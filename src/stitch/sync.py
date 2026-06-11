@@ -21,6 +21,7 @@ from stitch.protocol import (
 
 logger = logging.getLogger(__name__)
 CommitWaitPolicy = Literal["quiesce_all", "exact_only"]
+CommitMode = Literal["quiesce", "in_place"]
 
 
 class PolicyViolation(Exception):
@@ -38,13 +39,28 @@ class EngineAdapter(Protocol):
 
     async def apply_manifest(self, manifest: VersionManifest, version_path: str) -> None: ...
 
+    # Required only for commit_mode="in_place".
+    async def pause_generation(self) -> None: ...
+
+    async def continue_generation(self) -> None: ...
+
 
 class WeightSyncManager:
     """Local rollout server sync manager.
 
-    The default commit policy waits for all active proxied requests before a
-    weight commit. That is conservative for v1 and preserves exact-version
-    correctness for engines that cannot update safely during generation.
+    Commit modes:
+
+    - ``quiesce`` (default): wait for active proxied requests per
+      ``commit_wait_policy``, flush the engine cache, then apply. Safe on any
+      engine build.
+    - ``in_place``: pause the engine in place, apply without flushing, and
+      continue — in-flight requests resume decoding on their existing KV.
+      Cross-version KV isolation comes from the sidecar stamping a composed,
+      version-namespaced ``extra_key`` onto every proxied request. Requires
+      an engine build with the overlap-drain fix (see
+      docs/kv-version-namespace-design.md, "Mandatory engine fixes" #1);
+      without it a forward in flight at pause time can race the weight
+      mutation. Only exact-version requests are quiesced/gated.
     """
 
     def __init__(
@@ -54,12 +70,14 @@ class WeightSyncManager:
         engine: EngineAdapter,
         run_id: str | None = None,
         commit_wait_policy: CommitWaitPolicy = "quiesce_all",
+        commit_mode: CommitMode = "quiesce",
         debug_requests: bool = False,
     ) -> None:
         self.board = board
         self.engine = engine
         self.run_id = run_id
         self.commit_wait_policy = commit_wait_policy
+        self.commit_mode = commit_mode
         self.debug_requests = debug_requests
         self.current_version = 0
         self.latest_seen_version = 0
@@ -95,6 +113,7 @@ class WeightSyncManager:
         return {
             "run_id": self.run_id,
             "backend": self.engine.backend,
+            "commit_mode": self.commit_mode,
             "current_version": self.current_version,
             "latest_seen_version": self.latest_seen_version,
             "queued_target_version": self.queued_target_version,
@@ -119,7 +138,7 @@ class WeightSyncManager:
         """
         policy = policy or WeightVersionPolicy()
         async with self._active_cond:
-            await self._active_cond.wait_for(lambda: not self._committing)
+            await self._active_cond.wait_for(lambda: not self._admission_gated(policy))
             error = self._policy_error(policy)
             if error is not None:
                 if error["error"]["type"] == "WeightVersionNotReady":
@@ -140,6 +159,16 @@ class WeightSyncManager:
                     if not self._exact_inflight[key]:
                         del self._exact_inflight[key]
                 self._active_cond.notify_all()
+
+    def _admission_gated(self, policy: WeightVersionPolicy) -> bool:
+        if not self._committing:
+            return False
+        if self.commit_mode == "in_place":
+            # Non-strict requests cross commits freely: they are stamped with
+            # the version current at admission, and a mislabel around the
+            # commit is old-era impurity only. Exact pins must not cross.
+            return policy.exact_version is not None
+        return True
 
     def _policy_error(self, policy: WeightVersionPolicy) -> dict[str, Any] | None:
         current = self.current_version
@@ -220,9 +249,22 @@ class WeightSyncManager:
                 await self._wait_for_commit_point()
                 self.sync_state = SyncState.COMMITTING
                 try:
-                    await self.engine.flush_cache()
-                    await self.engine.apply_manifest(manifest, str(self.board.version_dir(version)))
-                    self.current_version = version
+                    version_path = str(self.board.version_dir(version))
+                    if self.commit_mode == "in_place":
+                        await self.engine.pause_generation()
+                        try:
+                            await self.engine.apply_manifest(manifest, version_path)
+                            # Bump before continue: requests admitted from here
+                            # on are stamped with the new namespace, while
+                            # already-admitted ones keep their old stamp (the
+                            # accepted old-era mislabel window).
+                            self.current_version = version
+                        finally:
+                            await self.engine.continue_generation()
+                    else:
+                        await self.engine.flush_cache()
+                        await self.engine.apply_manifest(manifest, version_path)
+                        self.current_version = version
                 finally:
                     async with self._active_cond:
                         self._committing = False
@@ -236,7 +278,11 @@ class WeightSyncManager:
 
     async def _wait_for_commit_point(self) -> None:
         async with self._active_cond:
-            if self.commit_wait_policy == "quiesce_all":
+            if self.commit_mode == "in_place":
+                # Exact pins must not cross a commit; summed over all versions
+                # so at most one exact version is ever live.
+                await self._active_cond.wait_for(lambda: not any(self._exact_inflight.values()))
+            elif self.commit_wait_policy == "quiesce_all":
                 await self._active_cond.wait_for(lambda: self._active_requests == 0)
             else:
                 await self._active_cond.wait_for(lambda: not self._exact_inflight.get(self.current_version))

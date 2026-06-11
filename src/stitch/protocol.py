@@ -153,6 +153,31 @@ class VersionManifest:
         return [a.path for a in self.artifacts if a.kind == "transition"]
 
 
+EXTRA_KEY_DELIMITER = ";"
+
+
+def compose_extra_key(version: int, user_extra_key: str | None = None) -> str:
+    """Compose a weight-version-namespaced engine ``extra_key``.
+
+    The version segment sits at a fixed position (the prefix) and is
+    delimiter-terminated, so it parses unambiguously regardless of the user
+    key's content. sglang appends ``lora_id`` to ``extra_key`` with no
+    delimiter, so the version must never be parsed from the right.
+    Examples: ``wv7;`` (no user key), ``wv7;my-key``.
+    """
+    return f"wv{int(version)}{EXTRA_KEY_DELIMITER}{user_extra_key or ''}"
+
+
+def parse_extra_key_version(extra_key: str) -> int | None:
+    """Inverse of :func:`compose_extra_key`. None for non-composed keys."""
+    if not extra_key.startswith("wv"):
+        return None
+    head, delim, _rest = extra_key.partition(EXTRA_KEY_DELIMITER)
+    if not delim or not head[2:].isdigit():
+        return None
+    return int(head[2:])
+
+
 def version_dir(root: str | Path, version: int) -> Path:
     return Path(root) / "versions" / f"weight_v{int(version):06d}"
 

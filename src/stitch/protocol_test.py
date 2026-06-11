@@ -5,7 +5,14 @@ import unittest
 from pathlib import Path
 
 from stitch.bulletin import FilesystemBulletinBoard
-from stitch.protocol import Artifact, VersionManifest, WeightVersionPolicy, read_latest
+from stitch.protocol import (
+    Artifact,
+    VersionManifest,
+    WeightVersionPolicy,
+    compose_extra_key,
+    parse_extra_key_version,
+    read_latest,
+)
 
 
 class ProtocolTest(unittest.TestCase):
@@ -39,6 +46,17 @@ class ProtocolTest(unittest.TestCase):
             self.assertEqual(loaded.transition_artifact_paths(), ["rank0000_flush000000.safetensors"])
             self.assertEqual(loaded.artifacts[0].checksum, "sha256:abc")
             self.assertEqual(loaded.run_id, "run-1")
+
+    def test_compose_extra_key_round_trips_and_is_position_fixed(self) -> None:
+        self.assertEqual(compose_extra_key(0), "wv0;")
+        self.assertEqual(compose_extra_key(7, "my-key"), "wv7;my-key")
+        self.assertEqual(parse_extra_key_version(compose_extra_key(12, None)), 12)
+        self.assertEqual(parse_extra_key_version(compose_extra_key(3, "wv9;decoy")), 3)
+        # The user key cannot shift or forge the version segment.
+        self.assertEqual(parse_extra_key_version("wv1;anything;else"), 1)
+        self.assertIsNone(parse_extra_key_version("plain-user-key"))
+        self.assertIsNone(parse_extra_key_version("wv12"))  # no terminator
+        self.assertIsNone(parse_extra_key_version("wvx;k"))
 
     def test_weight_version_policy_ignores_malformed_payload(self) -> None:
         self.assertEqual(WeightVersionPolicy.from_payload({}), WeightVersionPolicy())

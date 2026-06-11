@@ -101,6 +101,9 @@ HF_IMAGE_ENV = {
 }
 if "SLIME_DELTA_APP_NAME" in os.environ:
     HF_IMAGE_ENV["SLIME_DELTA_APP_NAME"] = APP_NAME
+# in_place needs an sglang build with the overlap-drain fix; default quiesce.
+if "SIDECAR_COMMIT_MODE" in os.environ:
+    HF_IMAGE_ENV["SIDECAR_COMMIT_MODE"] = os.environ["SIDECAR_COMMIT_MODE"]
 
 SERVER_ARGS = {
     "--served-model-name": MODEL_NAME,
@@ -141,7 +144,16 @@ image = (
             ]
         )
     )
-    .pip_install("autoinference-utils==0.2.0", "fastapi", "hatchling", "httpx", "modal==1.4.1", "uvicorn", "zstandard")
+    .pip_install(
+        "autoinference-utils==0.2.0",
+        "editables",
+        "fastapi",
+        "hatchling",
+        "httpx",
+        "modal==1.4.1",
+        "uvicorn",
+        "zstandard",
+    )
     .add_local_dir(
         STITCH_PACKAGE,
         remote_path="/root/packages/stitch",

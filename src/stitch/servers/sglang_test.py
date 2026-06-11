@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import tempfile
 import unittest
+from unittest import mock
 
 from stitch.bulletin import FilesystemBulletinBoard
 from stitch.sync import WeightSyncManager
@@ -10,11 +12,20 @@ from stitch.sync import WeightSyncManager
 class FakeEngine:
     backend = "fake"
 
+    def __init__(self) -> None:
+        self.events: list[str] = []
+
     async def flush_cache(self) -> None:
-        pass
+        self.events.append("flush")
 
     async def apply_manifest(self, manifest, version_path) -> None:
-        pass
+        self.events.append("apply")
+
+    async def pause_generation(self) -> None:
+        self.events.append("pause")
+
+    async def continue_generation(self) -> None:
+        self.events.append("continue")
 
 
 class SidecarProxyTest(unittest.TestCase):
@@ -57,6 +68,184 @@ class SidecarProxyTest(unittest.TestCase):
                 )
                 self.assertEqual(resp.status_code, 409)
                 self.assertEqual(resp.json()["error"]["type"], "WeightVersionTooOld")
+
+
+class _RecordingUpstream:
+    """Stand-in for httpx.AsyncClient that records the forwarded payload.
+
+    Fully synchronous (no suspension points) so the proxy's upstream task
+    completes before its disconnect watcher can observe the test client's
+    immediate ASGI disconnect.
+    """
+
+    last_json: dict | None = None
+
+    def __init__(self, *args, **kwargs) -> None:
+        pass
+
+    async def __aenter__(self) -> "_RecordingUpstream":
+        return self
+
+    async def __aexit__(self, *exc) -> bool:
+        return False
+
+    async def request(self, method, url, **kwargs):
+        import httpx
+
+        type(self).last_json = kwargs.get("json")
+        return httpx.Response(
+            200,
+            json={"text": "ok", "meta_info": {"finish_reason": {"type": "length"}}},
+            request=httpx.Request(method, url),
+        )
+
+
+class _BlockingUpstream:
+    """Fake upstream whose 'slow' generations block until released, recording
+    every forwarded payload in order."""
+
+    calls: list[dict] = []
+    release: "asyncio.Event"
+
+    def __init__(self, *args, **kwargs) -> None:
+        pass
+
+    async def __aenter__(self) -> "_BlockingUpstream":
+        return self
+
+    async def __aexit__(self, *exc) -> bool:
+        return False
+
+    async def request(self, method, url, **kwargs):
+        import httpx
+
+        payload = kwargs.get("json") or {}
+        type(self).calls.append(payload)
+        if payload.get("text") == "slow":
+            await type(self).release.wait()
+        return httpx.Response(
+            200,
+            json={"text": "ok", "meta_info": {}},
+            request=httpx.Request(method, url),
+        )
+
+
+class SidecarInPlaceCommitTest(unittest.TestCase):
+    def test_request_crossing_in_place_commit_is_stamped_start_end(self) -> None:
+        """End-to-end through the sidecar app: an in-flight request crosses an
+        in-place bulletin-board commit without being drained, finishes with
+        (start=0, end=1) metadata, and subsequent requests land in the new
+        extra_key namespace."""
+
+        async def run() -> None:
+            import httpx
+            from httpx import ASGITransport
+
+            from stitch.protocol import VersionManifest
+            from stitch.servers.sglang import create_app
+
+            with tempfile.TemporaryDirectory() as tmp:
+                board = FilesystemBulletinBoard(tmp)
+                engine = FakeEngine()
+                manager = WeightSyncManager(board=board, engine=engine, commit_mode="in_place")
+                app = create_app(manager, upstream_url="http://127.0.0.1:9")
+
+                _BlockingUpstream.calls = []
+                _BlockingUpstream.release = asyncio.Event()
+
+                async def wait_for(predicate, timeout: float = 5.0) -> None:
+                    deadline = asyncio.get_running_loop().time() + timeout
+                    while not predicate():
+                        if asyncio.get_running_loop().time() > deadline:
+                            raise AssertionError("timed out waiting for condition")
+                        await asyncio.sleep(0.01)
+
+                driver = httpx.AsyncClient(
+                    transport=ASGITransport(app=app), base_url="http://sidecar"
+                )
+                async with driver:
+                    with mock.patch("httpx.AsyncClient", _BlockingUpstream):
+                        slow = asyncio.create_task(driver.post("/generate", json={"text": "slow"}))
+                        await wait_for(lambda: manager.active_requests == 1)
+                        self.assertEqual(_BlockingUpstream.calls[0]["extra_key"], "wv0;")
+
+                        board.publish_manifest(
+                            VersionManifest(version=1, base_version=0, backend="fake", load_format="noop")
+                        )
+                        rpc = await driver.post(
+                            "/rpc_sync_from_bulletin_board", json={"target_version": 1}
+                        )
+                        self.assertTrue(rpc.json()["accepted"])
+
+                        # The commit lands while the request is still in flight:
+                        # in_place mode must not drain non-strict traffic.
+                        await wait_for(lambda: manager.current_version == 1)
+                        self.assertEqual(manager.active_requests, 1)
+                        self.assertEqual(engine.events, ["pause", "apply", "continue"])
+
+                        _BlockingUpstream.release.set()
+                        meta = (await slow).json()["meta_info"]
+                        self.assertEqual(meta["weight_version_start"], 0)
+                        self.assertEqual(meta["weight_version_end"], 1)
+
+                        # New admissions are stamped with the new namespace.
+                        await driver.post("/generate", json={"text": "hi"})
+                        self.assertEqual(_BlockingUpstream.calls[-1]["extra_key"], "wv1;")
+
+        asyncio.run(run())
+
+
+class SidecarStampingTest(unittest.TestCase):
+    def _client(self, tmp: str):
+        from fastapi.testclient import TestClient
+
+        from stitch.servers.sglang import create_app
+
+        board = FilesystemBulletinBoard(tmp)
+        manager = WeightSyncManager(board=board, engine=FakeEngine())
+        app = create_app(manager, upstream_url="http://127.0.0.1:9")
+        return manager, TestClient(app)
+
+    def test_generate_payload_is_stamped_with_composed_extra_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _RecordingUpstream.last_json = None
+            manager, client = self._client(tmp)
+            with client, mock.patch("httpx.AsyncClient", _RecordingUpstream):
+                resp = client.post("/generate", json={"text": "hi"})
+                self.assertEqual(resp.status_code, 200)
+                forwarded = _RecordingUpstream.last_json
+                self.assertEqual(forwarded["extra_key"], "wv0;")
+                self.assertIn("rid", forwarded)
+                meta = resp.json()["meta_info"]
+                self.assertEqual(meta["weight_version_start"], 0)
+                self.assertEqual(meta["weight_version_end"], 0)
+
+    def test_stamping_composes_user_extra_keys_and_lists(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            manager, client = self._client(tmp)
+            manager.current_version = 3
+            with client, mock.patch("httpx.AsyncClient", _RecordingUpstream):
+                client.post("/generate", json={"text": "hi", "extra_key": "user-key"})
+                self.assertEqual(_RecordingUpstream.last_json["extra_key"], "wv3;user-key")
+
+                client.post("/generate", json={"text": ["a", "b"], "extra_key": ["k1", "k2"]})
+                self.assertEqual(
+                    _RecordingUpstream.last_json["extra_key"], ["wv3;k1", "wv3;k2"]
+                )
+
+                client.post(
+                    "/v1/chat/completions",
+                    json={"model": "m", "messages": [{"role": "user", "content": "hi"}]},
+                )
+                self.assertEqual(_RecordingUpstream.last_json["extra_key"], "wv3;")
+
+    def test_unversioned_routes_are_not_stamped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            manager, client = self._client(tmp)
+            with client, mock.patch("httpx.AsyncClient", _RecordingUpstream):
+                _RecordingUpstream.last_json = None
+                client.post("/v1/completions", json={"model": "m", "prompt": "hi"})
+                self.assertNotIn("extra_key", _RecordingUpstream.last_json or {})
 
 
 if __name__ == "__main__":

@@ -75,6 +75,11 @@ Useful knobs:
 - `ROLLOUT_GATEWAY_URL`: explicit Flash gateway URL override for training.
 - `SGLANG_CONTEXT_LENGTH`, `SGLANG_MEM_FRACTION_STATIC`, `SGLANG_CHUNKED_PREFILL_SIZE`: SGLang server tuning.
 - `SIDECAR_DEBUG_REQUESTS=1`: log each versioned sidecar proxy request. This is noisy under rollout load.
+- `SIDECAR_COMMIT_MODE=in_place`: commit weights via pause/apply/continue without
+  draining or flushing — in-flight requests keep decoding on stale KV, and
+  cross-version isolation comes from the sidecar's version-namespaced
+  `extra_key` stamping. Defaults to `quiesce`. Only enable on an SGLang build
+  with the overlap-drain fix (see stitch `docs/kv-version-namespace-design.md`).
 
 For debugging, stream focused deployed-app logs with Modal's log search:
 
