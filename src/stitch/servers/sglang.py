@@ -14,8 +14,8 @@ from typing import Any
 
 from stitch.bulletin import FilesystemBulletinBoard
 from stitch.engines.sglang import SGLangDiskDeltaAdapter
-from stitch.protocol import WeightVersionPolicy
-from stitch.sync import PolicyViolation, WeightSyncManager
+from stitch.protocol import WeightVersionPolicy, compose_extra_key
+from stitch.sync import CommitMode, PolicyViolation, WeightSyncManager
 
 
 logger = logging.getLogger(__name__)
@@ -142,6 +142,15 @@ def create_app(
         try:
             ctx = manager.request_context(policy if versioned_route else None)
             async with ctx as start_version:
+                if versioned_route and payload:
+                    # Stamp the serving version into the engine's KV cache
+                    # namespace: requests admitted under different versions
+                    # structurally cannot share radix-tree prefixes.
+                    user_key = payload.get("extra_key")
+                    if isinstance(user_key, list):
+                        payload["extra_key"] = [compose_extra_key(start_version, k) for k in user_key]
+                    else:
+                        payload["extra_key"] = compose_extra_key(start_version, user_key)
                 started = asyncio.get_running_loop().time()
                 if versioned_route and manager.debug_requests:
                     logger.info(
@@ -250,6 +259,7 @@ def build_manager(
     bulletin_root: str,
     volume_name: str = "",
     run_id: str | None = None,
+    commit_mode: CommitMode = "quiesce",
     debug_requests: bool = False,
 ) -> WeightSyncManager:
     refresh = None
@@ -259,7 +269,13 @@ def build_manager(
         refresh = volume_reloader(volume_name)
     board = FilesystemBulletinBoard(bulletin_root, refresh=refresh)
     engine = SGLangDiskDeltaAdapter(upstream_url=upstream_url)
-    return WeightSyncManager(board=board, engine=engine, run_id=run_id, debug_requests=debug_requests)
+    return WeightSyncManager(
+        board=board,
+        engine=engine,
+        run_id=run_id,
+        commit_mode=commit_mode,
+        debug_requests=debug_requests,
+    )
 
 
 def main() -> None:
@@ -270,6 +286,18 @@ def main() -> None:
     parser.add_argument("--bulletin-root", default=os.environ.get("DELTA_BULLETIN_ROOT", "/delta-bulletin"))
     parser.add_argument("--volume-name", default=os.environ.get("DELTA_VOLUME_NAME", ""))
     parser.add_argument("--run-id", default=os.environ.get("DISAGG_RUN_ID"))
+    parser.add_argument(
+        "--commit-mode",
+        choices=("quiesce", "in_place"),
+        default=os.environ.get("SIDECAR_COMMIT_MODE", "quiesce"),
+        help=(
+            "quiesce: wait out active requests and flush before applying. "
+            "in_place: pause/apply/continue without flushing; in-flight "
+            "requests keep decoding on stale KV and version isolation comes "
+            "from extra_key stamping. in_place requires an engine build with "
+            "the overlap-drain fix."
+        ),
+    )
     parser.add_argument(
         "--debug-requests",
         action="store_true",
@@ -286,6 +314,7 @@ def main() -> None:
         bulletin_root=args.bulletin_root,
         volume_name=args.volume_name,
         run_id=args.run_id,
+        commit_mode=args.commit_mode,
         debug_requests=args.debug_requests,
     )
     uvicorn.run(

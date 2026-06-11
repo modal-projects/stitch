@@ -222,7 +222,20 @@ cannot head-of-line-block commits indefinitely.
   rollout servers, or fold the namespace into page hashes before enabling.
 - EAGLE/spec decoding: draft + target update together in the same handler and draft KV
   shares radix-managed slots, so versioning composes; the drain fix must cover spec_v2
-  state.
+  state (incl. the draft-extend `plan_stream` sync in `eagle_worker_v2`).
+
+### Spec/HiCache extension notes (verified against master, 2026-06)
+
+- DFLASH (blockwise-parallel drafting, now upstream): composes — its draft KV is reused
+  cross-request only via radix prefix hits, which the namespace partitions. But
+  `DFlashWorker` has no `update_weights_from_disk`; `__getattr__` delegates to the
+  target worker, so draft weights are silently never updated (upstream bug). Fix before
+  any dflash rollout fleet; draft acceptance otherwise decays across commits.
+- HiCache: host tier already namespaced (inherits python `RadixCache` child keys). Only
+  the storage/L3 hash chain is token-only — seeding the chain root with `extra_key`
+  (`get_hash_str`/`hash_page`, ~30 LOC) closes it, so enabling HiCache later is cheap.
+- RadixCacheCpp stays disabled (moderate lift: per-namespace tree instances).
+  PD-disagg unverified; it ships KV by page hash, so likely needs the same hash seeding.
 - Memory: locked stale prefixes shrink the effective pool until their requests finish;
   prefill admission throttles (budget excludes protected size) rather than crashing,
   and retraction prefers least-progress (new) requests — bounded unfairness right
