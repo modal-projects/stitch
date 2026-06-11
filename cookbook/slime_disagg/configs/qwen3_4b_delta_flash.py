@@ -2,14 +2,26 @@
 
 from __future__ import annotations
 
-from configs.base import DATA_PATH, ModalConfig, SlimeConfig
+from cookbook.slime_disagg.configs.base import DATA_PATH, ModalConfig, SlimeConfig
 
 
+APP_NAME = "slime-qwen3-4b-delta-flash"
 DELTA_VOLUME_NAME = "slime-delta-bulletin-qwen3-4b"
 DELTA_BULLETIN_ROOT = "/delta-bulletin"
 DELTA_VERSION_DIR = f"{DELTA_BULLETIN_ROOT}/versions"
+
+# How the rollout sidecar applies published weight versions. "quiesce" drains
+# in-flight requests before applying; "in_place" applies immediately and needs
+# an SGLang build with the overlap-drain fix (see docs/kv-version-namespace-design.md).
+SIDECAR_COMMIT_MODE = "quiesce"
+
+# SGLang server tuning, merged over the structural args set in modal_app.py.
 SGLANG_SERVER_ARGS = {
     "--reasoning-parser": "qwen3",
+    "--context-length": "16384",
+    "--mem-fraction-static": "0.84",
+    "--chunked-prefill-size": "4096",
+    "--max-prefill-tokens": "4096",
 }
 
 modal = ModalConfig(gpu="H200")

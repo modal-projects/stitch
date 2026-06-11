@@ -1,17 +1,18 @@
-"""Base configuration classes and volume mount paths for slime.
+"""Base configuration classes and volume mount paths.
 
 Two separate concerns:
 
-  ModalConfig  — Modal infrastructure (gpu model, async mode, dev overlay)
+  ModalConfig  — Modal infrastructure (GPU model, regions, rollout pool size)
   SlimeConfig  — SLIME training arguments
 
-Each experiment defines one instance of each. All non-private, non-callable
-attributes on a SlimeConfig subclass become SLIME CLI args automatically via
-cli_args(). The 'environment' field is the only exception — it is injected
-into the Ray job runtime env, not passed to SLIME directly.
+Each experiment module defines one instance of each, plus a handful of
+module-level constants (APP_NAME, DELTA_VOLUME_NAME, ...) that name the
+Modal resources the experiment owns. All non-private, non-callable
+attributes on a SlimeConfig subclass become SLIME CLI args automatically
+via cli_args(). The 'environment' field is the only exception — it is
+exported into the Ray runtime environment, not passed to SLIME directly.
 """
 
-import math
 from pathlib import Path
 from typing import Any, Literal
 
@@ -29,27 +30,20 @@ GPUType = Literal["H100", "H200", "B200", "B300", "A100"]
 _SLIME_SKIP = {"environment", "async_mode", "slime_model_script"}
 
 # SlimeConfig fields that SLIME reads as YAML files at runtime.
-# Users may set these as inline dicts in Python configs; the launcher
-# materializes them to temp YAML files before building the CLI command.
+# Experiments may set these as inline dicts; the launcher materializes
+# them to temp YAML files before building the CLI command.
 YAML_CONFIG_FIELDS = ("eval_config", "custom_config_path", "sglang_config")
 
 
 class ModalConfig:
-    """Modal infrastructure configuration — GPU provisioning and image setup only."""
+    """Modal infrastructure configuration."""
 
     gpu: GPUType = "H200"
-    memory: tuple[int, int] | None = (
-        None  # per-container memory in MiB; check https://modal.com/docs/guide/resources#memory-limits
-    )
+    memory: tuple[int, int] | None = None  # per-container memory in MiB (request, limit)
     cloud: str | None = None  # e.g. "aws", "gcp"
     region: str | None = None  # e.g. "us-east-2"
-    local_slime: str | None = None  # path to local slime repo for dev overlay
-    patch_files: list[
-        str
-    ] = []  # local patch files; each injected into image at /tmp/<filename>
-    image_run_commands: list[
-        str
-    ] = []  # commands to run during image build (e.g. git apply /tmp/my.patch)
+    rollout_min_containers: int = 2  # warm Flash rollout containers
+    proxy_regions: list[str] = ["us-east"]  # Flash gateway proxy regions
 
     def __init__(self, **kwargs: Any) -> None:
         for k, v in kwargs.items():
@@ -60,33 +54,20 @@ class SlimeConfig:
     """Base SLIME training configuration.
 
     Subclass and set class attributes to configure an experiment.
-    All attributes (except 'environment') are forwarded to SLIME as CLI args.
-    Each experiment must be fully self-contained — no inherited defaults.
+    All attributes (except those in _SLIME_SKIP) are forwarded to SLIME as
+    CLI args. Each experiment must be fully self-contained — no inherited
+    defaults beyond this base class.
 
     Fields in _SLIME_SKIP are launcher instructions, not SLIME CLI args:
-      environment       — injected into the Ray job runtime env
-      async_mode        — selects train_async.py vs train.py
+      environment        — exported into the Ray runtime environment
+      async_mode         — selects train_async.py vs train.py
       slime_model_script — path relative to /root/slime to a shell script that
                            defines MODEL_ARGS for model architecture; sourced
                            before running the train command
-
-    Example:
-
-        class MyExperiment(SlimeConfig):
-            async_mode = False
-            slime_model_script = ""
-            hf_checkpoint = "Qwen/Qwen3-8B"
-            actor_num_nodes = 1
-            actor_num_gpus_per_node = 8
-            megatron_to_hf_mode = "bridge"
-            ...
-
-        slime = MyExperiment()
     """
 
     # Launcher instructions — not passed to SLIME CLI (see _SLIME_SKIP).
     environment: dict = {
-        "PYTHONPATH": "/root/Megatron-LM/",
         "CUDA_DEVICE_MAX_CONNECTIONS": "1",
         "NCCL_NVLS_ENABLE": "1",
     }
@@ -99,8 +80,6 @@ class SlimeConfig:
         for k, v in kwargs.items():
             setattr(self, k, v)
 
-    # ── Internal ──────────────────────────────────────────────────────────────
-
     def _fields(self) -> dict[str, Any]:
         """Merged field dict from the class hierarchy; instance attrs win."""
         fields: dict[str, Any] = {}
@@ -111,13 +90,13 @@ class SlimeConfig:
                 {
                     k: v
                     for k, v in vars(cls).items()
-                    if not k.startswith("_") and not callable(v)
+                    if not k.startswith("_")
+                    and not callable(v)
+                    and not isinstance(v, (classmethod, staticmethod, property))
                 }
             )
         fields.update(vars(self))
         return {k: v for k, v in fields.items() if k not in _SLIME_SKIP}
-
-    # ── Public API ────────────────────────────────────────────────────────────
 
     def cli_args(self) -> list[str]:
         """SLIME CLI arguments derived from this config.
@@ -145,36 +124,24 @@ class SlimeConfig:
     def prepare_data(self) -> None:
         raise NotImplementedError(f"{type(self).__name__} has no prepare_data()")
 
-    def total_nodes(self) -> int:
-        """Total Modal cluster nodes required by this config.
+    def to_payload(self) -> dict[str, Any]:
+        """Flatten to plain data for sending to a deployed Trainer.
 
-        Derived from actor/critic/rollout GPU counts. Modal provisions whole
-        nodes, so we ceil-divide. Raises if total GPUs aren't a clean multiple
-        of gpus_per_node.
+        launch_train resolves config modules locally and ships the result, so
+        the deployed app never imports them — new or edited experiments run
+        without a redeploy.
         """
-        f = self._fields()
-        gpus_per_node = f.get("actor_num_gpus_per_node", 8)
-        actor_nodes = f.get("actor_num_nodes", 1)
-        colocate = f.get("colocate", False)
-        use_critic = f.get("use_critic", False)
-        critic_nodes = f.get("critic_num_nodes") or actor_nodes
-        critic_gpus = f.get("critic_num_gpus_per_node") or gpus_per_node
-        rollout_gpus = f.get("rollout_num_gpus")
+        return {
+            "fields": self._fields(),
+            "environment": dict(self.environment),
+            "async_mode": self.async_mode,
+            "slime_model_script": self.slime_model_script,
+        }
 
-        training_gpus = actor_nodes * gpus_per_node
-        if use_critic:
-            training_gpus += critic_nodes * critic_gpus
-
-        if colocate:
-            total_gpus = training_gpus
-        else:
-            rollout_gpus = rollout_gpus or (actor_nodes * gpus_per_node)
-            total_gpus = training_gpus + rollout_gpus
-
-        if total_gpus % gpus_per_node != 0:
-            raise ValueError(
-                f"total_gpus={total_gpus} is not a multiple of gpus_per_node={gpus_per_node}. "
-                f"Adjust actor_num_nodes, rollout_num_gpus, or actor_num_gpus_per_node."
-            )
-
-        return math.ceil(total_gpus / gpus_per_node)
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> "SlimeConfig":
+        cfg = cls(**payload["fields"])
+        cfg.environment = dict(payload["environment"])
+        cfg.async_mode = payload["async_mode"]
+        cfg.slime_model_script = payload["slime_model_script"]
+        return cfg
