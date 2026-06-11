@@ -1,124 +1,126 @@
-"""Modal Flash sparse-delta SLIME example.
+"""Disaggregated SLIME training on Modal.
 
-Deploys a Modal Flash SGLang pool with a weight-version sidecar, then runs a
-SLIME actor-only Ray training job that publishes sparse deltas through a v2
-Modal Volume bulletin board.
+A Modal Flash pool of SGLang servers handles rollouts; a clustered Trainer
+runs SLIME on Ray and publishes sparse weight deltas through a Modal Volume
+bulletin board that the rollout servers sync from.
+
+Run all commands as modules from the repo root, e.g.:
+
+    uv run --extra modal modal deploy -m cookbook.slime_disagg.modal_app
 """
 
 from __future__ import annotations
 
-import asyncio
 import importlib
 import os
-import shlex
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
-from types import ModuleType
 
 import modal
 import modal.experimental
 
+from cookbook.slime_disagg import helpers
+from cookbook.slime_disagg.configs.base import CHECKPOINTS_PATH, DATA_PATH, HF_CACHE_PATH, SlimeConfig
+from stitch.providers.modal import resolve_flash_gateway_url
 
-EXAMPLE_ROOT = Path(__file__).resolve().parent
-COOKBOOK_ROOT = EXAMPLE_ROOT.parent
-VENDOR_ROOT = EXAMPLE_ROOT / "vendor"
-STITCH_PACKAGE = Path(os.getenv("STITCH_REPO_PATH", COOKBOOK_ROOT.parent))
-STITCH_SRC = STITCH_PACKAGE / "src"
-for local_path in (COOKBOOK_ROOT, VENDOR_ROOT, STITCH_SRC):
-    if str(local_path) not in sys.path:
-        sys.path.insert(0, str(local_path))
+# The one deploy-time knob: which experiment config this app is built around.
+# `modal deploy` takes no function arguments, so the selection has to come from
+# the environment; the image records the same value so containers reconstruct
+# the identical app. Everything else is configured in the experiment modules.
+EXPERIMENT = os.environ.get("EXPERIMENT_CONFIG", "qwen3_4b_delta_flash")
+exp = importlib.import_module(f"cookbook.slime_disagg.configs.{EXPERIMENT}")
 
-from configs.base import CHECKPOINTS_PATH, DATA_PATH, HF_CACHE_PATH  # noqa: E402
-from slime_disagg.modal_helpers import (  # noqa: E402
-    ensure_pythonpath,
-    redact_command_for_log,
-    reset_bulletin_board as reset_bulletin_board_impl,
-    run_flash_pool_smoke as run_flash_pool_smoke_impl,
-    spawn_train_from_deployed_or_ephemeral,
-    start_sglang_sidecar,
-    terminate_process,
-    training_nodes,
-    wait_http,
-)
-from stitch.providers.modal import (  # noqa: E402
-    discover_flash_targets,
-    resolve_flash_gateway_url,
-    resolve_flash_gateway_url_aio,
-)
+modal_cfg = exp.modal
+slime_cfg = exp.slime
 
-
-SLIME_IMAGE_TAG = "slimerl/slime:nightly-dev-20260527a"
-SLIME_ROOT = "/root/slime"
-SLIME_REPO_URL = os.getenv("SLIME_REPO_URL", "https://github.com/modal-projects/slime.git")
-SLIME_REPO_REF = os.getenv("SLIME_REPO_REF", "jvmncs/rollout-endpoint")
-DEFAULT_EXPERIMENT = os.getenv("EXPERIMENT_CONFIG", "qwen3_4b_delta_flash")
-DEFAULT_APP_NAME = "slime-qwen3-4b-delta-flash"
-SERVER_CLS_NAME = "Server"
+APP_NAME = exp.APP_NAME
+MODEL_NAME = slime_cfg.hf_checkpoint
+ROLLOUT_CONCURRENCY = slime_cfg.sglang_server_concurrency
+N_TRAIN_NODES = helpers.training_nodes(slime_cfg)
 
 MINUTES = 60
 SIDECAR_PORT = 8000
 SGLANG_PORT = 8001
 RAY_PORT = 6379
+SERVER_STARTUP_TIMEOUT = 35 * MINUTES
+
+SLIME_IMAGE_TAG = "slimerl/slime:nightly-dev-20260527a"
+SLIME_ROOT = "/root/slime"
+# Fork branch with the generic HTTP rollout endpoint and publish-only
+# disk-delta hooks that this example drives.
+SLIME_REPO_URL = "https://github.com/modal-projects/slime.git"
+SLIME_REPO_REF = "jvmncs/rollout-endpoint"
+
+image = (
+    modal.Image.from_registry(SLIME_IMAGE_TAG)
+    .entrypoint([])
+    # The base image bakes in an HF cache; remove it so it cannot shadow the
+    # cache volume mounted at the same path.
+    .run_commands(f"rm -rf {HF_CACHE_PATH}")
+    # Replace the bundled slime with the fork branch.
+    .run_commands(
+        f"rm -rf {SLIME_ROOT}"
+        f" && git clone --depth 1 {SLIME_REPO_URL} {SLIME_ROOT}"
+        f" && cd {SLIME_ROOT}"
+        f" && git fetch --depth 1 origin {SLIME_REPO_REF}"
+        f" && git checkout FETCH_HEAD"
+        f" && python3 -m pip install --no-deps -e {SLIME_ROOT}"
+    )
+    .pip_install(
+        "autoinference-utils==0.2.0",  # SGLang server lifecycle for the rollout pool
+        "fastapi",  # stitch sidecar
+        "httpx",  # stitch sidecar
+        "uvicorn",  # stitch sidecar
+        "zstandard",  # slime's sparse-delta encoding
+    )
+    .env(
+        {
+            "EXPERIMENT_CONFIG": EXPERIMENT,
+            "HF_XET_HIGH_PERFORMANCE": "1",
+            "HF_HUB_ENABLE_HF_TRANSFER": "1",
+        }
+    )
+    # Local source is mounted when containers start rather than copied into the
+    # image, so code changes never trigger an image rebuild. Modal puts /root
+    # on PYTHONPATH, which also makes both packages importable from
+    # subprocesses (the sidecar, Ray workers).
+    .add_local_python_source("stitch")
+    .add_local_dir(
+        Path(__file__).parent,
+        remote_path="/root/cookbook/slime_disagg",
+        ignore=["**/__pycache__"],
+    )
+)
+
+with image.imports():
+    from autoinference_utils.endpoint import SGLangEndpoint, warmup_chat_completions
 
 
-def _load_experiment(name: str) -> ModuleType:
-    if not name:
-        name = DEFAULT_EXPERIMENT
-    module_name = name if "." in name else f"slime_disagg.configs.{name}"
-    return importlib.import_module(module_name)
+hf_cache_volume = modal.Volume.from_name("huggingface-cache", create_if_missing=True)
+data_volume = modal.Volume.from_name("slime-data", create_if_missing=True)
+checkpoints_volume = modal.Volume.from_name("slime-checkpoints", create_if_missing=True)
+delta_volume = modal.Volume.from_name(exp.DELTA_VOLUME_NAME, create_if_missing=True, version=2)
 
-
-def _experiment_app_name(exp: ModuleType) -> str:
-    return os.getenv("SLIME_DELTA_APP_NAME", getattr(exp, "APP_NAME", DEFAULT_APP_NAME))
-
-
-exp_mod = _load_experiment(DEFAULT_EXPERIMENT)
-modal_cfg = exp_mod.modal
-slime_cfg = exp_mod.slime
-
-APP_NAME = _experiment_app_name(exp_mod)
-MODEL_NAME = slime_cfg.hf_checkpoint
-DELTA_VOLUME_NAME = getattr(exp_mod, "DELTA_VOLUME_NAME", "slime-delta-bulletin")
-DELTA_BULLETIN_ROOT = getattr(exp_mod, "DELTA_BULLETIN_ROOT", "/delta-bulletin")
-DELTA_VERSION_DIR = getattr(exp_mod, "DELTA_VERSION_DIR", f"{DELTA_BULLETIN_ROOT}/versions")
-
-ROLLOUT_N_GPUS = int(os.getenv("ROLLOUT_N_GPUS", str(getattr(slime_cfg, "rollout_num_gpus_per_engine", 1))))
-ROLLOUT_GPU_TYPE = os.getenv("ROLLOUT_GPU", modal_cfg.gpu)
-ROLLOUT_GPU = f"{ROLLOUT_GPU_TYPE}:{ROLLOUT_N_GPUS}" if ROLLOUT_N_GPUS > 1 else ROLLOUT_GPU_TYPE
-MIN_CONTAINERS = int(os.getenv("MIN_CONTAINERS", "2"))
-TARGET_INPUTS = int(os.getenv("TARGET_INPUTS", str(getattr(slime_cfg, "sglang_server_concurrency", 64))))
-SCALEDOWN_WINDOW = int(os.getenv("SCALEDOWN_WINDOW_SECONDS", str(15 * MINUTES)))
-STARTUP_TIMEOUT = int(os.getenv("STARTUP_TIMEOUT_SECONDS", str(35 * MINUTES)))
-PROXY_REGIONS = [x for x in os.getenv("PROXY_REGIONS", "us-east").split(",") if x]
-
-HF_IMAGE_ENV = {
-    "EXPERIMENT_CONFIG": DEFAULT_EXPERIMENT,
-    "HF_XET_HIGH_PERFORMANCE": "1",
-    "HF_HUB_ENABLE_HF_TRANSFER": "1",
-    "PYTHONPATH": "/root:/root/Megatron-LM/",
+train_volumes = {
+    str(HF_CACHE_PATH): hf_cache_volume,
+    str(DATA_PATH): data_volume,
+    str(CHECKPOINTS_PATH): checkpoints_volume,
+    exp.DELTA_BULLETIN_ROOT: delta_volume,
 }
-if "SLIME_DELTA_APP_NAME" in os.environ:
-    HF_IMAGE_ENV["SLIME_DELTA_APP_NAME"] = APP_NAME
-# in_place needs an sglang build with the overlap-drain fix; default quiesce.
-if "SIDECAR_COMMIT_MODE" in os.environ:
-    HF_IMAGE_ENV["SIDECAR_COMMIT_MODE"] = os.environ["SIDECAR_COMMIT_MODE"]
 
-SERVER_ARGS = {
+app = modal.App(APP_NAME)
+
+SGLANG_SERVER_ARGS = {
     "--served-model-name": MODEL_NAME,
     "--dtype": "bfloat16",
-    "--context-length": os.getenv("SGLANG_CONTEXT_LENGTH", "16384"),
-    "--mem-fraction-static": os.getenv("SGLANG_MEM_FRACTION_STATIC", "0.84"),
-    "--chunked-prefill-size": os.getenv("SGLANG_CHUNKED_PREFILL_SIZE", "4096"),
-    "--max-prefill-tokens": os.getenv("SGLANG_MAX_PREFILL_TOKENS", "4096"),
-    "--cuda-graph-max-bs": str(TARGET_INPUTS),
-    "--max-running-requests": str(TARGET_INPUTS),
+    "--cuda-graph-max-bs": str(ROLLOUT_CONCURRENCY),
+    "--max-running-requests": str(ROLLOUT_CONCURRENCY),
     "--trust-remote-code": "",
-    "--update-weight-delta-chunk-bytes": str(getattr(slime_cfg, "sglang_update_weight_delta_chunk_bytes", 1024**3)),
-    "--update-weight-delta-read-workers": str(getattr(slime_cfg, "sglang_update_weight_delta_read_workers", 8)),
+    "--update-weight-delta-chunk-bytes": str(slime_cfg.sglang_update_weight_delta_chunk_bytes),
+    "--update-weight-delta-read-workers": str(slime_cfg.sglang_update_weight_delta_read_workers),
+    **exp.SGLANG_SERVER_ARGS,
 }
-SERVER_ARGS.update(getattr(exp_mod, "SGLANG_SERVER_ARGS", {}))
 
 WARMUP_PAYLOAD = {
     "model": MODEL_NAME,
@@ -128,127 +130,41 @@ WARMUP_PAYLOAD = {
     "chat_template_kwargs": {"enable_thinking": False},
 }
 
-image = (
-    modal.Image.from_registry(SLIME_IMAGE_TAG)
-    .entrypoint([])
-    .run_commands(f"rm -rf {HF_CACHE_PATH}")
-    .run_commands(
-        " && ".join(
-            [
-                f"rm -rf {shlex.quote(SLIME_ROOT)}",
-                f"git clone --depth 1 {shlex.quote(SLIME_REPO_URL)} {shlex.quote(SLIME_ROOT)}",
-                f"cd {shlex.quote(SLIME_ROOT)}",
-                f"git fetch --depth 1 origin {shlex.quote(SLIME_REPO_REF)}",
-                "git checkout FETCH_HEAD",
-                f"python3 -m pip install --no-deps -e {shlex.quote(SLIME_ROOT)}",
-            ]
-        )
-    )
-    .pip_install(
-        "autoinference-utils==0.2.0",
-        "editables",
-        "fastapi",
-        "hatchling",
-        "httpx",
-        "modal==1.4.1",
-        "uvicorn",
-        "zstandard",
-    )
-    .add_local_dir(
-        STITCH_PACKAGE,
-        remote_path="/root/packages/stitch",
-        copy=True,
-        ignore=[
-            "**/__pycache__",
-            "**/*.pyc",
-            "**/*_test.py",
-            "docs",
-            "cookbook",
-            ".git",
-            ".jj",
-            ".venv",
-            ".pytest_cache",
-        ],
-    )
-    .run_commands("python3 -m pip install --no-build-isolation --no-deps -e /root/packages/stitch")
-    .env(HF_IMAGE_ENV)
-    .add_local_dir(
-        VENDOR_ROOT / "configs",
-        remote_path="/root/configs",
-        copy=True,
-        ignore=["**/__pycache__", "**/*.pyc"],
-    )
-    .add_local_dir(
-        VENDOR_ROOT / "modal_helpers",
-        remote_path="/root/modal_helpers",
-        copy=True,
-        ignore=["**/__pycache__", "**/*.pyc"],
-    )
-    .add_local_dir(
-        EXAMPLE_ROOT,
-        remote_path="/root/slime_disagg",
-        copy=True,
-        ignore=["**/__pycache__", "**/*.pyc", "vendor"],
-    )
-    .add_local_file(
-        EXAMPLE_ROOT / "modal_app.py",
-        remote_path="/root/modal_app.py",
-        copy=True,
-    )
-)
-
-with image.imports():
-    from autoinference_utils.endpoint import SGLangEndpoint, warmup_chat_completions
-    from modal_helpers.utils import (
-        build_train_cmd,
-        get_modal_cluster_context,
-        prepare_slime_config,
-        start_ray_head,
-    )
-
-
-hf_cache_volume = modal.Volume.from_name("huggingface-cache", create_if_missing=True)
-data_volume = modal.Volume.from_name("slime-data", create_if_missing=True)
-checkpoints_volume = modal.Volume.from_name("slime-checkpoints", create_if_missing=True)
-delta_volume = modal.Volume.from_name(DELTA_VOLUME_NAME, create_if_missing=True, version=2)
-
-train_volumes = {
-    str(HF_CACHE_PATH): hf_cache_volume,
-    str(DATA_PATH): data_volume,
-    str(CHECKPOINTS_PATH): checkpoints_volume,
-    DELTA_BULLETIN_ROOT: delta_volume,
-}
-
-app = modal.App(APP_NAME)
-
 
 @app.cls(
-    include_source=False,
     image=image,
-    gpu=ROLLOUT_GPU,
-    cloud=modal_cfg.cloud if modal_cfg.cloud else None,
-    region=modal_cfg.region if modal_cfg.region else None,
-    volumes={str(HF_CACHE_PATH): hf_cache_volume, DELTA_BULLETIN_ROOT: delta_volume},
-    min_containers=MIN_CONTAINERS,
+    gpu=f"{modal_cfg.gpu}:{slime_cfg.rollout_num_gpus_per_engine}",
+    cloud=modal_cfg.cloud,
+    region=modal_cfg.region,
+    volumes={str(HF_CACHE_PATH): hf_cache_volume, exp.DELTA_BULLETIN_ROOT: delta_volume},
+    min_containers=modal_cfg.rollout_min_containers,
     timeout=40 * MINUTES,
-    scaledown_window=SCALEDOWN_WINDOW,
+    scaledown_window=15 * MINUTES,
+    include_source=False,
 )
 @modal.experimental.http_server(
     port=SIDECAR_PORT,
-    proxy_regions=PROXY_REGIONS,
+    proxy_regions=modal_cfg.proxy_regions,
     exit_grace_period=25,
-    startup_timeout=STARTUP_TIMEOUT,
+    startup_timeout=SERVER_STARTUP_TIMEOUT,
 )
-@modal.concurrent(target_inputs=TARGET_INPUTS)
+@modal.concurrent(target_inputs=ROLLOUT_CONCURRENCY)
 class Server:
+    """One SGLang rollout server plus the stitch weight-sync sidecar.
+
+    The sidecar proxies rollout traffic, reloads the delta Volume, and applies
+    published weight versions so requests pinned to a version are served by
+    matching weights.
+    """
+
     @modal.enter()
     def startup(self) -> None:
         self.endpoint = SGLangEndpoint(
             model_path=MODEL_NAME,
             worker_port=SGLANG_PORT,
-            tp=ROLLOUT_N_GPUS,
-            extra_server_args=SERVER_ARGS,
-            health_timeout=STARTUP_TIMEOUT,
+            tp=slime_cfg.rollout_num_gpus_per_engine,
+            extra_server_args=SGLANG_SERVER_ARGS,
+            health_timeout=SERVER_STARTUP_TIMEOUT,
             health_poll_interval=10.0,
         )
         self.endpoint.start()
@@ -259,186 +175,180 @@ class Server:
             request_timeout=120.0,
             max_attempts_per_request=3,
         )
-        self.sidecar = start_sglang_sidecar(
+        self.sidecar = helpers.start_sglang_sidecar(
             sidecar_port=SIDECAR_PORT,
             sglang_port=SGLANG_PORT,
-            bulletin_root=DELTA_BULLETIN_ROOT,
-            volume_name=DELTA_VOLUME_NAME,
+            bulletin_root=exp.DELTA_BULLETIN_ROOT,
+            volume_name=exp.DELTA_VOLUME_NAME,
+            commit_mode=exp.SIDECAR_COMMIT_MODE,
         )
-        wait_http(f"http://127.0.0.1:{SIDECAR_PORT}/health", self.sidecar, STARTUP_TIMEOUT)
-        print(
-            f"Modal Flash sparse-delta Server ready: model={MODEL_NAME}, "
-            f"current_weight_version=0, target_inputs={TARGET_INPUTS}"
-        )
+        helpers.wait_http(f"http://127.0.0.1:{SIDECAR_PORT}/health", self.sidecar, SERVER_STARTUP_TIMEOUT)
+        print(f"Rollout server ready: model={MODEL_NAME}, target_inputs={ROLLOUT_CONCURRENCY}")
 
     @modal.exit()
     def stop(self) -> None:
-        terminate_process(getattr(self, "sidecar", None))
+        helpers.terminate_process(getattr(self, "sidecar", None))
         if hasattr(self, "endpoint"):
             self.endpoint.stop()
 
 
-@app.local_entrypoint()
-def smoke_flash_pool(weight_version: int = 0, expect_min_containers: int = MIN_CONTAINERS) -> None:
-    """Hit the Flash gateway and direct container URLs."""
-    run_flash_pool_smoke(weight_version=weight_version, expect_min_containers=expect_min_containers)
+@app.cls(
+    image=image,
+    gpu=f"{modal_cfg.gpu}:{slime_cfg.actor_num_gpus_per_node}",
+    memory=modal_cfg.memory,
+    cloud=modal_cfg.cloud,
+    region=modal_cfg.region,
+    volumes=train_volumes,
+    timeout=24 * 60 * MINUTES,
+    startup_timeout=20 * MINUTES,
+    scaledown_window=30 * MINUTES,
+    experimental_options={"efa_enabled": True},
+    include_source=False,
+)
+@modal.experimental.clustered(N_TRAIN_NODES, rdma=True)
+class Trainer:
+    """SLIME actor cluster. The Ray cluster comes up once per container in
+    enter(), so back-to-back training runs reuse it instead of rebuilding it."""
 
+    @modal.enter()
+    def start_ray(self) -> None:
+        rank, master_addr, my_ip = helpers.get_modal_cluster_context(N_TRAIN_NODES)
+        self.rank = rank
+        # Ray actors inherit the raylet's environment, so everything the
+        # training processes need must be exported before `ray start`.
+        os.environ.update(
+            {
+                "SLIME_HOST_IP": my_ip,
+                "SGLANG_HOST_IP": my_ip,
+                "HOST_IP": my_ip,
+                "MASTER_ADDR": master_addr,
+                "RAY_ADDRESS": f"{master_addr}:{RAY_PORT}",
+                "no_proxy": f"127.0.0.1,{master_addr},{my_ip}",
+                "NO_PROXY": f"127.0.0.1,{master_addr},{my_ip}",
+                **slime_cfg.environment,
+            }
+        )
+        if rank == 0:
+            helpers.start_ray_head(my_ip, N_TRAIN_NODES, ray_port=RAY_PORT)
+        else:
+            helpers.start_ray_worker(my_ip, master_addr, ray_port=RAY_PORT)
 
-def run_flash_pool_smoke(
-    weight_version: int = 0,
-    expect_min_containers: int = MIN_CONTAINERS,
-    timeout_seconds: int = STARTUP_TIMEOUT,
-) -> None:
-    """Hit the deployed Flash gateway and direct container URLs."""
-    run_flash_pool_smoke_impl(
-        gateway_resolver=_resolve_flash_gateway_url,
-        target_discoverer=_discover_flash_targets,
-        model_name=MODEL_NAME,
-        weight_version=weight_version,
-        expect_min_containers=expect_min_containers,
-        timeout_seconds=timeout_seconds,
-    )
+    @modal.method()
+    def train(self, experiment: str, payload: dict) -> None:
+        """Run one training job from a SlimeConfig payload (see to_payload()).
 
+        The config arrives as data instead of a module name, so launch_train
+        can resolve experiments from the local working tree and new or edited
+        configs run without a redeploy.
+        """
+        for volume in train_volumes.values():
+            volume.reload()
+        # Rank 0 drives the run; the cluster stays up until its call returns,
+        # so the other ranks only need their Ray workers, started in enter().
+        if self.rank != 0:
+            return
 
-@app.local_entrypoint()
-def launch_train(experiment: str = DEFAULT_EXPERIMENT, app_name: str = "") -> None:
-    """Spawn training on the deployed app, falling back to this ephemeral app."""
-    exp = _load_experiment(experiment)
-    target_app_name = app_name or _experiment_app_name(exp)
-    spawn_train_from_deployed_or_ephemeral(
-        deployed_app_name=target_app_name,
-        experiment=experiment,
-        fallback_function=train,
-    )
+        cfg = SlimeConfig.from_payload(payload)
+        if helpers.training_nodes(cfg) != N_TRAIN_NODES:
+            raise ValueError(
+                f"experiment {experiment!r} needs {helpers.training_nodes(cfg)} node(s) but this app "
+                f"was deployed with {N_TRAIN_NODES}; deploy it as its own app with EXPERIMENT_CONFIG={experiment}"
+            )
+        if cfg.environment != slime_cfg.environment:
+            # Ray inherited the deploy-time environment when enter() started it.
+            print(
+                f"WARNING: experiment {experiment!r} changes `environment`, which only "
+                f"takes effect after a redeploy restarts the Ray cluster."
+            )
+
+        cfg.rollout_http_endpoint_url = resolve_flash_gateway_url(APP_NAME, Server.__name__)
+        # stitch's publish hooks read these off the slime args namespace.
+        cfg.custom_config_path = {
+            "update_weight_delta_volume_name": exp.DELTA_VOLUME_NAME,
+            "rollout_modal_flash_app_name": APP_NAME,
+            "rollout_modal_flash_server_cls_name": Server.__name__,
+        }
+        helpers.prepare_slime_config(cfg, tempfile.mkdtemp())
+        cmd = helpers.build_train_cmd(cfg, SLIME_ROOT)
+
+        print(f"Training {experiment}: nodes={N_TRAIN_NODES}, rollout_endpoint={cfg.rollout_http_endpoint_url}")
+        print(f"Command: {cmd}")
+        subprocess.run(["bash", "-lc", cmd], check=True)
 
 
 @app.function(
     image=image,
     volumes={str(HF_CACHE_PATH): hf_cache_volume},
-    timeout=2 * 60 * 60,
+    timeout=2 * 60 * MINUTES,
     secrets=[modal.Secret.from_name("huggingface-secret")],
+    include_source=False,
 )
-def download_model(experiment: str = DEFAULT_EXPERIMENT) -> None:
+def download_model() -> None:
     from huggingface_hub import snapshot_download
 
-    cfg = _load_experiment(experiment).slime
-    snapshot_download(repo_id=cfg.hf_checkpoint)
+    snapshot_download(repo_id=MODEL_NAME)
     hf_cache_volume.commit()
 
 
 @app.function(
     image=image,
     volumes={str(DATA_PATH): data_volume},
-    timeout=2 * 60 * 60,
+    timeout=2 * 60 * MINUTES,
     secrets=[modal.Secret.from_name("huggingface-secret")],
+    include_source=False,
 )
-def prepare_dataset(experiment: str = DEFAULT_EXPERIMENT) -> None:
-    cfg = _load_experiment(experiment).slime
+def prepare_dataset() -> None:
     data_volume.reload()
-    cfg.prepare_data()
+    slime_cfg.prepare_data()
     data_volume.commit()
 
 
 @app.function(
     image=image,
-    volumes={DELTA_BULLETIN_ROOT: delta_volume},
+    volumes={exp.DELTA_BULLETIN_ROOT: delta_volume},
     timeout=20 * MINUTES,
+    include_source=False,
 )
 def reset_bulletin_board(confirm: bool = False) -> None:
-    reset_bulletin_board_impl(DELTA_BULLETIN_ROOT, delta_volume, confirm=confirm)
-    print(f"Reset {DELTA_VOLUME_NAME} bulletin board to version 0.")
+    helpers.reset_bulletin_board(exp.DELTA_BULLETIN_ROOT, delta_volume, confirm=confirm)
+    print(f"Reset {exp.DELTA_VOLUME_NAME} bulletin board to version 0.")
 
 
-@app.function(
-    image=image,
-    gpu=f"{modal_cfg.gpu}:{slime_cfg.actor_num_gpus_per_node}",
-    memory=modal_cfg.memory if modal_cfg.memory else None,
-    cloud=modal_cfg.cloud if modal_cfg.cloud else None,
-    region=modal_cfg.region if modal_cfg.region else None,
-    volumes=train_volumes,
-    timeout=24 * 60 * 60,
-    experimental_options={"efa_enabled": True},
-)
-@modal.experimental.clustered(training_nodes(slime_cfg), rdma=True)
-async def train(experiment: str = DEFAULT_EXPERIMENT) -> None:
-    await asyncio.gather(
-        hf_cache_volume.reload.aio(),
-        data_volume.reload.aio(),
-        checkpoints_volume.reload.aio(),
-        delta_volume.reload.aio(),
-    )
+@app.local_entrypoint()
+def launch_train(experiment: str = EXPERIMENT) -> None:
+    """Resolve an experiment from the local working tree and spawn it on the
+    deployed app. Training args ship as data, so new or edited configs run
+    without a redeploy; infrastructure changes (GPU, nodes, pool size,
+    Volume names) still require one."""
+    from modal.exception import NotFoundError
 
-    exp = _load_experiment(experiment)
-    cfg = exp.slime
-    mcfg = exp.modal
-    app_name = _experiment_app_name(exp)
-    cfg.rollout_http_endpoint_url = await _resolve_flash_gateway_url_aio(app_name)
-    cfg.update_weight_delta_dir = getattr(exp, "DELTA_VERSION_DIR", DELTA_VERSION_DIR)
-    cfg.update_weight_delta_root = getattr(exp, "DELTA_BULLETIN_ROOT", DELTA_BULLETIN_ROOT)
-    cfg.environment["DELTA_VOLUME_NAME"] = getattr(exp, "DELTA_VOLUME_NAME", DELTA_VOLUME_NAME)
-    cfg.environment["SLIME_DELTA_APP_NAME"] = app_name
-    cfg.environment["SLIME_DELTA_SERVER_CLS_NAME"] = SERVER_CLS_NAME
-    ensure_pythonpath(cfg, "/root", "/root/Megatron-LM/")
-
-    n_nodes = training_nodes(cfg)
-    rank, master_addr, my_ip, _ = get_modal_cluster_context(n_nodes)
-
-    os.environ["SLIME_HOST_IP"] = my_ip
-    os.environ["SGLANG_HOST_IP"] = my_ip
-    os.environ["HOST_IP"] = my_ip
-    ray_env_vars = {
-        "RAY_ADDRESS": f"{master_addr}:{RAY_PORT}",
-        "no_proxy": f"127.0.0.1,{master_addr},{my_ip}",
-        "NO_PROXY": f"127.0.0.1,{master_addr},{my_ip}",
-        "MASTER_ADDR": master_addr,
-        **cfg.environment,
-    }
-    os.environ.update(ray_env_vars)
-
-    if rank != 0:
-        subprocess.run(
-            [
-                "ray",
-                "start",
-                f"--node-ip-address={my_ip}",
-                "--address",
-                f"{master_addr}:{RAY_PORT}",
-                "--disable-usage-stats",
-            ],
-            check=True,
-            timeout=int(os.getenv("RAY_WORKER_START_TIMEOUT_SECONDS", "240")),
+    run = importlib.import_module(f"cookbook.slime_disagg.configs.{experiment}")
+    if run.DELTA_VOLUME_NAME != exp.DELTA_VOLUME_NAME:
+        raise SystemExit(
+            f"Experiment {experiment!r} owns Volume {run.DELTA_VOLUME_NAME!r}, but app {APP_NAME!r} "
+            f"mounts {exp.DELTA_VOLUME_NAME!r}. Deploy it as its own app with EXPERIMENT_CONFIG={experiment}."
         )
-        while True:
-            await asyncio.sleep(10)
 
-    start_ray_head(my_ip, n_nodes, ray_port=RAY_PORT, include_dashboard=False)
-    prepare_slime_config(cfg, tempfile.mkdtemp())
+    trainer = modal.Cls.from_name(APP_NAME, Trainer.__name__)()
+    try:
+        call = trainer.train.spawn(experiment, run.slime.to_payload())
+    except NotFoundError:
+        raise SystemExit(
+            f"App {APP_NAME!r} is not deployed. Run:\n"
+            f"  uv run --extra modal modal deploy -m cookbook.slime_disagg.modal_app"
+        )
+    print(f"Spawned train({experiment!r}) on {APP_NAME}: {call.object_id}")
 
-    cmd = build_train_cmd(cfg, SLIME_ROOT)
 
-    print(
-        f"Training {experiment}: nodes={n_nodes}, gpu={mcfg.gpu}:{cfg.actor_num_gpus_per_node}, "
-        f"rollout_endpoint={cfg.rollout_http_endpoint_url}"
+@app.local_entrypoint()
+def smoke_flash_pool(weight_version: int = 0, timeout_seconds: int = 30 * MINUTES) -> None:
+    """Check that the deployed Flash pool serves completions at the expected
+    weight version, via the gateway and each container directly."""
+    helpers.smoke_flash_pool(
+        app_name=APP_NAME,
+        cls_name=Server.__name__,
+        model_name=MODEL_NAME,
+        weight_version=weight_version,
+        expect_min_containers=modal_cfg.rollout_min_containers,
+        timeout_seconds=timeout_seconds,
     )
-    print(f"Command: {redact_command_for_log(cmd)}")
-
-    env = os.environ.copy()
-    result = subprocess.run(["bash", "-lc", cmd], env=env)
-    if result.returncode != 0:
-        raise RuntimeError(f"Training command failed with exit code {result.returncode}")
-
-
-def _resolve_flash_gateway_url(app_name: str = APP_NAME) -> str:
-    if url := os.getenv("ROLLOUT_GATEWAY_URL"):
-        return url.rstrip("/")
-    return resolve_flash_gateway_url(app_name, SERVER_CLS_NAME)
-
-
-async def _resolve_flash_gateway_url_aio(app_name: str = APP_NAME) -> str:
-    if url := os.getenv("ROLLOUT_GATEWAY_URL"):
-        return url.rstrip("/")
-    return await resolve_flash_gateway_url_aio(app_name, SERVER_CLS_NAME)
-
-
-def _discover_flash_targets(app_name: str = APP_NAME) -> list[str]:
-    return discover_flash_targets(app_name, SERVER_CLS_NAME)

@@ -1,130 +1,106 @@
-# Disaggregated SLIME with Sparse-Delta Sync and Elastic Rollouts
+# Disaggregated SLIME on Modal
 
-This example runs Qwen3-4B GRPO with SLIME training on a Ray actor cluster and
-an elastic Modal Flash SGLang rollout pool. The trainer writes retained sparse
-delta transitions to a v2 Modal Volume bulletin board; each Flash container
-reloads the Volume and applies the requested weight version before serving
-version-pinned rollout requests.
+Train Qwen3-4B with GRPO while rollouts run on a separate, elastic pool of
+SGLang servers.
 
-Scope for this first implementation:
+The app has two halves.
 
-- Full-parameter fine-tuning through SLIME sparse delta compression.
-- Modal Flash gateway for blind load balancing across `Server` containers.
-- Direct container wakeups with `modal.experimental.flash_get_containers`.
-- `Volume.commit()` on trainer ranks and `Volume.reload()` in the rollout sidecar.
-- No LoRA path and no stale KV cache reuse.
+- **`Trainer`** is a clustered SLIME/Ray job. After each optimizer step it
+  writes a sparse weight delta to a Modal Volume (the "bulletin board") and
+  publishes a new weight version.
+- **`Server`** is a Modal Flash pool of SGLang servers. A sidecar in each
+  container watches the bulletin board, applies deltas in order, and serves
+  rollout requests pinned to an exact weight version. Requests for a version
+  the container hasn't reached yet get `409` and SLIME retries.
+
+The two halves never talk directly. Weights flow through the Volume, rollout
+traffic flows through the Flash gateway, and either side can scale or restart
+on its own.
 
 ## Layout
 
-- `modal_app.py`: Modal app, Flash `Server` class, train/download/reset entrypoints.
-- `modal_helpers.py`: example-specific Modal launch, smoke, and process helpers.
-- `configs/qwen3_4b_delta_flash.py`: Qwen3-4B GSM8K GRPO config.
-- `configs/qwen3_4b_delta_flash_hillclimb.py`: Longer GSM8K config for reward hillclimb validation.
-- `vendor/`: launcher config base classes and Modal cluster helpers vendored from [modal-projects/multinode-training-guide](https://github.com/modal-projects/multinode-training-guide).
-- `stitch` (this repo): reusable protocol, bulletin-board, SGLang sidecar, provider adapters, and SLIME adapter code. The image installs the enclosing checkout by default; override with `STITCH_REPO_PATH`.
+| File | What it is |
+|---|---|
+| `modal_app.py` | The Modal app. Image, `Server` pool, `Trainer` cluster, entrypoints |
+| `helpers.py` | Ray startup, sidecar process management, smoke checks |
+| `configs/base.py` | `ModalConfig` (infra) and `SlimeConfig` (training args) base classes |
+| `configs/qwen3_4b_delta_flash.py` | Qwen3-4B GSM8K GRPO, 3 rollouts. Protocol smoke test |
+| `configs/qwen3_4b_delta_flash_hillclimb.py` | Same, 120 rollouts with evals. Reward hillclimb |
 
-Config should use the extracted package paths:
+The `stitch` package (this repo) provides the bulletin-board protocol, the
+SGLang sidecar, and the SLIME hooks. Both it and this example are mounted
+into containers at startup, so code edits never rebuild the image.
 
-- `stitch.trainers.slime.commit_delta_volume`
-- `stitch.trainers.slime.publish_delta_version`
-- `stitch.trainers.slime.generate_rollout`
+## Run it
 
-The Modal image starts from the nightly SLIME image, installs the local
-`stitch` package, then replaces `/root/slime` with the fork
-branch that contains the generic HTTP rollout endpoint and publish-only
-disk-delta hooks. Override these when testing another branch:
-
-- `SLIME_REPO_URL`: defaults to `https://github.com/modal-projects/slime.git`
-- `SLIME_REPO_REF`: defaults to `jvmncs/rollout-endpoint`
-
-## Run
-
-The app expects a standard Modal secret named `huggingface-secret` when model
-or dataset access requires Hugging Face credentials.
+You need a Modal account and a `huggingface-secret` Modal secret. Work from
+the repo root, with this alias to keep the commands short:
 
 ```bash
-uv run --extra modal modal run cookbook/slime_disagg/modal_app.py::download_model
-uv run --extra modal modal run cookbook/slime_disagg/modal_app.py::prepare_dataset
-uv run --extra modal modal run cookbook/slime_disagg/modal_app.py::reset_bulletin_board --confirm
-MIN_CONTAINERS=2 TARGET_INPUTS=64 uv run --extra modal modal deploy --strategy recreate cookbook/slime_disagg/modal_app.py
-PYTHONPATH=cookbook uv run --extra modal python -u -c "from slime_disagg.modal_app import run_flash_pool_smoke; run_flash_pool_smoke(weight_version=0, expect_min_containers=2)"
-uv run --extra modal modal run --detach cookbook/slime_disagg/modal_app.py::launch_train --experiment qwen3_4b_delta_flash
-PYTHONPATH=cookbook uv run --extra modal python -u -c "from slime_disagg.modal_app import run_flash_pool_smoke; run_flash_pool_smoke(weight_version=3, expect_min_containers=2)"
+alias m="uv run --extra modal modal"
+
+# One-time setup. Fetch the model and dataset onto Volumes.
+m run -m cookbook.slime_disagg.modal_app::download_model
+m run -m cookbook.slime_disagg.modal_app::prepare_dataset
+
+# Start every rollout container from weight version 0.
+m run -m cookbook.slime_disagg.modal_app::reset_bulletin_board --confirm
+m deploy --strategy recreate -m cookbook.slime_disagg.modal_app
+
+# Wait for the pool to come up and answer at version 0.
+m run -m cookbook.slime_disagg.modal_app::smoke_flash_pool
+
+# Train. Returns immediately; the run continues on Modal.
+m run -m cookbook.slime_disagg.modal_app::launch_train
+
+# The 3-rollout config should leave the pool at version 3.
+m run -m cookbook.slime_disagg.modal_app::smoke_flash_pool --weight-version 3
 ```
 
-`launch_train` first looks up the deployed app's `train` function with
-`modal.Function.from_name`. If that function is not found, it falls back to the
-ephemeral `train` function from the current `modal run`; keep `--detach` so the
-fallback can outlive the local client process.
+To train again, run `launch_train` again. The `Trainer` cluster starts Ray
+once per container in `@modal.enter()`, so a warm cluster goes straight to
+training. To rerun from scratch, reset the bulletin board and redeploy with
+`--strategy recreate` so every container starts again from version 0.
 
-Reset the bulletin board before starting a fresh rollout pool. If a running pool
-has already synced old retained versions, reset first and then deploy with
-`--strategy recreate` so every container starts again from base version 0:
+## Configuration
+
+Each experiment is a module in `configs/` holding a `ModalConfig` (GPU type,
+pool size, regions), a `SlimeConfig` (every SLIME CLI arg), and the names of
+the Modal resources it owns.
+
+`launch_train` imports the experiment from your local working tree and ships
+the training arguments to the deployed `Trainer` as plain data. Editing or
+adding a `SlimeConfig` therefore needs no redeploy; just `launch_train` it.
+Infrastructure binds at deploy time, so changes to GPU type, node count,
+pool size, Volume names, or SGLang server flags still need a deploy.
+
+The only environment variable is `EXPERIMENT_CONFIG`, which picks the config
+module at deploy time. Each experiment becomes its own Modal app:
 
 ```bash
-uv run --extra modal modal run cookbook/slime_disagg/modal_app.py::reset_bulletin_board --confirm
-MIN_CONTAINERS=2 TARGET_INPUTS=64 uv run --extra modal modal deploy --strategy recreate cookbook/slime_disagg/modal_app.py
+EXPERIMENT_CONFIG=qwen3_4b_delta_flash_hillclimb m deploy --strategy recreate -m cookbook.slime_disagg.modal_app
 ```
 
-Useful knobs:
-
-- `SLIME_DELTA_APP_NAME`: Modal app name override. Defaults to the selected config's app name.
-- `MIN_CONTAINERS`: minimum Flash rollout containers. Defaults to `2`.
-- `TARGET_INPUTS`: Modal per-container concurrency and SGLang max running requests. Defaults to `64`.
-- `ROLLOUT_GPU`: rollout GPU type. Defaults to the config's Modal GPU.
-- `ROLLOUT_GATEWAY_URL`: explicit Flash gateway URL override for training.
-- `SGLANG_CONTEXT_LENGTH`, `SGLANG_MEM_FRACTION_STATIC`, `SGLANG_CHUNKED_PREFILL_SIZE`: SGLang server tuning.
-- `SIDECAR_DEBUG_REQUESTS=1`: log each versioned sidecar proxy request. This is noisy under rollout load.
-- `SIDECAR_COMMIT_MODE=in_place`: commit weights via pause/apply/continue without
-  draining or flushing — in-flight requests keep decoding on stale KV, and
-  cross-version isolation comes from the sidecar's version-namespaced
-  `extra_key` stamping. Defaults to `quiesce`. Only enable on an SGLang build
-  with the overlap-drain fix (see stitch `docs/kv-version-namespace-design.md`).
-
-For debugging, stream focused deployed-app logs with Modal's log search:
+The hillclimb run is the same transport with a real acceptance signal.
+`passrate/pass@1` and `passrate/pass@8` should trend up, and `eval/gsm8k`
+should not regress. Useful log searches:
 
 ```bash
-uv run --extra modal modal app logs slime-qwen3-4b-delta-flash --since 30m --search "Published sparse delta version"
-uv run --extra modal modal app logs slime-qwen3-4b-delta-flash --since 30m --search "Training qwen3_4b_delta_flash"
+m app logs slime-qwen3-4b-delta-flash-hillclimb --since 4h --search "passrate "
+m app logs slime-qwen3-4b-delta-flash-hillclimb --since 4h --search "Published sparse delta"
 ```
 
-## Reward Hillclimb Run
+## Protocol notes
 
-Use `qwen3_4b_delta_flash_hillclimb` when the acceptance signal is training
-quality rather than protocol/perf smoke. It keeps the same disaggregated sparse
-delta transport as the short config, but runs 120 rollouts, enables
-`log_passrate`, and evaluates GSM8K every 20 rollouts.
-
-```bash
-EXPERIMENT_CONFIG=qwen3_4b_delta_flash_hillclimb uv run --extra modal modal run cookbook/slime_disagg/modal_app.py::download_model
-EXPERIMENT_CONFIG=qwen3_4b_delta_flash_hillclimb uv run --extra modal modal run cookbook/slime_disagg/modal_app.py::prepare_dataset
-EXPERIMENT_CONFIG=qwen3_4b_delta_flash_hillclimb uv run --extra modal modal run cookbook/slime_disagg/modal_app.py::reset_bulletin_board --confirm
-EXPERIMENT_CONFIG=qwen3_4b_delta_flash_hillclimb MIN_CONTAINERS=2 TARGET_INPUTS=64 uv run --extra modal modal deploy --strategy recreate cookbook/slime_disagg/modal_app.py
-EXPERIMENT_CONFIG=qwen3_4b_delta_flash_hillclimb uv run --extra modal modal run --detach cookbook/slime_disagg/modal_app.py::launch_train --experiment qwen3_4b_delta_flash_hillclimb
-```
-
-Primary pass signal: `passrate/pass@1` and `passrate/pass@8` should trend up
-over the run. Secondary sanity signal: `eval/gsm8k` should improve from the
-pre-train baseline or, at minimum, not regress while train pass-rate improves.
-
-Useful log searches:
-
-```bash
-uv run --extra modal modal app logs slime-qwen3-4b-delta-flash-hillclimb --since 4h --search "passrate "
-uv run --extra modal modal app logs slime-qwen3-4b-delta-flash-hillclimb --since 4h --search "eval "
-uv run --extra modal modal app logs slime-qwen3-4b-delta-flash-hillclimb --since 4h --search "Published sparse delta"
-```
-
-## Protocol Notes
-
-The trainer publishes one complete manifest per weight version at
+The trainer publishes one manifest per weight version at
 `/delta-bulletin/versions/weight_vNNNNNN/manifest.json`, then updates
-`/delta-bulletin/latest.json`. The extracted SGLang sidecar applies versions in
-order from its current version to the requested target. SLIME's generic HTTP
-rollout endpoint mode sends exact version requests, so a container returns
-`409 WeightVersionNotReady` until it has caught up and SLIME retries until the
-target version is ready.
+`/delta-bulletin/latest.json`. Sidecars apply versions strictly in order from
+their current version to the requested one. A retained chain of deltas keeps
+recovery simple, since a fresh container replays from version 0. Bounding
+that replay with periodic checkpoints is left for later.
 
-The retained-chain approach is simple and recovery-friendly for this example.
-Production runs may later add periodic checkpoint or accumulated-delta anchors
-to bound cold-start replay length.
+Sidecars default to `quiesce` commit mode, which drains in-flight requests
+before applying a delta. The `in_place` mode (set `SIDECAR_COMMIT_MODE` in
+the config module) applies without draining and relies on version-namespaced
+KV keys. It needs an SGLang build with the overlap-drain fix, described in
+`docs/kv-version-namespace-design.md`.
