@@ -6,7 +6,7 @@ bulletin board that the rollout servers sync from.
 
 Run all commands as modules from the repo root, e.g.:
 
-    uv run --extra modal modal deploy -m cookbook.slime_disagg.modal_app
+    uv run --extra modal modal deploy -m cookbook.slime_disagg.modal_train
 """
 
 from __future__ import annotations
@@ -50,7 +50,13 @@ SLIME_ROOT = "/root/slime"
 # Fork branch with the generic HTTP rollout endpoint and publish-only
 # disk-delta hooks that this example drives.
 SLIME_REPO_URL = "https://github.com/modal-projects/slime.git"
-SLIME_REPO_REF = "jvmncs/rollout-endpoint"
+# Pin to an exact commit, not the branch tip: the build's `git fetch ... &&
+# checkout` is a cached image layer, so a moving branch tip silently leaves the
+# container on a stale slime. This commit has custom_rollout_request_hook_path
+# (added in d8526ee5), which stitch's rollout request hook relies on; an older
+# cached layer lacked it, so the hook never fired and rollout requests carried
+# no weight_version pin. Bump this SHA to roll slime forward.
+SLIME_REPO_REF = "4ea02f0ee6a4cef5ebcd90fd1c85888035e3d85b"
 
 image = (
     modal.Image.from_registry(SLIME_IMAGE_TAG)
@@ -66,6 +72,15 @@ image = (
         f" && git fetch --depth 1 origin {SLIME_REPO_REF}"
         f" && git checkout FETCH_HEAD"
         f" && python3 -m pip install --no-deps -e {SLIME_ROOT}"
+    )
+    # The base image installs megatron-core as a PEP 660 *strict* editable that
+    # exposes only `megatron.core`, hiding `megatron.training` (which slime's
+    # megatron backend imports) even though the full tree exists on disk at
+    # /root/Megatron-LM. Reinstall in compat editable mode so a .pth puts the
+    # whole source tree on the path and `megatron.training` is importable.
+    .run_commands(
+        "cd /root/Megatron-LM"
+        " && python3 -m pip install --no-deps -e . --config-settings editable_mode=compat"
     )
     .pip_install(
         "autoinference-utils==0.2.0",  # SGLang server lifecycle for the rollout pool
@@ -181,6 +196,7 @@ class Server:
             bulletin_root=exp.DELTA_BULLETIN_ROOT,
             volume_name=exp.DELTA_VOLUME_NAME,
             commit_mode=exp.SIDECAR_COMMIT_MODE,
+            debug_requests=getattr(exp, "SIDECAR_DEBUG_REQUESTS", False),
         )
         helpers.wait_http(f"http://127.0.0.1:{SIDECAR_PORT}/health", self.sidecar, SERVER_STARTUP_TIMEOUT)
         print(f"Rollout server ready: model={MODEL_NAME}, target_inputs={ROLLOUT_CONCURRENCY}")
@@ -335,7 +351,7 @@ def launch_train(experiment: str = EXPERIMENT) -> None:
     except NotFoundError:
         raise SystemExit(
             f"App {APP_NAME!r} is not deployed. Run:\n"
-            f"  uv run --extra modal modal deploy -m cookbook.slime_disagg.modal_app"
+            f"  uv run --extra modal modal deploy -m cookbook.slime_disagg.modal_train"
         )
     print(f"Spawned train({experiment!r}) on {APP_NAME}: {call.object_id}")
 

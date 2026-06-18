@@ -21,7 +21,7 @@ on its own.
 
 | File | What it is |
 |---|---|
-| `modal_app.py` | The Modal app. Image, `Server` pool, `Trainer` cluster, entrypoints |
+| `modal_train.py` | The Modal app. Image, `Server` pool, `Trainer` cluster, entrypoints |
 | `helpers.py` | Ray startup, sidecar process management, smoke checks |
 | `configs/base.py` | `ModalConfig` (infra) and `SlimeConfig` (training args) base classes |
 | `configs/qwen3_4b_delta_flash.py` | Qwen3-4B GSM8K GRPO, 3 rollouts. Protocol smoke test |
@@ -40,21 +40,21 @@ the repo root, with this alias to keep the commands short:
 alias m="uv run --extra modal modal"
 
 # One-time setup. Fetch the model and dataset onto Volumes.
-m run -m cookbook.slime_disagg.modal_app::download_model
-m run -m cookbook.slime_disagg.modal_app::prepare_dataset
+m run -m cookbook.slime_disagg.modal_train::download_model
+m run -m cookbook.slime_disagg.modal_train::prepare_dataset
 
 # Start every rollout container from weight version 0.
-m run -m cookbook.slime_disagg.modal_app::reset_bulletin_board --confirm
-m deploy --strategy recreate -m cookbook.slime_disagg.modal_app
+m run -m cookbook.slime_disagg.modal_train::reset_bulletin_board --confirm
+m deploy --strategy recreate -m cookbook.slime_disagg.modal_train
 
 # Wait for the pool to come up and answer at version 0.
-m run -m cookbook.slime_disagg.modal_app::smoke_flash_pool
+m run -m cookbook.slime_disagg.modal_train::smoke_flash_pool
 
 # Train. Returns immediately; the run continues on Modal.
-m run -m cookbook.slime_disagg.modal_app::launch_train
+m run -m cookbook.slime_disagg.modal_train::launch_train
 
 # The 3-rollout config should leave the pool at version 3.
-m run -m cookbook.slime_disagg.modal_app::smoke_flash_pool --weight-version 3
+m run -m cookbook.slime_disagg.modal_train::smoke_flash_pool --weight-version 3
 ```
 
 To train again, run `launch_train` again. The `Trainer` cluster starts Ray
@@ -78,7 +78,7 @@ The only environment variable is `EXPERIMENT_CONFIG`, which picks the config
 module at deploy time. Each experiment becomes its own Modal app:
 
 ```bash
-EXPERIMENT_CONFIG=qwen3_4b_delta_flash_hillclimb m deploy --strategy recreate -m cookbook.slime_disagg.modal_app
+EXPERIMENT_CONFIG=qwen3_4b_delta_flash_hillclimb m deploy --strategy recreate -m cookbook.slime_disagg.modal_train
 ```
 
 The hillclimb run is the same transport with a real acceptance signal.

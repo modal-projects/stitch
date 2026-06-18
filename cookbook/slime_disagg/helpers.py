@@ -194,11 +194,12 @@ def start_sglang_sidecar(
     bulletin_root: str,
     volume_name: str,
     commit_mode: str,
+    debug_requests: bool = False,
 ) -> subprocess.Popen:
     cmd = [
         "python3",
         "-m",
-        "stitch.servers.sglang",
+        "cookbook.slime_disagg.sidecar",
         "--host",
         "0.0.0.0",
         "--port",
@@ -212,6 +213,8 @@ def start_sglang_sidecar(
         "--commit-mode",
         commit_mode,
     ]
+    if debug_requests:
+        cmd.append("--debug-requests")
     print("Starting sidecar:", " ".join(cmd))
     return subprocess.Popen(cmd, start_new_session=True)
 
