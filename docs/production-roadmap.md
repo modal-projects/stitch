@@ -8,7 +8,7 @@ adversarially re-verified against the code. Companion doc:
 cross-request weight-sync design.
 
 Severity reflects impact on the deployed strict-mode configuration
-(`exact-rollout-id` pins, quiesce-all commits, publish-only trainer).
+(exact request-version pins, quiesce-all commits, publish-only trainer).
 
 ## P0 — verified correctness/liveness failures
 
@@ -112,11 +112,12 @@ Severity reflects impact on the deployed strict-mode configuration
   anchor (delta_accum or checkpoint) every N versions, implement the sidecar
   recovery path (`manifest.recovery` is currently write-only), add a retention
   window + GC job, and alarm on replay duration.
-- **`min_required_version` and version-aware retries** (protocol §6). slime
-  only emits `exact_version` or nothing; `_post` retries every error
-  identically (including non-retryable `WeightVersionTooOld` and arbitrary
-  4xx) until the budget kills the whole rollout. Parse the typed 409 error,
-  fail fast on too-old, back off on not-ready.
+- **Typed version-aware retry handling** (protocol §6). The slime endpoint
+  branch now emits both `exact_version` and `min_required_version`, but `_post`
+  still retries every error identically (including non-retryable
+  `WeightVersionTooOld` and arbitrary 4xx) until the budget kills the whole
+  rollout. Parse the typed 409 error, fail fast on too-old, back off on
+  not-ready.
 - **`weight_version_start/end` consumption** (protocol §6.3). The sidecar now
   reports them correctly, but nothing in slime reads
   `sample.weight_versions`; off-policy handling is version-blind. Needed for
@@ -148,8 +149,8 @@ steps:
    cache clear.
 4. O(delta) apply rewrite (precomputed name→shard-slice `index_copy_`),
    required before in-place commits on large models.
-5. slime: `min-required` policy mode + buffer filtering to actually exploit
-   commits that cross requests.
+5. slime: buffer filtering / off-policy handling to actually exploit commits
+   that cross requests.
 
 ## P3 — platform/ops hardening (Modal-specific)
 
@@ -182,11 +183,10 @@ steps:
 - `delta_dir`/`delta_root`/`bulletin_root`/volume-name are plumbed through 4
   layers with the dir→root derivation duplicated 3×; resolve once in slime
   arg post-processing and pass explicitly.
-- `trainers/slime.generate_rollout` is a near-verbatim fork of upstream
-  slime's entrypoint, maintained to change one integer — upstream a version
-  resolver hook and delete the fork. Related: the version pin is smuggled
-  through a private `args._rollout_weight_version` attr with a sentinel/delattr
-  dance; use a `ContextVar` or explicit parameter.
+- `trainers/slime.generate_rollout` is now only a compatibility wrapper; new
+  configs should use upstream slime's rollout function plus
+  `custom_rollout_request_hook_path`. Keep an eye on any remaining configs that
+  still depend on the wrapper before deleting it.
 - Dead surface: `volume_committer`, `wake_targets_aio`,
   `WeightVersionPolicy.to_payload`, the never-constructed `exact_only` commit
   policy, write-only manifest fields (`recovery`, `base_model`,
@@ -203,7 +203,7 @@ steps:
 - Naming: pick one vocabulary across protocol/doc/code
   (PREFETCHING/PREPARING/COMMITTING vs prepare/commit vs
   flush_cache/apply_manifest); PREFETCHING currently prefetches nothing.
-- modal_app: module-level config-from-env at import time (deploy-time
+- modal_train: module-level config-from-env at import time (deploy-time
   defaults silently leak across experiments — e.g. an experiment omitting
   `DELTA_VOLUME_NAME` inherits the default experiment's volume while the
   Server always mounts the default's); 4 near-identical gateway resolvers;
