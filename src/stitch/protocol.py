@@ -25,6 +25,146 @@ class SyncState(str, Enum):
 
 
 @dataclass(frozen=True)
+class RolloutReplicaState:
+    """Readiness report for one rollout server replica.
+
+    Providers may identify weights by an integer stitch version, an external
+    snapshot identity, or both. Readiness is separate from identity matching:
+    a healthy replica on an old snapshot is observable, but it is not ready for
+    requests that require the new target.
+    """
+
+    readiness: bool
+    current_version: int | None = None
+    current_snapshot_identity: str | None = None
+    replica_id: str | None = None
+    sync_state: str | None = None
+    readiness_reason: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "RolloutReplicaState":
+        known = {
+            "readiness",
+            "current_version",
+            "current_snapshot_identity",
+            "replica_id",
+            "sync_state",
+            "readiness_reason",
+            "metadata",
+        }
+        metadata = {k: v for k, v in data.items() if k not in known}
+        metadata.update(dict(data.get("metadata") or {}))
+        return cls(
+            readiness=_bool(data.get("readiness", False)),
+            current_version=_optional_int(data.get("current_version")),
+            current_snapshot_identity=_optional_str(data.get("current_snapshot_identity")),
+            replica_id=_optional_str(data.get("replica_id")),
+            sync_state=_optional_str(data.get("sync_state")),
+            readiness_reason=_optional_str(data.get("readiness_reason")),
+            metadata=metadata,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {"readiness": self.readiness}
+        if self.current_version is not None:
+            data["current_version"] = self.current_version
+        if self.current_snapshot_identity is not None:
+            data["current_snapshot_identity"] = self.current_snapshot_identity
+        if self.replica_id is not None:
+            data["replica_id"] = self.replica_id
+        if self.sync_state is not None:
+            data["sync_state"] = self.sync_state
+        if self.readiness_reason is not None:
+            data["readiness_reason"] = self.readiness_reason
+        if self.metadata:
+            data["metadata"] = self.metadata
+        return data
+
+    def matches_target(
+        self,
+        *,
+        target_version: int | None = None,
+        target_snapshot_identity: str | None = None,
+    ) -> bool:
+        if not self.readiness:
+            return False
+        if target_version is not None and self.current_version != int(target_version):
+            return False
+        if target_snapshot_identity is not None and self.current_snapshot_identity != str(target_snapshot_identity):
+            return False
+        return True
+
+
+@dataclass(frozen=True)
+class RolloutPoolState:
+    """Readiness report for a rollout server pool."""
+
+    replicas: list[RolloutReplicaState] = field(default_factory=list)
+    protocol_version: int = PROTOCOL_VERSION
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "RolloutPoolState":
+        known = {"protocol_version", "replicas", "metadata"}
+        metadata = {k: v for k, v in data.items() if k not in known}
+        metadata.update(dict(data.get("metadata") or {}))
+        return cls(
+            protocol_version=int(data.get("protocol_version", PROTOCOL_VERSION)),
+            replicas=[RolloutReplicaState.from_dict(x) for x in data.get("replicas", [])],
+            metadata=metadata,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "protocol_version": int(self.protocol_version),
+            "replicas": [replica.to_dict() for replica in self.replicas],
+        }
+        if self.metadata:
+            data["metadata"] = self.metadata
+        return data
+
+    def ready_count(
+        self,
+        *,
+        target_version: int | None = None,
+        target_snapshot_identity: str | None = None,
+    ) -> int:
+        return sum(
+            replica.matches_target(
+                target_version=target_version,
+                target_snapshot_identity=target_snapshot_identity,
+            )
+            for replica in self.replicas
+        )
+
+    def readiness_fraction(
+        self,
+        *,
+        target_version: int | None = None,
+        target_snapshot_identity: str | None = None,
+    ) -> float:
+        if not self.replicas:
+            return 0.0
+        return self.ready_count(
+            target_version=target_version,
+            target_snapshot_identity=target_snapshot_identity,
+        ) / len(self.replicas)
+
+    def is_ready(
+        self,
+        *,
+        threshold: float = 1.0,
+        target_version: int | None = None,
+        target_snapshot_identity: str | None = None,
+    ) -> bool:
+        return bool(self.replicas) and self.readiness_fraction(
+            target_version=target_version,
+            target_snapshot_identity=target_snapshot_identity,
+        ) >= float(threshold)
+
+
+@dataclass(frozen=True)
 class WeightVersionPolicy:
     """Request-level policy for acceptable rollout server weights."""
 
@@ -103,6 +243,12 @@ class VersionManifest:
     def read(cls, path: str | Path) -> "VersionManifest":
         with Path(path).open("r", encoding="utf-8") as f:
             data = json.load(f)
+        protocol_version = int(data.get("protocol_version", PROTOCOL_VERSION))
+        if protocol_version != PROTOCOL_VERSION:
+            raise ValueError(
+                f"manifest at {path} declares protocol_version {protocol_version}, "
+                f"but this build supports {PROTOCOL_VERSION}; refusing to read it"
+            )
         artifacts = [Artifact.from_dict(x) for x in data.get("artifacts", [])]
         transition_files = [str(x) for x in data.get("transition_files", [])]
         if not transition_files:
@@ -114,7 +260,7 @@ class VersionManifest:
             load_format=str(data.get("load_format", "delta")),
             transition_files=transition_files,
             created_at=float(data.get("created_at", 0.0)),
-            protocol_version=int(data.get("protocol_version", PROTOCOL_VERSION)),
+            protocol_version=protocol_version,
             artifacts=artifacts,
             run_id=None if data.get("run_id") is None else str(data["run_id"]),
             base_model=None if data.get("base_model") is None else str(data["base_model"]),
@@ -153,33 +299,22 @@ class VersionManifest:
         return [a.path for a in self.artifacts if a.kind == "transition"]
 
 
-EXTRA_KEY_DELIMITER = ";"
+def weight_identity(version: int) -> str:
+    """Canonical snapshot-identity string for an integer weight version."""
+    return f"weight_v{int(version):06d}"
 
 
-def compose_extra_key(version: int, user_extra_key: str | None = None) -> str:
-    """Compose a weight-version-namespaced engine ``extra_key``.
-
-    The version segment sits at a fixed position (the prefix) and is
-    delimiter-terminated, so it parses unambiguously regardless of the user
-    key's content. sglang appends ``lora_id`` to ``extra_key`` with no
-    delimiter, so the version must never be parsed from the right.
-    Examples: ``wv7;`` (no user key), ``wv7;my-key``.
-    """
-    return f"wv{int(version)}{EXTRA_KEY_DELIMITER}{user_extra_key or ''}"
-
-
-def parse_extra_key_version(extra_key: str) -> int | None:
-    """Inverse of :func:`compose_extra_key`. None for non-composed keys."""
-    if not extra_key.startswith("wv"):
+def parse_weight_identity(identity: str) -> int | None:
+    """Inverse of :func:`weight_identity`; None if not ``weight_v<digits>``."""
+    prefix = "weight_v"
+    if not identity.startswith(prefix):
         return None
-    head, delim, _rest = extra_key.partition(EXTRA_KEY_DELIMITER)
-    if not delim or not head[2:].isdigit():
-        return None
-    return int(head[2:])
+    digits = identity[len(prefix):]
+    return int(digits) if digits.isdigit() else None
 
 
 def version_dir(root: str | Path, version: int) -> Path:
-    return Path(root) / "versions" / f"weight_v{int(version):06d}"
+    return Path(root) / "versions" / weight_identity(version)
 
 
 def latest_path(root: str | Path) -> Path:
@@ -228,6 +363,28 @@ def version_too_old_error(current: int, target: int) -> dict[str, Any]:
     }
 
 
+def evaluate_version_policy(
+    current_version: int, policy: WeightVersionPolicy
+) -> dict[str, Any] | None:
+    """Shared exact/min admission check. Returns a typed error dict or None.
+
+    Callers decide how to react to a not-ready error (pull toward the target vs
+    reject): the bulletin-board manager queues a sync, the hot-load shim rejects.
+    """
+    if policy.exact_version is not None:
+        target = int(policy.exact_version)
+        if current_version < target:
+            return version_not_ready_error(current_version, target)
+        if current_version > target:
+            return version_too_old_error(current_version, target)
+        return None
+    if policy.min_required_version is not None and current_version < int(
+        policy.min_required_version
+    ):
+        return version_not_ready_error(current_version, int(policy.min_required_version))
+    return None
+
+
 def atomic_write_json(path: str | Path, payload: dict[str, Any]) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -244,3 +401,17 @@ def _optional_int(value: Any) -> int | None:
     if value is None:
         return None
     return int(value)
+
+
+def _optional_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    return str(value)
+
+
+def _bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.lower() in {"1", "true", "yes"}
+    return bool(value)

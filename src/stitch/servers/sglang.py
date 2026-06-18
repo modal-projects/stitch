@@ -1,21 +1,17 @@
 """HTTP sidecar that adds weight-version protocol semantics to SGLang."""
 
-from __future__ import annotations
-
-import argparse
 import asyncio
 import contextlib
+import inspect
 import logging
-import os
 import uuid
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from contextlib import asynccontextmanager
 from typing import Any
 
-from stitch.bulletin import FilesystemBulletinBoard
-from stitch.engines.sglang import SGLangDiskDeltaAdapter
-from stitch.protocol import WeightVersionPolicy, compose_extra_key
-from stitch.sync import CommitMode, PolicyViolation, WeightSyncManager
+from stitch.engines.sglang import compose_extra_key
+from stitch.protocol import WeightVersionPolicy
+from stitch.sync import PolicyViolation, RolloutSyncManager
 
 
 logger = logging.getLogger(__name__)
@@ -44,24 +40,40 @@ BLOCKED_ROUTES = frozenset(
 
 
 def create_app(
-    manager: WeightSyncManager,
+    manager: RolloutSyncManager,
     *,
     upstream_url: str,
     versioned_routes: Iterable[str] = ("generate", "v1/chat/completions"),
+    register_routes: Callable[[Any], None] | None = None,
+    include_sync_routes: bool = True,
+    upstream_timeout: float | None = 3600.0,
 ):
     from fastapi import FastAPI, Request
     from fastapi.responses import JSONResponse, Response
     import httpx
 
-    globals()["Request"] = Request
-    globals()["Response"] = Response
     upstream_url = upstream_url.rstrip("/")
+    # Bound the wait for an upstream (SGLang) response. A generation that
+    # finishes but never delivers its HTTP body would otherwise hang this proxy
+    # forever (timeout=None), holding the request open and wedging the client
+    # awaiting it — exactly the failure mode that stalled a rollout for hours.
+    # On timeout the upstream call raises, surfacing as a 5xx the client can
+    # retry, instead of an infinite hold. connect stays short (upstream is
+    # localhost); pass None to opt out.
+    upstream_request_timeout = httpx.Timeout(upstream_timeout, connect=10.0)
     versioned_route_set = {route.strip("/") for route in versioned_routes}
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         await manager.startup_sync()
-        yield
+        try:
+            yield
+        finally:
+            shutdown_sync = getattr(manager, "shutdown_sync", None)
+            if shutdown_sync is not None:
+                result = shutdown_sync()
+                if inspect.isawaitable(result):
+                    await result
 
     app = FastAPI(lifespan=lifespan)
 
@@ -77,17 +89,24 @@ def create_app(
     async def get_weight_version() -> dict[str, str]:
         return {"weight_version": str(manager.current_version)}
 
-    @app.post("/rpc_sync_from_bulletin_board")
-    async def rpc_sync_from_bulletin_board(request: Request) -> dict[str, Any]:
-        payload = await request.json()
-        target = payload.get("target_version")
-        manager.queue_sync(int(target) if target is not None else None)
-        return {
-            "accepted": True,
-            "current_version": manager.current_version,
-            "queued_target_version": manager.queued_target_version,
-            "sync_state": manager.sync_state.value,
-        }
+    if include_sync_routes:
+
+        @app.post("/rpc_sync_from_bulletin_board")
+        async def rpc_sync_from_bulletin_board(request: Request) -> dict[str, Any]:
+            payload = await request.json()
+            target = payload.get("target_version")
+            manager.queue_sync(int(target) if target is not None else None)
+            return {
+                "accepted": True,
+                "current_version": manager.current_version,
+                "queued_target_version": getattr(
+                    manager, "queued_target_version", None
+                ),
+                "sync_state": _sync_state_value(getattr(manager, "sync_state", None)),
+            }
+
+    if register_routes is not None:
+        register_routes(app)
 
     async def _watch_disconnect(request: Request) -> None:
         while True:
@@ -100,7 +119,9 @@ def create_app(
             async with httpx.AsyncClient(timeout=10.0, trust_env=False) as client:
                 await client.post(f"{upstream_url}/abort_request", json={"rid": rid})
         except Exception:  # noqa: BLE001
-            logger.warning("sidecar_proxy failed to abort upstream rid=%s", rid, exc_info=True)
+            logger.warning(
+                "sidecar_proxy failed to abort upstream rid=%s", rid, exc_info=True
+            )
 
     @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
     async def proxy(path: str, request: Request) -> Response:
@@ -117,18 +138,26 @@ def create_app(
             )
 
         body = await request.body()
-        payload: dict[str, Any] = {}
-        if body and request.headers.get("content-type", "").startswith("application/json"):
+        payload: dict[str, Any] | None = None
+        if body and request.headers.get("content-type", "").startswith(
+            "application/json"
+        ):
             parsed = await request.json()
             if isinstance(parsed, dict):
                 payload = parsed
 
         versioned_route = route in versioned_route_set
-        policy = WeightVersionPolicy.from_payload(payload) if versioned_route else WeightVersionPolicy()
+        policy = (
+            WeightVersionPolicy.from_payload(payload)
+            if versioned_route
+            else WeightVersionPolicy()
+        )
         request_id = request.headers.get("x-slime-request-id", "-")
 
+        forward_headers = _forward_headers(request.headers)
+
         rid: str | None = None
-        if versioned_route and payload:
+        if versioned_route and payload is not None:
             payload.pop("weight_version", None)
             # Inject a request id so the upstream generation can be aborted if
             # the client disconnects; otherwise abandoned requests keep
@@ -142,15 +171,19 @@ def create_app(
         try:
             ctx = manager.request_context(policy if versioned_route else None)
             async with ctx as start_version:
-                if versioned_route and payload:
+                if versioned_route and payload is not None:
                     # Stamp the serving version into the engine's KV cache
                     # namespace: requests admitted under different versions
                     # structurally cannot share radix-tree prefixes.
                     user_key = payload.get("extra_key")
                     if isinstance(user_key, list):
-                        payload["extra_key"] = [compose_extra_key(start_version, k) for k in user_key]
+                        payload["extra_key"] = [
+                            compose_extra_key(start_version, k) for k in user_key
+                        ]
                     else:
-                        payload["extra_key"] = compose_extra_key(start_version, user_key)
+                        payload["extra_key"] = compose_extra_key(
+                            start_version, user_key
+                        )
                 started = asyncio.get_running_loop().time()
                 if versioned_route and manager.debug_requests:
                     logger.info(
@@ -163,20 +196,30 @@ def create_app(
                     )
 
                 async def _upstream_call() -> Any:
-                    async with httpx.AsyncClient(timeout=None, trust_env=False) as client:
+                    async with httpx.AsyncClient(
+                        timeout=upstream_request_timeout, trust_env=False
+                    ) as client:
+                        request_kwargs: dict[str, Any] = {
+                            "params": request.query_params,
+                            "headers": forward_headers,
+                        }
+                        if payload is not None:
+                            request_kwargs["json"] = payload
+                        else:
+                            request_kwargs["content"] = body
                         return await client.request(
                             request.method,
                             f"{upstream_url}/{path}",
-                            params=request.query_params,
-                            json=payload if payload else None,
-                            content=None if payload else body,
-                            headers=_forward_headers(request.headers),
+                            **request_kwargs,
                         )
 
                 upstream_task = asyncio.ensure_future(_upstream_call())
                 disconnect_task = asyncio.ensure_future(_watch_disconnect(request))
                 try:
-                    await asyncio.wait({upstream_task, disconnect_task}, return_when=asyncio.FIRST_COMPLETED)
+                    await asyncio.wait(
+                        {upstream_task, disconnect_task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
                     if not upstream_task.done():
                         upstream_task.cancel()
                         with contextlib.suppress(BaseException):
@@ -240,89 +283,24 @@ def create_app(
             )
             return JSONResponse(exc.error, status_code=409)
 
-        if path == "generate" and isinstance(data, dict):
-            meta = data.setdefault("meta_info", {})
-            meta["weight_version"] = str(start_version)
-            meta["weight_version_start"] = start_version
-            meta["weight_version_end"] = end_version
-        elif path == "v1/chat/completions" and isinstance(data, dict):
-            data["weight_version_start"] = start_version
-            data["weight_version_end"] = end_version
+        if versioned_route and isinstance(data, dict):
+            # Driven by the same `versioned_route` flag that gated and stamped the
+            # request, so injection can't diverge from gating (previously a fixed
+            # path list here meant /v1/completions got version metadata while
+            # going ungated, and a custom versioned route got gated but no
+            # metadata). /generate carries it in meta_info; OpenAI-style routes
+            # at the top level.
+            if route == "generate":
+                meta = data.setdefault("meta_info", {})
+                meta["weight_version"] = str(start_version)
+                meta["weight_version_start"] = start_version
+                meta["weight_version_end"] = end_version
+            else:
+                data["weight_version_start"] = start_version
+                data["weight_version_end"] = end_version
         return JSONResponse(data, status_code=resp.status_code)
 
     return app
-
-
-def build_manager(
-    *,
-    upstream_url: str,
-    bulletin_root: str,
-    volume_name: str = "",
-    run_id: str | None = None,
-    commit_mode: CommitMode = "quiesce",
-    debug_requests: bool = False,
-) -> WeightSyncManager:
-    refresh = None
-    if volume_name:
-        from stitch.providers.modal import volume_reloader
-
-        refresh = volume_reloader(volume_name)
-    board = FilesystemBulletinBoard(bulletin_root, refresh=refresh)
-    engine = SGLangDiskDeltaAdapter(upstream_url=upstream_url)
-    return WeightSyncManager(
-        board=board,
-        engine=engine,
-        run_id=run_id,
-        commit_mode=commit_mode,
-        debug_requests=debug_requests,
-    )
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--upstream-url", required=True)
-    parser.add_argument("--bulletin-root", default=os.environ.get("DELTA_BULLETIN_ROOT", "/delta-bulletin"))
-    parser.add_argument("--volume-name", default=os.environ.get("DELTA_VOLUME_NAME", ""))
-    parser.add_argument("--run-id", default=os.environ.get("DISAGG_RUN_ID"))
-    parser.add_argument(
-        "--commit-mode",
-        choices=("quiesce", "in_place"),
-        default=os.environ.get("SIDECAR_COMMIT_MODE", "quiesce"),
-        help=(
-            "quiesce: wait out active requests and flush before applying. "
-            "in_place: pause/apply/continue without flushing; in-flight "
-            "requests keep decoding on stale KV and version isolation comes "
-            "from extra_key stamping. in_place requires an engine build with "
-            "the overlap-drain fix."
-        ),
-    )
-    parser.add_argument(
-        "--debug-requests",
-        action="store_true",
-        default=os.environ.get("SIDECAR_DEBUG_REQUESTS", "").lower() in {"1", "true", "yes"},
-        help="Log every versioned sidecar proxy request at INFO level.",
-    )
-    args = parser.parse_args()
-
-    logging.basicConfig(level=logging.INFO)
-    import uvicorn
-
-    manager = build_manager(
-        upstream_url=args.upstream_url,
-        bulletin_root=args.bulletin_root,
-        volume_name=args.volume_name,
-        run_id=args.run_id,
-        commit_mode=args.commit_mode,
-        debug_requests=args.debug_requests,
-    )
-    uvicorn.run(
-        create_app(manager, upstream_url=args.upstream_url),
-        host=args.host,
-        port=args.port,
-        log_level="info",
-    )
 
 
 def _forward_headers(headers: Any) -> dict[str, str]:
@@ -330,5 +308,5 @@ def _forward_headers(headers: Any) -> dict[str, str]:
     return {k: v for k, v in headers.items() if k.lower() not in blocked}
 
 
-if __name__ == "__main__":
-    main()
+def _sync_state_value(sync_state: Any) -> Any:
+    return getattr(sync_state, "value", sync_state)

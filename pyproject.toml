@@ -6,9 +6,9 @@ requires-python = ">=3.11"
 dependencies = []
 
 [project.optional-dependencies]
-modal = ["modal"]
+# providers/modal.py uses both the Modal SDK and requests (rollout-pool wake).
+modal = ["modal", "requests"]
 sglang = ["fastapi", "httpx", "uvicorn"]
-slime = ["requests"]
 
 [dependency-groups]
 dev = ["pytest"]

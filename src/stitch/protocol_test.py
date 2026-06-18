@@ -7,11 +7,14 @@ from pathlib import Path
 from stitch.bulletin import FilesystemBulletinBoard
 from stitch.protocol import (
     Artifact,
+    RolloutPoolState,
+    RolloutReplicaState,
     VersionManifest,
     WeightVersionPolicy,
-    compose_extra_key,
-    parse_extra_key_version,
+    evaluate_version_policy,
+    parse_weight_identity,
     read_latest,
+    weight_identity,
 )
 
 
@@ -47,16 +50,29 @@ class ProtocolTest(unittest.TestCase):
             self.assertEqual(loaded.artifacts[0].checksum, "sha256:abc")
             self.assertEqual(loaded.run_id, "run-1")
 
-    def test_compose_extra_key_round_trips_and_is_position_fixed(self) -> None:
-        self.assertEqual(compose_extra_key(0), "wv0;")
-        self.assertEqual(compose_extra_key(7, "my-key"), "wv7;my-key")
-        self.assertEqual(parse_extra_key_version(compose_extra_key(12, None)), 12)
-        self.assertEqual(parse_extra_key_version(compose_extra_key(3, "wv9;decoy")), 3)
-        # The user key cannot shift or forge the version segment.
-        self.assertEqual(parse_extra_key_version("wv1;anything;else"), 1)
-        self.assertIsNone(parse_extra_key_version("plain-user-key"))
-        self.assertIsNone(parse_extra_key_version("wv12"))  # no terminator
-        self.assertIsNone(parse_extra_key_version("wvx;k"))
+    def test_weight_identity_round_trips(self) -> None:
+        self.assertEqual(weight_identity(0), "weight_v000000")
+        self.assertEqual(weight_identity(123), "weight_v000123")
+        self.assertEqual(parse_weight_identity("weight_v000123"), 123)
+        self.assertIsNone(parse_weight_identity("base"))
+        self.assertIsNone(parse_weight_identity("weight_vxyz"))
+
+    def test_evaluate_version_policy(self) -> None:
+        self.assertIsNone(evaluate_version_policy(5, WeightVersionPolicy()))
+        self.assertIsNone(evaluate_version_policy(5, WeightVersionPolicy(exact_version=5)))
+        self.assertEqual(
+            evaluate_version_policy(4, WeightVersionPolicy(exact_version=5))["error"]["type"],
+            "WeightVersionNotReady",
+        )
+        self.assertEqual(
+            evaluate_version_policy(6, WeightVersionPolicy(exact_version=5))["error"]["type"],
+            "WeightVersionTooOld",
+        )
+        self.assertEqual(
+            evaluate_version_policy(4, WeightVersionPolicy(min_required_version=5))["error"]["type"],
+            "WeightVersionNotReady",
+        )
+        self.assertIsNone(evaluate_version_policy(5, WeightVersionPolicy(min_required_version=5)))
 
     def test_weight_version_policy_ignores_malformed_payload(self) -> None:
         self.assertEqual(WeightVersionPolicy.from_payload({}), WeightVersionPolicy())
@@ -64,6 +80,54 @@ class ProtocolTest(unittest.TestCase):
         self.assertEqual(
             WeightVersionPolicy.from_payload({"weight_version": {"min_required_version": "5", "exact_version": 6}}),
             WeightVersionPolicy(min_required_version=5, exact_version=6),
+        )
+
+    def test_rollout_pool_state_parses_snapshot_readiness(self) -> None:
+        state = RolloutPoolState.from_dict(
+            {
+                "replicas": [
+                    {
+                        "replica_id": "a",
+                        "readiness": True,
+                        "current_snapshot_identity": "ckpt-2",
+                        "zone": "us-east-1a",
+                    },
+                    {
+                        "replica_id": "b",
+                        "readiness": True,
+                        "current_snapshot_identity": "ckpt-2",
+                    },
+                    {
+                        "replica_id": "c",
+                        "readiness": False,
+                        "current_snapshot_identity": "ckpt-1",
+                        "readiness_reason": "downloading weights",
+                    },
+                ]
+            }
+        )
+
+        self.assertEqual(state.ready_count(target_snapshot_identity="ckpt-2"), 2)
+        self.assertEqual(state.readiness_fraction(target_snapshot_identity="ckpt-2"), 2 / 3)
+        self.assertTrue(state.is_ready(target_snapshot_identity="ckpt-2", threshold=0.5))
+        self.assertFalse(state.is_ready(target_snapshot_identity="ckpt-2", threshold=1.0))
+        self.assertEqual(state.replicas[0].metadata["zone"], "us-east-1a")
+        self.assertEqual(state.replicas[2].readiness_reason, "downloading weights")
+
+    def test_rollout_pool_state_matches_integer_versions(self) -> None:
+        state = RolloutPoolState(
+            replicas=[
+                RolloutReplicaState(readiness=True, current_version=7),
+                RolloutReplicaState(readiness=True, current_version=6),
+            ]
+        )
+
+        self.assertEqual(state.ready_count(target_version=7), 1)
+        self.assertEqual(state.ready_count(), 2)
+        self.assertFalse(RolloutPoolState().is_ready())
+        self.assertEqual(
+            RolloutPoolState.from_dict(state.to_dict()),
+            state,
         )
 
 

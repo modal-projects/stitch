@@ -43,7 +43,12 @@ class SidecarProxyTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             _manager, client = self._client(tmp)
             with client:
-                for route in ("update_weights_from_disk", "flush_cache", "pause_generation", "abort_request"):
+                for route in (
+                    "update_weights_from_disk",
+                    "flush_cache",
+                    "pause_generation",
+                    "abort_request",
+                ):
                     resp = client.post(f"/{route}", json={})
                     self.assertEqual(resp.status_code, 403, route)
                     self.assertEqual(resp.json()["error"]["type"], "RouteBlocked")
@@ -52,7 +57,9 @@ class SidecarProxyTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             _manager, client = self._client(tmp)
             with client:
-                self.assertEqual(client.get("/health").json(), {"ok": True, "current_version": 0})
+                self.assertEqual(
+                    client.get("/health").json(), {"ok": True, "current_version": 0}
+                )
                 info = client.get("/server_info").json()
                 self.assertEqual(info["current_version"], 0)
                 self.assertEqual(info["sync_state"], "IDLE")
@@ -79,6 +86,8 @@ class _RecordingUpstream:
     """
 
     last_json: dict | None = None
+    last_url: str | None = None
+    last_headers: dict | None = None
 
     def __init__(self, *args, **kwargs) -> None:
         pass
@@ -92,7 +101,9 @@ class _RecordingUpstream:
     async def request(self, method, url, **kwargs):
         import httpx
 
+        type(self).last_url = url
         type(self).last_json = kwargs.get("json")
+        type(self).last_headers = kwargs.get("headers")
         return httpx.Response(
             200,
             json={"text": "ok", "meta_info": {"finish_reason": {"type": "length"}}},
@@ -147,7 +158,9 @@ class SidecarInPlaceCommitTest(unittest.TestCase):
             with tempfile.TemporaryDirectory() as tmp:
                 board = FilesystemBulletinBoard(tmp)
                 engine = FakeEngine()
-                manager = WeightSyncManager(board=board, engine=engine, commit_mode="in_place")
+                manager = WeightSyncManager(
+                    board=board, engine=engine, commit_mode="in_place"
+                )
                 app = create_app(manager, upstream_url="http://127.0.0.1:9")
 
                 _BlockingUpstream.calls = []
@@ -165,12 +178,21 @@ class SidecarInPlaceCommitTest(unittest.TestCase):
                 )
                 async with driver:
                     with mock.patch("httpx.AsyncClient", _BlockingUpstream):
-                        slow = asyncio.create_task(driver.post("/generate", json={"text": "slow"}))
+                        slow = asyncio.create_task(
+                            driver.post("/generate", json={"text": "slow"})
+                        )
                         await wait_for(lambda: manager.active_requests == 1)
-                        self.assertEqual(_BlockingUpstream.calls[0]["extra_key"], "wv0;")
+                        self.assertEqual(
+                            _BlockingUpstream.calls[0]["extra_key"], "wv0;"
+                        )
 
                         board.publish_manifest(
-                            VersionManifest(version=1, base_version=0, backend="fake", load_format="noop")
+                            VersionManifest(
+                                version=1,
+                                base_version=0,
+                                backend="fake",
+                                load_format="noop",
+                            )
                         )
                         rpc = await driver.post(
                             "/rpc_sync_from_bulletin_board", json={"target_version": 1}
@@ -190,7 +212,9 @@ class SidecarInPlaceCommitTest(unittest.TestCase):
 
                         # New admissions are stamped with the new namespace.
                         await driver.post("/generate", json={"text": "hi"})
-                        self.assertEqual(_BlockingUpstream.calls[-1]["extra_key"], "wv1;")
+                        self.assertEqual(
+                            _BlockingUpstream.calls[-1]["extra_key"], "wv1;"
+                        )
 
         asyncio.run(run())
 
@@ -226,16 +250,23 @@ class SidecarStampingTest(unittest.TestCase):
             manager.current_version = 3
             with client, mock.patch("httpx.AsyncClient", _RecordingUpstream):
                 client.post("/generate", json={"text": "hi", "extra_key": "user-key"})
-                self.assertEqual(_RecordingUpstream.last_json["extra_key"], "wv3;user-key")
+                self.assertEqual(
+                    _RecordingUpstream.last_json["extra_key"], "wv3;user-key"
+                )
 
-                client.post("/generate", json={"text": ["a", "b"], "extra_key": ["k1", "k2"]})
+                client.post(
+                    "/generate", json={"text": ["a", "b"], "extra_key": ["k1", "k2"]}
+                )
                 self.assertEqual(
                     _RecordingUpstream.last_json["extra_key"], ["wv3;k1", "wv3;k2"]
                 )
 
                 client.post(
                     "/v1/chat/completions",
-                    json={"model": "m", "messages": [{"role": "user", "content": "hi"}]},
+                    json={
+                        "model": "m",
+                        "messages": [{"role": "user", "content": "hi"}],
+                    },
                 )
                 self.assertEqual(_RecordingUpstream.last_json["extra_key"], "wv3;")
 
@@ -244,9 +275,14 @@ class SidecarStampingTest(unittest.TestCase):
             manager, client = self._client(tmp)
             with client, mock.patch("httpx.AsyncClient", _RecordingUpstream):
                 _RecordingUpstream.last_json = None
-                client.post("/v1/completions", json={"model": "m", "prompt": "hi"})
+                # /v1/completions is not in the default versioned route set, so
+                # it must be neither stamped (request) nor version-annotated
+                # (response). Previously the response-metadata block hardcoded
+                # this path and injected version fields onto an ungated request.
+                resp = client.post("/v1/completions", json={"model": "m", "prompt": "hi"})
                 self.assertNotIn("extra_key", _RecordingUpstream.last_json or {})
-
+                self.assertNotIn("weight_version_start", resp.json())
+                self.assertNotIn("weight_version_end", resp.json())
 
 if __name__ == "__main__":
     unittest.main()
