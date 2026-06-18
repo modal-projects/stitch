@@ -15,7 +15,11 @@ DELTA_VERSION_DIR = f"{DELTA_BULLETIN_ROOT}/versions"
 # an SGLang build with the overlap-drain fix (see docs/kv-version-namespace-design.md).
 SIDECAR_COMMIT_MODE = "quiesce"
 
-# SGLang server tuning, merged over the structural args set in modal_app.py.
+# Log every versioned sidecar proxy request (start/end + injected rid) at INFO,
+# so a stuck rollout can be traced hop-by-hop: slime rid -> sidecar -> SGLang.
+SIDECAR_DEBUG_REQUESTS = True
+
+# SGLang server tuning, merged over the structural args set in modal_train.py.
 SGLANG_SERVER_ARGS = {
     "--reasoning-parser": "qwen3",
     "--context-length": "16384",
@@ -41,9 +45,14 @@ class _Slime(SlimeConfig):
     rollout_num_gpus_per_engine = 1
     rollout_http_endpoint_url = None
     rollout_http_endpoint_abort_strategy = "cancel-only"
-    rollout_weight_version_policy = "exact-rollout-id"
-    rollout_weight_version_retry_attempts = 240
-    rollout_weight_version_retry_sleep = 1.0
+    custom_rollout_request_hook_path = "stitch.trainers.slime.rollout_request_weight_version_hook"
+    rollout_request_weight_version_mode = "exact"
+    rollout_request_weight_version_lag = 0
+    rollout_request_retry_attempts = 240
+    rollout_request_retry_sleep = 1.0
+    # The trainer hits the Modal Flash gateway directly, which routes session
+    # affinity on Modal-Session-ID; emit that so GRPO siblings co-locate.
+    rollout_session_affinity_header = "Modal-Session-ID"
 
     # Sparse delta disk transport over the Modal Volume bulletin board.
     update_weight_mode = "delta"
@@ -53,8 +62,8 @@ class _Slime(SlimeConfig):
     update_weight_delta_root = DELTA_BULLETIN_ROOT
     update_weight_delta_keep_files = True
     update_weight_delta_publish_only = True
-    custom_delta_pre_push_path = "stitch.trainers.slime.commit_delta_volume"
-    custom_delta_publish_path = "stitch.trainers.slime.publish_delta_version"
+    custom_delta_pre_push_path = "cookbook.slime_disagg.hooks.commit_delta_volume"
+    custom_delta_publish_path = "cookbook.slime_disagg.hooks.publish_delta_version"
     sglang_update_weight_delta_chunk_bytes = 1024 * 1024 * 1024
     sglang_update_weight_delta_read_workers = 8
 
@@ -68,7 +77,7 @@ class _Slime(SlimeConfig):
     rm_type = "math"
 
     # Rollout
-    rollout_function_path = "stitch.trainers.slime.generate_rollout"
+    rollout_function_path = "slime.rollout.sglang_rollout.generate_rollout"
     num_rollout = 3
     rollout_batch_size = 64
     rollout_max_response_len = 4096
