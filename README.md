@@ -1,6 +1,7 @@
 # stitch
 
-Trainer-agnostic weight sync for disaggregated RL rollouts.
+A framework-agnostic protocol for disaggregated reinforcement learning of
+LLMs.
 
 When training and rollout generation run on separate machines, the rollout
 servers need a way to pick up new weights as the trainer produces them, and
@@ -10,13 +11,19 @@ versioned weight artifacts to a shared "bulletin board" directory, rollout
 servers sync to a requested version, and completion requests declare which
 versions they will accept.
 
+`stitch` is unopinionated about algorithm/training framework but is strongly
+opinionated about supporting workloads that are:
+- async-first
+- agentic-first
+- elastic rollout compute
+
 ## How it works
 
 1. After an optimizer step, the trainer writes weight artifacts (e.g. sparse
    deltas) for version `v` to the bulletin board, publishes a
    `manifest.json` describing them, then advances `latest.json`.
 2. A sidecar in front of each rollout server watches the board. When a request
-   arrives pinned to version `v` (via a `weight_version` policy in the
+   arrives pinned to version `v` (via a `weight_version` constraint in the
    request body), the sidecar applies versions in order until it reaches `v`,
    then proxies the request to the engine.
 3. Responses carry the version they were served with, and a server that hasn't
@@ -41,6 +48,8 @@ versions they will accept.
 - `src/stitch/providers/modal.py`: Modal helpers for Volume commit/reload and
   Flash container discovery.
 - `cookbook/`: End-to-end examples.
+  - `slime_disagg/`: SLIME plus a stitch-managed Modal Flash/SGLang pool.
+  - `standalone_rollouts/`: standalone Modal/SGLang rollout provider with a hot-load API shim.
 
 The core package has no required dependencies; extras pull in what each
 adapter needs (`modal`, `sglang`, `slime`).

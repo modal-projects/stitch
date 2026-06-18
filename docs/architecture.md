@@ -8,7 +8,7 @@ completion requests declare which weight versions are acceptable.
 ## Layers
 
 - Core protocol: request policy, response metadata, version manifests, latest
-  pointer, and sync state names.
+  pointer, sync state names, and rollout-pool readiness reports.
 - Bulletin board: durable storage for immutable manifests and artifacts.
 - Trainer adapters: framework-specific hooks that publish canonical artifacts.
 - Engine adapters: inference-engine-specific prepare/commit operations.
@@ -33,6 +33,17 @@ Canonical HF form simplifies trainer export, but each rollout engine still owns
 application semantics. The first engine adapter targets SGLang disk deltas via
 `/flush_cache` and `/update_weights_from_disk`. Future adapters can implement
 the same prepare/commit contract without changing the request protocol.
+
+## Pool Readiness Boundary
+
+Rollout pools are often provider-owned and elastic, so trainers should not need
+to know how replicas are discovered, replaced, or routed. Providers can expose a
+pool-readiness query that returns one `RolloutReplicaState` per observed
+replica. Trainers then apply a target identity/version and threshold locally,
+for example "at least 80% of replicas are ready for `weight_v000123`."
+
+This keeps policy in the trainer while leaving scheduling, health checks, and
+replica lifecycle to the provider.
 
 ## V1 Constraints
 
