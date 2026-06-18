@@ -1070,14 +1070,12 @@ source = { editable = "." }
 [package.optional-dependencies]
 modal = [
     { name = "modal" },
+    { name = "requests" },
 ]
 sglang = [
     { name = "fastapi" },
     { name = "httpx" },
     { name = "uvicorn" },
-]
-slime = [
-    { name = "requests" },
 ]
 
 [package.dev-dependencies]
@@ -1090,10 +1088,10 @@ requires-dist = [
     { name = "fastapi", marker = "extra == 'sglang'" },
     { name = "httpx", marker = "extra == 'sglang'" },
     { name = "modal", marker = "extra == 'modal'" },
-    { name = "requests", marker = "extra == 'slime'" },
+    { name = "requests", marker = "extra == 'modal'" },
     { name = "uvicorn", marker = "extra == 'sglang'" },
 ]
-provides-extras = ["modal", "sglang", "slime"]
+provides-extras = ["modal", "sglang"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "pytest" }]

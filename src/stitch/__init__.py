@@ -2,6 +2,8 @@
 
 from stitch.protocol import (
     Artifact,
+    RolloutPoolState,
+    RolloutReplicaState,
     SyncState,
     VersionManifest,
     WeightVersionPolicy,
@@ -12,6 +14,8 @@ from stitch.protocol import (
 
 __all__ = [
     "Artifact",
+    "RolloutPoolState",
+    "RolloutReplicaState",
     "SyncState",
     "VersionManifest",
     "WeightVersionPolicy",

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import time
 from argparse import Namespace
 from pathlib import Path
@@ -11,17 +10,9 @@ from typing import Any
 
 from stitch.bulletin import FilesystemBulletinBoard
 from stitch.protocol import Artifact, VersionManifest, read_latest
-from stitch.providers.modal import commit_volume, discover_flash_targets, wake_targets
 
 
 logger = logging.getLogger(__name__)
-
-
-def commit_delta_volume(args: Any, version_dir: str, rollout_engines: list[Any]) -> None:
-    """Slime ``custom_delta_pre_push_path`` hook for Modal Volume durability."""
-    del rollout_engines
-    commit_volume(_volume_name(args))
-    logger.info("Committed delta Volume for %s", version_dir)
 
 
 def publish_delta_version(
@@ -31,7 +22,13 @@ def publish_delta_version(
     weight_version: str | int,
     rollout_engines: list[Any],
 ) -> list[Any]:
-    """Slime ``custom_delta_publish_path`` hook for publish-only disk deltas."""
+    """Slime ``custom_delta_publish_path`` hook: write the version manifest and
+    advance ``latest.json`` on the bulletin board.
+
+    Provider-agnostic — no provider import. Durability (e.g. committing a Modal
+    Volume) and best-effort rollout-pool wake are layered on by the consuming
+    example's hook (see ``cookbook/slime_disagg/hooks.py``).
+    """
     del rollout_engines
     version = int(weight_version)
     root = Path(_bulletin_root(args))
@@ -51,26 +48,49 @@ def publish_delta_version(
         metadata={"trainer": "slime", "transport": "disk"},
     )
     FilesystemBulletinBoard(root).publish_manifest(manifest, version_path=version_path)
-    commit_volume(_volume_name(args))
     logger.info("Published sparse delta version %s with %d file(s)", version, len(sorted_files))
-
-    # Waking warm containers is a best-effort latency optimization: sidecars
-    # self-sync when a version-pinned request rejects. A transient Modal
-    # control-plane error here must not kill the training step, especially
-    # since latest.json already points at the new version.
-    try:
-        app_name = getattr(args, "rollout_modal_flash_app_name", None) or os.environ["SLIME_DELTA_APP_NAME"]
-        cls_name = getattr(args, "rollout_modal_flash_server_cls_name", None) or os.getenv(
-            "SLIME_DELTA_SERVER_CLS_NAME", "Server"
-        )
-        wake_targets(discover_flash_targets(app_name=app_name, cls_name=cls_name), version)
-    except Exception:  # noqa: BLE001
-        logger.warning(
-            "Best-effort rollout wake failed for version %s; sidecars will self-sync on demand",
-            version,
-            exc_info=True,
-        )
     return []
+
+
+def rollout_request_weight_version_hook(args: Namespace, sample: Any, request: dict[str, Any]) -> None:
+    """Attach provider admission constraints to one SLIME rollout request.
+
+    The hook is request-level control, not the trainer's staleness policy: it
+    prevents an opaque rollout router from spending compute on a replica that
+    cannot serve a version the trainer has already decided is usable.
+    """
+
+    mode = str(getattr(args, "rollout_request_weight_version_mode", "exact"))
+    if mode == "none":
+        return
+
+    target_version = rollout_target_weight_version(
+        args,
+        int(request["rollout_id"]),
+        evaluation=bool(request.get("evaluation", False)),
+    )
+    if not bool(request.get("evaluation", False)):
+        target_version = max(0, target_version - int(getattr(args, "rollout_request_weight_version_lag", 0)))
+    if mode == "exact":
+        request["payload"]["weight_version"] = {"exact_version": target_version}
+    elif mode == "min":
+        request["payload"]["weight_version"] = {"min_required_version": target_version}
+    else:
+        raise ValueError(f"Unsupported rollout_request_weight_version_mode: {mode!r}")
+
+    request["max_retries"] = int(getattr(args, "rollout_request_retry_attempts", request["max_retries"]))
+    request["retry_sleep"] = float(getattr(args, "rollout_request_retry_sleep", request["retry_sleep"]))
+    if getattr(sample, "session_id", None):
+        # Provider-neutral by default. Modal's Flash gateway routes session
+        # affinity on the Modal-Session-ID header, so the Modal configs set this
+        # to that name and affinity is honored at the gateway (one hop) rather
+        # than re-routed inside the rollout container.
+        affinity_header = str(
+            getattr(args, "rollout_session_affinity_header", "x-session-affinity")
+        )
+        headers = dict(request.get("headers") or {})
+        headers.setdefault(affinity_header, sample.session_id)
+        request["headers"] = headers
 
 
 def generate_rollout(
@@ -79,20 +99,22 @@ def generate_rollout(
     data_source: Any,
     evaluation: bool = False,
 ):
-    """Run Slime's default SGLang rollout with a publish-version policy."""
+    """Run SLIME's default SGLang rollout.
+
+    Kept as a compatibility wrapper for older configs. New configs should use
+    ``slime.rollout.sglang_rollout.generate_rollout`` directly plus
+    ``custom_rollout_request_hook_path`` when they need request constraints.
+    """
     from slime.rollout import sglang_rollout as upstream_rollout
-    from slime.rollout.sglang_rollout import rollout_weight_version_context
 
     assert args.rollout_global_dataset
-    target_version = rollout_target_weight_version(args, rollout_id, evaluation=evaluation)
     logger.info(
-        "Disaggregated %s rollout_id=%s target_weight_version=%s",
+        "Disaggregated %s rollout_id=%s",
         "eval" if evaluation else "train",
         rollout_id,
-        target_version,
     )
 
-    with rollout_weight_version_context(args, target_version):
+    with upstream_rollout.rollout_request_context(args, rollout_id, evaluation=evaluation):
         if evaluation:
             output, _ = upstream_rollout.run(upstream_rollout.eval_rollout(args, rollout_id))
             return output
@@ -116,10 +138,6 @@ def rollout_target_weight_version(args: Namespace, rollout_id: int, evaluation: 
             return int(rollout_id)
         root = Path(delta_dir).parent
     return read_latest(root)
-
-
-def _volume_name(args: Any) -> str:
-    return str(getattr(args, "update_weight_delta_volume_name", None) or os.environ["DELTA_VOLUME_NAME"])
 
 
 def _bulletin_root(args: Any) -> str:
