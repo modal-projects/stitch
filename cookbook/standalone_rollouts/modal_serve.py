@@ -306,14 +306,28 @@ def frontdoor():
     gateway routing (one hop, request gated by the per-container sidecar) instead
     of being re-routed inside a container.
     """
+    from contextlib import asynccontextmanager
+
     from fastapi import FastAPI, Request
     from fastapi.responses import Response
     import httpx
 
+    # One pooled client per front-door container, kept warm across requests so
+    # the front-door->gateway hop reuses connections instead of reconnecting per
+    # rollout. timeout=None preserves the prior no-deadline behavior (the
+    # per-container sidecar enforces the real upstream timeout).
+    clients: dict = {}
+
+    @asynccontextmanager
+    async def lifespan(_app):
+        async with httpx.AsyncClient(timeout=None, trust_env=False) as client:
+            clients["gateway"] = client
+            yield
+
     # No `from __future__ import annotations` in this module, so proxy()'s
     # `request: Request` / `-> Response` annotations evaluate eagerly against
     # these local imports — FastAPI resolves them without a globals() injection.
-    api = FastAPI()
+    api = FastAPI(lifespan=lifespan)
     gateway: dict[str, str | None] = {"url": None}
 
     @api.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
@@ -322,14 +336,13 @@ def frontdoor():
             gateway["url"] = provider_gateway_url()
         headers = _frontdoor_headers(dict(request.headers))
         body = await request.body()
-        async with httpx.AsyncClient(timeout=None, trust_env=False) as client:
-            resp = await client.request(
-                request.method,
-                f"{gateway['url']}/{path}",
-                headers=headers,
-                content=body,
-                params=request.query_params,
-            )
+        resp = await clients["gateway"].request(
+            request.method,
+            f"{gateway['url']}/{path}",
+            headers=headers,
+            content=body,
+            params=request.query_params,
+        )
         return Response(
             content=resp.content,
             status_code=resp.status_code,

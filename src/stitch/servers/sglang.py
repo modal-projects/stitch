@@ -63,12 +63,30 @@ def create_app(
     upstream_request_timeout = httpx.Timeout(upstream_timeout, connect=10.0)
     versioned_route_set = {route.strip("/") for route in versioned_routes}
 
+    # One pooled upstream client for the whole process. A rollout proxy that
+    # reconnects to the engine on every request pays a TCP/pool setup per hop;
+    # reusing the client keeps connections warm across the sidecar->engine hop
+    # that carries every rollout. Created lazily on the first proxied request
+    # (so request-time test patching of httpx.AsyncClient still wins) and closed
+    # on shutdown.
+    pooled: dict[str, Any] = {}
+
+    def upstream_client() -> Any:
+        client = pooled.get("client")
+        if client is None:
+            client = httpx.AsyncClient(timeout=upstream_request_timeout, trust_env=False)
+            pooled["client"] = client
+        return client
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         await manager.startup_sync()
         try:
             yield
         finally:
+            client = pooled.pop("client", None)
+            if client is not None:
+                await client.aclose()
             shutdown_sync = getattr(manager, "shutdown_sync", None)
             if shutdown_sync is not None:
                 result = shutdown_sync()
@@ -116,8 +134,9 @@ def create_app(
 
     async def _abort_upstream(rid: str) -> None:
         try:
-            async with httpx.AsyncClient(timeout=10.0, trust_env=False) as client:
-                await client.post(f"{upstream_url}/abort_request", json={"rid": rid})
+            await upstream_client().request(
+                "POST", f"{upstream_url}/abort_request", json={"rid": rid}, timeout=10.0
+            )
         except Exception:  # noqa: BLE001
             logger.warning(
                 "sidecar_proxy failed to abort upstream rid=%s", rid, exc_info=True
@@ -196,22 +215,19 @@ def create_app(
                     )
 
                 async def _upstream_call() -> Any:
-                    async with httpx.AsyncClient(
-                        timeout=upstream_request_timeout, trust_env=False
-                    ) as client:
-                        request_kwargs: dict[str, Any] = {
-                            "params": request.query_params,
-                            "headers": forward_headers,
-                        }
-                        if payload is not None:
-                            request_kwargs["json"] = payload
-                        else:
-                            request_kwargs["content"] = body
-                        return await client.request(
-                            request.method,
-                            f"{upstream_url}/{path}",
-                            **request_kwargs,
-                        )
+                    request_kwargs: dict[str, Any] = {
+                        "params": request.query_params,
+                        "headers": forward_headers,
+                    }
+                    if payload is not None:
+                        request_kwargs["json"] = payload
+                    else:
+                        request_kwargs["content"] = body
+                    return await upstream_client().request(
+                        request.method,
+                        f"{upstream_url}/{path}",
+                        **request_kwargs,
+                    )
 
                 upstream_task = asyncio.ensure_future(_upstream_call())
                 disconnect_task = asyncio.ensure_future(_watch_disconnect(request))
