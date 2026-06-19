@@ -33,22 +33,32 @@ def publish_delta_version(
     version = int(weight_version)
     root = Path(_bulletin_root(args))
     version_path = Path(version_dir)
-    sorted_files = sorted(files)
 
-    manifest = VersionManifest(
-        version=version,
-        base_version=version - 1,
-        backend="sparse_delta",
-        load_format="delta",
-        transition_files=sorted_files,
-        artifacts=[Artifact(kind="transition", path=path) for path in sorted_files],
-        created_at=time.time(),
-        run_id=getattr(args, "run_id", None),
-        base_model=getattr(args, "hf_checkpoint", None),
-        metadata={"trainer": "slime", "transport": "disk"},
-    )
+    # Disk-delta slime writes a canonical model.safetensors.index.json carrying
+    # the delta encoding/compression/checksum; lift it instead of hardcoding the
+    # format. Fall back to the pre-index layout when the engine didn't write one.
+    if (version_path / "model.safetensors.index.json").exists():
+        manifest = VersionManifest.from_slime_index(
+            version_path,
+            run_id=getattr(args, "run_id", None),
+            base_model=getattr(args, "hf_checkpoint", None),
+        )
+    else:
+        sorted_files = sorted(files)
+        manifest = VersionManifest(
+            version=version,
+            base_version=version - 1,
+            backend="sparse_delta",
+            load_format="delta",
+            transition_files=sorted_files,
+            artifacts=[Artifact(kind="transition", path=path) for path in sorted_files],
+            created_at=time.time(),
+            run_id=getattr(args, "run_id", None),
+            base_model=getattr(args, "hf_checkpoint", None),
+            metadata={"trainer": "slime", "transport": "disk"},
+        )
     FilesystemBulletinBoard(root).publish_manifest(manifest, version_path=version_path)
-    logger.info("Published sparse delta version %s with %d file(s)", version, len(sorted_files))
+    logger.info("Published delta version %s with %d file(s)", manifest.version, len(manifest.transition_files))
     return []
 
 

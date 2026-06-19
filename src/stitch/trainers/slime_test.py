@@ -94,6 +94,46 @@ class SlimeHooksTest(unittest.TestCase):
             self.assertEqual(manifest.artifacts[0].kind, "transition")
             self.assertEqual(manifest.metadata["trainer"], "slime")
 
+    def test_publish_delta_version_lifts_slime_index(self) -> None:
+        import json
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            version_dir = root / "versions" / "weight_v000002"
+            version_dir.mkdir(parents=True)
+            (version_dir / "model.safetensors.index.json").write_text(
+                json.dumps(
+                    {
+                        "metadata": {
+                            "version": "000002",
+                            "base_version": "000001",
+                            "delta_encoding": "xor",
+                            "compression_format": "zstd",
+                            "checksum_format": "xxh3-128",
+                        },
+                        "weight_map": {"w": "model-00001-of-00001.safetensors"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = Namespace(
+                update_weight_delta_root=str(root),
+                update_weight_delta_dir=str(root / "versions"),
+                hf_checkpoint="Qwen/Qwen3-4B",
+                run_id="run-2",
+            )
+
+            # files arg is ignored when the engine wrote a canonical index.
+            publish_delta_version(args, str(version_dir), [], 2, [])
+
+            manifest = VersionManifest.read(version_dir / "manifest.json")
+            self.assertEqual(read_latest(root), 2)
+            self.assertEqual(manifest.base_version, 1)
+            self.assertEqual(manifest.backend, "disk_delta")
+            self.assertEqual(manifest.compression_format, "zstd")
+            self.assertEqual(manifest.checksum_format, "xxh3-128")
+            self.assertEqual(manifest.transition_files, ["model-00001-of-00001.safetensors"])
+
 
 if __name__ == "__main__":
     unittest.main()
