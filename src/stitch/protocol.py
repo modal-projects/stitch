@@ -450,6 +450,17 @@ def atomic_write_json(path: str | Path, payload: dict[str, Any]) -> None:
     os.replace(tmp, path)
 
 
+def atomic_write_text(path: str | Path, text: str) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
 def _optional_int(value: Any) -> int | None:
     if value is None:
         return None
