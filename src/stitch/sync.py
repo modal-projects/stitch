@@ -222,10 +222,9 @@ class WeightSyncManager(RolloutAdmissionGate):
       continue — in-flight requests resume decoding on their existing KV.
       Cross-version KV isolation comes from the sidecar stamping a composed,
       version-namespaced ``extra_key`` onto every proxied request. Requires
-      an engine build with the overlap-drain fix (see
-      docs/kv-version-namespace-design.md, "Mandatory engine fixes" #1);
-      without it a forward in flight at pause time can race the weight
-      mutation. Only exact-version requests are quiesced/gated.
+      an engine build with the overlap-drain fix; without it a forward in
+      flight at pause time can race the weight mutation. Only exact-version
+      requests are quiesced/gated.
     """
 
     def __init__(

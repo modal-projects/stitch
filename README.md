@@ -59,7 +59,7 @@ adapter needs (`modal`, `sglang`, `slime`).
 Trainer adapters should publish canonical Hugging Face tensor names so engine
 adapters stay trainer-agnostic. Engine adapters implement the same
 prepare/commit contract as the SGLang one; the request protocol doesn't
-change. See [docs/architecture.md](docs/architecture.md) for the boundaries.
+change.
 
 ## Development
 

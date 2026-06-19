@@ -18,7 +18,7 @@ HF_CACHE_PATH = Path("/root/.cache/huggingface")
 LOCAL_CHECKPOINT_PATH = "/local-checkpoint"
 # How the rollout sidecar applies versions. in_place pauses/applies/continues
 # without flushing (relies on the engine overlap-drain fix); quiesce is the safe
-# fallback. See docs/kv-version-namespace-design.md.
+# fallback.
 COMMIT_MODE = "in_place"
 S3_TRANSPORT_BUCKET_NAME = "modal-stitch-s3-transport"
 S3_TRANSPORT_KEY_PREFIX = "standalone-rollouts/qwen3-4b"

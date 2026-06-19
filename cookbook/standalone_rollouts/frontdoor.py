@@ -2,8 +2,7 @@
 
 The front door is the single public entry and the single writer of the
 bulletin board's monotonic ``latest`` pointer. It implements the customer's
-hot-load API (``docs/orig-api.md``) as a thin projection of the canonical
-log-as-truth design:
+hot-load API as a thin projection of the canonical log-as-truth design:
 
 - ``POST /hot_load/...`` advances ``latest`` to the signalled checkpoint
   (monotonic CAS — a rewind is rejected for now; rolling the fleet back from a

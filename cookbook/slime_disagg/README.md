@@ -102,5 +102,4 @@ that replay with periodic checkpoints is left for later.
 Sidecars default to `quiesce` commit mode, which drains in-flight requests
 before applying a delta. The `in_place` mode (set `SIDECAR_COMMIT_MODE` in
 the config module) applies without draining and relies on version-namespaced
-KV keys. It needs an SGLang build with the overlap-drain fix, described in
-`docs/kv-version-namespace-design.md`.
+KV keys. It needs an SGLang build with the overlap-drain fix.
