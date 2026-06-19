@@ -42,6 +42,11 @@ class EngineAdapter(Protocol):
 
     async def continue_generation(self) -> None: ...
 
+    # Optional: one-time engine preparation run before the first sync (e.g.
+    # materializing the host-local base checkpoint deltas are applied onto).
+    # startup_sync probes for it defensively, so adapters may omit it.
+    async def prepare(self) -> None: ...
+
 
 class RolloutSyncManager(Protocol):
     """The surface stitch.servers.sglang.create_app drives — implemented both by
@@ -182,6 +187,9 @@ class WeightSyncManager(RolloutAdmissionGate):
         self._exact_inflight: dict[int, int] = defaultdict(int)
 
     async def startup_sync(self) -> None:
+        prepare = getattr(self.engine, "prepare", None)
+        if prepare is not None:
+            await prepare()
         while True:
             await self.board.refresh()
             latest = self.board.read_latest()
