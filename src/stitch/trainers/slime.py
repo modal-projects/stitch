@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from stitch.bulletin import FilesystemBulletinBoard
-from stitch.protocol import Artifact, VersionManifest, read_latest
+from stitch.protocol import Artifact, VersionManifest
 
 
 logger = logging.getLogger(__name__)
@@ -71,25 +71,32 @@ def rollout_request_weight_version_hook(args: Namespace, sample: Any, request: d
     """
 
     mode = str(getattr(args, "rollout_request_weight_version_mode", "exact"))
-    if mode == "none":
-        return
+    # PR #5's per-request hook receives no rollout_id (it is per-rollout context,
+    # not per-request — sample.index is the batch position), so the trainer-step
+    # pin only runs when one is supplied. Otherwise the pool serves the latest
+    # hot-loaded version and a lagging replica returns a retryable 409. TODO:
+    # re-derive the per-request target (e.g. the latest published version) under
+    # the PR #5 contract if strict pinning is needed.
+    rollout_id = request.get("rollout_id")
+    if mode != "none" and rollout_id is not None:
+        target_version = rollout_target_weight_version(
+            args,
+            int(rollout_id),
+            evaluation=bool(request.get("evaluation", False)),
+        )
+        if not bool(request.get("evaluation", False)):
+            target_version = max(0, target_version - int(getattr(args, "rollout_request_weight_version_lag", 0)))
+        if mode == "exact":
+            request["payload"]["weight_version"] = {"exact_version": target_version}
+        elif mode == "min":
+            request["payload"]["weight_version"] = {"min_required_version": target_version}
+        else:
+            raise ValueError(f"Unsupported rollout_request_weight_version_mode: {mode!r}")
 
-    target_version = rollout_target_weight_version(
-        args,
-        int(request["rollout_id"]),
-        evaluation=bool(request.get("evaluation", False)),
-    )
-    if not bool(request.get("evaluation", False)):
-        target_version = max(0, target_version - int(getattr(args, "rollout_request_weight_version_lag", 0)))
-    if mode == "exact":
-        request["payload"]["weight_version"] = {"exact_version": target_version}
-    elif mode == "min":
-        request["payload"]["weight_version"] = {"min_required_version": target_version}
-    else:
-        raise ValueError(f"Unsupported rollout_request_weight_version_mode: {mode!r}")
-
-    request["max_retries"] = int(getattr(args, "rollout_request_retry_attempts", request["max_retries"]))
-    request["retry_sleep"] = float(getattr(args, "rollout_request_retry_sleep", request["retry_sleep"]))
+    # Generous retries on every request so a lagging/scaling replica (a 409
+    # weight-version reject or a transient error) is retried, not failed.
+    request["max_retries"] = int(getattr(args, "rollout_request_retry_attempts", request.get("max_retries", 60)))
+    request["retry_sleep"] = float(getattr(args, "rollout_request_retry_sleep", request.get("retry_sleep", 1.0)))
     if getattr(sample, "session_id", None):
         # Provider-neutral by default. Modal's Flash gateway routes session
         # affinity on the Modal-Session-ID header, so the Modal configs set this
@@ -140,15 +147,18 @@ def generate_rollout(
 def rollout_target_weight_version(args: Namespace, rollout_id: int, evaluation: bool = False) -> int:
     if not evaluation:
         return int(rollout_id)
-
-    root = getattr(args, "update_weight_delta_root", None)
-    if root is None:
-        delta_dir = getattr(args, "update_weight_delta_dir", None)
-        if delta_dir is None:
-            return int(rollout_id)
-        root = Path(delta_dir).parent
-    return read_latest(root)
+    # Eval pins to the latest published version (the slime-native `latest`).
+    try:
+        return FilesystemBulletinBoard(_bulletin_root(args), layout="slime").read_latest()
+    except Exception:  # noqa: BLE001
+        return int(rollout_id)
 
 
 def _bulletin_root(args: Any) -> str:
-    return str(getattr(args, "update_weight_delta_root", None) or Path(args.update_weight_delta_dir).parent)
+    root = (
+        getattr(args, "update_weight_disk_dir", None)
+        or getattr(args, "update_weight_delta_root", None)
+    )
+    if root:
+        return str(root)
+    return str(Path(args.update_weight_delta_dir).parent)

@@ -8,7 +8,6 @@ from cookbook.slime_disagg.configs.base import DATA_PATH, ModalConfig, SlimeConf
 APP_NAME = "slime-qwen3-4b-delta-flash"
 DELTA_VOLUME_NAME = "slime-delta-bulletin-qwen3-4b"
 DELTA_BULLETIN_ROOT = "/delta-bulletin"
-DELTA_VERSION_DIR = f"{DELTA_BULLETIN_ROOT}/versions"
 
 # How the rollout sidecar applies published weight versions. "in_place" pauses
 # the engine, applies, and resumes — in-flight requests keep decoding on stale
@@ -45,10 +44,11 @@ class _Slime(SlimeConfig):
     actor_num_nodes = 1
     actor_num_gpus_per_node = 8
     colocate = False
-    rollout_num_gpus = 2
+    rollout_num_gpus = 0
     rollout_num_gpus_per_engine = 1
-    rollout_http_endpoint_url = None
-    rollout_http_endpoint_abort_strategy = "cancel-only"
+    # Publish-only: slime launches no engines and routes /generate to the Modal
+    # Flash gateway (filled in at launch); rollouts pull weights from the pool.
+    rollout_endpoint_url = None
     custom_rollout_request_hook_path = "stitch.trainers.slime.rollout_request_weight_version_hook"
     rollout_request_weight_version_mode = "exact"
     rollout_request_weight_version_lag = 0
@@ -58,18 +58,17 @@ class _Slime(SlimeConfig):
     # affinity on Modal-Session-ID; emit that so GRPO siblings co-locate.
     rollout_session_affinity_header = "Modal-Session-ID"
 
-    # Sparse delta disk transport over the Modal Volume bulletin board.
+    # Disk-delta publish-only over the Modal Volume bulletin board: slime writes
+    # weight_v{N}/ + a `latest` pointer to update_weight_disk_dir (the Volume),
+    # the pre-push hook commits the Volume + wakes the pool, and each sidecar
+    # applies the delta host-side via slime's disk_delta. Publish-only is implied
+    # by rollout_endpoint_url, so no local-checkpoint dir is required here.
     update_weight_mode = "delta"
     update_weight_transport = "disk"
-    update_weight_encoding = "deltas_zstd"
-    update_weight_delta_dir = DELTA_VERSION_DIR
-    update_weight_delta_root = DELTA_BULLETIN_ROOT
-    update_weight_delta_keep_files = True
-    update_weight_delta_publish_only = True
-    custom_delta_pre_push_path = "cookbook.slime_disagg.hooks.commit_delta_volume"
-    custom_delta_publish_path = "cookbook.slime_disagg.hooks.publish_delta_version"
-    sglang_update_weight_delta_chunk_bytes = 1024 * 1024 * 1024
-    sglang_update_weight_delta_read_workers = 8
+    update_weight_delta_encoding = "xor"
+    update_weight_delta_checksum = "xxh3-128"
+    update_weight_disk_dir = DELTA_BULLETIN_ROOT
+    custom_delta_pre_push_path = "cookbook.slime_disagg.hooks.commit_and_wake"
 
     # Data
     prompt_data = f"{DATA_PATH}/gsm8k/train.parquet"

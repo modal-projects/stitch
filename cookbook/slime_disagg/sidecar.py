@@ -34,7 +34,9 @@ def build_manager(
         from stitch.providers.modal import volume_reloader
 
         refresh = volume_reloader(volume_name)
-    board = FilesystemBulletinBoard(bulletin_root, refresh=refresh)
+    # slime publish-only writes the flat slime-native layout (weight_v{N}/ +
+    # model.safetensors.index.json + a raw `latest` pointer) to the Volume.
+    board = FilesystemBulletinBoard(bulletin_root, refresh=refresh, layout="slime")
     engine = SGLangDiskDeltaAdapter(
         upstream_url=upstream_url,
         local_checkpoint_dir=local_checkpoint_dir,

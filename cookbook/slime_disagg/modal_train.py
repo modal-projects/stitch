@@ -55,11 +55,10 @@ SLIME_ROOT = "/root/slime"
 SLIME_REPO_URL = "https://github.com/modal-projects/slime.git"
 # Pin to an exact commit, not the branch tip: the build's `git fetch ... &&
 # checkout` is a cached image layer, so a moving branch tip silently leaves the
-# container on a stale slime. This commit has custom_rollout_request_hook_path
-# (added in d8526ee5), which stitch's rollout request hook relies on; an older
-# cached layer lacked it, so the hook never fired and rollout requests carried
-# no weight_version pin. Bump this SHA to roll slime forward.
-SLIME_REPO_REF = "4ea02f0ee6a4cef5ebcd90fd1c85888035e3d85b"
+# container on a stale slime. This is PR #5 head (disaggregated-rollout): disk-
+# delta publish-only + rollout_endpoint_url + custom_rollout_request_hook_path.
+# Bump this SHA to roll slime forward.
+SLIME_REPO_REF = "570cd0b3bc28141abfbf054333d129d41fe50f19"
 
 image = (
     modal.Image.from_registry(SLIME_IMAGE_TAG)
@@ -140,8 +139,10 @@ SGLANG_SERVER_ARGS = {
     "--cuda-graph-max-bs": str(ROLLOUT_CONCURRENCY),
     "--max-running-requests": str(ROLLOUT_CONCURRENCY),
     "--trust-remote-code": "",
-    "--update-weight-delta-chunk-bytes": str(slime_cfg.sglang_update_weight_delta_chunk_bytes),
-    "--update-weight-delta-read-workers": str(slime_cfg.sglang_update_weight_delta_read_workers),
+    # The disk-delta branch applies deltas host-side and reloads via the ordinary
+    # update_weights_from_disk path, so the old engine-side delta server args
+    # (--update-weight-delta-chunk-bytes/--update-weight-delta-read-workers) no
+    # longer exist and must not be passed.
     **exp.SGLANG_SERVER_ARGS,
 }
 
@@ -292,7 +293,7 @@ class Trainer:
                 f"takes effect after a redeploy restarts the Ray cluster."
             )
 
-        cfg.rollout_http_endpoint_url = resolve_flash_gateway_url(APP_NAME, Server.__name__)
+        cfg.rollout_endpoint_url = resolve_flash_gateway_url(APP_NAME, Server.__name__)
         # stitch's publish hooks read these off the slime args namespace.
         cfg.custom_config_path = {
             "update_weight_delta_volume_name": exp.DELTA_VOLUME_NAME,
@@ -302,7 +303,7 @@ class Trainer:
         helpers.prepare_slime_config(cfg, tempfile.mkdtemp())
         cmd = helpers.build_train_cmd(cfg, SLIME_ROOT)
 
-        print(f"Training {experiment}: nodes={N_TRAIN_NODES}, rollout_endpoint={cfg.rollout_http_endpoint_url}")
+        print(f"Training {experiment}: nodes={N_TRAIN_NODES}, rollout_endpoint={cfg.rollout_endpoint_url}")
         print(f"Command: {cmd}")
         subprocess.run(["bash", "-lc", cmd], check=True)
 
