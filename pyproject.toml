@@ -7,7 +7,7 @@ dependencies = []
 
 [project.optional-dependencies]
 # providers/modal.py uses the Modal SDK and httpx (rollout-pool wake).
-modal = ["modal", "httpx"]
+modal = ["modal>=1.5.1.dev9", "httpx"]
 sglang = ["fastapi", "httpx", "uvicorn"]
 
 [dependency-groups]
