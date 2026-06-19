@@ -47,6 +47,7 @@ def create_app(
     register_routes: Callable[[Any], None] | None = None,
     include_sync_routes: bool = True,
     upstream_timeout: float | None = 3600.0,
+    background_sync_interval: float | None = None,
 ):
     from fastapi import FastAPI, Request
     from fastapi.responses import JSONResponse, Response
@@ -78,12 +79,38 @@ def create_app(
             pooled["client"] = client
         return client
 
+    async def _reconcile_loop(interval: float) -> None:
+        # Pull-based reconcile against the bulletin board's `latest` pointer.
+        # In the log-as-truth deployment the front door advances `latest` and
+        # the pool catches up here, so a replica that missed a wake (or scaled
+        # up after one) still converges without any request-version pin.
+        board = getattr(manager, "board", None)
+        queue_sync = getattr(manager, "queue_sync", None)
+        if board is None or queue_sync is None:
+            return
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                await board.refresh()
+                queue_sync()
+            except Exception:  # noqa: BLE001
+                logger.warning("background reconcile failed", exc_info=True)
+
+    reconcile: dict[str, Any] = {}
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         await manager.startup_sync()
+        if background_sync_interval and background_sync_interval > 0:
+            reconcile["task"] = asyncio.ensure_future(_reconcile_loop(background_sync_interval))
         try:
             yield
         finally:
+            task = reconcile.pop("task", None)
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(BaseException):
+                    await task
             client = pooled.pop("client", None)
             if client is not None:
                 await client.aclose()
