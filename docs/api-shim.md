@@ -124,17 +124,24 @@ After the initial full checkpoint, subsequent updates are sent as delta checkpoi
 
 **Format:**
 
-- XOR of byte representations of old and new weight tensors, then compressed
+- Per-tensor byte-level delta against the previous version: XOR (an involution)
+  or `overwrite` (changed positions + values), then compressed
 - Safetensors files contain compressed diff tensors (not actual weights)
-- Checksum per tensor for integrity (currently adler32)
-- Compression format is specified in `incremental_snapshot_metadata.compression_format` so trainer and provider agree on the algorithm
+- Per-tensor checksum for integrity (xxh3-128 default; blake3 or adler32)
+- Compression is zstd; the encoding/compression/checksum are declared per
+  version (in the `metadata` block of the version's `model.safetensors.index.json`,
+  and in the hot-load signal's `incremental_snapshot_metadata`)
 
-**Provider must:**
+**How the stitch provider applies it (host-side):**
 
-- Accept `incremental_snapshot_metadata` in the hot-load signal (includes `compression_format` and `checksum_format`)
-- Store previous checkpoint weights to apply the XOR diff
-- Pipeline: decompress (using specified format) → XOR with previous → new weights
-- Be prepared to support additional compression formats as they are added
+- Each replica keeps a local full HF checkpoint, materialized once from the base
+- It applies the published delta chain in order onto that local copy in place
+  (decompress → XOR/scatter → per-tensor checksum verify; refuses an
+  out-of-order base), then reloads the engine via the ordinary
+  `update_weights_from_disk` path — there is no engine-side delta receiver
+- A customer-produced delta (XOR + adler32 + zstd) applies as-is; the front door
+  normalizes the POST's `incremental_snapshot_metadata` into the version's
+  `index.json` metadata when the uploader didn't write it there
 
 **Delta lifecycle:**
 
@@ -244,10 +251,20 @@ SLIME publish-only harness that writes each weight version through a Modal
 S3 bucket mount, announces it through this hot-load API, and polls pool
 readiness before rollouts continue.
 
-The pool-readiness query is the main protocol feature worth carrying back into
-`stitch`: trainers need a provider-agnostic way to ask "how much of the rollout
-pool can serve the target weights?" without knowing how the provider schedules
-or replaces replicas. `stitch.protocol.RolloutPoolState` models this shape:
+The stitch provider implements this API as a thin **front-door adapter over a
+log-as-truth core**: a durable, monotonic `latest` pointer in the shared object
+store is the source of truth, and the elastic rollout pool reconciles to it by
+pull (each replica self-syncs; a scaled-up container catches up with no push).
+The front door is the single writer of `latest` — `POST /hot_load` advances it
+(monotonic CAS; a rewind is rejected, pending a roll-from-recovery-anchor path)
+and best-effort wakes the pool. There is no central desired-state mailbox.
+
+The pool-readiness query is the main protocol feature this carries back into
+`stitch`: trainers ask "how much of the rollout pool can serve the target
+weights?" without knowing how the provider schedules or replaces replicas. The
+front door answers `GET /hot_load` by enumerating the **live** containers and
+querying each `/server_info` — so a scaled-down replica never inflates the
+readiness fraction. `stitch.protocol.RolloutPoolState` models the shape:
 
 ```json
 {
