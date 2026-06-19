@@ -93,6 +93,8 @@ class RolloutRequestHookTest(unittest.TestCase):
             hooks.rollout_request_weight_version_hook(args, sample, request)
         self.assertNotIn("weight_version", request["payload"])
         self.assertEqual(request["headers"]["x-session-affinity"], "grp-1")
+        # Retries are applied even without a version pin (cold/scaling pool).
+        self.assertEqual(request["max_retries"], 60)
 
     def test_attaches_auth_headers(self) -> None:
         # The front door enforces auth on inference too, so every rollout request
