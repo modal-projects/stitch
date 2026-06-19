@@ -176,35 +176,43 @@ def rollout_request_weight_version_hook(
             os.environ.get("STITCH_SHIM_ROLLOUT_REQUEST_WEIGHT_VERSION_MODE", "exact"),
         )
     )
-    if mode == "none":
-        return
-
-    target_version = _rollout_request_target_version(args, request)
-    if mode == "exact":
-        request["payload"]["weight_version"] = {"exact_version": target_version}
-    elif mode == "min":
-        request["payload"]["weight_version"] = {"min_required_version": target_version}
-    else:
-        raise ValueError(
-            f"Unsupported api_shim_rollout_request_weight_version_mode: {mode!r}"
+    # PR #5's apply_rollout_request_hook builds request={url,payload,headers,
+    # max_retries,retry_sleep} with NO rollout_id — that is per-rollout context,
+    # not per-request (sample.index is the batch position, not the trainer step).
+    # So the step-based version pin only runs if a caller supplies a rollout_id.
+    # announce_and_wait already blocks the next rollout until the pool serves the
+    # target, so skipping the pin is safe; it is belt-and-suspenders admission
+    # control for lagging replicas. TODO: re-derive a per-request target under
+    # the PR #5 contract (e.g. the latest published version) if pinning is wanted.
+    rollout_id = request.get("rollout_id")
+    if mode != "none" and rollout_id is not None:
+        target_version = _rollout_request_target_version(
+            args, int(rollout_id), bool(request.get("evaluation", False))
         )
-
-    request["max_retries"] = int(
-        _setting(
-            args,
-            "api_shim_rollout_request_retry_attempts",
-            "STITCH_SHIM_ROLLOUT_REQUEST_RETRY_ATTEMPTS",
-            default="60",
+        if mode == "exact":
+            request["payload"]["weight_version"] = {"exact_version": target_version}
+        elif mode == "min":
+            request["payload"]["weight_version"] = {"min_required_version": target_version}
+        else:
+            raise ValueError(
+                f"Unsupported api_shim_rollout_request_weight_version_mode: {mode!r}"
+            )
+        request["max_retries"] = int(
+            _setting(
+                args,
+                "api_shim_rollout_request_retry_attempts",
+                "STITCH_SHIM_ROLLOUT_REQUEST_RETRY_ATTEMPTS",
+                default="60",
+            )
         )
-    )
-    request["retry_sleep"] = float(
-        _setting(
-            args,
-            "api_shim_rollout_request_retry_sleep",
-            "STITCH_SHIM_ROLLOUT_REQUEST_RETRY_SLEEP",
-            default="1.0",
+        request["retry_sleep"] = float(
+            _setting(
+                args,
+                "api_shim_rollout_request_retry_sleep",
+                "STITCH_SHIM_ROLLOUT_REQUEST_RETRY_SLEEP",
+                default="1.0",
+            )
         )
-    )
 
     if getattr(sample, "session_id", None):
         # Neutral by default. External clients send this through the front-door
@@ -220,8 +228,7 @@ def rollout_request_weight_version_hook(
         request["headers"] = headers
 
 
-def _rollout_request_target_version(args: Any, request: dict[str, Any]) -> int:
-    rollout_id = int(request["rollout_id"])
+def _rollout_request_target_version(args: Any, rollout_id: int, evaluation: bool) -> int:
     lag = int(
         _setting(
             args,
@@ -230,9 +237,9 @@ def _rollout_request_target_version(args: Any, request: dict[str, Any]) -> int:
             default="0",
         )
     )
-    if bool(request.get("evaluation", False)):
+    if evaluation:
         lag = 0
-    return max(0, rollout_id - lag)
+    return max(0, int(rollout_id) - lag)
 
 
 def wait_until_ready(cfg: ShimConfig, identity: str) -> RolloutPoolState:

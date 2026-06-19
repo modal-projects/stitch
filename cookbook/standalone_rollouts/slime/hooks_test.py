@@ -64,5 +64,29 @@ class AnnounceAndWaitTest(unittest.TestCase):
         self.assertEqual(posted, [])
 
 
+class RolloutRequestHookTest(unittest.TestCase):
+    def test_skips_pin_without_rollout_id_but_sets_affinity(self) -> None:
+        # PR #5's request carries no rollout_id: the hook must not crash, must
+        # skip the version pin, and still apply session affinity.
+        args = Namespace(api_shim_rollout_request_weight_version_mode="exact")
+        sample = Namespace(session_id="grp-1")
+        request = {"url": "u", "payload": {}, "headers": None, "max_retries": 60, "retry_sleep": 1.0}
+        with mock.patch.dict("os.environ", {}, clear=True):
+            hooks.rollout_request_weight_version_hook(args, sample, request)
+        self.assertNotIn("weight_version", request["payload"])
+        self.assertEqual(request["headers"]["x-session-affinity"], "grp-1")
+
+    def test_pins_exact_when_rollout_id_supplied(self) -> None:
+        args = Namespace(
+            api_shim_rollout_request_weight_version_mode="exact",
+            api_shim_rollout_request_version_lag=0,
+        )
+        sample = Namespace(session_id=None)
+        request = {"payload": {}, "headers": None, "rollout_id": 3}
+        with mock.patch.dict("os.environ", {}, clear=True):
+            hooks.rollout_request_weight_version_hook(args, sample, request)
+        self.assertEqual(request["payload"]["weight_version"], {"exact_version": 3})
+
+
 if __name__ == "__main__":
     unittest.main()
