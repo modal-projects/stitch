@@ -52,13 +52,16 @@ class AnnounceAndWaitTest(unittest.TestCase):
 
         self.assertEqual(posted, [])
 
-    def test_rejects_non_weight_version_dir(self) -> None:
+    def test_skips_baseline_non_version_dir(self) -> None:
+        posted: list[int] = []
         args = Namespace(api_shim_base_url="http://provider")
         with mock.patch.object(hooks, "_distributed_rank", return_value=0), mock.patch.object(
-            hooks, "_post_hot_load", lambda *a, **k: None
+            hooks, "_post_hot_load", lambda *a, **k: posted.append(1)
         ):
-            with self.assertRaises(ValueError):
-                hooks.announce_and_wait(args, "/work/base", [])
+            # _capture_baseline calls the hook with the disk-dir root, not a
+            # weight_v{N} dir — it must be a no-op, not an error.
+            hooks.announce_and_wait(args, "/mnt/stitch-s3-transport", [])
+        self.assertEqual(posted, [])
 
 
 if __name__ == "__main__":

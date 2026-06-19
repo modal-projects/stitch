@@ -136,11 +136,14 @@ def announce_and_wait(args: Any, version_dir: str, rollout_engines: list[Any]) -
     del rollout_engines
     if _distributed_rank() not in (None, 0):
         return
-    cfg = ShimConfig.from_env(args)
     identity = Path(version_dir).name
     version = parse_weight_identity(identity)
     if version is None:
-        raise ValueError(f"version dir {version_dir!r} is not weight_v<NNNNNN>")
+        # _capture_baseline (the first update_weights) calls the pre-push hook
+        # with the disk-dir root, not a published version dir — nothing to
+        # announce yet. Only weight_v{N} dirs are hot-loaded.
+        return
+    cfg = ShimConfig.from_env(args)
     _post_hot_load(
         cfg,
         identity=identity,
