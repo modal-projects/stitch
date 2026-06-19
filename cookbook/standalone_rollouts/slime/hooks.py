@@ -214,18 +214,28 @@ def rollout_request_weight_version_hook(
             )
         )
 
+    # The customer authenticates every request, and the provider front door
+    # enforces it on all routes (inference included), so the trainer must attach
+    # the same auth headers it sends to the hot-load API.
+    cfg = ShimConfig.from_env(args)
+    headers = dict(request.get("headers") or {})
+    if cfg.api_key:
+        headers["Authorization"] = f"Bearer {cfg.api_key}"
+    if cfg.provider_model:
+        headers["Provider-Model"] = cfg.provider_model
+    if cfg.provider_deployment:
+        headers["Provider-Deployment"] = cfg.provider_deployment
     if getattr(sample, "session_id", None):
-        # Neutral by default. External clients send this through the front-door
-        # relabel proxy, which maps it to Modal-Session-ID before the gateway.
+        # Neutral by default. The front-door relabel proxy maps this to
+        # Modal-Session-ID before the gateway.
         affinity_header = _setting(
             args,
             "api_shim_session_affinity_header",
             "STITCH_SHIM_SESSION_AFFINITY_HEADER",
             default="x-session-affinity",
         )
-        headers = dict(request.get("headers") or {})
         headers.setdefault(affinity_header, sample.session_id)
-        request["headers"] = headers
+    request["headers"] = headers
 
 
 def _rollout_request_target_version(args: Any, rollout_id: int, evaluation: bool) -> int:
