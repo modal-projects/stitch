@@ -357,10 +357,11 @@ def _auth_error(headers):
     secrets=[modal.Secret.from_name(exp.SHIM_SECRET_NAME)],
     min_containers=1,
     max_containers=1,  # singleton: exactly one writer of the `latest` pointer
+    nonpreemptible=True,  # keep the sole writer up; a preemption blips the API
     scaledown_window=15 * MINUTES,
     include_source=False,
 )
-@modal.concurrent(target_inputs=1000)
+@modal.concurrent(max_inputs=1000)  # asgi front door: one container, many concurrent inputs
 @modal.asgi_app()
 def frontdoor():
     """Public front door: the single writer of `latest` and the customer
