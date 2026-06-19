@@ -1,10 +1,18 @@
-"""Standalone Modal rollout provider that implements the hot-load API shim.
+"""Standalone Modal rollout provider implementing the customer hot-load API.
+
+Log-as-truth design: the front door is a singleton that owns the monotonic
+``latest`` pointer in the S3 transport and implements the customer's
+``POST/GET /hot_load`` API (``docs/orig-api.md``). An elastic Flash pool of
+SGLang servers + stitch sidecars reconciles to ``latest`` on its own and serves
+inference. There is no central desired-state mailbox: the pool pulls, and the
+front door derives readiness by enumerating the live containers.
 
 Run commands from the repo root, for example:
 
     uv run --extra modal modal deploy -m cookbook.standalone_rollouts.modal_serve
 """
 
+import asyncio
 import importlib
 import os
 import subprocess
@@ -14,7 +22,9 @@ import modal
 import modal.experimental
 
 from cookbook.slime_disagg import helpers
-from stitch.providers.modal import resolve_flash_gateway_url
+from cookbook.standalone_rollouts import frontdoor as frontdoor_mod
+from stitch.bulletin import FilesystemBulletinBoard
+from stitch.providers.modal import discover_flash_targets, resolve_flash_gateway_url, wake_targets
 
 
 PROVIDER_CONFIG = os.environ.get("PROVIDER_CONFIG", "qwen3_4b_hot_load")
@@ -27,6 +37,7 @@ SIDECAR_PORT = 8000
 SGLANG_PORT = 8001
 MINUTES = 60
 SERVER_STARTUP_TIMEOUT = 35 * MINUTES
+LOCAL_CHECKPOINT_PATH = exp.LOCAL_CHECKPOINT_PATH
 S3_TRANSPORT_BUCKET_NAME = os.environ.get(
     "STITCH_SHIM_S3_BUCKET_NAME", exp.S3_TRANSPORT_BUCKET_NAME
 )
@@ -40,18 +51,39 @@ S3_TRANSPORT_OIDC_AUTH_ROLE_ARN = os.environ.get(
 )
 
 SLIME_IMAGE_TAG = "slimerl/slime:nightly-dev-20260527a"
+SLIME_ROOT = "/root/slime"
+SLIME_REPO_URL = "https://github.com/modal-projects/slime.git"
+# PR #5 head (disaggregated-rollout, stacked on disk-delta-weight-sync). The
+# provider sidecar applies disk deltas host-side via slime.utils.disk_delta, so
+# the image must carry that branch's slime plus its checksum/compression deps.
+# Pin a SHA, not the branch tip: the clone is a cached image layer.
+SLIME_REPO_REF = "570cd0b3bc28141abfbf054333d129d41fe50f19"
 
 image = (
     modal.Image.from_registry(SLIME_IMAGE_TAG)
     .entrypoint([])
     .run_commands(f"rm -rf {exp.HF_CACHE_PATH}")
+    # Replace the bundled slime with the disk-delta branch so the sidecar can
+    # import slime.utils.disk_delta (host-side apply).
+    .run_commands(
+        f"rm -rf {SLIME_ROOT}"
+        f" && git clone --depth 1 {SLIME_REPO_URL} {SLIME_ROOT}"
+        f" && cd {SLIME_ROOT}"
+        f" && git fetch --depth 1 origin {SLIME_REPO_REF}"
+        f" && git checkout FETCH_HEAD"
+        f" && python3 -m pip install --no-deps -e {SLIME_ROOT}"
+    )
     .pip_install(
-        "autoinference-utils==0.2.0",
+        "autoinference-utils==0.2.0",  # SGLang server lifecycle for the rollout pool
         "boto3",
         "fastapi",
         "httpx",
         "uvicorn",
+        # slime.utils.disk_delta host-side apply: zstd decompress + xxhash
+        # (xxh3-128 default) / blake3 checksums. slime is installed --no-deps.
         "zstandard",
+        "xxhash",
+        "blake3",
     )
     .env(
         {
@@ -62,6 +94,7 @@ image = (
             "STITCH_SHIM_MODAL_APP_NAME": APP_NAME,
             "STITCH_SHIM_MODAL_CLS_NAME": "Server",
             "STITCH_SHIM_TRANSPORT_ROOT": str(S3_TRANSPORT_MOUNT_PATH),
+            "STITCH_LOCAL_CHECKPOINT_DIR": LOCAL_CHECKPOINT_PATH,
         }
     )
     .add_local_python_source("stitch")
@@ -86,6 +119,7 @@ def _key_prefix_for_mount(prefix: str) -> str | None:
 hf_cache_volume = modal.Volume.from_name(
     exp.HF_CACHE_VOLUME_NAME, create_if_missing=True
 )
+# read_only=False: the front door writes the `latest` pointer here.
 s3_transport_mount = modal.CloudBucketMount(
     bucket_name=S3_TRANSPORT_BUCKET_NAME,
     key_prefix=_key_prefix_for_mount(S3_TRANSPORT_KEY_PREFIX),
@@ -93,8 +127,8 @@ s3_transport_mount = modal.CloudBucketMount(
     if S3_TRANSPORT_REGION
     else None,
     oidc_auth_role_arn=S3_TRANSPORT_OIDC_AUTH_ROLE_ARN,
+    read_only=False,
 )
-state_dict = modal.Dict.from_name(exp.STATE_DICT_NAME, create_if_missing=True)
 app = modal.App(APP_NAME)
 
 SGLANG_SERVER_ARGS = {
@@ -103,12 +137,6 @@ SGLANG_SERVER_ARGS = {
     "--cuda-graph-max-bs": str(ROLLOUT_CONCURRENCY),
     "--max-running-requests": str(ROLLOUT_CONCURRENCY),
     "--trust-remote-code": "",
-    "--update-weight-delta-chunk-bytes": str(
-        exp.SGLANG_UPDATE_WEIGHT_DELTA_CHUNK_BYTES
-    ),
-    "--update-weight-delta-read-workers": str(
-        exp.SGLANG_UPDATE_WEIGHT_DELTA_READ_WORKERS
-    ),
     **exp.SGLANG_SERVER_ARGS,
 }
 
@@ -144,7 +172,8 @@ WARMUP_PAYLOAD = {
 )
 @modal.concurrent(target_inputs=ROLLOUT_CONCURRENCY)
 class Server:
-    """One SGLang server plus a provider hot-load API shim."""
+    """One SGLang server plus the stitch weight-sync sidecar, reconciling to the
+    `latest` pointer the front door advances."""
 
     @modal.enter()
     def startup(self) -> None:
@@ -164,14 +193,19 @@ class Server:
             request_timeout=120.0,
             max_attempts_per_request=3,
         )
-        self.sidecar = _start_provider_sidecar()
+        # Deltas are applied host-side onto a copy of the base checkpoint; the
+        # base resolves to the same HF cache snapshot the SGLang server loaded.
+        from huggingface_hub import snapshot_download
+
+        base_checkpoint_dir = snapshot_download(MODEL_NAME, local_files_only=True)
+        self.sidecar = _start_provider_sidecar(base_checkpoint_dir=base_checkpoint_dir)
         helpers.wait_http(
             f"http://127.0.0.1:{SIDECAR_PORT}/health",
             self.sidecar,
             SERVER_STARTUP_TIMEOUT,
         )
         print(
-            f"API-shim rollout server ready: model={MODEL_NAME}, target_inputs={ROLLOUT_CONCURRENCY}"
+            f"Rollout server ready: model={MODEL_NAME}, target_inputs={ROLLOUT_CONCURRENCY}"
         )
 
     @modal.exit()
@@ -208,8 +242,7 @@ def print_secret_template() -> None:
                 f"modal secret create {exp.SHIM_SECRET_NAME} \\",
                 "  STITCH_SHIM_API_KEY=... \\",
                 "  STITCH_SHIM_PROVIDER_MODEL=qwen3-4b \\",
-                "  STITCH_SHIM_PROVIDER_DEPLOYMENT=rollout-prod \\",
-                "  STITCH_SHIM_BASE_SNAPSHOT_IDENTITY=base",
+                "  STITCH_SHIM_PROVIDER_DEPLOYMENT=rollout-prod",
             ]
         )
     )
@@ -234,6 +267,7 @@ def smoke(
         provider_model=provider_model,
         provider_deployment=provider_deployment,
     )
+    last_error = ""
     while True:
         try:
             req = urllib.request.Request(
@@ -261,7 +295,7 @@ def smoke(
     req = urllib.request.Request(
         f"{gateway}/v1/chat/completions",
         data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", **headers},
     )
     with urllib.request.urlopen(req, timeout=180) as resp:
         print(json.dumps(json.load(resp), indent=2)[:2000])
@@ -294,49 +328,92 @@ def _frontdoor_headers(raw: dict[str, str]) -> dict[str, str]:
     return headers
 
 
-@app.function(image=image, min_containers=1, scaledown_window=15 * MINUTES, include_source=False)
-@modal.concurrent(max_inputs=ROLLOUT_CONCURRENCY)
+def _auth_error(headers):
+    """Validate the customer auth headers against the provider secret. Returns a
+    JSONResponse to reject, or None to allow."""
+    from fastapi.responses import JSONResponse
+
+    api_key = os.environ.get("STITCH_SHIM_API_KEY")
+    if api_key and headers.get("authorization") != f"Bearer {api_key}":
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    provider_model = os.environ.get("STITCH_SHIM_PROVIDER_MODEL")
+    if provider_model and headers.get("provider-model") != provider_model:
+        return JSONResponse(
+            {"error": "Provider-Model header does not match this deployment"},
+            status_code=400,
+        )
+    provider_deployment = os.environ.get("STITCH_SHIM_PROVIDER_DEPLOYMENT")
+    if provider_deployment and headers.get("provider-deployment") != provider_deployment:
+        return JSONResponse(
+            {"error": "Provider-Deployment header does not match this deployment"},
+            status_code=400,
+        )
+    return None
+
+
+@app.function(
+    image=image,
+    volumes={str(S3_TRANSPORT_MOUNT_PATH): s3_transport_mount},
+    secrets=[modal.Secret.from_name(exp.SHIM_SECRET_NAME)],
+    min_containers=1,
+    max_containers=1,  # singleton: exactly one writer of the `latest` pointer
+    scaledown_window=15 * MINUTES,
+    include_source=False,
+)
+@modal.concurrent(target_inputs=1000)
 @modal.asgi_app()
 def frontdoor():
-    """Public front door for external/opaque clients (the api-shim contract).
+    """Public front door: the single writer of `latest` and the customer
+    hot-load API, plus an affinity-relabeling proxy to the rollout gateway.
 
-    External trainers keep sending the neutral ``x-session-affinity`` header;
-    this proxy rewrites it to ``Modal-Session-ID`` and forwards everything to the
-    internal Server Flash gateway, so affinity is honored by Modal's native
-    gateway routing (one hop, request gated by the per-container sidecar) instead
-    of being re-routed inside a container.
+    No `from __future__ import annotations` interplay here — frontdoor_mod's
+    create_frontdoor_app resolves its handler annotations against its own
+    eager fastapi import.
     """
-    from contextlib import asynccontextmanager
-
-    from fastapi import FastAPI, Request
-    from fastapi.responses import Response
     import httpx
+    from fastapi.responses import Response
 
-    # One pooled client per front-door container, kept warm across requests so
-    # the front-door->gateway hop reuses connections instead of reconnecting per
-    # rollout. timeout=None preserves the prior no-deadline behavior (the
-    # per-container sidecar enforces the real upstream timeout).
-    clients: dict = {}
-
-    @asynccontextmanager
-    async def lifespan(_app):
-        async with httpx.AsyncClient(timeout=None, trust_env=False) as client:
-            clients["gateway"] = client
-            yield
-
-    # No `from __future__ import annotations` in this module, so proxy()'s
-    # `request: Request` / `-> Response` annotations evaluate eagerly against
-    # these local imports — FastAPI resolves them without a globals() injection.
-    api = FastAPI(lifespan=lifespan)
+    board = FilesystemBulletinBoard(str(S3_TRANSPORT_MOUNT_PATH), layout="slime")
     gateway: dict[str, str | None] = {"url": None}
+    clients: dict[str, httpx.AsyncClient] = {}
 
-    @api.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
-    async def proxy(path: str, request: Request) -> Response:
+    def _proxy_client() -> httpx.AsyncClient:
+        client = clients.get("client")
+        if client is None:
+            client = httpx.AsyncClient(timeout=None, trust_env=False)
+            clients["client"] = client
+        return client
+
+    async def read_current_version() -> int:
+        return board.read_latest()
+
+    async def advance_to(version: int) -> None:
+        # Singleton writer: a single small write is one atomic S3 PutObject, so
+        # no rename dance is needed. Direct write avoids FUSE rename semantics.
+        (S3_TRANSPORT_MOUNT_PATH / "latest").write_text(f"{int(version):06d}", encoding="utf-8")
+
+    async def list_server_infos() -> list[dict]:
+        targets = await asyncio.to_thread(discover_flash_targets, APP_NAME, Server.__name__)
+        infos: list[dict] = []
+        async with httpx.AsyncClient(timeout=10.0, trust_env=False) as client:
+            for target in targets:
+                try:
+                    resp = await client.get(f"{target}/server_info")
+                    infos.append(resp.json())
+                except Exception:  # noqa: BLE001 — unreachable replica reported as not-ready
+                    infos.append({"sync_state": None, "last_sync_error": "unreachable"})
+        return infos
+
+    async def wake(version: int) -> None:
+        targets = await asyncio.to_thread(discover_flash_targets, APP_NAME, Server.__name__)
+        await asyncio.to_thread(wake_targets, targets, version)
+
+    async def proxy(request, path: str) -> Response:
         if gateway["url"] is None:
             gateway["url"] = provider_gateway_url()
         headers = _frontdoor_headers(dict(request.headers))
         body = await request.body()
-        resp = await clients["gateway"].request(
+        resp = await _proxy_client().request(
             request.method,
             f"{gateway['url']}/{path}",
             headers=headers,
@@ -349,16 +426,23 @@ def frontdoor():
             media_type=resp.headers.get("content-type") or None,
         )
 
-    return api
+    return frontdoor_mod.create_frontdoor_app(
+        read_current_version=read_current_version,
+        advance_to=advance_to,
+        list_server_infos=list_server_infos,
+        proxy=proxy,
+        authorize=_auth_error,
+        wake=wake,
+    )
 
 
 def frontdoor_url() -> str:
-    """Advertised provider URL: external clients hit the front door, not the
-    Server Flash gateway directly, so the affinity relabel happens pre-gateway."""
+    """Advertised provider URL: external clients hit the front door, which owns
+    `latest` and relabels affinity pre-gateway."""
     return frontdoor.get_web_url().rstrip("/")
 
 
-def _start_provider_sidecar() -> subprocess.Popen:
+def _start_provider_sidecar(*, base_checkpoint_dir: str) -> subprocess.Popen:
     cmd = [
         "python3",
         "-m",
@@ -369,18 +453,16 @@ def _start_provider_sidecar() -> subprocess.Popen:
         str(SIDECAR_PORT),
         "--upstream-url",
         f"http://127.0.0.1:{SGLANG_PORT}",
-        "--state-dict-name",
-        exp.STATE_DICT_NAME,
-        "--snapshot-root",
-        exp.SNAPSHOT_ROOT,
         "--transport-root",
         str(S3_TRANSPORT_MOUNT_PATH),
-        "--base-snapshot-identity",
-        os.environ.get(
-            "STITCH_SHIM_BASE_SNAPSHOT_IDENTITY", exp.BASE_SNAPSHOT_IDENTITY
-        ),
+        "--local-checkpoint-dir",
+        LOCAL_CHECKPOINT_PATH,
+        "--base-checkpoint-dir",
+        base_checkpoint_dir,
+        "--commit-mode",
+        exp.COMMIT_MODE,
     ]
-    print("Starting provider shim:", " ".join(cmd))
+    print("Starting provider sidecar:", " ".join(cmd))
     return subprocess.Popen(cmd, start_new_session=True)
 
 
