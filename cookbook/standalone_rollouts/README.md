@@ -1,44 +1,58 @@
 # Standalone SGLang Rollout Provider
 
 This cookbook deploys a standalone Modal Flash pool of SGLang rollout servers
-that implements the hot-load API in [docs/api-shim.md](../../docs/api-shim.md).
-External trainers upload checkpoints or compatible deltas to S3, call the
-provider hot-load endpoint, poll readiness, then send rollout traffic to the
-same Modal gateway.
+that implements the customer hot-load API in
+[docs/api-shim.md](../../docs/api-shim.md). External trainers upload checkpoints
+or deltas to S3, call the provider hot-load endpoint, poll readiness, then send
+rollout traffic to the same provider URL.
 
-The provider flow is:
+It is a **log-as-truth** design: a durable, monotonic `latest` pointer in the S3
+transport is the source of truth, and the elastic pool reconciles to it by pull.
 
-1. Modal starts one SGLang server per warm container.
-2. A FastAPI shim sidecar exposes `/hot_load/v1/models/hot_load`.
-3. `POST /hot_load/v1/models/hot_load` records the desired snapshot identity in
-   a shared Modal Dict.
-4. Every replica notices the desired identity, materializes
-   `<mounted-s3-transport>/<identity>/`, applies it to its local SGLang server,
-   and reports readiness back into the Modal Dict.
-5. `GET /hot_load/v1/models/hot_load` returns the aggregated replica states.
-6. Inference requests (`/generate`, `/v1/chat/completions`,
-   `/v1/completions`, etc.) are proxied to SGLang.
+1. Modal starts one SGLang server + a stitch weight-sync sidecar per warm
+   container. Each sidecar is a `WeightSyncManager` that reconciles its engine
+   to `latest` (on startup, on a wake, and on a periodic poll).
+2. The **front door** — a singleton ASGI app (`max_containers=1`) and the only
+   writer of `latest` — serves the customer API. `POST /hot_load/...` advances
+   `latest` (monotonic CAS; a rewind is rejected) and best-effort wakes the
+   pool. The pool pulls the new `weight_v{N}/`, applies the disk delta host-side
+   (slime `disk_delta`: chain-replay + per-tensor checksum), and reloads SGLang.
+3. `GET /hot_load/...` reports readiness by enumerating the **live** containers
+   and querying each `/server_info` — no self-reported replica state, so a
+   scaled-down replica can't haunt the readiness fraction.
+4. Inference (`/generate`, `/v1/chat/completions`, `/v1/completions`, …) is
+   proxied to the SGLang gateway.
+
+There is no Modal `Dict` desired-mailbox and no per-replica self-report: a
+scaled-up container catches up by reading `latest` with no push.
 
 ## Layout
 
 | File | What it is |
 |---|---|
-| `modal_serve.py` | Standalone Modal rollout-provider app; owns the Modal `App` |
-| `provider.py` | Hot-load API shim and transport-to-SGLang apply logic |
+| `modal_serve.py` | Standalone Modal rollout-provider app; owns the Modal `App`, the Server pool, and the singleton front door |
+| `frontdoor.py` | Front-door hot-load adapter logic (advance `latest`, live-readiness, proxy) — injected I/O, unit-tested |
+| `provider.py` | Per-container sidecar: a `WeightSyncManager` over a slime-layout board on the transport |
 | `configs/qwen3_4b_hot_load.py` | Qwen3-4B provider config |
 | `slime/` | Optional SLIME integration-test harness for this provider |
 
 ## Compatibility Notes
 
-Full snapshots should be Hugging Face/SafeTensors directories that SGLang can
-load with `update_weights_from_disk(load_format="auto")`.
+The provider targets slime's `disk-delta-weight-sync` branch + PR #5. Each
+version is a canonical HF/SafeTensors directory `weight_v{N}/` with a
+`model.safetensors.index.json`; the engine applies deltas **host-side** (slime
+`disk_delta`) onto a local full checkpoint and then reloads through the ordinary
+`update_weights_from_disk` path — there is no engine-side `load_format="delta"`
+receiver. The delta format is XOR (or `overwrite`) encoding, zstd compression,
+and xxh3-128 (or blake3/adler32) per-tensor checksums; the version's
+`index.json` carries `delta_encoding`/`compression_format`/`checksum_format`.
 
-Delta snapshots are currently applied through SGLang's `load_format="delta"`
-path. That is compatible with SLIME sparse-delta safetensors. The customer shim
-spec describes compressed XOR deltas; to support that exact format, add a
-materialization step in `provider.py` that reconstructs a full local HF
-checkpoint or converts the XOR files into an SGLang-compatible delta before
-calling `update_weights_from_disk`.
+A customer-produced delta (XOR + adler32 + zstd) is directly applicable by this
+applier. The only adapter work is metadata *location*: the customer sends
+`compression_format`/`checksum_format`/`previous_snapshot_identity` in the POST
+body and ships a weight-map-only `index.json`, whereas the applier reads those
+from the index's `metadata` block — so a customer-facing front door normalizes
+the POST metadata into the index before advancing `latest`.
 
 Session affinity is delegated to Modal's Flash gateway. External clients send
 the neutral `x-session-affinity` header to the **front door** (the advertised
@@ -80,9 +94,11 @@ Create the secret:
 uv run --extra modal modal secret create stitch-api-shim-provider \
   STITCH_SHIM_API_KEY=... \
   STITCH_SHIM_PROVIDER_MODEL=qwen3-4b \
-  STITCH_SHIM_PROVIDER_DEPLOYMENT=rollout-prod \
-  STITCH_SHIM_BASE_SNAPSHOT_IDENTITY=base
+  STITCH_SHIM_PROVIDER_DEPLOYMENT=rollout-prod
 ```
+
+The S3 OIDC role must allow `s3:PutObject` on the prefix: the singleton front
+door writes the `latest` pointer there.
 
 Deploy:
 
@@ -92,10 +108,9 @@ alias m="uv run --extra modal modal"
 m run -m cookbook.standalone_rollouts.modal_serve::download_model
 m deploy -m cookbook.standalone_rollouts.modal_serve
 m run -m cookbook.standalone_rollouts.modal_serve::print_url
-m run -m cookbook.standalone_rollouts.modal_serve::smoke \
-  --api-key ... \
-  --provider-model qwen3-4b \
-  --provider-deployment rollout-prod
+# Authenticated smoke from inside Modal (reads the provider secret; the API key
+# never leaves Modal): polls GET /hot_load readiness + a base completion.
+m run -m cookbook.standalone_rollouts.modal_serve::check
 ```
 
 The default app is `stitch-qwen3-4b-api-shim`. To create a separate deployment,
@@ -136,8 +151,8 @@ curl -X POST "$GATEWAY/hot_load/v1/models/hot_load" \
     "identity": "weight_v000002",
     "incremental_snapshot_metadata": {
       "previous_snapshot_identity": "weight_v000001",
-      "compression_format": "deltas_zstd",
-      "checksum_format": "adler32"
+      "compression_format": "zstd",
+      "checksum_format": "xxh3-128"
     },
     "reset_prompt_cache": "new_session"
   }'
@@ -182,20 +197,17 @@ m deploy -m cookbook.standalone_rollouts.slime.modal_train
 m run -m cookbook.standalone_rollouts.slime.modal_train::launch_train
 ```
 
-The trainer uses SLIME's opaque HTTP endpoint mode for rollout traffic and
-publish-only disk deltas for weight updates. A SLIME request hook adds an exact
-`weight_version` constraint to each rollout request after the publish hook has
-waited for the provider pool to report the version ready. If Modal's opaque
-routing lands a request on a lagging replica, the provider returns retryable
-`409` before spending rollout compute.
+The trainer sets `rollout_endpoint_url` (SLIME publish-only mode): it launches
+no rollout engines, routes `/generate` to the provider front door, and writes
+each `weight_v{N}/` straight to the mounted S3 transport via
+`--update-weight-disk-dir`. Its `custom_delta_pre_push_path` hook
+(`announce_and_wait`) POSTs the customer hot-load API for the new version and
+blocks until the provider pool reports it ready, so the next rollout only runs
+once enough replicas serve the new weights. A SLIME request hook adds an exact
+`weight_version` constraint to each rollout request; if Modal's opaque routing
+lands one on a lagging replica, the provider returns a retryable `409` before
+spending rollout compute. For a lower-latency async setup, drop the readiness
+wait and switch the request hook to `min` mode with a positive version lag.
 
-The harness sets `update_weight_delta_publish_wait="sync"` because its publish
-hook polls this provider's pool-readiness endpoint. That makes `update_weights`
-block until the configured readiness threshold is met before the next rollout
-dispatch starts. For a lower-latency async setup, use SLIME's default publish
-wait mode and switch the request hook to the staleness/admission constraint that
-matches the trainer's off-policy correction path, for example `min` mode with a
-positive request-version lag.
-The first weight update seeds SLIME's local delta snapshot and does not announce
-a provider update; subsequent updates publish `weight_v000001`,
-`weight_v000002`, and so on to the provider.
+The first weight update only seeds SLIME's baseline snapshot and publishes
+nothing; subsequent updates publish `weight_v000001`, `weight_v000002`, … .
