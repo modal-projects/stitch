@@ -47,9 +47,10 @@ SLIME_IMAGE_TAG = "slimerl/slime:nightly-dev-20260527a"
 SLIME_ROOT = "/root/slime"
 SLIME_REPO_URL = "https://github.com/modal-projects/slime.git"
 # Pin to an exact commit (see cookbook/slime_disagg/modal_train.py): the cached
-# clone layer otherwise leaves the container on a stale slime, e.g. one missing
-# custom_rollout_request_hook_path so stitch's request hook never fires.
-SLIME_REPO_REF = "4ea02f0ee6a4cef5ebcd90fd1c85888035e3d85b"
+# clone layer otherwise leaves the container on a stale slime. This is PR #5
+# head (disaggregated-rollout): disk-delta publish-only + rollout_endpoint_url +
+# custom_rollout_request_hook_path.
+SLIME_REPO_REF = "570cd0b3bc28141abfbf054333d129d41fe50f19"
 
 trainer_image = (
     modal.Image.from_registry(SLIME_IMAGE_TAG)
@@ -64,7 +65,11 @@ trainer_image = (
         f" && python3 -m pip install --no-deps -e {SLIME_ROOT}"
     )
     .pip_install(
+        # Disk-delta encode side (slime.utils.disk_delta) compresses with
+        # zstandard and checksums with xxhash (xxh3-128 default) / blake3.
         "zstandard",
+        "xxhash",
+        "blake3",
     )
     .env(
         {
@@ -163,7 +168,7 @@ class Trainer:
                 f"takes effect after a redeploy restarts the Ray cluster."
             )
 
-        cfg.rollout_http_endpoint_url = provider_url
+        cfg.rollout_endpoint_url = provider_url
         cfg.api_shim_base_url = provider_url
         cfg.custom_config_path = _custom_config(
             cfg, rollout_num_engines=getattr(run, "ROLLOUT_NUM_ENGINES", 1)
@@ -172,7 +177,7 @@ class Trainer:
         cmd = helpers.build_train_cmd(cfg, SLIME_ROOT)
 
         print(
-            f"Training {experiment}: nodes={N_TRAIN_NODES}, rollout_endpoint={cfg.rollout_http_endpoint_url}"
+            f"Training {experiment}: nodes={N_TRAIN_NODES}, rollout_endpoint={cfg.rollout_endpoint_url}"
         )
         print(f"Command: {cmd}")
         subprocess.run(["bash", "-lc", cmd], check=True)
