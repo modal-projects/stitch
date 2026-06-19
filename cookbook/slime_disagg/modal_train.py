@@ -90,7 +90,12 @@ image = (
         "fastapi",  # stitch sidecar
         "httpx",  # stitch sidecar
         "uvicorn",  # stitch sidecar
-        "zstandard",  # slime's sparse-delta encoding
+        # The sidecar applies disk deltas host-side via slime.utils.disk_delta,
+        # which decompresses with zstandard and checksums with xxhash (xxh3-128
+        # default) or blake3. slime is installed --no-deps, so add them here.
+        "zstandard",
+        "xxhash",
+        "blake3",
     )
     .env(
         {
