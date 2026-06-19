@@ -49,8 +49,9 @@ class EngineAdapter(Protocol):
 
 
 class RolloutSyncManager(Protocol):
-    """The surface stitch.servers.sglang.create_app drives — implemented both by
-    WeightSyncManager (bulletin board) and the cookbook hot-load ProviderShim.
+    """The surface stitch.servers.sglang.create_app drives. WeightSyncManager
+    implements it, and both the bulletin-board sidecar and the hot-load provider
+    sidecar build one — they differ only in board backend and front-door surface.
 
     create_app also probes optional members defensively (shutdown_sync, and the
     sync-route trio queue_sync/queued_target_version/sync_state); those are not
@@ -77,9 +78,9 @@ class RolloutAdmissionGate:
     ``_active_cond`` acquisition the committer uses, and commits hold the gate
     across the engine apply *and* the version advance (cleared only after).
     Subclasses provide ``current_version`` and override the hooks for their
-    policy / admission / exact-pin specifics. Both the bulletin-board
-    ``WeightSyncManager`` and the cookbook hot-load ``ProviderShim`` compose it,
-    so the gate semantics (and the P0.1 commit-window fix) live in one place.
+    policy / admission / exact-pin specifics. ``WeightSyncManager`` composes it
+    (so the bulletin-board and hot-load provider sidecars, both WeightSyncManager,
+    share the gate semantics and the P0.1 commit-window fix in one place).
     """
 
     def __init__(self, *, commit_mode: CommitMode = "quiesce") -> None:

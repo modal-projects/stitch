@@ -11,11 +11,15 @@ MODEL_NAME = "Qwen/Qwen3-4B"
 HF_SECRET_NAME = "huggingface-secret"
 SHIM_SECRET_NAME = "stitch-api-shim-provider"
 HF_CACHE_VOLUME_NAME = "huggingface-cache"
-STATE_DICT_NAME = "stitch-api-shim-qwen3-4b-state"
 
 HF_CACHE_PATH = Path("/root/.cache/huggingface")
-SNAPSHOT_ROOT = "/snapshots"
-BASE_SNAPSHOT_IDENTITY = "base"
+# Ephemeral host-local full HF checkpoint the sidecar patches in place per delta
+# (seeded from the base; rebuilt on a cold container).
+LOCAL_CHECKPOINT_PATH = "/local-checkpoint"
+# How the rollout sidecar applies versions. in_place pauses/applies/continues
+# without flushing (relies on the engine overlap-drain fix); quiesce is the safe
+# fallback. See docs/kv-version-namespace-design.md.
+COMMIT_MODE = "in_place"
 S3_TRANSPORT_BUCKET_NAME = "modal-stitch-s3-transport"
 S3_TRANSPORT_KEY_PREFIX = "standalone-rollouts/qwen3-4b"
 S3_TRANSPORT_MOUNT_PATH = Path("/mnt/stitch-s3-transport")
@@ -32,8 +36,10 @@ ROLLOUT_MIN_CONTAINERS = 2
 ROLLOUT_NUM_GPUS_PER_ENGINE = 1
 ROLLOUT_CONCURRENCY = 64
 
-SGLANG_UPDATE_WEIGHT_DELTA_CHUNK_BYTES = 1024 * 1024 * 1024
-SGLANG_UPDATE_WEIGHT_DELTA_READ_WORKERS = 8
+# The disk-delta-weight-sync branch applies deltas host-side and reloads via the
+# ordinary update_weights_from_disk path, so the old engine-side delta server
+# args (--update-weight-delta-chunk-bytes/--update-weight-delta-read-workers) no
+# longer exist and must not be passed.
 SGLANG_SERVER_ARGS = {
     "--reasoning-parser": "qwen3",
     "--context-length": "16384",
