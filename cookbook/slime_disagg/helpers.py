@@ -18,7 +18,6 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from stitch.protocol import write_latest
 from stitch.providers.modal import discover_flash_targets, resolve_flash_gateway_url
 
 RAY_START_TIMEOUT = 240
@@ -346,8 +345,9 @@ def reset_bulletin_board(root: str | Path, volume: Any, *, confirm: bool = False
 
     import shutil
 
+    # slime-native flat layout: weight_v{N}/ dirs + a raw `latest` pointer.
     root = Path(root)
-    shutil.rmtree(root / "versions", ignore_errors=True)
-    (root / "versions").mkdir(parents=True, exist_ok=True)
-    write_latest(root, 0)
+    for version_dir in root.glob("weight_v*"):
+        shutil.rmtree(version_dir, ignore_errors=True)
+    (root / "latest").unlink(missing_ok=True)
     volume.commit()

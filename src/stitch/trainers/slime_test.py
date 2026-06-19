@@ -71,6 +71,22 @@ class SlimeHooksTest(unittest.TestCase):
         self.assertEqual(request["payload"]["weight_version"], {"min_required_version": 3})
         self.assertIsNone(request["headers"])
 
+    def test_rollout_request_hook_degrades_without_rollout_id(self) -> None:
+        # PR #5's request carries no rollout_id: skip the pin (no crash), still
+        # apply the retry budget and session affinity.
+        args = Namespace(
+            rollout_request_weight_version_mode="exact",
+            rollout_request_retry_attempts=240,
+        )
+        sample = Namespace(session_id="grp-9")
+        request = {"payload": {}, "headers": None, "max_retries": 60, "retry_sleep": 1.0}
+
+        rollout_request_weight_version_hook(args, sample, request)
+
+        self.assertNotIn("weight_version", request["payload"])
+        self.assertEqual(request["max_retries"], 240)
+        self.assertEqual(request["headers"]["x-session-affinity"], "grp-9")
+
     def test_publish_delta_version_writes_manifest_and_latest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
