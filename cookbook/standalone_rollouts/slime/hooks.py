@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import time
 import urllib.error
 import urllib.request
@@ -32,6 +33,7 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class ShimConfig:
     api_base_url: str
+    transport_root: Path | None = None
     api_key: str | None = None
     provider_model: str | None = None
     provider_deployment: str | None = None
@@ -45,6 +47,9 @@ class ShimConfig:
 
     @classmethod
     def from_env(cls, args: Any | None = None) -> "ShimConfig":
+        transport = _setting(
+            args, "api_shim_transport_root", "STITCH_SHIM_TRANSPORT_ROOT", default=""
+        )
         return cls(
             api_base_url=_setting(
                 args,
@@ -53,6 +58,7 @@ class ShimConfig:
                 default=getattr(args, "rollout_endpoint_url", None),
                 required=True,
             ).rstrip("/"),
+            transport_root=Path(transport) if transport else None,
             api_key=_setting(args, "api_shim_api_key", "STITCH_SHIM_API_KEY"),
             provider_model=_setting(
                 args, "api_shim_provider_model", "STITCH_SHIM_PROVIDER_MODEL"
@@ -120,17 +126,22 @@ class ShimConfig:
             return self.base_snapshot_identity
         return self.identity_for_version(int(version) - 1)
 
+    def transport_path_for_identity(self, identity: str) -> Path:
+        if self.transport_root is None:
+            raise RuntimeError("transport_root is not configured (api_shim_transport_root)")
+        return self.transport_root / identity
+
 
 def announce_and_wait(args: Any, version_dir: str, rollout_engines: list[Any]) -> None:
     """SLIME ``custom_delta_pre_push_path`` hook (publish-only mode).
 
-    Disk-delta publish-only writes ``weight_v{N}/`` straight to the mounted S3
-    transport, so there is nothing to copy. Rank 0 signals the provider's
-    customer hot-load API for the just-written version and blocks until the
-    elastic pool reports it ready, so the next rollout only runs once enough
-    replicas serve the new weights. (slime also advances its own ``latest``
-    pointer; the POST drives the front door — which owns the canonical pointer —
-    and gives us the readiness gate.)
+    slime publishes ``weight_v{N}/`` to a LOCAL disk dir (its disk-delta writer
+    uses atomic rename, which the S3 CloudBucketMount does not support). Rank 0
+    copies that version dir to the shared transport the provider pool pulls from,
+    then signals the provider's customer hot-load API and blocks until the
+    elastic pool reports the version ready — so the next rollout only runs once
+    enough replicas serve the new weights. The POST drives the front door, which
+    owns the canonical ``latest`` pointer.
     """
 
     del rollout_engines
@@ -144,6 +155,10 @@ def announce_and_wait(args: Any, version_dir: str, rollout_engines: list[Any]) -
         # announce yet. Only weight_v{N} dirs are hot-loaded.
         return
     cfg = ShimConfig.from_env(args)
+    # slime's atomic-rename writer can't target the S3 mount (ENOSYS), so the
+    # version dir lives on local disk; copy it to the transport (PutObject) the
+    # provider pool reads before signalling the hot-load.
+    _copy_version_to_transport(Path(version_dir), cfg.transport_path_for_identity(identity))
     _post_hot_load(
         cfg,
         identity=identity,
@@ -338,6 +353,27 @@ def _headers(cfg: ShimConfig) -> dict[str, str]:
     if cfg.provider_deployment:
         headers["Provider-Deployment"] = cfg.provider_deployment
     return headers
+
+
+def _copy_version_to_transport(version_dir: Path, destination: Path) -> None:
+    """Copy a locally-published version dir to the (S3-mounted) transport.
+
+    Uses plain writes, not rename: PutObject works on the CloudBucketMount while
+    rename does not. On a single-node trainer all ranks share the local FS, so
+    rank 0 copies the whole dir (every rank's shard + the index).
+    """
+    files = sorted(
+        path
+        for path in version_dir.rglob("*")
+        if path.is_file() and not path.name.endswith(".tmp")
+    )
+    for path in files:
+        target = destination / path.relative_to(version_dir)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            target.unlink()  # the transport may reject overwrites
+        with path.open("rb") as src, target.open("wb") as dst:
+            shutil.copyfileobj(src, dst)
 
 
 def _distributed_rank() -> int | None:

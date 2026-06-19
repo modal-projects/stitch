@@ -9,9 +9,12 @@ HF_SECRET_NAME = "huggingface-secret"
 # The trainer calls the provider shim, so it needs the same optional auth values
 # as the provider itself.
 SHIM_SECRET_NAME = "stitch-api-shim-provider"
-# slime writes weight_v{N}/ + the raw `latest` pointer straight here (the
-# mounted S3 transport), in the flat customer layout the provider pool pulls.
+# The mounted S3 transport the provider pool pulls from (flat customer layout).
 TRANSPORT_ROOT = "/mnt/stitch-s3-transport"
+# slime publishes here first: its disk-delta writer uses atomic rename, which the
+# S3 CloudBucketMount does NOT support (ENOSYS). The announce hook then copies
+# each version dir to the transport (PutObject) before signalling the provider.
+LOCAL_DELTA_DIR = "/tmp/slime-api-shim-deltas"
 # Publish-only drives one opaque HTTP endpoint (the provider front door).
 ROLLOUT_NUM_ENGINES = 1
 
@@ -51,7 +54,7 @@ class _Slime(SlimeConfig):
     update_weight_transport = "disk"
     update_weight_delta_encoding = "xor"
     update_weight_delta_checksum = "xxh3-128"
-    update_weight_disk_dir = TRANSPORT_ROOT
+    update_weight_disk_dir = LOCAL_DELTA_DIR
     api_shim_transport_root = TRANSPORT_ROOT
     custom_delta_pre_push_path = (
         "cookbook.standalone_rollouts.slime.hooks.announce_and_wait"

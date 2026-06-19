@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
 from argparse import Namespace
+from pathlib import Path
 from unittest import mock
 
 from cookbook.standalone_rollouts.slime import hooks
@@ -22,25 +24,38 @@ class ShimConfigTest(unittest.TestCase):
 
 
 class AnnounceAndWaitTest(unittest.TestCase):
-    def test_posts_hot_load_and_waits_on_rank_zero(self) -> None:
-        posted: list[tuple[str, str]] = []
+    def test_copies_to_transport_then_announces_on_rank_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            version_dir = root / "local" / "weight_v000003"
+            version_dir.mkdir(parents=True)
+            (version_dir / "model-00000-of-00001.safetensors").write_bytes(b"delta")
+            (version_dir / "model.safetensors.index.json").write_text("{}", encoding="utf-8")
+            transport = root / "transport"
 
-        def fake_post(cfg, *, identity, previous_identity) -> None:
-            posted.append((identity, previous_identity))
+            posted: list[tuple[str, str]] = []
 
-        ready = RolloutPoolState(
-            replicas=[
-                RolloutReplicaState(readiness=True, current_snapshot_identity="weight_v000003")
-            ]
-        )
-        args = Namespace(api_shim_base_url="http://provider")
-        with mock.patch.object(hooks, "_distributed_rank", return_value=0), mock.patch.object(
-            hooks, "_post_hot_load", fake_post
-        ), mock.patch.object(hooks, "_get_hot_load_state", return_value=ready):
-            hooks.announce_and_wait(args, "/work/weight_v000003", [])
+            def fake_post(cfg, *, identity, previous_identity) -> None:
+                posted.append((identity, previous_identity))
 
-        # Announces the just-written identity, with v2 as its predecessor.
-        self.assertEqual(posted, [("weight_v000003", "weight_v000002")])
+            ready = RolloutPoolState(
+                replicas=[
+                    RolloutReplicaState(readiness=True, current_snapshot_identity="weight_v000003")
+                ]
+            )
+            args = Namespace(api_shim_base_url="http://provider", api_shim_transport_root=str(transport))
+            with mock.patch.object(hooks, "_distributed_rank", return_value=0), mock.patch.object(
+                hooks, "_post_hot_load", fake_post
+            ), mock.patch.object(hooks, "_get_hot_load_state", return_value=ready):
+                hooks.announce_and_wait(args, str(version_dir), [])
+
+            # The local version dir is copied to the transport (no rename)...
+            self.assertEqual(
+                (transport / "weight_v000003" / "model-00000-of-00001.safetensors").read_bytes(), b"delta"
+            )
+            self.assertTrue((transport / "weight_v000003" / "model.safetensors.index.json").exists())
+            # ...then the version is announced (v2 as predecessor).
+            self.assertEqual(posted, [("weight_v000003", "weight_v000002")])
 
     def test_is_noop_off_rank_zero(self) -> None:
         posted: list[int] = []
