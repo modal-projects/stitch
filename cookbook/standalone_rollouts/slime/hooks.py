@@ -212,22 +212,27 @@ def rollout_request_weight_version_hook(
             raise ValueError(
                 f"Unsupported api_shim_rollout_request_weight_version_mode: {mode!r}"
             )
-        request["max_retries"] = int(
-            _setting(
-                args,
-                "api_shim_rollout_request_retry_attempts",
-                "STITCH_SHIM_ROLLOUT_REQUEST_RETRY_ATTEMPTS",
-                default="60",
-            )
+
+    # Generous retries on every rollout request so a cold/scaling/lagging replica
+    # (a transient 503, or a 409 weight-version reject) is retried rather than
+    # failing the rollout — the point of the elastic-pool readiness model. This
+    # also rides out a pool that is still warming when rollouts begin.
+    request["max_retries"] = int(
+        _setting(
+            args,
+            "api_shim_rollout_request_retry_attempts",
+            "STITCH_SHIM_ROLLOUT_REQUEST_RETRY_ATTEMPTS",
+            default="60",
         )
-        request["retry_sleep"] = float(
-            _setting(
-                args,
-                "api_shim_rollout_request_retry_sleep",
-                "STITCH_SHIM_ROLLOUT_REQUEST_RETRY_SLEEP",
-                default="1.0",
-            )
+    )
+    request["retry_sleep"] = float(
+        _setting(
+            args,
+            "api_shim_rollout_request_retry_sleep",
+            "STITCH_SHIM_ROLLOUT_REQUEST_RETRY_SLEEP",
+            default="1.0",
         )
+    )
 
     # The customer authenticates every request, and the provider front door
     # enforces it on all routes (inference included), so the trainer must attach
