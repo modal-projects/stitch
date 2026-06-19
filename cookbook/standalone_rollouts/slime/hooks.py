@@ -16,7 +16,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import shutil
 import time
 import urllib.error
 import urllib.request
@@ -24,7 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from stitch.protocol import RolloutPoolState, weight_identity
+from stitch.protocol import RolloutPoolState, parse_weight_identity, weight_identity
 
 
 logger = logging.getLogger(__name__)
@@ -32,14 +31,13 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class ShimConfig:
-    transport_root: Path
     api_base_url: str
     api_key: str | None = None
     provider_model: str | None = None
     provider_deployment: str | None = None
     base_snapshot_identity: str = "base"
-    compression_format: str = "deltas_zstd"
-    checksum_format: str = "adler32"
+    compression_format: str = "zstd"
+    checksum_format: str = "xxh3-128"
     reset_prompt_cache: str = "new_session"
     readiness_threshold: float = 1.0
     poll_timeout_seconds: float = 30 * 60
@@ -48,19 +46,11 @@ class ShimConfig:
     @classmethod
     def from_env(cls, args: Any | None = None) -> "ShimConfig":
         return cls(
-            transport_root=Path(
-                _setting(
-                    args,
-                    "api_shim_transport_root",
-                    "STITCH_SHIM_TRANSPORT_ROOT",
-                    required=True,
-                )
-            ),
             api_base_url=_setting(
                 args,
                 "api_shim_base_url",
                 "STITCH_SHIM_API_BASE_URL",
-                default=getattr(args, "rollout_http_endpoint_url", None),
+                default=getattr(args, "rollout_endpoint_url", None),
                 required=True,
             ).rstrip("/"),
             api_key=_setting(args, "api_shim_api_key", "STITCH_SHIM_API_KEY"),
@@ -82,13 +72,13 @@ class ShimConfig:
                 args,
                 "api_shim_compression_format",
                 "STITCH_SHIM_COMPRESSION_FORMAT",
-                default=str(getattr(args, "update_weight_encoding", "deltas_zstd")),
+                default="zstd",
             ),
             checksum_format=_setting(
                 args,
                 "api_shim_checksum_format",
                 "STITCH_SHIM_CHECKSUM_FORMAT",
-                default="adler32",
+                default=str(getattr(args, "update_weight_delta_checksum", "xxh3-128")),
             ),
             reset_prompt_cache=_setting(
                 args,
@@ -130,71 +120,27 @@ class ShimConfig:
             return self.base_snapshot_identity
         return self.identity_for_version(int(version) - 1)
 
-    def transport_path_for_identity(self, identity: str) -> Path:
-        return self.transport_root / identity
 
+def announce_and_wait(args: Any, version_dir: str, rollout_engines: list[Any]) -> None:
+    """SLIME ``custom_delta_pre_push_path`` hook (publish-only mode).
 
-def copy_delta_to_transport(
-    args: Any, version_dir: str, rollout_engines: list[Any]
-) -> None:
-    """SLIME ``custom_delta_pre_push_path`` hook.
-
-    SLIME calls this on every training rank after that rank has finished
-    writing its sparse delta files. Each rank copies the rank-prefixed files it
-    can see into the mounted S3 transport path. On non-distributed local runs,
-    the hook copies every file under
-    ``version_dir``.
+    Disk-delta publish-only writes ``weight_v{N}/`` straight to the mounted S3
+    transport, so there is nothing to copy. Rank 0 signals the provider's
+    customer hot-load API for the just-written version and blocks until the
+    elastic pool reports it ready, so the next rollout only runs once enough
+    replicas serve the new weights. (slime also advances its own ``latest``
+    pointer; the POST drives the front door — which owns the canonical pointer —
+    and gives us the readiness gate.)
     """
 
     del rollout_engines
+    if _distributed_rank() not in (None, 0):
+        return
     cfg = ShimConfig.from_env(args)
     identity = Path(version_dir).name
-    files = _uploadable_files(Path(version_dir), rank=_distributed_rank())
-    if not files:
-        logger.info("No local delta files to copy for %s", version_dir)
-        return
-
-    destination = cfg.transport_path_for_identity(identity)
-    for path in files:
-        rel = path.relative_to(version_dir).as_posix()
-        target = destination / rel
-        _replace_transport_file(path, target)
-        logger.info("Copied %s to %s", path, target)
-
-
-# Backward-compatible name for configs written before the transport moved from
-# direct boto3 uploads to Modal's CloudBucketMount filesystem.
-upload_delta_to_s3 = copy_delta_to_transport
-
-
-def _replace_transport_file(source: Path, target: Path) -> None:
-    """Copy ``source`` to ``target`` on transports that reject overwrites."""
-
-    target.parent.mkdir(parents=True, exist_ok=True)
-    if target.exists():
-        target.unlink()
-    with source.open("rb") as src, target.open("wb") as dst:
-        shutil.copyfileobj(src, dst)
-
-
-def publish_delta_to_hot_load(
-    args: Any,
-    version_dir: str,
-    files: list[str],
-    weight_version: str | int,
-    rollout_engines: list[Any],
-) -> list[Any]:
-    """SLIME ``custom_delta_publish_path`` hook.
-
-    Rank 0 calls this once per published SLIME version after every rank's
-    ``copy_delta_to_transport`` hook has completed. The hook blocks until the
-    provider reports enough replicas on the announced snapshot identity.
-    """
-
-    del version_dir, files, rollout_engines
-    version = int(weight_version)
-    cfg = ShimConfig.from_env(args)
-    identity = cfg.identity_for_version(version)
+    version = parse_weight_identity(identity)
+    if version is None:
+        raise ValueError(f"version dir {version_dir!r} is not weight_v<NNNNNN>")
     _post_hot_load(
         cfg,
         identity=identity,
@@ -207,7 +153,6 @@ def publish_delta_to_hot_load(
         state.ready_count(target_snapshot_identity=identity),
         len(state.replicas),
     )
-    return []
 
 
 def rollout_request_weight_version_hook(
@@ -373,20 +318,6 @@ def _headers(cfg: ShimConfig) -> dict[str, str]:
     if cfg.provider_deployment:
         headers["Provider-Deployment"] = cfg.provider_deployment
     return headers
-
-
-def _uploadable_files(version_dir: Path, *, rank: int | None) -> list[Path]:
-    if not version_dir.exists():
-        return []
-    files = sorted(
-        path
-        for path in version_dir.rglob("*")
-        if path.is_file() and not path.name.endswith(".tmp")
-    )
-    if rank is None:
-        return files
-    rank_prefix = f"rank{rank:04d}_"
-    return [path for path in files if path.name.startswith(rank_prefix)]
 
 
 def _distributed_rank() -> int | None:

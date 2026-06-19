@@ -9,9 +9,11 @@ HF_SECRET_NAME = "huggingface-secret"
 # The trainer calls the provider shim, so it needs the same optional auth values
 # as the provider itself.
 SHIM_SECRET_NAME = "stitch-api-shim-provider"
-DELTA_WORK_ROOT = "/tmp/slime-api-shim-deltas"
-DELTA_VERSION_DIR = f"{DELTA_WORK_ROOT}/versions"
-ROLLOUT_NUM_ENGINES = 8
+# slime writes weight_v{N}/ + the raw `latest` pointer straight here (the
+# mounted S3 transport), in the flat customer layout the provider pool pulls.
+TRANSPORT_ROOT = "/mnt/stitch-s3-transport"
+# Publish-only drives one opaque HTTP endpoint (the provider front door).
+ROLLOUT_NUM_ENGINES = 1
 
 modal = ModalConfig(gpu="H200")
 
@@ -29,8 +31,9 @@ class _Slime(SlimeConfig):
     colocate = False
     rollout_num_gpus = 0
     rollout_num_gpus_per_engine = 1
-    rollout_http_endpoint_url = None
-    rollout_http_endpoint_abort_strategy = "cancel-only"
+    # Publish-only mode: slime launches no engines and routes /generate to this
+    # opaque URL (set at launch from the deployed provider front door).
+    rollout_endpoint_url = None
     custom_rollout_request_hook_path = (
         "cookbook.standalone_rollouts.slime.hooks.rollout_request_weight_version_hook"
     )
@@ -39,22 +42,19 @@ class _Slime(SlimeConfig):
     api_shim_rollout_request_retry_attempts = 240
     api_shim_rollout_request_retry_sleep = 1.0
 
-    # Sparse delta disk transport. Hooks upload to S3, call the provider
-    # hot-load API, and poll readiness before SLIME starts the next rollout.
+    # Disk-delta publish-only: slime writes weight_v{N}/ (+ a `latest` pointer)
+    # straight to the mounted S3 transport for the elastic provider pool to pull.
+    # rollout_endpoint_url puts slime in publish-only mode, so no local
+    # checkpoint dir is required. The pre-push hook calls the customer hot-load
+    # API and waits for pool readiness before the next rollout.
     update_weight_mode = "delta"
     update_weight_transport = "disk"
-    update_weight_encoding = "deltas_zstd"
-    update_weight_delta_dir = DELTA_VERSION_DIR
-    update_weight_delta_root = DELTA_WORK_ROOT
-    update_weight_delta_keep_files = True
-    update_weight_delta_publish_only = True
-    update_weight_delta_publish_wait = "sync"
-    api_shim_transport_root = "/mnt/stitch-s3-transport"
+    update_weight_delta_encoding = "xor"
+    update_weight_delta_checksum = "xxh3-128"
+    update_weight_disk_dir = TRANSPORT_ROOT
+    api_shim_transport_root = TRANSPORT_ROOT
     custom_delta_pre_push_path = (
-        "cookbook.standalone_rollouts.slime.hooks.copy_delta_to_transport"
-    )
-    custom_delta_publish_path = (
-        "cookbook.standalone_rollouts.slime.hooks.publish_delta_to_hot_load"
+        "cookbook.standalone_rollouts.slime.hooks.announce_and_wait"
     )
 
     # Data
