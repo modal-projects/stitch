@@ -229,6 +229,61 @@ def download_model() -> None:
     hf_cache_volume.commit()
 
 
+@app.function(
+    image=image,
+    secrets=[modal.Secret.from_name(exp.SHIM_SECRET_NAME)],
+    timeout=35 * MINUTES,
+    include_source=False,
+)
+def check(timeout_seconds: int = 20 * MINUTES) -> None:
+    """Authenticated smoke from inside Modal: reads the provider secret (so the
+    API key never leaves Modal), polls GET /hot_load readiness through the front
+    door, then serves a base completion through it. Run with:
+
+        uv run --extra modal modal run -m cookbook.standalone_rollouts.modal_serve::check
+    """
+    import json
+    import time
+    import urllib.request
+
+    gateway = modal.Function.from_name(APP_NAME, "frontdoor").get_web_url().rstrip("/")
+    headers = _shim_headers()
+    deadline = time.time() + timeout_seconds
+    last = ""
+    while True:
+        try:
+            req = urllib.request.Request(
+                f"{gateway}/hot_load/v1/models/hot_load", headers=headers
+            )
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                pool = json.load(resp)
+            ready = [r for r in pool.get("replicas", []) if r.get("readiness")]
+            print(f"pool: {len(pool.get('replicas', []))} replicas, {len(ready)} ready :: {pool}")
+            if len(ready) >= exp.ROLLOUT_MIN_CONTAINERS:
+                break
+            last = f"only {len(ready)} ready"
+        except Exception as exc:  # noqa: BLE001
+            last = f"{type(exc).__name__}: {exc}"
+        if time.time() > deadline:
+            raise TimeoutError(f"front-door readiness timed out: {last}")
+        time.sleep(10)
+
+    payload = {
+        "model": MODEL_NAME,
+        "messages": [{"role": "user", "content": "Reply with exactly OK."}],
+        "max_tokens": 8,
+        "temperature": 0,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+    req = urllib.request.Request(
+        f"{gateway}/v1/chat/completions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", **headers},
+    )
+    with urllib.request.urlopen(req, timeout=180) as resp:
+        print("completion:", json.dumps(json.load(resp))[:1200])
+
+
 @app.local_entrypoint()
 def print_url() -> None:
     print(frontdoor_url())
