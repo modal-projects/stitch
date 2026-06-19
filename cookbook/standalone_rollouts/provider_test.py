@@ -228,6 +228,9 @@ class _RecordingUpstream:
     async def __aexit__(self, *exc) -> bool:
         return False
 
+    async def aclose(self) -> None:
+        return None
+
     async def request(self, method, url, **kwargs):
         import httpx
 

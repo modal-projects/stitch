@@ -98,6 +98,9 @@ class _RecordingUpstream:
     async def __aexit__(self, *exc) -> bool:
         return False
 
+    async def aclose(self) -> None:
+        return None
+
     async def request(self, method, url, **kwargs):
         import httpx
 
@@ -126,6 +129,9 @@ class _BlockingUpstream:
 
     async def __aexit__(self, *exc) -> bool:
         return False
+
+    async def aclose(self) -> None:
+        return None
 
     async def request(self, method, url, **kwargs):
         import httpx
@@ -283,6 +289,35 @@ class SidecarStampingTest(unittest.TestCase):
                 self.assertNotIn("extra_key", _RecordingUpstream.last_json or {})
                 self.assertNotIn("weight_version_start", resp.json())
                 self.assertNotIn("weight_version_end", resp.json())
+
+
+class _CountingUpstream(_RecordingUpstream):
+    instances = 0
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        type(self).instances += 1
+
+
+class SidecarClientPoolTest(unittest.TestCase):
+    def test_upstream_client_is_pooled_across_requests(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            from fastapi.testclient import TestClient
+
+            from stitch.servers.sglang import create_app
+
+            board = FilesystemBulletinBoard(tmp)
+            manager = WeightSyncManager(board=board, engine=FakeEngine())
+            app = create_app(manager, upstream_url="http://127.0.0.1:9")
+
+            _CountingUpstream.instances = 0
+            with TestClient(app) as client, mock.patch("httpx.AsyncClient", _CountingUpstream):
+                for _ in range(3):
+                    self.assertEqual(client.post("/generate", json={"text": "hi"}).status_code, 200)
+            # One pooled client served all three requests, plus it was closed
+            # on shutdown (no per-request construct/teardown).
+            self.assertEqual(_CountingUpstream.instances, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
