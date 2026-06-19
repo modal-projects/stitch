@@ -18,7 +18,7 @@ LOCAL_DELTA_DIR = "/tmp/slime-api-shim-deltas"
 # Publish-only drives one opaque HTTP endpoint (the provider front door).
 ROLLOUT_NUM_ENGINES = 1
 
-modal = ModalConfig(gpu="H200")
+modal = ModalConfig(gpu="H200", region="us")
 
 
 class _Slime(SlimeConfig):

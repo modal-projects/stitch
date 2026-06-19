@@ -30,8 +30,13 @@ S3_TRANSPORT_OIDC_AUTH_ROLE_ARN = (
 
 GPU = "H200"
 CLOUD = None
-REGION = None
-PROXY_REGIONS = ["us-east"]
+# Pin the rollout pool (and the front door) to the US so they stay co-located.
+REGION = "us"
+# Region inputs are routed through. The front door's `routing_region` and the
+# rollout pool's Flash `proxy_regions` are kept identical so customer traffic and
+# the pool share one entry region.
+ROUTING_REGION = "us-east"
+PROXY_REGIONS = [ROUTING_REGION]
 ROLLOUT_MIN_CONTAINERS = 2
 ROLLOUT_NUM_GPUS_PER_ENGINE = 1
 ROLLOUT_CONCURRENCY = 64
