@@ -26,7 +26,7 @@ def build_manager(
     base_checkpoint_dir: str,
     volume_name: str = "",
     run_id: str | None = None,
-    commit_mode: CommitMode = "quiesce",
+    commit_mode: CommitMode = "in_place",
     debug_requests: bool = False,
 ) -> WeightSyncManager:
     refresh = None
@@ -75,13 +75,13 @@ def main() -> None:
     parser.add_argument(
         "--commit-mode",
         choices=("quiesce", "in_place"),
-        default=os.environ.get("SIDECAR_COMMIT_MODE", "quiesce"),
+        default=os.environ.get("SIDECAR_COMMIT_MODE", "in_place"),
         help=(
-            "quiesce: wait out active requests and flush before applying. "
-            "in_place: pause/apply/continue without flushing; in-flight "
-            "requests keep decoding on stale KV and version isolation comes "
-            "from extra_key stamping. in_place requires an engine build with "
-            "the overlap-drain fix."
+            "in_place (default): pause/apply/continue without flushing; "
+            "in-flight requests keep decoding on stale KV and version isolation "
+            "comes from extra_key stamping. Relies on the engine's overlap-drain "
+            "fix. quiesce: wait out active requests and flush before applying "
+            "(safe on any build)."
         ),
     )
     parser.add_argument(
