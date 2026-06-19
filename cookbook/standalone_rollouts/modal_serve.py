@@ -2,7 +2,7 @@
 
 Log-as-truth design: the front door is a singleton that owns the monotonic
 ``latest`` pointer in the S3 transport and implements the customer's
-``POST/GET /hot_load`` API (``docs/orig-api.md``). An elastic Flash pool of
+``POST/GET /hot_load`` API. An elastic Flash pool of
 SGLang servers + stitch sidecars reconciles to ``latest`` on its own and serves
 inference. There is no central desired-state mailbox: the pool pulls, and the
 front door derives readiness by enumerating the live containers.

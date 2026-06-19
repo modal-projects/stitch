@@ -1,8 +1,7 @@
 # Standalone SGLang Rollout Provider
 
 This cookbook deploys a standalone Modal Flash pool of SGLang rollout servers
-that implements the customer hot-load API in
-[docs/api-shim.md](../../docs/api-shim.md). External trainers upload checkpoints
+that implements the customer hot-load API. External trainers upload checkpoints
 or deltas to S3, call the provider hot-load endpoint, poll readiness, then send
 rollout traffic to the same provider URL.
 
