@@ -26,8 +26,11 @@ class ProtocolTest(unittest.TestCase):
             manifest = VersionManifest(
                 version=3,
                 base_version=2,
-                backend="sparse_delta",
-                load_format="delta",
+                backend="disk_delta",
+                load_format="auto",
+                delta_encoding="xor",
+                compression_format="zstd",
+                checksum_format="xxh3-128",
                 transition_files=["rank0000_flush000000.safetensors"],
                 artifacts=[
                     Artifact(
@@ -49,6 +52,49 @@ class ProtocolTest(unittest.TestCase):
             self.assertEqual(loaded.transition_artifact_paths(), ["rank0000_flush000000.safetensors"])
             self.assertEqual(loaded.artifacts[0].checksum, "sha256:abc")
             self.assertEqual(loaded.run_id, "run-1")
+            self.assertEqual(loaded.delta_encoding, "xor")
+            self.assertEqual(loaded.compression_format, "zstd")
+            self.assertEqual(loaded.checksum_format, "xxh3-128")
+
+    def test_manifest_from_slime_index(self) -> None:
+        import json
+
+        with tempfile.TemporaryDirectory() as tmp:
+            version_dir = Path(tmp) / "weight_v000007"
+            version_dir.mkdir(parents=True)
+            (version_dir / "model.safetensors.index.json").write_text(
+                json.dumps(
+                    {
+                        "metadata": {
+                            "version": "000007",
+                            "base_version": "000006",
+                            "delta_encoding": "xor",
+                            "compression_format": "zstd",
+                            "checksum_format": "xxh3-128",
+                        },
+                        "weight_map": {
+                            "model.layers.0.weight": "model-00001-of-00002.safetensors",
+                            "model.layers.1.weight": "model-00002-of-00002.safetensors",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            manifest = VersionManifest.from_slime_index(version_dir, run_id="run-9")
+
+            self.assertEqual(manifest.version, 7)
+            self.assertEqual(manifest.base_version, 6)
+            self.assertEqual(manifest.backend, "disk_delta")
+            self.assertEqual(manifest.load_format, "auto")
+            self.assertEqual(manifest.delta_encoding, "xor")
+            self.assertEqual(manifest.compression_format, "zstd")
+            self.assertEqual(manifest.checksum_format, "xxh3-128")
+            self.assertEqual(
+                manifest.transition_files,
+                ["model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"],
+            )
+            self.assertEqual(manifest.run_id, "run-9")
 
     def test_weight_identity_round_trips(self) -> None:
         self.assertEqual(weight_identity(0), "weight_v000000")

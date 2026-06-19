@@ -230,6 +230,12 @@ class VersionManifest:
     base_version: int
     backend: str
     load_format: str
+    # How the transition artifacts are encoded/compressed/checksummed. Mirrors
+    # slime's disk-delta index.json metadata so the engine-neutral manifest is
+    # self-describing; None on full snapshots or pre-delta manifests.
+    delta_encoding: str | None = None
+    compression_format: str | None = None
+    checksum_format: str | None = None
     transition_files: list[str] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
     protocol_version: int = PROTOCOL_VERSION
@@ -258,6 +264,9 @@ class VersionManifest:
             base_version=int(data["base_version"]),
             backend=str(data.get("backend", "sparse_delta")),
             load_format=str(data.get("load_format", "delta")),
+            delta_encoding=_optional_str(data.get("delta_encoding")),
+            compression_format=_optional_str(data.get("compression_format")),
+            checksum_format=_optional_str(data.get("checksum_format")),
             transition_files=transition_files,
             created_at=float(data.get("created_at", 0.0)),
             protocol_version=protocol_version,
@@ -266,6 +275,44 @@ class VersionManifest:
             base_model=None if data.get("base_model") is None else str(data["base_model"]),
             recovery=data.get("recovery"),
             metadata=dict(data.get("metadata") or {}),
+        )
+
+    @classmethod
+    def from_slime_index(
+        cls,
+        version_dir: str | Path,
+        *,
+        run_id: str | None = None,
+        base_model: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> "VersionManifest":
+        """Lift a slime disk-delta version directory's
+        ``model.safetensors.index.json`` into the engine-neutral manifest.
+
+        slime's disk-delta publisher writes a canonical HF index whose
+        ``metadata`` block carries the version lineage and the delta
+        encoding/compression/checksum. The delta is applied host-side and the
+        engine then reloads the full local checkpoint, so ``load_format`` is the
+        plain ``auto`` path, not a delta receiver.
+        """
+        index_path = Path(version_dir) / "model.safetensors.index.json"
+        with index_path.open("r", encoding="utf-8") as f:
+            index = json.load(f)
+        meta = index.get("metadata") or {}
+        files = sorted({str(name) for name in (index.get("weight_map") or {}).values()})
+        return cls(
+            version=int(meta["version"]),
+            base_version=int(meta["base_version"]),
+            backend="disk_delta",
+            load_format="auto",
+            delta_encoding=_optional_str(meta.get("delta_encoding")),
+            compression_format=_optional_str(meta.get("compression_format")),
+            checksum_format=_optional_str(meta.get("checksum_format")),
+            transition_files=files,
+            artifacts=[Artifact(kind="transition", path=path) for path in files],
+            run_id=run_id,
+            base_model=base_model,
+            metadata=metadata if metadata is not None else {"trainer": "slime", "transport": "disk"},
         )
 
     def write(self, path: str | Path) -> None:
@@ -283,6 +330,12 @@ class VersionManifest:
             "artifacts": [a.to_dict() for a in artifacts],
             "created_at": float(self.created_at),
         }
+        if self.delta_encoding is not None:
+            data["delta_encoding"] = self.delta_encoding
+        if self.compression_format is not None:
+            data["compression_format"] = self.compression_format
+        if self.checksum_format is not None:
+            data["checksum_format"] = self.checksum_format
         if self.run_id is not None:
             data["run_id"] = self.run_id
         if self.base_model is not None:
