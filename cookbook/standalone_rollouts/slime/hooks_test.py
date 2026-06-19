@@ -68,7 +68,10 @@ class RolloutRequestHookTest(unittest.TestCase):
     def test_skips_pin_without_rollout_id_but_sets_affinity(self) -> None:
         # PR #5's request carries no rollout_id: the hook must not crash, must
         # skip the version pin, and still apply session affinity.
-        args = Namespace(api_shim_rollout_request_weight_version_mode="exact")
+        args = Namespace(
+            api_shim_rollout_request_weight_version_mode="exact",
+            rollout_endpoint_url="http://provider",
+        )
         sample = Namespace(session_id="grp-1")
         request = {"url": "u", "payload": {}, "headers": None, "max_retries": 60, "retry_sleep": 1.0}
         with mock.patch.dict("os.environ", {}, clear=True):
@@ -76,10 +79,31 @@ class RolloutRequestHookTest(unittest.TestCase):
         self.assertNotIn("weight_version", request["payload"])
         self.assertEqual(request["headers"]["x-session-affinity"], "grp-1")
 
+    def test_attaches_auth_headers(self) -> None:
+        # The front door enforces auth on inference too, so every rollout request
+        # must carry the provider auth headers.
+        args = Namespace(
+            api_shim_rollout_request_weight_version_mode="none",
+            rollout_endpoint_url="http://provider",
+        )
+        sample = Namespace(session_id=None)
+        request = {"payload": {}, "headers": None}
+        env = {
+            "STITCH_SHIM_API_KEY": "k",
+            "STITCH_SHIM_PROVIDER_MODEL": "qwen3-4b",
+            "STITCH_SHIM_PROVIDER_DEPLOYMENT": "prod",
+        }
+        with mock.patch.dict("os.environ", env, clear=True):
+            hooks.rollout_request_weight_version_hook(args, sample, request)
+        self.assertEqual(request["headers"]["Authorization"], "Bearer k")
+        self.assertEqual(request["headers"]["Provider-Model"], "qwen3-4b")
+        self.assertEqual(request["headers"]["Provider-Deployment"], "prod")
+
     def test_pins_exact_when_rollout_id_supplied(self) -> None:
         args = Namespace(
             api_shim_rollout_request_weight_version_mode="exact",
             api_shim_rollout_request_version_lag=0,
+            rollout_endpoint_url="http://provider",
         )
         sample = Namespace(session_id=None)
         request = {"payload": {}, "headers": None, "rollout_id": 3}
