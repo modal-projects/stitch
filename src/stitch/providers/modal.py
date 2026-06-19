@@ -62,27 +62,30 @@ def wake_targets(targets: list[str], version: int, *, timeout: float = 5.0) -> N
     import logging
     from concurrent.futures import ThreadPoolExecutor
 
-    import requests
+    import httpx
 
     logger = logging.getLogger(__name__)
 
-    def wake_one(target: str) -> None:
-        url = f"{target}/rpc_sync_from_bulletin_board"
-        try:
-            resp = requests.post(
-                url, json={"target_version": int(version)}, timeout=timeout
-            )
-            resp.raise_for_status()
-            logger.info("Wake sync accepted by %s: %s", target, resp.text[:200])
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Failed to wake %s for version %s: %s", target, version, exc)
-
     if not targets:
         return
-    # Wakes run in the trainer publish hot path; fan out instead of paying
-    # one round-trip per container serially.
-    with ThreadPoolExecutor(max_workers=min(16, len(targets))) as pool:
-        list(pool.map(wake_one, targets))
+
+    # Wakes run in the trainer publish hot path; fan out instead of paying one
+    # round-trip per container serially. One httpx.Client is shared across the
+    # pool (Clients are thread-safe) so connections and keep-alive are reused.
+    # trust_env=False keeps proxy env vars from rerouting localhost/gateway hops.
+    with httpx.Client(timeout=timeout, trust_env=False) as client:
+
+        def wake_one(target: str) -> None:
+            url = f"{target}/rpc_sync_from_bulletin_board"
+            try:
+                resp = client.post(url, json={"target_version": int(version)})
+                resp.raise_for_status()
+                logger.info("Wake sync accepted by %s: %s", target, resp.text[:200])
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to wake %s for version %s: %s", target, version, exc)
+
+        with ThreadPoolExecutor(max_workers=min(16, len(targets))) as pool:
+            list(pool.map(wake_one, targets))
 
 
 def normalize_base_url(host: str) -> str:
