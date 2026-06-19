@@ -6,7 +6,7 @@ import unittest
 
 from stitch.bulletin import FilesystemBulletinBoard
 from stitch.protocol import SyncState, VersionManifest, WeightVersionPolicy
-from stitch.sync import PolicyViolation, WeightSyncManager
+from stitch.sync import PolicyViolation, RolloutAdmissionGate, WeightSyncManager
 
 
 class FakeEngine:
@@ -254,6 +254,69 @@ class SyncManagerTest(unittest.TestCase):
                 # The gate must not be left set after a failed commit.
                 async with manager.request_context() as version:
                     self.assertEqual(version, 0)
+
+        asyncio.run(run())
+
+
+class AdmissionGateCommitDriverTest(unittest.TestCase):
+    """The shared commit_version driver both WeightSyncManager and the hot-load
+    ProviderShim commit through."""
+
+    def test_in_place_commit_advances_version_before_resume(self) -> None:
+        async def run() -> None:
+            gate = RolloutAdmissionGate(commit_mode="in_place")
+            events: list[str] = []
+
+            async def pause() -> None:
+                events.append("pause")
+
+            async def apply() -> None:
+                events.append("apply")
+
+            async def resume() -> None:
+                events.append("resume")
+
+            await gate.commit_version(
+                apply=apply,
+                on_applied=lambda: events.append("applied"),
+                pause=pause,
+                resume=resume,
+            )
+
+            # Pause, apply, advance the served version, then resume — and the
+            # gate is reopened afterward.
+            self.assertEqual(events, ["pause", "apply", "applied", "resume"])
+            self.assertFalse(gate._committing)
+
+        asyncio.run(run())
+
+    def test_quiesce_commit_skips_pause_and_unwinds_on_failure(self) -> None:
+        async def run() -> None:
+            gate = RolloutAdmissionGate(commit_mode="quiesce")
+            events: list[str] = []
+
+            async def pause() -> None:
+                events.append("pause")
+
+            async def apply() -> None:
+                events.append("apply")
+                raise RuntimeError("boom")
+
+            async def resume() -> None:
+                events.append("resume")
+
+            with self.assertRaises(RuntimeError):
+                await gate.commit_version(
+                    apply=apply,
+                    on_applied=lambda: events.append("applied"),
+                    pause=pause,
+                    resume=resume,
+                )
+
+            # quiesce never pauses; a failed apply advances nothing and the gate
+            # is cleared so admissions resume.
+            self.assertEqual(events, ["apply"])
+            self.assertFalse(gate._committing)
 
         asyncio.run(run())
 
