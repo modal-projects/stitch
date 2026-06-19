@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 
 from stitch.protocol import VersionManifest
 
@@ -35,11 +38,51 @@ def parse_extra_key_version(extra_key: str) -> int | None:
 
 @dataclass
 class SGLangDiskDeltaAdapter:
+    """Applies disk-delta weight versions to one local SGLang server.
+
+    The delta is applied *host-side*: slime's ``disk_delta`` patches a local
+    full HF checkpoint in place (chain-replayed from the base, per-tensor
+    checksum-verified, with a base-version precondition), and the engine then
+    reloads that checkpoint through the ordinary ``update_weights_from_disk``
+    path. The engine carries no delta receiver, so no ``load_format`` / ``files``
+    delta payload is sent — that is all the new disk-delta slime branch needs.
+
+    ``apply_deltas`` / ``init_local_checkpoint`` are injectable so the adapter is
+    testable without slime/numpy installed; by default they bind lazily to
+    ``slime.utils.disk_delta``.
+    """
+
     upstream_url: str
-    backend: str = "sparse_delta"
+    local_checkpoint_dir: str
+    base_checkpoint_dir: str
+    backend: str = "disk_delta"
+    apply_deltas: Callable[[str, str, int], None] | None = None
+    init_local_checkpoint: Callable[[str, str], None] | None = None
 
     def __post_init__(self) -> None:
         self.upstream_url = self.upstream_url.rstrip("/")
+
+    def _apply_deltas(self) -> Callable[[str, str, int], None]:
+        if self.apply_deltas is not None:
+            return self.apply_deltas
+        from slime.utils.disk_delta import apply_deltas
+
+        return apply_deltas
+
+    def _init_local_checkpoint(self) -> Callable[[str, str], None]:
+        if self.init_local_checkpoint is not None:
+            return self.init_local_checkpoint
+        from slime.utils.disk_delta import init_local_checkpoint
+
+        return init_local_checkpoint
+
+    async def prepare(self) -> None:
+        """Materialize the host-local full checkpoint from the base once
+        (idempotent) so later deltas apply on top of it in place. Run at startup;
+        blocking copy, so it is offloaded to a thread."""
+        await asyncio.to_thread(
+            self._init_local_checkpoint(), self.local_checkpoint_dir, self.base_checkpoint_dir
+        )
 
     async def flush_cache(self) -> None:
         import httpx
@@ -68,14 +111,17 @@ class SGLangDiskDeltaAdapter:
     async def apply_manifest(self, manifest: VersionManifest, version_path: str) -> None:
         import httpx
 
-        files = manifest.transition_artifact_paths()
-        if not files:
-            return
+        # Bring the local checkpoint up to this version host-side (apply_deltas
+        # chain-replays from whatever is applied, verifying each base_version),
+        # then reload the full local checkpoint. version_path is the published
+        # version dir; its parent is the root of weight_v* dirs apply_deltas walks.
+        delta_root = str(Path(version_path).parent)
+        await asyncio.to_thread(
+            self._apply_deltas(), self.local_checkpoint_dir, delta_root, int(manifest.version)
+        )
 
         payload = {
-            "model_path": version_path,
-            "files": files,
-            "load_format": manifest.load_format,
+            "model_path": self.local_checkpoint_dir,
             "weight_version": str(manifest.version),
             # The sync manager flushes via GET /flush_cache while quiesced.
             # The engine-side post-apply flush hard-asserts on failure

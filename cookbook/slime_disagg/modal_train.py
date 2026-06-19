@@ -44,6 +44,9 @@ SIDECAR_PORT = 8000
 SGLANG_PORT = 8001
 RAY_PORT = 6379
 SERVER_STARTUP_TIMEOUT = 35 * MINUTES
+# Ephemeral host-local full HF checkpoint the sidecar patches in place per delta
+# (seeded once from the base; rebuilt from base on a cold container).
+LOCAL_CHECKPOINT_PATH = "/local-checkpoint"
 
 SLIME_IMAGE_TAG = "slimerl/slime:nightly-dev-20260527a"
 SLIME_ROOT = "/root/slime"
@@ -190,10 +193,17 @@ class Server:
             request_timeout=120.0,
             max_attempts_per_request=3,
         )
+        # Deltas are applied host-side onto a copy of the base checkpoint; the
+        # base resolves to the same HF cache snapshot the SGLang server loaded.
+        from huggingface_hub import snapshot_download
+
+        base_checkpoint_dir = snapshot_download(MODEL_NAME, local_files_only=True)
         self.sidecar = helpers.start_sglang_sidecar(
             sidecar_port=SIDECAR_PORT,
             sglang_port=SGLANG_PORT,
             bulletin_root=exp.DELTA_BULLETIN_ROOT,
+            local_checkpoint_dir=LOCAL_CHECKPOINT_PATH,
+            base_checkpoint_dir=base_checkpoint_dir,
             volume_name=exp.DELTA_VOLUME_NAME,
             commit_mode=exp.SIDECAR_COMMIT_MODE,
             debug_requests=getattr(exp, "SIDECAR_DEBUG_REQUESTS", False),
