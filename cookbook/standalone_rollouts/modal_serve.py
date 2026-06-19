@@ -24,7 +24,11 @@ import modal.experimental
 from cookbook.slime_disagg import helpers
 from cookbook.standalone_rollouts import frontdoor as frontdoor_mod
 from stitch.bulletin import FilesystemBulletinBoard
-from stitch.providers.modal import discover_flash_targets, resolve_flash_gateway_url, wake_targets
+from stitch.providers.modal import (
+    discover_flash_targets,
+    resolve_flash_gateway_url,
+    wake_targets,
+)
 
 
 PROVIDER_CONFIG = os.environ.get("PROVIDER_CONFIG", "qwen3_4b_hot_load")
@@ -246,7 +250,7 @@ def check(timeout_seconds: int = 20 * MINUTES) -> None:
     import time
     import urllib.request
 
-    gateway = modal.Function.from_name(APP_NAME, "frontdoor").get_web_url().rstrip("/")
+    gateway = modal.Server.from_name(APP_NAME, "FrontDoor").get_url().rstrip("/")
     headers = _shim_headers()
     deadline = time.time() + timeout_seconds
     last = ""
@@ -258,7 +262,9 @@ def check(timeout_seconds: int = 20 * MINUTES) -> None:
             with urllib.request.urlopen(req, timeout=30) as resp:
                 pool = json.load(resp)
             ready = [r for r in pool.get("replicas", []) if r.get("readiness")]
-            print(f"pool: {len(pool.get('replicas', []))} replicas, {len(ready)} ready :: {pool}")
+            print(
+                f"pool: {len(pool.get('replicas', []))} replicas, {len(ready)} ready :: {pool}"
+            )
             if len(ready) >= exp.ROLLOUT_MIN_CONTAINERS:
                 break
             last = f"only {len(ready)} ready"
@@ -398,7 +404,10 @@ def _auth_error(headers):
             status_code=400,
         )
     provider_deployment = os.environ.get("STITCH_SHIM_PROVIDER_DEPLOYMENT")
-    if provider_deployment and headers.get("provider-deployment") != provider_deployment:
+    if (
+        provider_deployment
+        and headers.get("provider-deployment") != provider_deployment
+    ):
         return JSONResponse(
             {"error": "Provider-Deployment header does not match this deployment"},
             status_code=400,
@@ -406,96 +415,135 @@ def _auth_error(headers):
     return None
 
 
-@app.function(
+FRONTDOOR_PORT = 8000
+
+
+@app.server(
     image=image,
     volumes={str(S3_TRANSPORT_MOUNT_PATH): s3_transport_mount},
     secrets=[modal.Secret.from_name(exp.SHIM_SECRET_NAME)],
     min_containers=1,
-    max_containers=1,  # singleton: exactly one writer of the `latest` pointer
+    max_containers=2,  # singleton: exactly one writer of the `latest` pointer
     nonpreemptible=True,  # keep the sole writer up; a preemption blips the API
-    scaledown_window=15 * MINUTES,
+    scaledown_window=1,
+    region=exp.REGION,  # co-locate the front door with the rollout pool (us)
+    routing_region=exp.ROUTING_REGION,  # share the pool's Flash proxy region
+    port=FRONTDOOR_PORT,
+    unauthenticated=True,  # public customer endpoint; auth is enforced in-app
+    target_concurrency=1000,  # one container, many concurrent inputs
+    startup_timeout=5 * MINUTES,
+    exit_grace_period=25,
     include_source=False,
 )
-@modal.concurrent(max_inputs=1000)  # asgi front door: one container, many concurrent inputs
-@modal.asgi_app()
-def frontdoor():
+class FrontDoor:
     """Public front door: the single writer of `latest` and the customer
     hot-load API, plus an affinity-relabeling proxy to the rollout gateway.
 
-    No `from __future__ import annotations` interplay here — frontdoor_mod's
+    Serves the front-door FastAPI app under uvicorn (App.server). No
+    `from __future__ import annotations` interplay here — frontdoor_mod's
     create_frontdoor_app resolves its handler annotations against its own
     eager fastapi import.
     """
-    import httpx
-    from fastapi.responses import Response
 
-    board = FilesystemBulletinBoard(str(S3_TRANSPORT_MOUNT_PATH), layout="slime")
-    gateway: dict[str, str | None] = {"url": None}
-    clients: dict[str, httpx.AsyncClient] = {}
+    @modal.enter()
+    def start(self) -> None:
+        import threading
 
-    def _proxy_client() -> httpx.AsyncClient:
-        client = clients.get("client")
-        if client is None:
-            client = httpx.AsyncClient(timeout=None, trust_env=False)
-            clients["client"] = client
-        return client
+        import httpx
+        import uvicorn
+        from fastapi.responses import Response
 
-    async def read_current_version() -> int:
-        return board.read_latest()
+        board = FilesystemBulletinBoard(str(S3_TRANSPORT_MOUNT_PATH), layout="slime")
+        gateway: dict[str, str | None] = {"url": None}
+        clients: dict[str, httpx.AsyncClient] = {}
 
-    async def advance_to(version: int) -> None:
-        # Singleton writer: a single small write is one atomic S3 PutObject, so
-        # no rename dance is needed. Direct write avoids FUSE rename semantics.
-        (S3_TRANSPORT_MOUNT_PATH / "latest").write_text(f"{int(version):06d}", encoding="utf-8")
+        def _proxy_client() -> httpx.AsyncClient:
+            client = clients.get("client")
+            if client is None:
+                client = httpx.AsyncClient(timeout=None, trust_env=False)
+                clients["client"] = client
+            return client
 
-    async def list_server_infos() -> list[dict]:
-        targets = await asyncio.to_thread(discover_flash_targets, APP_NAME, Server.__name__)
-        infos: list[dict] = []
-        async with httpx.AsyncClient(timeout=10.0, trust_env=False) as client:
-            for target in targets:
-                try:
-                    resp = await client.get(f"{target}/server_info")
-                    infos.append(resp.json())
-                except Exception:  # noqa: BLE001 — unreachable replica reported as not-ready
-                    infos.append({"sync_state": None, "last_sync_error": "unreachable"})
-        return infos
+        async def read_current_version() -> int:
+            return board.read_latest()
 
-    async def wake(version: int) -> None:
-        targets = await asyncio.to_thread(discover_flash_targets, APP_NAME, Server.__name__)
-        await asyncio.to_thread(wake_targets, targets, version)
+        async def advance_to(version: int) -> None:
+            # Singleton writer: a single small write is one atomic S3 PutObject,
+            # so no rename dance is needed. Direct write avoids FUSE rename
+            # semantics.
+            (S3_TRANSPORT_MOUNT_PATH / "latest").write_text(
+                f"{int(version):06d}", encoding="utf-8"
+            )
 
-    async def proxy(request, path: str) -> Response:
-        if gateway["url"] is None:
-            gateway["url"] = provider_gateway_url()
-        headers = _frontdoor_headers(dict(request.headers))
-        body = await request.body()
-        resp = await _proxy_client().request(
-            request.method,
-            f"{gateway['url']}/{path}",
-            headers=headers,
-            content=body,
-            params=request.query_params,
+        async def list_server_infos() -> list[dict]:
+            targets = await asyncio.to_thread(
+                discover_flash_targets, APP_NAME, Server.__name__
+            )
+            infos: list[dict] = []
+            async with httpx.AsyncClient(timeout=10.0, trust_env=False) as client:
+                for target in targets:
+                    try:
+                        resp = await client.get(f"{target}/server_info")
+                        infos.append(resp.json())
+                    except Exception:  # noqa: BLE001 — unreachable replica reported as not-ready
+                        infos.append(
+                            {"sync_state": None, "last_sync_error": "unreachable"}
+                        )
+            return infos
+
+        async def wake(version: int) -> None:
+            targets = await asyncio.to_thread(
+                discover_flash_targets, APP_NAME, Server.__name__
+            )
+            await asyncio.to_thread(wake_targets, targets, version)
+
+        async def proxy(request, path: str) -> Response:
+            if gateway["url"] is None:
+                gateway["url"] = provider_gateway_url()
+            headers = _frontdoor_headers(dict(request.headers))
+            body = await request.body()
+            resp = await _proxy_client().request(
+                request.method,
+                f"{gateway['url']}/{path}",
+                headers=headers,
+                content=body,
+                params=request.query_params,
+            )
+            return Response(
+                content=resp.content,
+                status_code=resp.status_code,
+                media_type=resp.headers.get("content-type") or None,
+            )
+
+        asgi_app = frontdoor_mod.create_frontdoor_app(
+            read_current_version=read_current_version,
+            advance_to=advance_to,
+            list_server_infos=list_server_infos,
+            proxy=proxy,
+            authorize=_auth_error,
+            wake=wake,
         )
-        return Response(
-            content=resp.content,
-            status_code=resp.status_code,
-            media_type=resp.headers.get("content-type") or None,
+        config = uvicorn.Config(
+            asgi_app, host="0.0.0.0", port=FRONTDOOR_PORT, log_level="info"
         )
+        self._server = uvicorn.Server(config)
+        self._thread = threading.Thread(target=self._server.run, daemon=True)
+        self._thread.start()
 
-    return frontdoor_mod.create_frontdoor_app(
-        read_current_version=read_current_version,
-        advance_to=advance_to,
-        list_server_infos=list_server_infos,
-        proxy=proxy,
-        authorize=_auth_error,
-        wake=wake,
-    )
+    @modal.exit()
+    def stop(self) -> None:
+        server = getattr(self, "_server", None)
+        if server is not None:
+            server.should_exit = True
+        thread = getattr(self, "_thread", None)
+        if thread is not None:
+            thread.join(timeout=25)
 
 
 def frontdoor_url() -> str:
     """Advertised provider URL: external clients hit the front door, which owns
     `latest` and relabels affinity pre-gateway."""
-    return frontdoor.get_web_url().rstrip("/")
+    return FrontDoor.get_url().rstrip("/")
 
 
 def _start_provider_sidecar(*, base_checkpoint_dir: str) -> subprocess.Popen:

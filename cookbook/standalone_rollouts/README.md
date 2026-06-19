@@ -11,8 +11,9 @@ transport is the source of truth, and the elastic pool reconciles to it by pull.
 1. Modal starts one SGLang server + a stitch weight-sync sidecar per warm
    container. Each sidecar is a `WeightSyncManager` that reconciles its engine
    to `latest` (on startup, on a wake, and on a periodic poll).
-2. The **front door** — a singleton ASGI app (`max_containers=1`) and the only
-   writer of `latest` — serves the customer API. `POST /hot_load/...` advances
+2. The **front door** — a singleton `App.server` (`min_containers=1`, pinned to
+   the same routing region as the pool) and the only writer of `latest` — serves
+   the customer API. `POST /hot_load/...` advances
    `latest` (monotonic CAS; a rewind is rejected) and best-effort wakes the
    pool. The pool pulls the new `weight_v{N}/`, applies the disk delta host-side
    (slime `disk_delta`: chain-replay + per-tensor checksum), and reloads SGLang.
@@ -21,9 +22,6 @@ transport is the source of truth, and the elastic pool reconciles to it by pull.
    scaled-down replica can't haunt the readiness fraction.
 4. Inference (`/generate`, `/v1/chat/completions`, `/v1/completions`, …) is
    proxied to the SGLang gateway.
-
-There is no Modal `Dict` desired-mailbox and no per-replica self-report: a
-scaled-up container catches up by reading `latest` with no push.
 
 ## Layout
 
@@ -55,7 +53,7 @@ the POST metadata into the index before advancing `latest`.
 
 Session affinity is delegated to Modal's Flash gateway. External clients send
 the neutral `x-session-affinity` header to the **front door** (the advertised
-provider URL, an ASGI app in front of the pool); the front door rewrites it to
+provider URL, an `App.server` in front of the pool); the front door rewrites it to
 `Modal-Session-ID` *before* the gateway, which then consistently routes related
 requests to the same replica. The rewrite must happen pre-gateway, so it lives
 in the front door rather than the per-container sidecar. Requests without the

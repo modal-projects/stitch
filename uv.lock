@@ -507,7 +507,7 @@ wheels = [
 
 [[package]]
 name = "modal"
-version = "1.5.0"
+version = "1.5.1.dev10"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
@@ -524,9 +524,9 @@ dependencies = [
     { name = "typing-extensions" },
     { name = "watchfiles" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/59/f9/87425e60db2a8597b248417772b409c49ca3a05ff6b1282a21cd7d856f09/modal-1.5.0.tar.gz", hash = "sha256:15033cf84f5f4f9f8a3dcf47a768cfcca36d1ad38ab7b3459fd3cbc29aa84a77", size = 771722, upload-time = "2026-06-09T22:37:27.5Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/df/d8/a411a2ab084a73bc028835a5f5e37217e26c1d711841a84640aa8f91bf68/modal-1.5.1.dev10.tar.gz", hash = "sha256:c36c15e1a60e031ab34ac9ee9109786a0363bf888ccc5ae4aeff6d795a94e81e", size = 787356, upload-time = "2026-06-19T01:29:55.396Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/5c/71/85e476e7d32c0a648d5aa97c4335ac02357d059c2bb734cf175b08446597/modal-1.5.0-py3-none-any.whl", hash = "sha256:9c5687eff775d1372bd70b87e43499e40777a1de160f23786c00807bf342fcb6", size = 882122, upload-time = "2026-06-09T22:37:24.608Z" },
+    { url = "https://files.pythonhosted.org/packages/ec/8f/dec98992d3f6cec2c43a2a0b06b7129f230c0179f3217ed1708fd53ac727/modal-1.5.1.dev10-py3-none-any.whl", hash = "sha256:8f87d256fae3a4a75502bf3eac9fdf5e8a89d355e5cfa8dbe61d99fc5354dec2", size = 898275, upload-time = "2026-06-19T01:29:52.473Z" },
 ]
 
 [[package]]
@@ -984,7 +984,7 @@ requires-dist = [
     { name = "fastapi", marker = "extra == 'sglang'" },
     { name = "httpx", marker = "extra == 'modal'" },
     { name = "httpx", marker = "extra == 'sglang'" },
-    { name = "modal", marker = "extra == 'modal'" },
+    { name = "modal", marker = "extra == 'modal'", specifier = ">=1.5.1.dev9" },
     { name = "uvicorn", marker = "extra == 'sglang'" },
 ]
 provides-extras = ["modal", "sglang"]
@@ -994,14 +994,14 @@ dev = [{ name = "pytest" }]
 
 [[package]]
 name = "synchronicity"
-version = "0.12.3"
+version = "0.12.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ec/d5/e96e6082790c92480380f28aa53e111844cdac7b0f75846f4772cb535a43/synchronicity-0.12.3.tar.gz", hash = "sha256:0d4228b85eaf2805f23b4615b2039a9d24ea811646e2d9f8d0c033094eb85841", size = 60261, upload-time = "2026-05-28T12:33:50.206Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/5d/1c/f51dc54bbd302991026a53f9790735540e0e9e1184e9d5939f02446aa5bc/synchronicity-0.12.5.tar.gz", hash = "sha256:94d96b1d85698e3056b96a793b8c0949af6584e4a7d877fabdeb5385efe230aa", size = 60745, upload-time = "2026-06-18T21:06:23.545Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/57/ea/531a6ea751cbd989da386144810b1b8f529b0aae8c1a9beda8b40966c9c2/synchronicity-0.12.3-py3-none-any.whl", hash = "sha256:e476818cd14102136f41622c619de548f0000c024485fc18521c8fe908ea7574", size = 40982, upload-time = "2026-05-28T12:33:49.125Z" },
+    { url = "https://files.pythonhosted.org/packages/06/74/ad9b99520f70c0bc3318e582e359d360cfc0f7afd7bf368a7f24013cece7/synchronicity-0.12.5-py3-none-any.whl", hash = "sha256:fdbbb10d437bc08a6b0f814fc66fddd1b58ffed314533d42f1ab555801e781af", size = 41107, upload-time = "2026-06-18T21:06:22.505Z" },
 ]
 
 [[package]]
