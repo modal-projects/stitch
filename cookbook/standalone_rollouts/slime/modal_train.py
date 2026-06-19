@@ -64,6 +64,13 @@ trainer_image = (
         f" && git checkout FETCH_HEAD"
         f" && python3 -m pip install --no-deps -e {SLIME_ROOT}"
     )
+    # The base image installs megatron-core as a PEP 660 *strict* editable that
+    # hides megatron.training (which slime's megatron backend imports). Reinstall
+    # in compat mode so the whole source tree is importable (mirrors slime_disagg).
+    .run_commands(
+        "cd /root/Megatron-LM"
+        " && python3 -m pip install --no-deps -e . --config-settings editable_mode=compat"
+    )
     .pip_install(
         # Disk-delta encode side (slime.utils.disk_delta) compresses with
         # zstandard and checksums with xxhash (xxh3-128 default) / blake3.
