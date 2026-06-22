@@ -1,6 +1,6 @@
 # Disaggregated SLIME on Modal
 
-Train Qwen3-4B with GRPO while rollouts run on a separate, elastic pool of
+Train a model with GRPO while rollouts run on a separate, elastic pool of
 SGLang servers.
 
 The app has two halves.
@@ -19,17 +19,12 @@ on its own.
 
 ## Layout
 
-| File | What it is |
-|---|---|
-| `modal_train.py` | The Modal app. Image, `Server` pool, `Trainer` cluster, entrypoints |
-| `helpers.py` | Ray startup, sidecar process management, smoke checks |
-| `configs/base.py` | `ModalConfig` (infra) and `SlimeConfig` (training args) base classes |
-| `configs/qwen3_4b_delta_flash.py` | Qwen3-4B GSM8K GRPO, 3 rollouts. Protocol smoke test |
-| `configs/qwen3_4b_delta_flash_hillclimb.py` | Same, 120 rollouts with evals. Reward hillclimb |
-
-The `stitch` package (this repo) provides the bulletin-board protocol, the
-SGLang sidecar, and the SLIME hooks. Both it and this example are mounted
-into containers at startup, so code edits never rebuild the image.
+`modal_train.py` defines the Modal app (the `Server` pool, the `Trainer`
+cluster, and the setup/launch entrypoints); `configs/` holds one module per
+experiment. The `stitch` package (this repo) provides the bulletin-board
+protocol, the SGLang sidecar, and the SLIME hooks. Both `stitch` and this
+example are mounted into containers at startup, so code edits never rebuild
+the image.
 
 ## Run it
 
@@ -52,7 +47,7 @@ m run -m cookbook.slime_disagg.modal_train::smoke_flash_pool
 # Train. Returns immediately; the run continues on Modal.
 m run -m cookbook.slime_disagg.modal_train::launch_train
 
-# The 3-rollout config should leave the pool at version 3.
+# Smoke-check the pool at a given version (the chain advances one per rollout).
 m run -m cookbook.slime_disagg.modal_train::smoke_flash_pool --weight-version 3
 ```
 
@@ -79,26 +74,28 @@ The only environment variable is `EXPERIMENT_CONFIG`, which picks the config
 module at deploy time. Each experiment becomes its own Modal app:
 
 ```bash
-EXPERIMENT_CONFIG=qwen3_4b_delta_flash_hillclimb m deploy --strategy recreate -m cookbook.slime_disagg.modal_train
+EXPERIMENT_CONFIG=<experiment> m deploy --strategy recreate -m cookbook.slime_disagg.modal_train
 ```
 
-The hillclimb run is the same transport with a real acceptance signal.
-`passrate/pass@1` and `passrate/pass@8` should trend up, and `eval/gsm8k`
-should not regress. Useful log searches:
+A config with a real acceptance signal (rather than the smoke-test protocol
+check) runs the same transport while the reward metrics climb. The
+`passrate/pass@1` and `passrate/pass@8` metrics should trend up. Useful log
+searches (the app name is the config's `APP_NAME`):
 
 ```bash
-m app logs slime-qwen3-4b-delta-flash-hillclimb --since 4h --search "passrate "
-m app logs slime-qwen3-4b-delta-flash-hillclimb --since 4h --search "Published sparse delta"
+m app logs <app-name> --since 4h --search "passrate "
+m app logs <app-name> --since 4h --search "Published sparse delta"
 ```
 
 ## Protocol notes
 
-The trainer publishes one manifest per weight version at
-`/delta-bulletin/versions/weight_vNNNNNN/manifest.json`, then updates
-`/delta-bulletin/latest.json`. Sidecars apply versions strictly in order from
-their current version to the requested one. A retained chain of deltas keeps
-recovery simple, since a fresh container replays from version 0. Bounding
-that replay with periodic checkpoints is left for later.
+Each launch gets a fresh `run_id`. The trainer writes that run's delta chain
+under `/delta-bulletin/<run_id>/weight_v{N}/`, and a single `/delta-bulletin/latest`
+pointer names the active snapshot (`<run_id>/weight_v{N}`). Sidecars apply
+versions in order from their current version; when the pointer moves to a new
+run they re-materialize the base and replay that run's chain from the start.
+Each run is isolated under its own `run_id`, so sequential runs never collide.
+Bounding the per-run replay with periodic recovery anchors is left for later.
 
 Sidecars default to `quiesce` commit mode, which drains in-flight requests
 before applying a delta. The `in_place` mode (set `SIDECAR_COMMIT_MODE` in
