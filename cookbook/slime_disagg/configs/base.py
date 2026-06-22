@@ -39,10 +39,12 @@ class ModalConfig:
     """Modal infrastructure configuration."""
 
     gpu: GPUType = "H200"
-    memory: tuple[int, int] | None = None  # per-container memory in MiB (request, limit)
+    memory: tuple[int, int] | None = (
+        None  # per-container memory in MiB (request, limit)
+    )
     cloud: str | None = None  # e.g. "aws", "gcp"
     region: str | None = None  # e.g. "us-east-2"
-    rollout_min_containers: int = 2  # warm Flash rollout containers
+    rollout_min_containers: int = 4  # warm Flash rollout containers
     proxy_regions: list[str] = ["us-east"]  # Flash gateway proxy regions
 
     def __init__(self, **kwargs: Any) -> None:

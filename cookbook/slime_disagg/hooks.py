@@ -12,12 +12,13 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Any
 
 from stitch.bulletin import FilesystemBulletinBoard
 from stitch.protocol import parse_weight_identity
-from stitch.providers.modal import commit_volume, discover_flash_targets, wake_targets
+from stitch.providers.modal import commit_volume, discover_flash_targets, volume_reloader, wake_targets
 
 
 logger = logging.getLogger(__name__)
@@ -83,3 +84,68 @@ def _bulletin_root(args: Any) -> str:
         getattr(args, "update_weight_disk_dir", None)
         or os.environ.get("DELTA_BULLETIN_ROOT", "/delta-bulletin")
     )
+
+
+# ── M3: staleness-gated rollout requests ──────────────────────────────────────
+
+# Cache of the latest published version for the gate. The per-request hook gets no
+# rollout_id, so the staleness floor is derived out-of-band from the published
+# `latest` pointer (the publish hook already advanced + committed it). TTL-cached
+# with a Volume reload so a (possibly cross-node) rollout actor sees rank-0's
+# committed pointer without a Volume reload per request.
+_latest_cache: dict[str, Any] = {"version": 0, "at": -1e9, "board": None}
+
+
+def _gate_board(args: Any) -> FilesystemBulletinBoard:
+    vol = getattr(args, "update_weight_delta_volume_name", None) or os.environ.get("DELTA_VOLUME_NAME")
+    refresh = volume_reloader(vol) if vol else None
+    return FilesystemBulletinBoard(_bulletin_root(args), refresh=refresh, layout="slime")
+
+
+async def _latest_published(args: Any, ttl: float = 2.0) -> int:
+    now = time.monotonic()
+    if _latest_cache["board"] is None:
+        _latest_cache["board"] = _gate_board(args)
+    if now - _latest_cache["at"] >= ttl:
+        _latest_cache["at"] = now  # claim the refresh slot before awaiting -> no reload herd
+        try:
+            await _latest_cache["board"].refresh()
+            _latest_cache["version"] = int(_latest_cache["board"].read_latest())
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "gate: could not read latest published version; using cached %s",
+                _latest_cache["version"],
+                exc_info=True,
+            )
+    return _latest_cache["version"]
+
+
+async def gated_rollout_request_hook(args: Any, sample: Any, request: dict[str, Any]) -> None:
+    """SLIME ``custom_rollout_request_hook_path`` (M3): gate each rollout on
+    ``weight_version - k`` so unusable (too-stale) rollouts are never generated.
+
+    The per-request hook receives no rollout_id, so the staleness floor is derived
+    out-of-band from the published ``latest`` pointer (see ``_latest_published``).
+    A request pinned to ``min_required_version = latest - lag`` is admitted only by
+    a replica within ``lag`` versions of the newest weights; a lagging replica
+    returns a retryable 409 (which also nudges it to sync forward), so the trainer
+    never spends rollout compute on weights staler than its bound. ``min`` mode
+    (not ``exact``) lets the request cross in_place commits without being quiesced.
+    """
+    mode = str(getattr(args, "rollout_request_weight_version_mode", "min"))
+    if mode != "none":
+        latest = await _latest_published(args)
+        lag = int(getattr(args, "rollout_request_weight_version_lag", 0))
+        target = max(0, latest - lag)
+        key = "exact_version" if mode == "exact" else "min_required_version"
+        request["payload"]["weight_version"] = {key: target}
+
+    request["max_retries"] = int(getattr(args, "rollout_request_retry_attempts", request.get("max_retries", 60)))
+    request["retry_sleep"] = float(getattr(args, "rollout_request_retry_sleep", request.get("retry_sleep", 1.0)))
+
+    session_id = getattr(sample, "session_id", None)
+    if session_id:
+        header = str(getattr(args, "rollout_session_affinity_header", "x-session-affinity"))
+        headers = dict(request.get("headers") or {})
+        headers.setdefault(header, session_id)
+        request["headers"] = headers

@@ -30,7 +30,7 @@ transport is the source of truth, and the elastic pool reconciles to it by pull.
 | `modal_serve.py` | Standalone Modal rollout-provider app; owns the Modal `App`, the Server pool, and the singleton front door |
 | `frontdoor.py` | Front-door hot-load adapter logic (advance `latest`, live-readiness, proxy) — injected I/O, unit-tested |
 | `provider.py` | Per-container sidecar: a `WeightSyncManager` over a slime-layout board on the transport |
-| `configs/qwen3_4b_hot_load.py` | Qwen3-4B provider config |
+| `configs/moonlight_hot_load.py` | Moonlight-16B-A3B provider config (DeepSeek-V3-arch MoE; routing replay) |
 | `slime/` | Optional SLIME integration-test harness for this provider |
 
 ## Compatibility Notes
@@ -73,11 +73,11 @@ The default config mounts the S3 bucket `modal-stitch-s3-transport` at
 arn:aws:iam::459781239556:role/modal-buckets/stitch-s3-transport-role
 ```
 
-The mounted bucket prefix is `standalone-rollouts/qwen3-4b/`, so the external
+The mounted bucket prefix is `standalone-rollouts/moonlight/`, so the external
 S3 location for uploaded snapshots is:
 
 ```text
-s3://modal-stitch-s3-transport/standalone-rollouts/qwen3-4b/<identity>/
+s3://modal-stitch-s3-transport/standalone-rollouts/moonlight/<identity>/
 ```
 
 Override `STITCH_SHIM_S3_BUCKET_NAME`, `STITCH_SHIM_S3_KEY_PREFIX`,
@@ -90,7 +90,7 @@ Create the secret:
 ```bash
 uv run --extra modal modal secret create stitch-api-shim-provider \
   STITCH_SHIM_API_KEY=... \
-  STITCH_SHIM_PROVIDER_MODEL=qwen3-4b \
+  STITCH_SHIM_PROVIDER_MODEL=moonlight \
   STITCH_SHIM_PROVIDER_DEPLOYMENT=rollout-prod
 ```
 
@@ -110,7 +110,7 @@ m run -m cookbook.standalone_rollouts.modal_serve::print_url
 m run -m cookbook.standalone_rollouts.modal_serve::check
 ```
 
-The default app is `stitch-qwen3-4b-api-shim`. To create a separate deployment,
+The default app is `stitch-moonlight-api-shim`. To create a separate deployment,
 add a config under `configs/` and deploy with:
 
 ```bash
@@ -122,7 +122,7 @@ PROVIDER_CONFIG=my_provider_config m deploy -m cookbook.standalone_rollouts.moda
 Upload each snapshot to:
 
 ```text
-s3://modal-stitch-s3-transport/standalone-rollouts/qwen3-4b/<identity>/
+s3://modal-stitch-s3-transport/standalone-rollouts/moonlight/<identity>/
 ```
 
 Signal it:
@@ -130,7 +130,7 @@ Signal it:
 ```bash
 curl -X POST "$GATEWAY/hot_load/v1/models/hot_load" \
   -H "Authorization: Bearer $STITCH_SHIM_API_KEY" \
-  -H "Provider-Model: qwen3-4b" \
+  -H "Provider-Model: moonlight" \
   -H "Provider-Deployment: rollout-prod" \
   -H "Content-Type: application/json" \
   -d '{"identity":"weight_v000001"}'
@@ -141,7 +141,7 @@ For a compatible SGLang/SLIME delta:
 ```bash
 curl -X POST "$GATEWAY/hot_load/v1/models/hot_load" \
   -H "Authorization: Bearer $STITCH_SHIM_API_KEY" \
-  -H "Provider-Model: qwen3-4b" \
+  -H "Provider-Model: moonlight" \
   -H "Provider-Deployment: rollout-prod" \
   -H "Content-Type: application/json" \
   -d '{
@@ -160,7 +160,7 @@ Poll readiness:
 ```bash
 curl "$GATEWAY/hot_load/v1/models/hot_load" \
   -H "Authorization: Bearer $STITCH_SHIM_API_KEY" \
-  -H "Provider-Model: qwen3-4b" \
+  -H "Provider-Model: moonlight" \
   -H "Provider-Deployment: rollout-prod"
 ```
 
@@ -194,17 +194,25 @@ m deploy -m cookbook.standalone_rollouts.slime.modal_train
 m run -m cookbook.standalone_rollouts.slime.modal_train::launch_train
 ```
 
-The trainer sets `rollout_endpoint_url` (SLIME publish-only mode): it launches
-no rollout engines, routes `/generate` to the provider front door, and writes
-each `weight_v{N}/` straight to the mounted S3 transport via
-`--update-weight-disk-dir`. Its `custom_delta_pre_push_path` hook
-(`announce_and_wait`) POSTs the customer hot-load API for the new version and
-blocks until the provider pool reports it ready, so the next rollout only runs
-once enough replicas serve the new weights. A SLIME request hook adds an exact
-`weight_version` constraint to each rollout request; if Modal's opaque routing
-lands one on a lagging replica, the provider returns a retryable `409` before
-spending rollout compute. For a lower-latency async setup, drop the readiness
-wait and switch the request hook to `min` mode with a positive version lag.
+The trainer (`slime/configs/moonlight_slime_trainer.py`) runs **async-first**
+(`train_async`, one-step off-policy) with **rollout routing replay** enabled, in
+SLIME publish-only mode: it launches no rollout engines, routes `/generate` to
+the provider front door, and writes each `weight_v{N}/` to a local disk dir.
+
+Staleness is gated by a **publish-hook readiness barrier**, not a per-request
+pin (this is the key difference from `slime_disagg`, which uses a min-version
+request gate). The `custom_delta_pre_push_path` hook (`announce_and_wait`) copies
+the new version to the S3 transport, POSTs the customer hot-load API, and blocks
+until the front door reports **every live replica** ready on the new version
+(`readiness_threshold` 1.0) — so the next rollouts always run on current weights.
+The request hook therefore leaves the version gate off
+(`api_shim_rollout_request_weight_version_mode="none"`) and only carries auth
+headers, retries, and session affinity.
+
+Routing replay requires the pool to return per-token routed experts: the provider
+config sets `--enable-return-routed-experts` and the trainer sets
+`use_rollout_routing_replay=True` (the layer count / router top-k come from the
+sourced `scripts/models/moonlight.sh`).
 
 The first weight update only seeds SLIME's baseline snapshot and publishes
 nothing; subsequent updates publish `weight_v000001`, `weight_v000002`, … .
