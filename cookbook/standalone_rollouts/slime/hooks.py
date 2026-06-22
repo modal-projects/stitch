@@ -20,7 +20,7 @@ import shutil
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +44,11 @@ class ShimConfig:
     readiness_threshold: float = 1.0
     poll_timeout_seconds: float = 30 * 60
     poll_interval_seconds: float = 5.0
+    # Run id: partitions the transport (`<run_id>/weight_v{N}/`) and is folded
+    # into the single self-identifying pointer, so a fresh run's chain is isolated
+    # and a finished run's pointer can't fast-forward a new run's cold start.
+    # None = the run-less customer flat layout.
+    run_id: str | None = None
 
     @classmethod
     def from_env(cls, args: Any | None = None) -> "ShimConfig":
@@ -116,6 +121,10 @@ class ShimConfig:
                     default="5",
                 )
             ),
+            # run_id is NOT read here: a per-launch value can't ride an --api-shim-*
+            # arg (dropped by slime's parser) or a late env var (doesn't reach the
+            # Ray actor this hook runs in). announce_and_wait derives it from the
+            # version dir slime wrote (update_weight_disk_dir = <local>/<run_id>).
         )
 
     def identity_for_version(self, version: int) -> str:
@@ -129,7 +138,14 @@ class ShimConfig:
     def transport_path_for_identity(self, identity: str) -> Path:
         if self.transport_root is None:
             raise RuntimeError("transport_root is not configured (api_shim_transport_root)")
-        return self.transport_root / identity
+        base = self.transport_root / self.run_id if self.run_id else self.transport_root
+        return base / identity
+
+    def readiness_identity(self, identity: str) -> str:
+        """The run-scoped snapshot identity the pool reports for readiness matching
+        (``<run_id>/weight_vN``), so a replica on a finished run's same-numbered
+        version isn't miscounted as ready for this run."""
+        return f"{self.run_id}/{identity}" if self.run_id else identity
 
 
 def announce_and_wait(args: Any, version_dir: str, rollout_engines: list[Any]) -> None:
@@ -155,6 +171,14 @@ def announce_and_wait(args: Any, version_dir: str, rollout_engines: list[Any]) -
         # announce yet. Only weight_v{N} dirs are hot-loaded.
         return
     cfg = ShimConfig.from_env(args)
+    # The run id is the partition dir slime wrote into
+    # (update_weight_disk_dir = <local>/<run_id>): derive it from the version dir
+    # rather than an env var or --api-shim-* arg, neither of which crosses into the
+    # Ray training actor this hook runs in. update_weight_disk_dir is a known slime
+    # arg, so the partition reliably reaches here.
+    run_id = Path(version_dir).parent.name or None
+    if run_id:
+        cfg = replace(cfg, run_id=run_id)
     # slime's atomic-rename writer can't target the S3 mount (ENOSYS), so the
     # version dir lives on local disk; copy it to the transport (PutObject) the
     # provider pool reads before signalling the hot-load.
@@ -164,11 +188,12 @@ def announce_and_wait(args: Any, version_dir: str, rollout_engines: list[Any]) -
         identity=identity,
         previous_identity=cfg.previous_identity_for_version(version),
     )
+    target = cfg.readiness_identity(identity)
     state = wait_until_ready(cfg, identity)
     logger.info(
         "Provider hot-load ready for %s: %s/%s replicas",
-        identity,
-        state.ready_count(target_snapshot_identity=identity),
+        target,
+        state.ready_count(target_snapshot_identity=target),
         len(state.replicas),
     )
 
@@ -273,24 +298,28 @@ def _rollout_request_target_version(args: Any, rollout_id: int, evaluation: bool
 
 
 def wait_until_ready(cfg: ShimConfig, identity: str) -> RolloutPoolState:
+    # The pool reports current_snapshot_identity run-scoped (`<run_id>/weight_vN`),
+    # so match against the same composite — otherwise a replica still serving a
+    # finished run's same-numbered version would falsely count as ready.
+    target = cfg.readiness_identity(identity)
     deadline = time.monotonic() + cfg.poll_timeout_seconds
     while True:
         state = _get_hot_load_state(cfg)
         if state.is_ready(
             threshold=cfg.readiness_threshold,
-            target_snapshot_identity=identity,
+            target_snapshot_identity=target,
         ):
             return state
         if time.monotonic() >= deadline:
-            ready = state.ready_count(target_snapshot_identity=identity)
+            ready = state.ready_count(target_snapshot_identity=target)
             raise TimeoutError(
-                f"Timed out waiting for {identity}: {ready}/{len(state.replicas)} "
+                f"Timed out waiting for {target}: {ready}/{len(state.replicas)} "
                 f"replicas ready at threshold {cfg.readiness_threshold}; last_state={state.to_dict()}"
             )
         logger.info(
             "Waiting for %s readiness: %.3f < %.3f",
-            identity,
-            state.readiness_fraction(target_snapshot_identity=identity),
+            target,
+            state.readiness_fraction(target_snapshot_identity=target),
             cfg.readiness_threshold,
         )
         time.sleep(cfg.poll_interval_seconds)
@@ -299,6 +328,9 @@ def wait_until_ready(cfg: ShimConfig, identity: str) -> RolloutPoolState:
 def _post_hot_load(cfg: ShimConfig, *, identity: str, previous_identity: str) -> None:
     payload = {
         "identity": identity,
+        # The run id tells the front door which (possibly new) run this belongs to;
+        # a new run restarts the version space instead of being a rewind.
+        "run_id": cfg.run_id,
         "incremental_snapshot_metadata": {
             "previous_snapshot_identity": previous_identity,
             "compression_format": cfg.compression_format,

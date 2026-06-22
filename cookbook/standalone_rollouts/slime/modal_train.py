@@ -11,6 +11,7 @@ import importlib
 import os
 import subprocess
 import tempfile
+import uuid
 from pathlib import Path
 
 import modal
@@ -186,6 +187,15 @@ class Trainer:
 
         cfg.rollout_endpoint_url = provider_url
         cfg.api_shim_base_url = provider_url
+        # Fresh run id per launch, carried on update_weight_disk_dir — a *known*
+        # slime arg, so it reaches the publish hook running in the Ray training
+        # actor. (A per-launch env var doesn't: Ray workers start in @modal.enter()
+        # before train() runs, so they don't inherit this env; and an unknown
+        # --api-shim-run-id arg is dropped by slime's parser.) slime writes this
+        # run's chain to <local>/<run_id>/weight_v{N}/, and announce_and_wait
+        # derives the run id from that dir to scope the S3 transport + pointer.
+        run_id = uuid.uuid4().hex[:12]
+        cfg.update_weight_disk_dir = f"{cfg.update_weight_disk_dir}/{run_id}"
         cfg.custom_config_path = _custom_config(
             cfg, rollout_num_engines=getattr(run, "ROLLOUT_NUM_ENGINES", 1)
         )

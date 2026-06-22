@@ -11,6 +11,8 @@ from typing import Any, Protocol
 from stitch.protocol import (
     VersionManifest,
     atomic_write_text,
+    format_snapshot_identity,
+    parse_snapshot_identity,
     read_latest,
     version_dir,
     weight_identity,
@@ -23,15 +25,21 @@ class BulletinBoard(Protocol):
 
     async def refresh(self) -> None: ...
 
-    def read_latest(self) -> int: ...
+    def read_latest(self) -> tuple[str | None, int]: ...
 
-    def write_latest(self, version: int) -> None: ...
+    def write_latest(self, run_id: str | None, version: int) -> None: ...
 
-    def version_dir(self, version: int) -> Path: ...
+    def version_dir(self, run_id: str | None, version: int) -> Path: ...
 
-    def read_manifest(self, version: int) -> VersionManifest: ...
+    def read_manifest(self, run_id: str | None, version: int) -> VersionManifest: ...
 
-    def publish_manifest(self, manifest: VersionManifest, version_path: str | Path | None = None) -> None: ...
+    def publish_manifest(
+        self,
+        manifest: VersionManifest,
+        version_path: str | Path | None = None,
+        *,
+        run_id: str | None = None,
+    ) -> None: ...
 
 
 class FilesystemBulletinBoard:
@@ -45,10 +53,15 @@ class FilesystemBulletinBoard:
       version dirs, a JSON ``latest.json`` pointer, and a ``manifest.json`` per
       version.
     - ``"slime"``: slime's native disk-delta publish output (and the customer's
-      object-store layout) — flat ``weight_v{N:06d}/`` dirs directly under the
-      root, a raw ``latest`` pointer file (``"NNNNNN"``), and the manifest read
-      from each version's ``model.safetensors.index.json``. This is what the
-      rollout pool reconciles against; the front door advances ``latest``.
+      object-store layout). Each run's chain lives under ``<run_id>/weight_v{N:06d}/``
+      and the single ``latest`` pointer holds the self-identifying snapshot identity
+      ``<run_id>/weight_v{N:06d}`` (a bare ``weight_v{N:06d}`` for the degenerate
+      run-less layout). The manifest is read from each version's
+      ``model.safetensors.index.json``. Run-id partitioning is what makes sequential
+      runs collision-free: a new run writes a fresh ``<run_id>/`` chain and the
+      pointer moves to it (a new run is not a rewind), so a finished run's chain can
+      never be overwritten or fast-forward a cold start. The pool reconciles against
+      ``latest``; the front door (or the publish hook) advances it.
     """
 
     def __init__(
@@ -71,37 +84,49 @@ class FilesystemBulletinBoard:
         if inspect.isawaitable(result):
             await result
 
-    def read_latest(self) -> int:
+    def read_latest(self) -> tuple[str | None, int]:
+        """The active snapshot pointer as ``(run_id, version)``.
+
+        slime: parse ``<run_id>/weight_v{N}`` (or a bare/legacy pointer) from the
+        ``latest`` file; missing/empty/unparseable -> ``(None, 0)``. stitch: the
+        JSON pointer is run-less, so ``(None, <version>)``.
+        """
         if self.layout == "slime":
             path = self.root / "latest"
             if not path.exists():
-                return 0
-            text = path.read_text(encoding="utf-8").strip()
-            return int(text) if text else 0
-        return read_latest(self.root)
+                return (None, 0)
+            return parse_snapshot_identity(path.read_text(encoding="utf-8"))
+        return (None, read_latest(self.root))
 
-    def write_latest(self, version: int) -> None:
+    def write_latest(self, run_id: str | None, version: int) -> None:
         if self.layout == "slime":
-            atomic_write_text(self.root / "latest", f"{int(version):06d}")
+            atomic_write_text(self.root / "latest", format_snapshot_identity(run_id, version))
         else:
             write_latest(self.root, version)
 
-    def version_dir(self, version: int) -> Path:
+    def version_dir(self, run_id: str | None, version: int) -> Path:
         if self.layout == "slime":
-            return self.root / weight_identity(version)
+            base = self.root / run_id if run_id else self.root
+            return base / weight_identity(version)
         return version_dir(self.root, version)
 
-    def read_manifest(self, version: int) -> VersionManifest:
+    def read_manifest(self, run_id: str | None, version: int) -> VersionManifest:
         if self.layout == "slime":
-            return VersionManifest.from_slime_index(self.version_dir(version))
-        return VersionManifest.read(self.version_dir(version) / "manifest.json")
+            return VersionManifest.from_slime_index(self.version_dir(run_id, version))
+        return VersionManifest.read(self.version_dir(run_id, version) / "manifest.json")
 
-    def publish_manifest(self, manifest: VersionManifest, version_path: str | Path | None = None) -> None:
+    def publish_manifest(
+        self,
+        manifest: VersionManifest,
+        version_path: str | Path | None = None,
+        *,
+        run_id: str | None = None,
+    ) -> None:
         if self.layout == "slime":
             # The version dir + index.json already exist (written by slime/the
-            # uploader); publishing is only advancing the monotonic pointer.
-            self.write_latest(manifest.version)
+            # uploader under <run_id>/); publishing is only advancing the pointer.
+            self.write_latest(run_id, manifest.version)
             return
-        target = Path(version_path) if version_path is not None else self.version_dir(manifest.version)
+        target = Path(version_path) if version_path is not None else self.version_dir(run_id, manifest.version)
         manifest.write(target / "manifest.json")
-        self.write_latest(manifest.version)
+        self.write_latest(run_id, manifest.version)

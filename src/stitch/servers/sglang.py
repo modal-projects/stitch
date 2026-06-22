@@ -221,14 +221,15 @@ def create_app(
                     # Stamp the serving version into the engine's KV cache
                     # namespace: requests admitted under different versions
                     # structurally cannot share radix-tree prefixes.
+                    run_id = getattr(manager, "current_run_id", None)
                     user_key = payload.get("extra_key")
                     if isinstance(user_key, list):
                         payload["extra_key"] = [
-                            compose_extra_key(start_version, k) for k in user_key
+                            compose_extra_key(start_version, k, run_id) for k in user_key
                         ]
                     else:
                         payload["extra_key"] = compose_extra_key(
-                            start_version, user_key
+                            start_version, user_key, run_id
                         )
                 started = asyncio.get_running_loop().time()
                 if versioned_route and manager.debug_requests:

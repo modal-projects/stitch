@@ -43,9 +43,8 @@ alias m="uv run --extra modal modal"
 m run -m cookbook.slime_disagg.modal_train::download_model
 m run -m cookbook.slime_disagg.modal_train::prepare_dataset
 
-# Start every rollout container from weight version 0.
-m run -m cookbook.slime_disagg.modal_train::reset_bulletin_board --confirm
-m deploy --strategy recreate -m cookbook.slime_disagg.modal_train
+# Deploy the rollout pool + trainer.
+m deploy -m cookbook.slime_disagg.modal_train
 
 # Wait for the pool to come up and answer at version 0.
 m run -m cookbook.slime_disagg.modal_train::smoke_flash_pool
@@ -57,10 +56,12 @@ m run -m cookbook.slime_disagg.modal_train::launch_train
 m run -m cookbook.slime_disagg.modal_train::smoke_flash_pool --weight-version 3
 ```
 
-To train again, run `launch_train` again. The `Trainer` cluster starts Ray
-once per container in `@modal.enter()`, so a warm cluster goes straight to
-training. To rerun from scratch, reset the bulletin board and redeploy with
-`--strategy recreate` so every container starts again from version 0.
+To train again, just run `launch_train` again. Each launch gets a fresh run id
+and writes its delta chain under its own `<run_id>/` partition, so sequential
+runs never collide — no bulletin-board reset between runs. The warm `Trainer`
+cluster (Ray started once per container in `@modal.enter()`) goes straight to
+training, and the rollout pool re-materializes to the new run's base on its own
+when it sees the pointer move to the new `<run_id>`.
 
 ## Configuration
 

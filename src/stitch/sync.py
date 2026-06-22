@@ -241,6 +241,10 @@ class WeightSyncManager(RolloutAdmissionGate):
         self.engine = engine
         self.run_id = run_id
         self.debug_requests = debug_requests
+        # The active *chain* identity, parsed from the pointer (`<run_id>/weight_vN`).
+        # Distinct from `self.run_id` (the static replica label). None for the
+        # run-less stitch layout, where the manager never switches.
+        self.current_run_id: str | None = None
         self.current_version = 0
         self.latest_seen_version = 0
         self.queued_target_version: int | None = None
@@ -253,19 +257,16 @@ class WeightSyncManager(RolloutAdmissionGate):
         prepare = getattr(self.engine, "prepare", None)
         if prepare is not None:
             await prepare()
-        while True:
-            await self.board.refresh()
-            latest = self.board.read_latest()
-            self.latest_seen_version = max(self.latest_seen_version, latest)
-            if latest <= self.current_version:
-                return
-            await self.sync_to(latest)
+        # Converge to the board's current (run_id, latest): _sync_once follows a
+        # run switch (re-materialize + reset to v0) and replays the chain.
+        await self.sync_to()
 
     async def server_info(self) -> dict[str, Any]:
         return {
             "run_id": self.run_id,
             "backend": self.engine.backend,
             "commit_mode": self.commit_mode,
+            "current_run_id": self.current_run_id,
             "current_version": self.current_version,
             "latest_seen_version": self.latest_seen_version,
             "queued_target_version": self.queued_target_version,
@@ -288,61 +289,97 @@ class WeightSyncManager(RolloutAdmissionGate):
         return error is None, self.current_version, error
 
     def queue_sync(self, target_version: int | None = None) -> None:
-        target = (
-            max(self.board.read_latest(), self.latest_seen_version)
-            if target_version is None
-            else int(target_version)
-        )
-        if target <= self.current_version:
+        run_id, latest = self.board.read_latest()
+        self.latest_seen_version = max(self.latest_seen_version, latest)
+        hint = int(target_version) if target_version is not None else 0
+        # A run change is always work (the pointer moved to a fresh chain, even if
+        # its version number is lower than what we serve); within a run it's work
+        # only when the target exceeds what we've applied.
+        needs_switch = run_id != self.current_run_id
+        if not needs_switch and max(latest, hint) <= self.current_version:
             return
-        self.queued_target_version = max(target, self.queued_target_version or 0)
+        self.queued_target_version = max(latest, hint, self.queued_target_version or 0)
         if self.sync_state is SyncState.IDLE:
             self.sync_state = SyncState.QUEUED
         if self._sync_task is None or self._sync_task.done():
             self._sync_task = asyncio.get_running_loop().create_task(self.sync_to())
 
     async def sync_to(self, target_version: int | None = None) -> None:
-        if target_version is not None and int(target_version) > self.current_version:
+        # target_version is an optional lower-bound hint from a waker; the
+        # authoritative target is always the board's current (run_id, latest), so
+        # we converge to it — and follow a run switch — regardless of the hint.
+        if target_version is not None:
             self.queued_target_version = max(int(target_version), self.queued_target_version or 0)
 
         while True:
-            target = self.queued_target_version
-            if target is None or target <= self.current_version:
-                self.queued_target_version = None
-                self.sync_state = SyncState.IDLE
-                return
-
             try:
-                reached_target = await self._sync_once(target)
+                reached = await self._sync_once()
             except Exception as exc:  # noqa: BLE001
                 self.last_sync_error = str(exc)
                 self.sync_state = SyncState.ERROR
                 logger.exception("Weight sync failed")
                 return
 
-            if reached_target:
-                continue
+            if reached:
+                self.queued_target_version = None
+                self.sync_state = SyncState.IDLE
+                return
             await asyncio.sleep(1.0)
 
-    async def _sync_once(self, target_version: int) -> bool:
+    async def _switch_run(self, new_run_id: str | None) -> None:
+        """Rebase onto a new run's chain: re-materialize base and reset to v0.
+
+        A new run forks at base (slime sets ``base_version=000000`` for v1 of every
+        run), so switching chains means discarding the current weights and replaying
+        the new chain. The re-materialize runs through the commit gate (pause →
+        reset → resume) exactly like a version commit, so no in-flight request
+        decodes across the weight wipe.
+        """
+        logger.info(
+            "run change %r -> %r: re-materializing base, resetting to v0",
+            self.current_run_id,
+            new_run_id,
+        )
+        reset = getattr(self.engine, "reset", None)
+        was_patched = self.current_version > 0
+
+        async def _apply() -> None:
+            if reset is not None and was_patched:
+                await reset()
+
+        def _applied() -> None:
+            self.current_run_id = new_run_id
+            self.current_version = 0
+            self.latest_seen_version = 0
+            self.last_sync_error = None
+
+        await self.commit_version(
+            apply=_apply,
+            on_applied=_applied,
+            pause=self.engine.pause_generation,
+            resume=self.engine.continue_generation,
+        )
+
+    async def _sync_once(self) -> bool:
         async with self._sync_lock:
             await self.board.refresh()
-            latest = self.board.read_latest()
+            run_id, latest = self.board.read_latest()
+            if run_id != self.current_run_id:
+                await self._switch_run(run_id)
             self.latest_seen_version = max(self.latest_seen_version, latest)
-            target = min(int(target_version), latest)
-            if target <= self.current_version:
-                return self.current_version >= int(target_version)
+            if latest <= self.current_version:
+                return True
 
             self.sync_state = SyncState.PREFETCHING
             self.last_sync_error = None
-            for version in range(self.current_version + 1, target + 1):
-                manifest = self.board.read_manifest(version)
+            for version in range(self.current_version + 1, latest + 1):
+                manifest = self.board.read_manifest(self.current_run_id, version)
                 if manifest.base_version != self.current_version:
                     raise RuntimeError(
                         f"cannot apply version {version}: manifest base "
                         f"{manifest.base_version} != current {self.current_version}"
                     )
-                version_path = str(self.board.version_dir(version))
+                version_path = str(self.board.version_dir(self.current_run_id, version))
                 self.sync_state = SyncState.PREPARING
 
                 async def apply(manifest: VersionManifest = manifest, version_path: str = version_path) -> None:
@@ -364,7 +401,6 @@ class WeightSyncManager(RolloutAdmissionGate):
                 )
                 self.sync_state = SyncState.PREFETCHING
 
-            if self.queued_target_version is not None and self.queued_target_version <= self.current_version:
-                self.queued_target_version = None
-                self.sync_state = SyncState.IDLE
-            return self.current_version >= int(target_version)
+            # Reached the board's latest for this run as captured at pass start; a
+            # version published mid-pass is picked up by the next reconcile tick.
+            return self.current_version >= latest

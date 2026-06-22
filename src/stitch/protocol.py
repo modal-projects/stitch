@@ -366,6 +366,43 @@ def parse_weight_identity(identity: str) -> int | None:
     return int(digits) if digits.isdigit() else None
 
 
+def format_snapshot_identity(run_id: str | None, version: int) -> str:
+    """The canonical pointer/snapshot identity for a (run_id, version).
+
+    ``<run_id>/weight_v<NNNNNN>`` when a run is named, else the bare
+    ``weight_v<NNNNNN>`` (the degenerate single-run / customer flat layout). This
+    is the single self-identifying value written to the slime-layout ``latest``
+    pointer: a run-scoped chain can never be mistaken for a different run's, and
+    an old bare pointer parses back to ``run_id=None`` rather than a phantom run.
+    """
+    identity = weight_identity(version)
+    return f"{run_id}/{identity}" if run_id else identity
+
+
+def parse_snapshot_identity(text: str) -> tuple[str | None, int]:
+    """Inverse of :func:`format_snapshot_identity`, tolerant of legacy pointers.
+
+    ``<run_id>/weight_v<NNNNNN>`` -> ``(run_id, version)``; a bare
+    ``weight_v<NNNNNN>`` -> ``(None, version)``; a legacy raw ``<NNNNNN>`` ->
+    ``(None, version)``; empty / unparseable -> ``(None, 0)`` (treated as
+    no-valid-pointer, i.e. not-ready rather than a misparse).
+    """
+    text = (text or "").strip()
+    if not text:
+        return (None, 0)
+    run_id: str | None = None
+    tail = text
+    if "/" in text:
+        run_id, tail = text.rsplit("/", 1)
+        run_id = run_id or None
+    version = parse_weight_identity(tail)
+    if version is None:
+        version = int(tail) if tail.isdigit() else None
+    if version is None:
+        return (None, 0)
+    return (run_id, version)
+
+
 def version_dir(root: str | Path, version: int) -> Path:
     return Path(root) / "versions" / weight_identity(version)
 

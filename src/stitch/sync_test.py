@@ -1,12 +1,28 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import tempfile
 import unittest
+from pathlib import Path
 
 from stitch.bulletin import FilesystemBulletinBoard
 from stitch.protocol import SyncState, VersionManifest, WeightVersionPolicy
 from stitch.sync import PolicyViolation, RolloutAdmissionGate, WeightSyncManager
+
+
+def _write_slime_version(base: Path, version: int, prev: int) -> None:
+    vdir = base / f"weight_v{version:06d}"
+    vdir.mkdir(parents=True)
+    (vdir / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {
+                "metadata": {"version": f"{version:06d}", "base_version": f"{prev:06d}"},
+                "weight_map": {"w": "model-00001-of-00001.safetensors"},
+            }
+        ),
+        encoding="utf-8",
+    )
 
 
 class FakeEngine:
@@ -30,6 +46,9 @@ class FakeEngine:
         self.applies.append((manifest.version, version_path))
         self.events.append("apply")
 
+    async def reset(self) -> None:
+        self.events.append("reset")
+
     async def pause_generation(self) -> None:
         self.events.append("pause")
 
@@ -52,6 +71,55 @@ class SyncManagerTest(unittest.TestCase):
                 self.assertEqual(manager.current_version, 2)
                 self.assertEqual(manager.sync_state, SyncState.IDLE)
                 self.assertEqual([v for v, _ in engine.applies], [1, 2])
+
+        asyncio.run(run())
+
+    def test_run_change_rematerializes_and_resets_under_gate(self) -> None:
+        async def run() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                board = FilesystemBulletinBoard(root, layout="slime")
+                _write_slime_version(root / "run-a", 1, 0)
+                _write_slime_version(root / "run-a", 2, 1)
+                board.write_latest("run-a", 2)
+                engine = FakeEngine()
+                manager = WeightSyncManager(board=board, engine=engine, commit_mode="in_place")
+
+                await manager.startup_sync()
+                self.assertEqual(manager.current_run_id, "run-a")
+                self.assertEqual(manager.current_version, 2)
+                self.assertEqual([v for v, _ in engine.applies], [1, 2])
+
+                # A new run forks at base with its version space restarting at 1.
+                _write_slime_version(root / "run-b", 1, 0)
+                board.write_latest("run-b", 1)
+                await manager.sync_to()
+
+                self.assertEqual(manager.current_run_id, "run-b")
+                self.assertEqual(manager.current_version, 1)
+                self.assertIn("run-b", engine.applies[-1][1])  # applied the new run's chain
+                # The re-materialize ran under the commit gate: the reset is
+                # bracketed by pause/continue, so no request decodes across it.
+                i = engine.events.index("reset")
+                self.assertEqual(engine.events[i - 1], "pause")
+                self.assertEqual(engine.events[i + 1], "continue")
+
+        asyncio.run(run())
+
+    def test_stitch_layout_never_switches_run(self) -> None:
+        async def run() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                board = FilesystemBulletinBoard(tmp)  # stitch layout: run-less
+                board.publish_manifest(VersionManifest(version=1, base_version=0, backend="fake", load_format="noop"))
+                board.publish_manifest(VersionManifest(version=2, base_version=1, backend="fake", load_format="noop"))
+                engine = FakeEngine()
+                manager = WeightSyncManager(board=board, engine=engine)
+
+                await manager.startup_sync()
+
+                self.assertIsNone(manager.current_run_id)
+                self.assertEqual(manager.current_version, 2)
+                self.assertNotIn("reset", engine.events)
 
         asyncio.run(run())
 

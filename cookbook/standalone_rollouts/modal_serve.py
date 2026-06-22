@@ -24,6 +24,7 @@ import modal.experimental
 from cookbook.slime_disagg import helpers
 from cookbook.standalone_rollouts import frontdoor as frontdoor_mod
 from stitch.bulletin import FilesystemBulletinBoard
+from stitch.protocol import format_snapshot_identity
 from stitch.providers.modal import (
     discover_flash_targets,
     resolve_flash_gateway_url,
@@ -433,7 +434,7 @@ FRONTDOOR_PORT = 8000
     volumes={str(S3_TRANSPORT_MOUNT_PATH): s3_transport_mount},
     secrets=[modal.Secret.from_name(exp.SHIM_SECRET_NAME)],
     min_containers=1,
-    max_containers=2,  # singleton: exactly one writer of the `latest` pointer
+    max_containers=1,  # singleton: exactly one writer of the `latest` pointer
     nonpreemptible=True,  # keep the sole writer up; a preemption blips the API
     scaledown_window=2,
     region=exp.REGION,  # co-locate the front door with the rollout pool (us)
@@ -474,15 +475,16 @@ class FrontDoor:
                 clients["client"] = client
             return client
 
-        async def read_current_version() -> int:
+        async def read_current_pointer() -> tuple[str | None, int]:
             return board.read_latest()
 
-        async def advance_to(version: int) -> None:
+        async def advance_to(run_id: str | None, version: int) -> None:
             # Singleton writer: a single small write is one atomic S3 PutObject,
-            # so no rename dance is needed. Direct write avoids FUSE rename
-            # semantics.
+            # so no rename dance is needed. The pointer is self-identifying
+            # (`<run_id>/weight_vN`), so a new run is a forward move (not a rewind)
+            # and there is no separate run pointer to flip.
             (S3_TRANSPORT_MOUNT_PATH / "latest").write_text(
-                f"{int(version):06d}", encoding="utf-8"
+                format_snapshot_identity(run_id, version), encoding="utf-8"
             )
 
         async def list_server_infos() -> list[dict]:
@@ -526,7 +528,7 @@ class FrontDoor:
             )
 
         asgi_app = frontdoor_mod.create_frontdoor_app(
-            read_current_version=read_current_version,
+            read_current_pointer=read_current_pointer,
             advance_to=advance_to,
             list_server_infos=list_server_infos,
             proxy=proxy,
