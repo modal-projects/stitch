@@ -27,7 +27,7 @@ from cookbook.slime_disagg.configs.base import (
 
 
 TRAINER_CONFIG = os.environ.get(
-    "TRAINER_CONFIG", os.environ.get("EXPERIMENT_CONFIG", "qwen3_4b_slime_trainer")
+    "TRAINER_CONFIG", os.environ.get("EXPERIMENT_CONFIG", "moonlight_slime_trainer")
 )
 exp = importlib.import_module(
     f"cookbook.standalone_rollouts.slime.configs.{TRAINER_CONFIG}"
@@ -50,7 +50,7 @@ SLIME_REPO_URL = "https://github.com/modal-projects/slime.git"
 # clone layer otherwise leaves the container on a stale slime. This is PR #5
 # head (disaggregated-rollout): disk-delta publish-only + rollout_endpoint_url +
 # custom_rollout_request_hook_path.
-SLIME_REPO_REF = "570cd0b3bc28141abfbf054333d129d41fe50f19"
+SLIME_REPO_REF = "ebfe153949b1a69c39e92f947ed5d475166dd724"  # incl. deepseekv3 router-dtype export fix + per-request rollout hook
 
 trainer_image = (
     modal.Image.from_registry(SLIME_IMAGE_TAG)
@@ -94,6 +94,16 @@ trainer_image = (
         ignore=["**/__pycache__"],
     )
 )
+
+# Dev iteration: SLIME_LOCAL_DIR overlays a local slime checkout onto the image's
+# cloned fork (installed editable at /root/slime), so fork edits take effect on
+# container start with no image rebuild. Unset by default.
+if slime_local := os.environ.get("SLIME_LOCAL_DIR"):
+    trainer_image = trainer_image.add_local_dir(
+        slime_local,
+        remote_path=SLIME_ROOT,
+        ignore=[".git", "**/__pycache__", "**/*.pyc"],
+    )
 
 hf_cache_volume = provider_app.hf_cache_volume
 data_volume = modal.Volume.from_name("slime-data", create_if_missing=True)
@@ -156,8 +166,7 @@ class Trainer:
 
         _validate_trainer_environment()
         provider_url = (
-            os.environ.get("STITCH_SHIM_API_BASE_URL")
-            or provider_app.frontdoor_url()
+            os.environ.get("STITCH_SHIM_API_BASE_URL") or provider_app.frontdoor_url()
         ).rstrip("/")
         os.environ["STITCH_SHIM_API_BASE_URL"] = provider_url
         cfg = SlimeConfig.from_payload(payload)
@@ -228,7 +237,7 @@ def print_trainer_secret_template() -> None:
             [
                 f"modal secret create {exp.SHIM_SECRET_NAME} \\",
                 "  STITCH_SHIM_API_KEY=... \\",
-                "  STITCH_SHIM_PROVIDER_MODEL=qwen3-4b \\",
+                "  STITCH_SHIM_PROVIDER_MODEL=moonlight \\",
                 "  STITCH_SHIM_PROVIDER_DEPLOYMENT=rollout-prod \\",
                 "  STITCH_SHIM_BASE_SNAPSHOT_IDENTITY=base",
             ]

@@ -21,7 +21,12 @@ import modal
 import modal.experimental
 
 from cookbook.slime_disagg import helpers
-from cookbook.slime_disagg.configs.base import CHECKPOINTS_PATH, DATA_PATH, HF_CACHE_PATH, SlimeConfig
+from cookbook.slime_disagg.configs.base import (
+    CHECKPOINTS_PATH,
+    DATA_PATH,
+    HF_CACHE_PATH,
+    SlimeConfig,
+)
 from stitch.providers.modal import resolve_flash_gateway_url
 
 # The one deploy-time knob: which experiment config this app is built around.
@@ -58,7 +63,7 @@ SLIME_REPO_URL = "https://github.com/modal-projects/slime.git"
 # container on a stale slime. This is PR #5 head (disaggregated-rollout): disk-
 # delta publish-only + rollout_endpoint_url + custom_rollout_request_hook_path.
 # Bump this SHA to roll slime forward.
-SLIME_REPO_REF = "570cd0b3bc28141abfbf054333d129d41fe50f19"
+SLIME_REPO_REF = "ebfe153949b1a69c39e92f947ed5d475166dd724"  # incl. deepseekv3 router-dtype export fix + per-request rollout hook
 
 image = (
     modal.Image.from_registry(SLIME_IMAGE_TAG)
@@ -115,6 +120,17 @@ image = (
     )
 )
 
+# Dev iteration: SLIME_LOCAL_DIR overlays a local slime checkout onto the image's
+# cloned fork (installed editable at /root/slime), so fork edits take effect on
+# container start with no image rebuild or push. Unset by default, so the committed
+# example always builds from the pinned SLIME_REPO_REF.
+if slime_local := os.environ.get("SLIME_LOCAL_DIR"):
+    image = image.add_local_dir(
+        slime_local,
+        remote_path=SLIME_ROOT,
+        ignore=[".git", "**/__pycache__", "**/*.pyc"],
+    )
+
 with image.imports():
     from autoinference_utils.endpoint import SGLangEndpoint, warmup_chat_completions
 
@@ -122,7 +138,9 @@ with image.imports():
 hf_cache_volume = modal.Volume.from_name("huggingface-cache", create_if_missing=True)
 data_volume = modal.Volume.from_name("slime-data", create_if_missing=True)
 checkpoints_volume = modal.Volume.from_name("slime-checkpoints", create_if_missing=True)
-delta_volume = modal.Volume.from_name(exp.DELTA_VOLUME_NAME, create_if_missing=True, version=2)
+delta_volume = modal.Volume.from_name(
+    exp.DELTA_VOLUME_NAME, create_if_missing=True, version=2
+)
 
 train_volumes = {
     str(HF_CACHE_PATH): hf_cache_volume,
@@ -160,7 +178,10 @@ WARMUP_PAYLOAD = {
     gpu=f"{modal_cfg.gpu}:{slime_cfg.rollout_num_gpus_per_engine}",
     cloud=modal_cfg.cloud,
     region=modal_cfg.region,
-    volumes={str(HF_CACHE_PATH): hf_cache_volume, exp.DELTA_BULLETIN_ROOT: delta_volume},
+    volumes={
+        str(HF_CACHE_PATH): hf_cache_volume,
+        exp.DELTA_BULLETIN_ROOT: delta_volume,
+    },
     min_containers=modal_cfg.rollout_min_containers,
     timeout=40 * MINUTES,
     scaledown_window=15 * MINUTES,
@@ -214,8 +235,14 @@ class Server:
             commit_mode=exp.SIDECAR_COMMIT_MODE,
             debug_requests=getattr(exp, "SIDECAR_DEBUG_REQUESTS", False),
         )
-        helpers.wait_http(f"http://127.0.0.1:{SIDECAR_PORT}/health", self.sidecar, SERVER_STARTUP_TIMEOUT)
-        print(f"Rollout server ready: model={MODEL_NAME}, target_inputs={ROLLOUT_CONCURRENCY}")
+        helpers.wait_http(
+            f"http://127.0.0.1:{SIDECAR_PORT}/health",
+            self.sidecar,
+            SERVER_STARTUP_TIMEOUT,
+        )
+        print(
+            f"Rollout server ready: model={MODEL_NAME}, target_inputs={ROLLOUT_CONCURRENCY}"
+        )
 
     @modal.exit()
     def stop(self) -> None:
@@ -303,7 +330,9 @@ class Trainer:
         helpers.prepare_slime_config(cfg, tempfile.mkdtemp())
         cmd = helpers.build_train_cmd(cfg, SLIME_ROOT)
 
-        print(f"Training {experiment}: nodes={N_TRAIN_NODES}, rollout_endpoint={cfg.rollout_endpoint_url}")
+        print(
+            f"Training {experiment}: nodes={N_TRAIN_NODES}, rollout_endpoint={cfg.rollout_endpoint_url}"
+        )
         print(f"Command: {cmd}")
         subprocess.run(["bash", "-lc", cmd], check=True)
 
@@ -361,8 +390,8 @@ def launch_train(experiment: str = EXPERIMENT) -> None:
             f"mounts {exp.DELTA_VOLUME_NAME!r}. Deploy it as its own app with EXPERIMENT_CONFIG={experiment}."
         )
 
-    trainer = modal.Cls.from_name(APP_NAME, Trainer.__name__)()
     try:
+        trainer = modal.Cls.from_name(APP_NAME, Trainer.__name__)()
         call = trainer.train.spawn(experiment, run.slime.to_payload())
     except NotFoundError:
         raise SystemExit(
@@ -373,7 +402,9 @@ def launch_train(experiment: str = EXPERIMENT) -> None:
 
 
 @app.local_entrypoint()
-def smoke_flash_pool(weight_version: int = 0, timeout_seconds: int = 30 * MINUTES) -> None:
+def smoke_flash_pool(
+    weight_version: int = 0, timeout_seconds: int = 30 * MINUTES
+) -> None:
     """Check that the deployed Flash pool serves completions at the expected
     weight version, via the gateway and each container directly."""
     helpers.smoke_flash_pool(

@@ -107,13 +107,13 @@ class RolloutRequestHookTest(unittest.TestCase):
         request = {"payload": {}, "headers": None}
         env = {
             "STITCH_SHIM_API_KEY": "k",
-            "STITCH_SHIM_PROVIDER_MODEL": "qwen3-4b",
+            "STITCH_SHIM_PROVIDER_MODEL": "moonlight",
             "STITCH_SHIM_PROVIDER_DEPLOYMENT": "prod",
         }
         with mock.patch.dict("os.environ", env, clear=True):
             hooks.rollout_request_weight_version_hook(args, sample, request)
         self.assertEqual(request["headers"]["Authorization"], "Bearer k")
-        self.assertEqual(request["headers"]["Provider-Model"], "qwen3-4b")
+        self.assertEqual(request["headers"]["Provider-Model"], "moonlight")
         self.assertEqual(request["headers"]["Provider-Deployment"], "prod")
 
     def test_pins_exact_when_rollout_id_supplied(self) -> None:

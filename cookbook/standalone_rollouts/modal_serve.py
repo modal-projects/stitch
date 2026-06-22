@@ -31,7 +31,7 @@ from stitch.providers.modal import (
 )
 
 
-PROVIDER_CONFIG = os.environ.get("PROVIDER_CONFIG", "qwen3_4b_hot_load")
+PROVIDER_CONFIG = os.environ.get("PROVIDER_CONFIG", "moonlight_hot_load")
 exp = importlib.import_module(f"cookbook.standalone_rollouts.configs.{PROVIDER_CONFIG}")
 
 APP_NAME = exp.APP_NAME
@@ -61,7 +61,7 @@ SLIME_REPO_URL = "https://github.com/modal-projects/slime.git"
 # provider sidecar applies disk deltas host-side via slime.utils.disk_delta, so
 # the image must carry that branch's slime plus its checksum/compression deps.
 # Pin a SHA, not the branch tip: the clone is a cached image layer.
-SLIME_REPO_REF = "570cd0b3bc28141abfbf054333d129d41fe50f19"
+SLIME_REPO_REF = "ebfe153949b1a69c39e92f947ed5d475166dd724"  # incl. deepseekv3 router-dtype export fix + per-request rollout hook
 
 image = (
     modal.Image.from_registry(SLIME_IMAGE_TAG)
@@ -108,6 +108,16 @@ image = (
         ignore=["**/__pycache__"],
     )
 )
+
+# Dev iteration: SLIME_LOCAL_DIR overlays a local slime checkout onto the image's
+# cloned fork (installed editable at /root/slime), so fork edits take effect on
+# container start with no image rebuild. Unset by default.
+if slime_local := os.environ.get("SLIME_LOCAL_DIR"):
+    image = image.add_local_dir(
+        slime_local,
+        remote_path=SLIME_ROOT,
+        ignore=[".git", "**/__pycache__", "**/*.pyc"],
+    )
 
 with image.imports():
     from autoinference_utils.endpoint import SGLangEndpoint, warmup_chat_completions
@@ -302,7 +312,7 @@ def print_secret_template() -> None:
             [
                 f"modal secret create {exp.SHIM_SECRET_NAME} \\",
                 "  STITCH_SHIM_API_KEY=... \\",
-                "  STITCH_SHIM_PROVIDER_MODEL=qwen3-4b \\",
+                "  STITCH_SHIM_PROVIDER_MODEL=moonlight \\",
                 "  STITCH_SHIM_PROVIDER_DEPLOYMENT=rollout-prod",
             ]
         )
@@ -425,7 +435,7 @@ FRONTDOOR_PORT = 8000
     min_containers=1,
     max_containers=2,  # singleton: exactly one writer of the `latest` pointer
     nonpreemptible=True,  # keep the sole writer up; a preemption blips the API
-    scaledown_window=1,
+    scaledown_window=2,
     region=exp.REGION,  # co-locate the front door with the rollout pool (us)
     routing_region=exp.ROUTING_REGION,  # share the pool's Flash proxy region
     port=FRONTDOOR_PORT,
