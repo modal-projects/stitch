@@ -149,7 +149,8 @@ def rollout_target_weight_version(args: Namespace, rollout_id: int, evaluation: 
         return int(rollout_id)
     # Eval pins to the latest published version (the slime-native `latest`).
     try:
-        return FilesystemBulletinBoard(_bulletin_root(args), layout="slime").read_latest()
+        _, version = FilesystemBulletinBoard(_bulletin_root(args), layout="slime").read_latest()
+        return version
     except Exception:  # noqa: BLE001
         return int(rollout_id)
 

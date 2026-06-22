@@ -335,19 +335,3 @@ def _post_json(url: str, payload: dict, *, timeout: float) -> dict:
     with urllib.request.urlopen(request, timeout=timeout) as resp:
         return json.load(resp)
 
-
-# ── Bulletin board ────────────────────────────────────────────────────────────
-
-
-def reset_bulletin_board(root: str | Path, volume: Any, *, confirm: bool = False) -> None:
-    if not confirm:
-        raise ValueError("Pass --confirm to clear retained sparse-delta versions.")
-
-    import shutil
-
-    # slime-native flat layout: weight_v{N}/ dirs + a raw `latest` pointer.
-    root = Path(root)
-    for version_dir in root.glob("weight_v*"):
-        shutil.rmtree(version_dir, ignore_errors=True)
-    (root / "latest").unlink(missing_ok=True)
-    volume.commit()

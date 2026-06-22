@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,10 +12,13 @@ from pathlib import Path
 from stitch.protocol import VersionManifest
 
 
+logger = logging.getLogger(__name__)
 EXTRA_KEY_DELIMITER = ";"
 
 
-def compose_extra_key(version: int, user_extra_key: str | None = None) -> str:
+def compose_extra_key(
+    version: int, user_extra_key: str | None = None, run_id: str | None = None
+) -> str:
     """Compose a weight-version-namespaced SGLang ``extra_key``.
 
     The version segment sits at a fixed position (the prefix) and is
@@ -22,8 +27,14 @@ def compose_extra_key(version: int, user_extra_key: str | None = None) -> str:
     delimiter, so the version must never be parsed from the right.
     Examples: ``wv7;`` (no user key), ``wv7;my-key``. This is an SGLang
     radix-cache namespacing concern, not part of the engine-neutral protocol.
+
+    ``run_id`` is folded into the key *content* (after the delimiter), so two
+    runs that both restart version numbering at 1 get distinct radix namespaces
+    (``wv1;run-a/`` vs ``wv1;run-b/``) and a stale cross-run request can never
+    reuse another run's same-numbered KV. ``run_id=None`` keeps the bare form.
     """
-    return f"wv{int(version)}{EXTRA_KEY_DELIMITER}{user_extra_key or ''}"
+    run_segment = f"{run_id}/" if run_id else ""
+    return f"wv{int(version)}{EXTRA_KEY_DELIMITER}{run_segment}{user_extra_key or ''}"
 
 
 def parse_extra_key_version(extra_key: str) -> int | None:
@@ -84,6 +95,20 @@ class SGLangDiskDeltaAdapter:
             self._init_local_checkpoint(), self.local_checkpoint_dir, self.base_checkpoint_dir
         )
 
+    async def reset(self) -> None:
+        """Discard the local checkpoint and re-materialize the base from scratch.
+
+        Used on a run switch: the new run's chain forks at base, so the locally
+        patched checkpoint must be thrown away before replaying the new chain. The
+        sync manager invokes this under the commit gate (engine paused), so no
+        request decodes across the wipe; ``prepare`` then rebuilds a complete base
+        (a partial wipe from a crash is re-seeded by ``init_local_checkpoint``).
+        """
+        import shutil
+
+        await asyncio.to_thread(shutil.rmtree, self.local_checkpoint_dir, ignore_errors=True)
+        await self.prepare()
+
     async def flush_cache(self) -> None:
         import httpx
 
@@ -116,10 +141,15 @@ class SGLangDiskDeltaAdapter:
         # then reload the full local checkpoint. version_path is the published
         # version dir; its parent is the root of weight_v* dirs apply_deltas walks.
         delta_root = str(Path(version_path).parent)
+        _t_apply = time.perf_counter()
         await asyncio.to_thread(
             self._apply_deltas(), self.local_checkpoint_dir, delta_root, int(manifest.version)
         )
+        logger.info(
+            "[apply timing] v=%s host_delta_apply=%.2fs", manifest.version, time.perf_counter() - _t_apply
+        )
 
+        _t_reload = time.perf_counter()
         payload = {
             "model_path": self.local_checkpoint_dir,
             "weight_version": str(manifest.version),
@@ -135,3 +165,6 @@ class SGLangDiskDeltaAdapter:
             data = resp.json()
             if data.get("success") is False:
                 raise RuntimeError(f"SGLang rejected weight update: {data}")
+        logger.info(
+            "[apply timing] v=%s engine_reload=%.2fs", manifest.version, time.perf_counter() - _t_reload
+        )

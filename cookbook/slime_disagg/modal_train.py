@@ -15,6 +15,7 @@ import importlib
 import os
 import subprocess
 import tempfile
+import uuid
 from pathlib import Path
 
 import modal
@@ -321,11 +322,19 @@ class Trainer:
             )
 
         cfg.rollout_endpoint_url = resolve_flash_gateway_url(APP_NAME, Server.__name__)
+        # Fresh run id per launch: slime writes this run's chain under a partition
+        # (<bulletin_root>/<run_id>/weight_v{N}/), while the canonical pointer at
+        # <bulletin_root>/latest is self-identifying (<run_id>/weight_vN). So a new
+        # run never overwrites a finished run's version dirs and its pointer move is
+        # a forward step, not a colliding rewind — no manual bulletin reset needed.
+        run_id = uuid.uuid4().hex[:12]
+        cfg.update_weight_disk_dir = f"{exp.DELTA_BULLETIN_ROOT}/{run_id}"
         # stitch's publish hooks read these off the slime args namespace.
         cfg.custom_config_path = {
             "update_weight_delta_volume_name": exp.DELTA_VOLUME_NAME,
             "rollout_modal_flash_app_name": APP_NAME,
             "rollout_modal_flash_server_cls_name": Server.__name__,
+            "run_id": run_id,
         }
         helpers.prepare_slime_config(cfg, tempfile.mkdtemp())
         cmd = helpers.build_train_cmd(cfg, SLIME_ROOT)
@@ -362,17 +371,6 @@ def prepare_dataset() -> None:
     data_volume.reload()
     slime_cfg.prepare_data()
     data_volume.commit()
-
-
-@app.function(
-    image=image,
-    volumes={exp.DELTA_BULLETIN_ROOT: delta_volume},
-    timeout=20 * MINUTES,
-    include_source=False,
-)
-def reset_bulletin_board(confirm: bool = False) -> None:
-    helpers.reset_bulletin_board(exp.DELTA_BULLETIN_ROOT, delta_volume, confirm=confirm)
-    print(f"Reset {exp.DELTA_VOLUME_NAME} bulletin board to version 0.")
 
 
 @app.local_entrypoint()

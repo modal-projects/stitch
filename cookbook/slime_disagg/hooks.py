@@ -36,12 +36,17 @@ def commit_and_wake(args: Any, version_dir: str, rollout_engines: list[Any]) -> 
     version = parse_weight_identity(Path(version_dir).name)
     rank = _distributed_rank()
 
-    # Rank 0 owns the monotonic `latest` pointer and writes it before committing,
-    # so the committed bulletin is self-consistent for the poll/startup path
-    # (slime's own latest write is post-hook and uncommitted). Every rank commits
-    # its node's shards.
+    # Rank 0 owns the `latest` pointer and writes it before committing, so the
+    # committed bulletin is self-consistent for the poll/startup path (slime's own
+    # latest write is post-hook and uncommitted). Every rank commits its shards.
+    # The pointer lives at the transport root (the Volume mount) and is
+    # self-identifying — `<run_id>/weight_vN` — while slime wrote the version dir
+    # under the run partition (update_weight_disk_dir = <root>/<run_id>), so a new
+    # run is a forward move of the pointer, never a colliding rewind.
     if version is not None and rank in (None, 0):
-        FilesystemBulletinBoard(_bulletin_root(args), layout="slime").write_latest(version)
+        FilesystemBulletinBoard(_transport_root(args), layout="slime").write_latest(
+            _run_id(args), version
+        )
     commit_volume(_volume_name(args))
 
     if version is None or rank not in (None, 0):
@@ -80,10 +85,23 @@ def _volume_name(args: Any) -> str:
 
 
 def _bulletin_root(args: Any) -> str:
+    """Where slime writes version dirs: ``<transport_root>/<run_id>``."""
     return str(
         getattr(args, "update_weight_disk_dir", None)
         or os.environ.get("DELTA_BULLETIN_ROOT", "/delta-bulletin")
     )
+
+
+def _transport_root(args: Any) -> str:
+    """The Volume mount root that holds the canonical ``latest`` pointer and that
+    the sidecar boards are rooted at — the parent of the per-run write dir."""
+    return str(Path(_bulletin_root(args)).parent)
+
+
+def _run_id(args: Any) -> str:
+    """The run partition (chain identity). Passed explicitly via custom_config,
+    falling back to the basename of the per-run write dir."""
+    return str(getattr(args, "run_id", None) or Path(_bulletin_root(args)).name)
 
 
 # ── M3: staleness-gated rollout requests ──────────────────────────────────────
@@ -93,13 +111,14 @@ def _bulletin_root(args: Any) -> str:
 # `latest` pointer (the publish hook already advanced + committed it). TTL-cached
 # with a Volume reload so a (possibly cross-node) rollout actor sees rank-0's
 # committed pointer without a Volume reload per request.
-_latest_cache: dict[str, Any] = {"version": 0, "at": -1e9, "board": None}
+_latest_cache: dict[str, Any] = {"version": 0, "run_id": None, "at": -1e9, "board": None}
 
 
 def _gate_board(args: Any) -> FilesystemBulletinBoard:
     vol = getattr(args, "update_weight_delta_volume_name", None) or os.environ.get("DELTA_VOLUME_NAME")
     refresh = volume_reloader(vol) if vol else None
-    return FilesystemBulletinBoard(_bulletin_root(args), refresh=refresh, layout="slime")
+    # The pointer lives at the transport root (the mount), not the per-run write dir.
+    return FilesystemBulletinBoard(_transport_root(args), refresh=refresh, layout="slime")
 
 
 async def _latest_published(args: Any, ttl: float = 2.0) -> int:
@@ -110,7 +129,12 @@ async def _latest_published(args: Any, ttl: float = 2.0) -> int:
         _latest_cache["at"] = now  # claim the refresh slot before awaiting -> no reload herd
         try:
             await _latest_cache["board"].refresh()
-            _latest_cache["version"] = int(_latest_cache["board"].read_latest())
+            run_id, version = _latest_cache["board"].read_latest()
+            # Staleness floor is per-run (version restarts at 1 each run); on a run
+            # change adopt the new run's pointer immediately so the floor isn't
+            # pinned to a finished run's higher version number.
+            _latest_cache["run_id"] = run_id
+            _latest_cache["version"] = int(version)
         except Exception:  # noqa: BLE001
             logger.warning(
                 "gate: could not read latest published version; using cached %s",

@@ -22,27 +22,38 @@ No ``from __future__ import annotations`` here: the route handlers'
 fastapi import, or FastAPI mistakes ``request`` for a query parameter.
 """
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 from stitch.protocol import (
     RolloutPoolState,
     RolloutReplicaState,
+    format_snapshot_identity,
     parse_weight_identity,
-    weight_identity,
 )
 
 
 HOT_LOAD_PATH = "/hot_load/v1/models/hot_load"
 
 
-def advance_latest_decision(current_version: int, identity: str) -> dict[str, Any]:
-    """Decide whether a hot-load signal should advance the monotonic ``latest``.
+def advance_latest_decision(
+    current_run_id: str | None,
+    current_version: int,
+    identity: str,
+    request_run_id: str | None,
+) -> dict[str, Any]:
+    """Decide whether a hot-load signal should advance the ``latest`` pointer.
 
-    Returns ``{"version": int}`` to accept, or ``{"error": {...}}`` to reject:
-    an unparseable identity (``InvalidIdentity``), or one at/behind the current
-    version (``WeightRewindRejected`` — a rewind would poison warm replicas; the
-    future path is rolling the fleet from the nearest recovery anchor).
+    Run-id partitioning makes this idempotent across runs. A signal from a
+    *different* run (``request_run_id != current_run_id``) is a fresh chain whose
+    version space restarts at 1, so it is accepted and resets the version space
+    (``"reset": True``) — accepting v1 after a finished run reached v5 is the
+    intended begin-a-new-run path, not a rewind. Within the same run (and the
+    run-less customer layout where both are None) the monotonic CAS still applies.
+
+    Returns ``{"run_id": str|None, "version": int, "reset": bool}`` to accept, or
+    ``{"error": {...}}`` to reject (``InvalidIdentity`` / ``WeightRewindRejected``).
     """
     version = parse_weight_identity(identity)
     if version is None:
@@ -52,18 +63,22 @@ def advance_latest_decision(current_version: int, identity: str) -> dict[str, An
                 "message": f"identity {identity!r} is not weight_v<NNNNNN>",
             }
         }
+    if request_run_id != current_run_id:
+        # New run: its version space restarts, so accepting it is not a rewind.
+        return {"run_id": request_run_id, "version": int(version), "reset": True}
     if version <= current_version:
         return {
             "error": {
                 "type": "WeightRewindRejected",
                 "message": (
-                    f"latest is at version {current_version}; refusing to rewind to {version}"
+                    f"latest is at version {current_version} (run {current_run_id!r}); "
+                    f"refusing to rewind to {version}"
                 ),
                 "current_version": int(current_version),
                 "requested_version": int(version),
             }
         }
-    return {"version": int(version)}
+    return {"run_id": request_run_id, "version": int(version), "reset": False}
 
 
 def pool_state_from_server_infos(infos: list[dict[str, Any]]) -> RolloutPoolState:
@@ -77,11 +92,14 @@ def pool_state_from_server_infos(infos: list[dict[str, Any]]) -> RolloutPoolStat
     replicas: list[RolloutReplicaState] = []
     for info in infos:
         current_version = info.get("current_version")
+        current_run_id = info.get("current_run_id")
         sync_state = info.get("sync_state")
         last_error = info.get("last_sync_error")
         ready = sync_state == "IDLE" and not last_error
+        # The snapshot identity carries the run, so a replica still serving a
+        # finished run's same-numbered version isn't counted ready for a new run.
         identity = (
-            weight_identity(current_version)
+            format_snapshot_identity(current_run_id, current_version)
             if isinstance(current_version, int) and current_version >= 0
             else None
         )
@@ -100,8 +118,8 @@ def pool_state_from_server_infos(infos: list[dict[str, Any]]) -> RolloutPoolStat
 
 def create_frontdoor_app(
     *,
-    read_current_version: Callable[[], Awaitable[int]],
-    advance_to: Callable[[int], Awaitable[None]],
+    read_current_pointer: Callable[[], Awaitable[tuple[str | None, int]]],
+    advance_to: Callable[[str | None, int], Awaitable[None]],
     list_server_infos: Callable[[], Awaitable[list[dict[str, Any]]]],
     proxy: Callable[..., Awaitable[Any]],
     authorize: Callable[[Any], Any] | None = None,
@@ -109,15 +127,21 @@ def create_frontdoor_app(
 ):
     """Build the front-door FastAPI app from injected I/O.
 
-    ``read_current_version``/``advance_to`` read and (atomically, monotonically)
-    write the ``latest`` pointer; ``list_server_infos`` enumerates live replicas;
-    ``proxy`` forwards non-hot-load requests; ``authorize`` returns a rejection
-    Response or ``None``; ``wake`` is a best-effort post-advance nudge.
+    ``read_current_pointer`` returns the active ``(run_id, version)``;
+    ``advance_to(run_id, version)`` atomically writes the single self-identifying
+    ``latest`` pointer. ``list_server_infos`` enumerates live replicas; ``proxy``
+    forwards non-hot-load requests; ``authorize`` returns a rejection Response or
+    ``None``; ``wake`` is a best-effort post-advance nudge.
+
+    The read-decide-advance sequence is serialized so the singleton front door
+    never races itself into a transient rewind (two POSTs both reading the same
+    current version and advancing out of order).
     """
     from fastapi import FastAPI, Request
     from fastapi.responses import JSONResponse, Response
 
     app = FastAPI()
+    advance_lock = asyncio.Lock()
 
     def _auth(request: Request):
         return authorize(request.headers) if authorize is not None else None
@@ -131,19 +155,29 @@ def create_frontdoor_app(
         if not isinstance(payload, dict) or not payload.get("identity"):
             return JSONResponse({"error": "body.identity is required"}, status_code=400)
         identity = str(payload["identity"])
-        decision = advance_latest_decision(await read_current_version(), identity)
-        if "error" in decision:
-            status = 400 if decision["error"]["type"] == "InvalidIdentity" else 409
-            return JSONResponse(decision, status_code=status)
-        version = decision["version"]
-        await advance_to(version)
+        request_run_id = payload.get("run_id")
+        async with advance_lock:
+            current_run_id, current_version = await read_current_pointer()
+            decision = advance_latest_decision(
+                current_run_id, current_version, identity, request_run_id
+            )
+            if "error" in decision:
+                status = 400 if decision["error"]["type"] == "InvalidIdentity" else 409
+                return JSONResponse(decision, status_code=status)
+            await advance_to(decision["run_id"], decision["version"])
+        snapshot_identity = format_snapshot_identity(decision["run_id"], decision["version"])
         if wake is not None:
             try:
-                await wake(version)
+                await wake(decision["version"])
             except Exception:  # noqa: BLE001 — wake is a latency optimization only
                 pass
         return JSONResponse(
-            {"accepted": True, "identity": identity, "current_snapshot_identity": identity}
+            {
+                "accepted": True,
+                "identity": identity,
+                "current_snapshot_identity": snapshot_identity,
+                "run_id": decision["run_id"],
+            }
         )
 
     @app.get(HOT_LOAD_PATH, response_model=None)

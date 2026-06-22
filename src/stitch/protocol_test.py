@@ -44,7 +44,7 @@ class ProtocolTest(unittest.TestCase):
             )
 
             board.publish_manifest(manifest)
-            loaded = board.read_manifest(3)
+            loaded = board.read_manifest(None, 3)
 
             self.assertEqual(read_latest(root), 3)
             self.assertEqual(loaded.version, 3)
