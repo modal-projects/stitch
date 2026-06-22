@@ -132,7 +132,37 @@ if slime_local := os.environ.get("SLIME_LOCAL_DIR"):
         ignore=[".git", "**/__pycache__", "**/*.pyc"],
     )
 
-with image.imports():
+
+# The rollout pool may need a different serving stack than the trainer — e.g. a
+# Blackwell SGLang build that serves native-INT4 Kimi K2.6, which the slime
+# trainer image does not provide. An experiment opts in by defining
+# build_serving_image(...); otherwise the pool reuses the trainer image (the
+# Qwen/Moonlight bf16 and Moonlight-INT4 experiments do). Either way the pool
+# pins the trainer's exact slime ref, so the sidecar's disk_delta decoder matches
+# the trainer's delta encoder.
+def _select_server_image() -> modal.Image:
+    builder = getattr(exp, "build_serving_image", None)
+    if builder is None:
+        return image
+    return builder(
+        slime_repo_url=SLIME_REPO_URL,
+        slime_repo_ref=SLIME_REPO_REF,
+        slime_root=SLIME_ROOT,
+        hf_cache_path=str(HF_CACHE_PATH),
+        experiment=EXPERIMENT,
+    )
+
+
+server_image = _select_server_image()
+if slime_local and server_image is not image:
+    # Mirror the trainer's dev-iteration overlay onto a dedicated serving image.
+    server_image = server_image.add_local_dir(
+        slime_local,
+        remote_path=SLIME_ROOT,
+        ignore=[".git", "**/__pycache__", "**/*.pyc"],
+    )
+
+with server_image.imports():
     from autoinference_utils.endpoint import SGLangEndpoint, warmup_chat_completions
 
 
@@ -175,7 +205,7 @@ WARMUP_PAYLOAD = {
 
 
 @app.cls(
-    image=image,
+    image=server_image,
     gpu=f"{modal_cfg.gpu}:{slime_cfg.rollout_num_gpus_per_engine}",
     cloud=modal_cfg.cloud,
     region=modal_cfg.region,
