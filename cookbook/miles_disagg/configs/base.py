@@ -80,6 +80,12 @@ class ModalConfig:
     # headroom and rank 0's commit (shards + .metadata + common.pt) hits ENOSPC. None =
     # fall back to rollout_ephemeral_disk_mib.
     torch_dist_prep_ephemeral_disk_mib: int | None = None
+    # Ephemeral disk (MiB) for the Trainer nodes. miles' ray.init(address="auto") uses
+    # default spill+log dirs under /tmp/ray, so over a multi-hour run Ray logs + object
+    # spill (rollout batches + per-publish full-model gathers) accumulate on the node's
+    # disk; Modal's default is far too small and progressively ENOSPC'd (`No space left
+    # on device` writing /tmp/ray/.../logs). None = Modal default.
+    trainer_ephemeral_disk_mib: int | None = None
 
     def __init__(self, **kwargs: Any) -> None:
         for k, v in kwargs.items():

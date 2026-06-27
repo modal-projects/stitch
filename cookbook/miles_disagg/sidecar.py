@@ -35,8 +35,21 @@ def _parallel_init_local_checkpoint(workers: int = 32):
     ``apply_deltas`` stays compatible, and fall back to the miles default if those
     internals move under us."""
     import concurrent.futures
+    import hashlib
+    import shutil
 
     from miles.utils import disk_delta as dd
+
+    def _base_fingerprint(base_dir: str) -> str:
+        """Identity of the base's bytes: (filename, size, mtime_ns) over every shard. Re-prep
+        rewrites the shards (new mtime/size), so this changes even when the tensor index/shapes
+        don't — which is exactly the case that bit us (NVFP4 values changed, names didn't)."""
+        h = hashlib.sha256()
+        for e in sorted(os.scandir(base_dir), key=lambda e: e.name):
+            if e.is_file():
+                st = e.stat()
+                h.update(f"{e.name}:{st.st_size}:{st.st_mtime_ns}\n".encode())
+        return h.hexdigest()
 
     def _init(local_ckpt_dir: str, base_dir: str) -> None:
         try:
@@ -48,9 +61,24 @@ def _parallel_init_local_checkpoint(workers: int = 32):
             dd.init_local_checkpoint(local_ckpt_dir, base_dir)
             return
 
+        fp_path = os.path.join(local_ckpt_dir, ".base_fingerprint")
+        base_fp = _base_fingerprint(base_dir)
         with apply_lock(local_ckpt_dir):
             if read_version(local_ckpt_dir) is not None:
-                return
+                try:
+                    cur = open(fp_path).read().strip()
+                except FileNotFoundError:
+                    cur = None
+                if cur == base_fp:
+                    return  # current base already materialized
+                # STALE: /local-checkpoint holds a different (older) base — e.g. after a re-prep.
+                # Reusing it makes the host-side delta (diffed against the NEW base) XOR onto the
+                # WRONG bytes -> base_local XOR delta != export -> checksum mismatch on every tensor.
+                logger.warning(
+                    "stale /local-checkpoint (base changed: %s != %s) — wiping + re-materializing",
+                    cur, base_fp,
+                )
+                shutil.rmtree(local_ckpt_dir, ignore_errors=True)
             logger.info("Materializing base %s -> %s (%d copy workers)", base_dir, local_ckpt_dir, workers)
             os.makedirs(local_ckpt_dir, exist_ok=True)
             files = [e for e in os.scandir(base_dir) if e.is_file()]
@@ -65,6 +93,8 @@ def _parallel_init_local_checkpoint(workers: int = 32):
                 for _ in ex.map(_copy, files):  # re-raises the first copy failure
                     pass
             write_version(local_ckpt_dir, "000000")
+            with open(fp_path, "w") as f:
+                f.write(base_fp)
 
     return _init
 
