@@ -79,7 +79,7 @@ MILES_REPO_URL = "https://github.com/modal-projects/miles.git"
 # radixark/miles#1261 NVFP4 RL @f95c2c495) + our publish-only/0-dim/encoding_dsv4
 # fixes + KimiK25 mbridge import converter (miles_plugins/mbridge/kimi.py). PUSH
 # this branch to modal-projects/miles before deploying. (Built in /tmp/miles-merge.)
-MILES_REPO_REF = "08add1c88882a03d0af0ef8ca3c8f13bab566a6d"
+MILES_REPO_REF = "e9ad52dbbe09b6113b4fa4dccfb5ace35341540e"
 
 # Build-time bake of the megatron R3 dispatch fix (see the .run_commands call
 # below). Kept as a string so the build step has no host-file dependency; the
@@ -358,6 +358,10 @@ _TRAINER_KWARGS = dict(
     cloud=modal_cfg.cloud,
     region=modal_cfg.region,
     volumes=train_volumes,
+    # Ray (address="auto") spills objects + writes logs under /tmp/ray on the node's
+    # ephemeral disk; Modal's default is far too small for a multi-hour 128-GPU run and
+    # progressively ENOSPC'd. Give the B200:8 nodes' local NVMe room.
+    ephemeral_disk=modal_cfg.trainer_ephemeral_disk_mib,
     timeout=24 * 60 * MINUTES,
     startup_timeout=20 * MINUTES,
     scaledown_window=30 * MINUTES,

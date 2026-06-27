@@ -133,6 +133,10 @@ modal = ModalConfig(
     # The served NVFP4 base is ~591 GB; the sidecar copies it to /local-checkpoint
     # on ephemeral disk. 800 GiB covers the copy plus in-place delta-apply headroom.
     rollout_ephemeral_disk_mib=819_200,
+    # Trainer nodes: Ray logs + object spill (rollout batches + per-publish full-model
+    # gathers) accumulate under /tmp/ray over the run; the default disk progressively
+    # ENOSPC'd. 2 TiB of the B200:8 local NVMe gives ample headroom.
+    trainer_ephemeral_disk_mib=2_097_152,
     # torch_dist conversion: 4x8 B200 = 32-way. EP32 shards the 384 experts to
     # ~90 GB/rank so each rank's distcp write finishes well inside the 900s cluster
     # heartbeat window (EP16's ~150 GB/rank raced it and missed .metadata). TP1/PP1
