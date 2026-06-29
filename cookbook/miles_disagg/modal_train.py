@@ -411,6 +411,11 @@ class Trainer:
     def start_ray(self) -> None:
         rank, master_addr, my_ip = helpers.get_modal_cluster_context(N_TRAIN_NODES)
         self.rank = rank
+        # Per-node host-RAM trace: the trainer can OOM-kill at host-RAM exhaustion
+        # (the publish/update_weights gather is the peak), and Modal's kill leaves no
+        # peak behind. This makes `modal app logs -f` show which node/phase blows the
+        # ~1.95 TiB budget. Runs on every node (SPMD enter()).
+        helpers.start_host_mem_monitor()
         os.environ.update(
             {
                 "MILES_HOST_IP": my_ip,
