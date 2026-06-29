@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import subprocess
 import time
 import urllib.error
 import urllib.request
@@ -46,9 +47,7 @@ def start_sglang_sidecar(
     volume_name: str,
     commit_mode: str,
     debug_requests: bool = False,
-) -> "subprocess.Popen":
-    import subprocess
-
+) -> subprocess.Popen:
     from cookbook.sidecar_process import start_sglang_sidecar as _start
 
     return _start(

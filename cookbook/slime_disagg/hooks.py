@@ -9,10 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 from cookbook.bulletin_hooks import (
-    CachedLatestPointer,
-    bulletin_root,
     commit_and_wake as _commit_and_wake,
-    distributed_rank,
     gated_rollout_request_hook,
 )
 
