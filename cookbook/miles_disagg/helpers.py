@@ -1,11 +1,9 @@
-"""Ray cluster, sidecar process, and smoke-check helpers for the miles example.
+"""Trainer-specific helpers for the miles_disagg example.
 
-The miles twin of cookbook/slime_disagg/helpers.py. The Ray bring-up, sidecar
-launch, and Flash-pool smoke check are trainer-agnostic and identical; only
-``prepare_miles_config`` / ``build_train_cmd`` (which source the miles model
-script and run miles' train.py/train_async.py) and the sidecar module path
-differ. Ray helpers were originally adapted from
-https://github.com/modal-projects/multinode-training-guide.
+Ray cluster, sidecar, and process helpers are shared across trainers via
+:mod:`cookbook.ray_cluster` and :mod:`cookbook.sidecar_process`. This module
+provides miles-specific config preparation, train command building, and the
+Flash pool smoke check.
 """
 
 from __future__ import annotations
@@ -13,144 +11,56 @@ from __future__ import annotations
 import json
 import os
 import shlex
-import signal
-import socket
 import subprocess
 import time
 import urllib.error
 import urllib.request
-from pathlib import Path
 from typing import Any
 
 from stitch.providers.modal import discover_flash_targets, resolve_flash_gateway_url
 
-RAY_START_TIMEOUT = 240
-RAY_WORKER_JOIN_TIMEOUT = 180
+# Re-export shared helpers so existing callers (modal_train.py) don't break.
+from cookbook.ray_cluster import (  # noqa: F401
+    RAY_START_TIMEOUT,
+    RAY_WORKER_JOIN_TIMEOUT,
+    get_modal_cluster_context,
+    start_ray_head,
+    start_ray_worker,
+    training_nodes,
+)
+from cookbook.sidecar_process import (  # noqa: F401
+    terminate_process,
+    wait_http,
+)
 
 
-# ── Ray cluster ───────────────────────────────────────────────────────────────
+SIDECAR_MODULE = "cookbook.miles_disagg.sidecar"
 
 
-def training_nodes(cfg: Any) -> int:
-    nodes = int(getattr(cfg, "actor_num_nodes", 1))
-    if getattr(cfg, "use_critic", False) or getattr(cfg, "advantage_estimator", None) == "ppo":
-        nodes += int(getattr(cfg, "critic_num_nodes", nodes))
-    return nodes
+def start_sglang_sidecar(
+    *,
+    sidecar_port: int,
+    sglang_port: int,
+    bulletin_root: str,
+    local_checkpoint_dir: str,
+    base_checkpoint_dir: str,
+    volume_name: str,
+    commit_mode: str,
+    debug_requests: bool = False,
+) -> subprocess.Popen:
+    from cookbook.sidecar_process import start_sglang_sidecar as _start
 
-
-def get_modal_cluster_context(n_nodes: int) -> tuple[int, str, str]:
-    """Return (rank, master_addr, my_ip) for the current Modal cluster."""
-    import modal.experimental
-
-    try:
-        info = modal.experimental.get_cluster_info()
-    except Exception:  # noqa: BLE001
-        if n_nodes == 1:
-            ip = _get_local_ip()
-            return 0, ip, ip
-        raise
-    actual_nodes = len(info.container_ipv4_ips)
-    if actual_nodes == 0 and n_nodes == 1:
-        ip = _get_local_ip()
-        return 0, ip, ip
-    if actual_nodes != n_nodes:
-        raise RuntimeError(f"cluster size mismatch: expected {n_nodes} node(s), got {actual_nodes}")
-    return info.rank, info.container_ipv4_ips[0], info.container_ipv4_ips[info.rank]
-
-
-def _get_local_ip() -> str:
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-        try:
-            sock.connect(("8.8.8.8", 80))
-            return sock.getsockname()[0]
-        except OSError:
-            return socket.gethostbyname(socket.gethostname())
-
-
-def start_ray_head(my_ip: str, n_nodes: int, *, ray_port: int) -> None:
-    """Start the Ray head node and wait for all workers to join."""
-    import ray
-
-    start_cmd = [
-        "ray",
-        "start",
-        "--head",
-        f"--node-ip-address={my_ip}",
-        f"--port={ray_port}",
-        "--disable-usage-stats",
-        "--include-dashboard=false",
-    ]
-    try:
-        subprocess.run(start_cmd, check=True, timeout=RAY_START_TIMEOUT)
-    except subprocess.TimeoutExpired as exc:
-        _print_ray_logs()
-        raise RuntimeError(f"Ray head node did not finish startup within {RAY_START_TIMEOUT}s") from exc
-    except subprocess.CalledProcessError as exc:
-        _print_ray_logs()
-        raise RuntimeError(f"Ray head node failed to start with exit code {exc.returncode}") from exc
-
-    last_error = ""
-    for _ in range(RAY_START_TIMEOUT):
-        try:
-            ray.init(address=f"{my_ip}:{ray_port}")
-            break
-        except Exception as exc:  # noqa: BLE001
-            last_error = f"{type(exc).__name__}: {exc}"
-            time.sleep(1)
-    else:
-        _print_ray_logs()
-        raise RuntimeError(f"Ray head node failed to start before timeout: {last_error}")
-
-    for _ in range(RAY_WORKER_JOIN_TIMEOUT):
-        alive = [n for n in ray.nodes() if n["Alive"]]
-        print(f"Waiting for workers: {len(alive)}/{n_nodes} alive")
-        if len(alive) == n_nodes:
-            break
-        time.sleep(1)
-    else:
-        _print_ray_logs()
-        raise RuntimeError(f"Timed out waiting for all {n_nodes} Ray nodes to join")
-
-
-def start_ray_worker(my_ip: str, master_addr: str, *, ray_port: int) -> None:
-    """Join this container to the Ray cluster as a worker node."""
-    subprocess.run(
-        [
-            "ray",
-            "start",
-            f"--node-ip-address={my_ip}",
-            "--address",
-            f"{master_addr}:{ray_port}",
-            "--disable-usage-stats",
-        ],
-        check=True,
-        timeout=RAY_START_TIMEOUT,
+    return _start(
+        sidecar_module=SIDECAR_MODULE,
+        sidecar_port=sidecar_port,
+        sglang_port=sglang_port,
+        bulletin_root=bulletin_root,
+        local_checkpoint_dir=local_checkpoint_dir,
+        base_checkpoint_dir=base_checkpoint_dir,
+        volume_name=volume_name,
+        commit_mode=commit_mode,
+        debug_requests=debug_requests,
     )
-
-
-def _print_ray_logs() -> None:
-    log_dir = Path("/tmp/ray/session_latest/logs")
-    for name in (
-        "dashboard.log",
-        "dashboard.err",
-        "gcs_server.out",
-        "gcs_server.err",
-        "raylet.out",
-        "raylet.err",
-        "monitor.out",
-        "monitor.err",
-    ):
-        path = log_dir / name
-        if not path.exists():
-            continue
-        print(f"===== {path} =====")
-        try:
-            lines = path.read_text(errors="replace").splitlines()
-        except OSError as exc:
-            print(f"could not read {path}: {exc}")
-            continue
-        for line in lines[-80:]:
-            print(line)
 
 
 # ── miles launch ──────────────────────────────────────────────────────────────
@@ -220,76 +130,6 @@ def build_train_cmd(miles_cfg: Any, miles_root: str) -> str:
         )
         return f"bash -c {shlex.quote(inner)}"
     return f"python3 {train_script} {shlex.join(miles_cfg.cli_args())}"
-
-
-# ── Sidecar process ───────────────────────────────────────────────────────────
-
-
-def start_sglang_sidecar(
-    *,
-    sidecar_port: int,
-    sglang_port: int,
-    bulletin_root: str,
-    local_checkpoint_dir: str,
-    base_checkpoint_dir: str,
-    volume_name: str,
-    commit_mode: str,
-    debug_requests: bool = False,
-) -> subprocess.Popen:
-    cmd = [
-        "python3",
-        "-m",
-        "cookbook.miles_disagg.sidecar",
-        "--host",
-        "0.0.0.0",
-        "--port",
-        str(sidecar_port),
-        "--upstream-url",
-        f"http://127.0.0.1:{sglang_port}",
-        "--bulletin-root",
-        bulletin_root,
-        "--local-checkpoint-dir",
-        local_checkpoint_dir,
-        "--base-checkpoint-dir",
-        base_checkpoint_dir,
-        "--volume-name",
-        volume_name,
-        "--commit-mode",
-        commit_mode,
-    ]
-    if debug_requests:
-        cmd.append("--debug-requests")
-    print("Starting sidecar:", " ".join(cmd))
-    return subprocess.Popen(cmd, start_new_session=True)
-
-
-def wait_http(url: str, process: subprocess.Popen | None, timeout: int) -> None:
-    deadline = time.time() + timeout
-    last_error: str | None = None
-    while time.time() < deadline:
-        if process is not None and process.poll() is not None:
-            raise RuntimeError(f"process exited while waiting for {url}: code={process.returncode}")
-        try:
-            with urllib.request.urlopen(url, timeout=5) as resp:
-                if 200 <= resp.status < 500:
-                    return
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            last_error = f"{type(exc).__name__}: {exc}"
-        time.sleep(2)
-    raise TimeoutError(f"Timed out waiting for {url}; last error: {last_error}")
-
-
-def terminate_process(process: subprocess.Popen | None) -> None:
-    if process is None or process.poll() is not None:
-        return
-    try:
-        os.killpg(process.pid, signal.SIGTERM)
-        process.wait(timeout=20)
-    except Exception:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except Exception:
-            pass
 
 
 # ── Flash pool smoke check ────────────────────────────────────────────────────

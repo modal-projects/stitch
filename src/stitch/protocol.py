@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 
 PROTOCOL_VERSION = 1
@@ -516,3 +516,37 @@ def _bool(value: Any) -> bool:
     if isinstance(value, str):
         return value.lower() in {"1", "true", "yes"}
     return bool(value)
+
+
+@runtime_checkable
+class EngineAdapter(Protocol):
+    """Contract for rollout engine adapters driven by :class:`WeightSyncManager`.
+
+    An adapter bridges the sync manager to one inference engine instance.
+    Required methods are called during every version commit; optional methods
+    (``prepare``, ``reset``) are probed with ``getattr`` at startup and on run
+    switches, so adapters may omit them.
+
+    See :class:`stitch.engines.sglang.SGLangDiskDeltaAdapter` for the canonical
+    implementation.
+    """
+
+    backend: str
+
+    async def flush_cache(self) -> None:
+        """Evict all cached state (KV, radix tree). Called before ``apply_manifest``
+        in quiesce mode; skipped in in_place mode."""
+        ...
+
+    async def apply_manifest(self, manifest: VersionManifest, version_path: str) -> None:
+        """Apply one published weight version to the engine."""
+        ...
+
+    async def pause_generation(self) -> None:
+        """Pause the engine's scheduler in place. Required for ``commit_mode="in_place"``;
+        in-flight requests stay resident and resume after ``continue_generation``."""
+        ...
+
+    async def continue_generation(self) -> None:
+        """Resume the engine's scheduler after a pause."""
+        ...

@@ -8,6 +8,7 @@ from argparse import Namespace
 from pathlib import Path
 from unittest import mock
 
+import cookbook.bulletin_hooks as bulletin_hooks
 from cookbook.slime_disagg import hooks
 
 
@@ -26,10 +27,10 @@ class CommitAndWakeTest(unittest.TestCase):
             )
 
             with mock.patch.dict(os.environ, {"DELTA_VOLUME_NAME": "delta-volume"}), mock.patch.object(
-                hooks, "_distributed_rank", return_value=0
-            ), mock.patch.object(hooks, "commit_volume") as commit_volume, mock.patch.object(
-                hooks, "discover_flash_targets", return_value=["https://c"]
-            ), mock.patch.object(hooks, "wake_targets") as wake_targets:
+                bulletin_hooks, "distributed_rank", return_value=0
+            ), mock.patch.object(bulletin_hooks, "commit_volume") as commit_volume, mock.patch.object(
+                bulletin_hooks, "discover_flash_targets", return_value=["https://c"]
+            ), mock.patch.object(bulletin_hooks, "wake_targets") as wake_targets:
                 hooks.commit_and_wake(args, str(version_dir), [])
 
             # The canonical pointer lives at the transport root and is self-identifying.
@@ -45,9 +46,9 @@ class CommitAndWakeTest(unittest.TestCase):
             # The baseline call passes the disk-dir root, not a weight_v{N} dir.
             args = Namespace(update_weight_disk_dir=str(disk_dir), run_id="run-a")
             with mock.patch.dict(os.environ, {"DELTA_VOLUME_NAME": "delta-volume"}), mock.patch.object(
-                hooks, "_distributed_rank", return_value=0
-            ), mock.patch.object(hooks, "commit_volume") as commit_volume, mock.patch.object(
-                hooks, "wake_targets"
+                bulletin_hooks, "distributed_rank", return_value=0
+            ), mock.patch.object(bulletin_hooks, "commit_volume") as commit_volume, mock.patch.object(
+                bulletin_hooks, "wake_targets"
             ) as wake_targets:
                 hooks.commit_and_wake(args, str(disk_dir), [])
 
@@ -62,9 +63,9 @@ class CommitAndWakeTest(unittest.TestCase):
             (disk_dir / "weight_v000002").mkdir(parents=True)
             args = Namespace(update_weight_disk_dir=str(disk_dir), run_id="run-a")
             with mock.patch.dict(os.environ, {"DELTA_VOLUME_NAME": "delta-volume"}), mock.patch.object(
-                hooks, "_distributed_rank", return_value=3
-            ), mock.patch.object(hooks, "commit_volume") as commit_volume, mock.patch.object(
-                hooks, "wake_targets"
+                bulletin_hooks, "distributed_rank", return_value=3
+            ), mock.patch.object(bulletin_hooks, "commit_volume") as commit_volume, mock.patch.object(
+                bulletin_hooks, "wake_targets"
             ) as wake_targets:
                 hooks.commit_and_wake(args, str(disk_dir / "weight_v000002"), [])
 
@@ -84,11 +85,16 @@ class GateTest(unittest.TestCase):
                 # the staleness gate cares only about the version within the run.
                 (root / "latest").write_text("run-a/weight_v000005", encoding="utf-8")
                 args = Namespace(update_weight_disk_dir=str(disk_dir), run_id="run-a")
-                hooks._latest_cache.update({"version": 0, "run_id": None, "at": -1e9, "board": None})
+                # Reset the module-level cache before each test.
+                cache = bulletin_hooks._latest_cache
+                cache.version = 0
+                cache.run_id = None
+                cache._refreshed_at = -1e9
+                cache._board = None
                 with mock.patch.dict(os.environ, {}, clear=True):
-                    version = await hooks._latest_published(args)
+                    version = await cache.get(args)
                 self.assertEqual(version, 5)
-                self.assertEqual(hooks._latest_cache["run_id"], "run-a")
+                self.assertEqual(cache.run_id, "run-a")
 
         asyncio.run(run())
 

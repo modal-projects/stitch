@@ -2,6 +2,7 @@
 
 from stitch.protocol import (
     Artifact,
+    EngineAdapter,
     RolloutPoolState,
     RolloutReplicaState,
     SyncState,
@@ -14,6 +15,7 @@ from stitch.protocol import (
 
 __all__ = [
     "Artifact",
+    "EngineAdapter",
     "RolloutPoolState",
     "RolloutReplicaState",
     "SyncState",

@@ -11,6 +11,7 @@ from typing import Any, Literal, Protocol
 
 from stitch.bulletin import BulletinBoard
 from stitch.protocol import (
+    EngineAdapter,
     SyncState,
     VersionManifest,
     WeightVersionPolicy,
@@ -28,24 +29,6 @@ class PolicyViolation(Exception):
     def __init__(self, error: Mapping[str, Any]) -> None:
         super().__init__(error["error"]["message"])
         self.error = error
-
-
-class EngineAdapter(Protocol):
-    backend: str
-
-    async def flush_cache(self) -> None: ...
-
-    async def apply_manifest(self, manifest: VersionManifest, version_path: str) -> None: ...
-
-    # Required only for commit_mode="in_place".
-    async def pause_generation(self) -> None: ...
-
-    async def continue_generation(self) -> None: ...
-
-    # Optional: one-time engine preparation run before the first sync (e.g.
-    # materializing the host-local base checkpoint deltas are applied onto).
-    # startup_sync probes for it defensively, so adapters may omit it.
-    async def prepare(self) -> None: ...
 
 
 class RolloutSyncManager(Protocol):
