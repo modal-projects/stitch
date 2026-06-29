@@ -99,6 +99,28 @@ _R3_DISPATCH_BAKE_PY = (
     "print(f'[R3 bake] patched {n} dispatch site(s) in token_dispatcher.py')"
 )
 
+# Keep GLM4Moe expert-bias exports fp32 for BF16 disk-delta byte-shape parity.
+_GLM4MOE_EXPERT_BIAS_TARGET = f"{MILES_ROOT}/miles/backends/megatron_utils/megatron_to_hf/glm4moe.py"
+_GLM4MOE_EXPERT_BIAS_OLD = (
+    '        elif rest == "mlp.router.expert_bias":\n'
+    '            return [(f"model.layers.{layer_idx}.mlp.gate.e_score_correction_bias", to_model_dtype(args, param))]'
+)
+_GLM4MOE_EXPERT_BIAS_NEW = (
+    '        elif rest == "mlp.router.expert_bias":\n'
+    "            return [(f\"model.layers.{layer_idx}.mlp.gate.e_score_correction_bias\", param)]"
+)
+_GLM4MOE_EXPERT_BIAS_BAKE_PY = (
+    "import pathlib;"
+    f"p=pathlib.Path({_GLM4MOE_EXPERT_BIAS_TARGET!r});"
+    "s=p.read_text();"
+    f"n=s.count({_GLM4MOE_EXPERT_BIAS_OLD!r});"
+    "assert n == 1, f'expected exactly one GLM4Moe expert-bias export site, found {n}';"
+    f"p.write_text(s.replace({_GLM4MOE_EXPERT_BIAS_OLD!r}, {_GLM4MOE_EXPERT_BIAS_NEW!r}));"
+    "print(f'[GLM4Moe bake] patched {n} expert-bias dtype export site(s) in glm4moe.py')"
+)
+
+TORCH_DIST_CONVERT_WRAPPER = "/root/convert_hf_to_torch_dist_modal.py"
+
 image = (
     modal.Image.from_registry(MILES_IMAGE_TAG)
     .entrypoint([])
@@ -152,6 +174,16 @@ image = (
         }
     )
 )
+
+if getattr(exp, "USE_MODAL_TORCH_DIST_WRAPPER", False):
+    image = image.add_local_file(
+        "cookbook/miles_disagg/convert_hf_to_torch_dist_modal.py",
+        TORCH_DIST_CONVERT_WRAPPER,
+        copy=True,
+    )
+
+if getattr(exp, "PATCH_GLM4MOE_EXPERT_BIAS_FP32", False):
+    image = image.run_commands(f"python3 -c {shlex.quote(_GLM4MOE_EXPERT_BIAS_BAKE_PY)}")
 
 # R3 debug probe (env-gated, removable): log the actual EP all-to-all split sizes
 # right before token_dispatch's all_to_all, to diagnose the K2.6 routing-replay
@@ -493,12 +525,21 @@ def prepare_checkpoints() -> None:
          served packing == the trainer's export packing by construction.
       3. (optional) fetch ANCHOR_MODEL (nvidia NVFP4) for validation only.
     """
+    if getattr(exp, "DISABLE_HF_XET", False):
+        os.environ["HF_HUB_DISABLE_XET"] = "1"
+        os.environ.pop("HF_XET_HIGH_PERFORMANCE", None)
+    if getattr(exp, "DISABLE_HF_TRANSFER", False):
+        os.environ.pop("HF_HUB_ENABLE_HF_TRANSFER", None)
+
     from huggingface_hub import snapshot_download
 
     prep_volume.reload()
     tag = exp.MODEL_TAG
     bf16_dir = f"{PREP_PATH}/{tag}/bf16"
     nvfp4_dir = f"{PREP_PATH}/{tag}/nvfp4"
+    served_checkpoint_format = getattr(exp, "SERVED_CHECKPOINT_FORMAT", "nvfp4")
+    if served_checkpoint_format not in {"bf16", "nvfp4"}:
+        raise SystemExit(f"Unsupported SERVED_CHECKPOINT_FORMAT={served_checkpoint_format!r}")
     tools = f"{MILES_ROOT}/tools"
 
     def _staged(final_dir: str, build) -> None:
@@ -539,6 +580,11 @@ def prepare_checkpoints() -> None:
         _strip_stale_quant_config(os.path.join(out, "config.json"))
 
     _staged(bf16_dir, _build_bf16)
+
+    if served_checkpoint_format == "bf16":
+        prep_volume.commit()
+        print(f"Prepared masters={bf16_dir} served_base={bf16_dir}")
+        return
 
     # 2. served NVFP4 base (TE-direct quantizer per radixark/miles#1261). bf16
     # carve-outs for the dense first / last layers must match the trainer's
@@ -616,6 +662,8 @@ def prepare_torch_dist() -> None:
         return
     if not miles_cfg.miles_model_script:
         raise SystemExit("prepare_torch_dist requires miles_model_script (MODEL_ARGS)")
+    use_modal_wrapper = TORCH_DIST_PREP_NODES > 1 and getattr(exp, "USE_MODAL_TORCH_DIST_WRAPPER", False)
+    convert_script = TORCH_DIST_CONVERT_WRAPPER if use_modal_wrapper else f"{MILES_ROOT}/tools/convert_hf_to_torch_dist.py"
     # source the model script for ${MODEL_ARGS[@]}, then torchrun the conversion.
     inner = (
         f"source {MILES_ROOT}/{miles_cfg.miles_model_script} && "
@@ -623,11 +671,14 @@ def prepare_torch_dist() -> None:
         f" --nnodes {TORCH_DIST_PREP_NODES} --node-rank {rank}"
         f" --master-addr {master_addr} --master-port 29500"
         f" --nproc-per-node {_TORCH_DIST_GPUS_PER_NODE}"
-        f" {MILES_ROOT}/tools/convert_hf_to_torch_dist.py ${{MODEL_ARGS[@]}}"
+        f" {convert_script} ${{MODEL_ARGS[@]}}"
         f" --hf-checkpoint {bf16_dir} --save {torch_dist_dir} --megatron-to-hf-mode raw"
         f" {modal_cfg.torch_dist_convert_extra_args}"
     )
-    subprocess.run(["bash", "-c", inner], check=True)
+    env = os.environ.copy()
+    if use_modal_wrapper:
+        env["SKIP_RELEASE_RENAME"] = "1"
+    subprocess.run(["bash", "-c", inner], check=True, env=env)
     # Each node wrote its own distcp shards to its own Volume mount, so EVERY node must
     # commit — a rank-0-only commit drops nodes 1..N-1's shards and the checkpoint loads
     # short a shard (FileNotFoundError on __<rank>_<n>.distcp). Rank 0 additionally
