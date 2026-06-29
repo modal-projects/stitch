@@ -221,3 +221,55 @@ def _post_json(url: str, payload: dict, *, timeout: float) -> dict:
     )
     with urllib.request.urlopen(request, timeout=timeout) as resp:
         return json.load(resp)
+
+
+def start_host_mem_monitor(interval_s: int = 20) -> None:
+    """Log this node's host-RAM trajectory to stdout from a daemon thread.
+
+    The trainer can OOM-kill on host-RAM exhaustion (the publish/update_weights
+    full-model gather is the peak consumer), but Megatron only reports GPU memory
+    and the kill leaves no durable peak behind. This logs MemTotal/MemAvailable +
+    the container cgroup usage every ``interval_s`` so a live ``modal app logs -f``
+    shows exactly which phase blows the ~1.95 TiB B200:8 node and how high it peaks.
+    Runs on EVERY node (called from the SPMD enter()), so whichever rank OOMs has
+    its own trace. Best-effort: never raises."""
+    import threading
+
+    host = socket.gethostname()
+
+    def _meminfo() -> tuple[float, float]:
+        total = avail = 0.0
+        try:
+            with open("/proc/meminfo") as f:
+                for line in f:
+                    if line.startswith("MemTotal:"):
+                        total = int(line.split()[1]) / 1024 / 1024  # GiB
+                    elif line.startswith("MemAvailable:"):
+                        avail = int(line.split()[1]) / 1024 / 1024
+        except Exception:  # noqa: BLE001
+            pass
+        return total, avail
+
+    def _cgroup_used_gib() -> float:
+        for path in ("/sys/fs/cgroup/memory.current",  # cgroup v2
+                     "/sys/fs/cgroup/memory/memory.usage_in_bytes"):  # v1
+            try:
+                with open(path) as f:
+                    return int(f.read().strip()) / 1024**3
+            except Exception:  # noqa: BLE001
+                continue
+        return -1.0
+
+    def _loop() -> None:
+        while True:
+            total, avail = _meminfo()
+            used = total - avail
+            cg = _cgroup_used_gib()
+            print(
+                f"[hostmem] {host} used={used:.0f}GiB avail={avail:.0f}GiB "
+                f"total={total:.0f}GiB cgroup_used={cg:.0f}GiB",
+                flush=True,
+            )
+            time.sleep(interval_s)
+
+    threading.Thread(target=_loop, daemon=True, name="host-mem-monitor").start()
