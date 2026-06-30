@@ -13,8 +13,7 @@ DELTA_BULLETIN_ROOT = "/delta-bulletin"
 # the engine, applies, and resumes — in-flight requests keep decoding on stale
 # KV and cross-version isolation comes from extra_key stamping, so commits stop
 # blocking behind over-generation/eval stragglers and skip the full-tree flush.
-# It relies on the targeted SGLang build's overlap-drain fix. "quiesce" is the
-# safe fallback that drains in-flight requests before applying.
+# "quiesce" is the safe fallback that drains in-flight requests before applying.
 SIDECAR_COMMIT_MODE = "in_place"
 
 # Log every versioned sidecar proxy request (start/end + injected rid) at INFO,
