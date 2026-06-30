@@ -24,6 +24,9 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from cookbook.rollout_control import apply_session_affinity
+from cookbook.rollout_control import distributed_rank as _distributed_rank
+from cookbook.rollout_control import read_setting as _setting
 from stitch.protocol import RolloutPoolState, parse_weight_identity, weight_identity
 
 
@@ -198,6 +201,37 @@ def announce_and_wait(args: Any, version_dir: str, rollout_engines: list[Any]) -
     )
 
 
+def announce_claim(args: Any, *, run_id: str) -> None:
+    """Trainer launch hook (rank 0): claim the rollout pool for this run via the
+    front door, the standalone counterpart to :func:`cookbook.bulletin_hooks.claim_pool`.
+
+    POST the empty pointer (``weight_v000000``) under a fresh ``run_id`` so the
+    front door's cross-run :func:`decide_pointer_move` resets ``latest`` to base
+    *before* the first delta — every replica (cold, or warm on a finished run)
+    reconciles to base up front instead of inferring the reset from the first
+    publish's run mismatch. Best-effort and non-blocking: the pool may be scaled
+    to zero at launch, and the first :func:`announce_and_wait` already blocks on
+    readiness, so a transient claim failure costs only the early reset, not
+    correctness. ``run_id`` must be fresh per launch (the epoch/fence token).
+    """
+    if _distributed_rank() not in (None, 0):
+        return
+    cfg = replace(ShimConfig.from_env(args), run_id=run_id)
+    try:
+        _post_hot_load(
+            cfg,
+            identity=weight_identity(0),
+            previous_identity=cfg.base_snapshot_identity,
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "Best-effort pool claim failed for run %r; the first publish's "
+            "cross-run reset will still establish base",
+            run_id,
+            exc_info=True,
+        )
+
+
 def rollout_request_weight_version_hook(
     args: Any, sample: Any, request: dict[str, Any]
 ) -> None:
@@ -270,17 +304,16 @@ def rollout_request_weight_version_hook(
         headers["Provider-Model"] = cfg.provider_model
     if cfg.provider_deployment:
         headers["Provider-Deployment"] = cfg.provider_deployment
-    if getattr(sample, "session_id", None):
-        # Neutral by default. The front-door relabel proxy maps this to
-        # Modal-Session-ID before the gateway.
-        affinity_header = _setting(
-            args,
-            "api_shim_session_affinity_header",
-            "STITCH_SHIM_SESSION_AFFINITY_HEADER",
-            default="x-session-affinity",
-        )
-        headers.setdefault(affinity_header, sample.session_id)
     request["headers"] = headers
+    # Neutral by default. The front-door relabel proxy maps this to
+    # Modal-Session-ID before the gateway.
+    affinity_header = _setting(
+        args,
+        "api_shim_session_affinity_header",
+        "STITCH_SHIM_SESSION_AFFINITY_HEADER",
+        default="x-session-affinity",
+    )
+    apply_session_affinity(request, getattr(sample, "session_id", None), affinity_header)
 
 
 def _rollout_request_target_version(args: Any, rollout_id: int, evaluation: bool) -> int:
@@ -413,32 +446,4 @@ def _copy_version_to_transport(version_dir: Path, destination: Path) -> None:
             shutil.copyfileobj(src, dst)
 
 
-def _distributed_rank() -> int | None:
-    try:
-        import torch.distributed as dist
 
-        if dist.is_available() and dist.is_initialized():
-            return int(dist.get_rank())
-    except Exception:  # noqa: BLE001
-        return None
-    return None
-
-
-def _setting(
-    args: Any | None,
-    attr: str,
-    env: str,
-    *,
-    default: str | None = None,
-    required: bool = False,
-) -> str:
-    value = getattr(args, attr, None) if args is not None else None
-    if value is None:
-        value = os.environ.get(env)
-    if value is None:
-        value = default
-    if value is None and required:
-        raise RuntimeError(
-            f"Missing required setting {attr!r} or environment variable {env}"
-        )
-    return str(value) if value is not None else ""
