@@ -81,9 +81,8 @@ def main() -> None:
         help=(
             "in_place (default): pause/apply/continue without flushing; "
             "in-flight requests keep decoding on stale KV and version isolation "
-            "comes from extra_key stamping. Relies on the engine's overlap-drain "
-            "fix. quiesce: wait out active requests and flush before applying "
-            "(safe on any build)."
+            "comes from extra_key stamping. quiesce: wait out active requests "
+            "and flush before applying."
         ),
     )
     parser.add_argument(

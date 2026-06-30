@@ -38,9 +38,7 @@ DELTA_BULLETIN_ROOT = "/delta-bulletin"
 # M3: in_place commit applies weights without draining in-flight rollouts. Stale
 # KV is isolated per weight version by the sidecar's extra_key stamping (so old
 # requests keep decoding on their version's KV and it drains as they finish);
-# min-version pins cross commits freely, only exact pins are quiesced. (The
-# overlap-drain race the docs warned about is a tiny, un-reproduced window in the
-# overlap-spec path, so we don't gate on the patched build.)
+# min-version pins cross commits freely, only exact pins are quiesced.
 SIDECAR_COMMIT_MODE = "in_place"
 SIDECAR_DEBUG_REQUESTS = True
 
