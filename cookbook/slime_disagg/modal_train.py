@@ -17,6 +17,7 @@ import subprocess
 import tempfile
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
 import modal
 import modal.experimental
@@ -368,6 +369,16 @@ class Trainer:
         }
         helpers.prepare_slime_config(cfg, tempfile.mkdtemp())
         cmd = helpers.build_train_cmd(cfg, SLIME_ROOT)
+
+        # Claim the pool for this run *before* slime starts publishing: write the
+        # empty pointer (<run_id>/weight_v000000) and wake the pool so every
+        # replica resets to base now, closing the window where a replica could
+        # reconcile to a finished run's stale high-water version.
+        from cookbook.slime_disagg import hooks
+
+        hooks.claim_pool(
+            SimpleNamespace(update_weight_disk_dir=cfg.update_weight_disk_dir, **cfg.custom_config_path)
+        )
 
         print(
             f"Training {experiment}: nodes={N_TRAIN_NODES}, rollout_endpoint={cfg.rollout_endpoint_url}"

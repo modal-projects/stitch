@@ -27,8 +27,10 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from stitch.protocol import (
+    PointerRewind,
     RolloutPoolState,
     RolloutReplicaState,
+    decide_pointer_move,
     format_snapshot_identity,
     parse_weight_identity,
 )
@@ -54,6 +56,11 @@ def advance_latest_decision(
 
     Returns ``{"run_id": str|None, "version": int, "reset": bool}`` to accept, or
     ``{"error": {...}}`` to reject (``InvalidIdentity`` / ``WeightRewindRejected``).
+    The accept/reset/rewind call is :func:`stitch.protocol.decide_pointer_move`,
+    the same rule the bulletin-board publish path advances through; this wrapper
+    only parses the wire identity and shapes the error dict. An explicit claim is
+    just a signal at ``weight_v000000`` with a fresh ``run_id`` (a cross-run move,
+    so ``reset=True``).
     """
     version = parse_weight_identity(identity)
     if version is None:
@@ -63,22 +70,20 @@ def advance_latest_decision(
                 "message": f"identity {identity!r} is not weight_v<NNNNNN>",
             }
         }
-    if request_run_id != current_run_id:
-        # New run: its version space restarts, so accepting it is not a rewind.
-        return {"run_id": request_run_id, "version": int(version), "reset": True}
-    if version <= current_version:
+    try:
+        move = decide_pointer_move(
+            current_run_id, current_version, run_id=request_run_id, version=version
+        )
+    except PointerRewind as rewind:
         return {
             "error": {
                 "type": "WeightRewindRejected",
-                "message": (
-                    f"latest is at version {current_version} (run {current_run_id!r}); "
-                    f"refusing to rewind to {version}"
-                ),
-                "current_version": int(current_version),
-                "requested_version": int(version),
+                "message": str(rewind),
+                "current_version": rewind.current_version,
+                "requested_version": rewind.requested_version,
             }
         }
-    return {"run_id": request_run_id, "version": int(version), "reset": False}
+    return {"run_id": move.run_id, "version": move.version, "reset": move.reset}
 
 
 def pool_state_from_server_infos(infos: list[dict[str, Any]]) -> RolloutPoolState:

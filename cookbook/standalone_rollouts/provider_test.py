@@ -89,9 +89,11 @@ class ProviderSyncTest(unittest.TestCase):
                 )
                 await manager.startup_sync()
 
-                # Reconciled to the `latest` pointer, applying the chain in order.
+                # Reconciled to the `latest` pointer: the v1..v2 tail composes
+                # into a single engine apply at the target version (not one apply
+                # per intermediate version) — see WeightSyncManager._sync_once.
                 self.assertEqual(manager.current_version, 2)
-                self.assertEqual(engine.applies, [1, 2])
+                self.assertEqual(engine.applies, [2])
 
         asyncio.run(run())
 

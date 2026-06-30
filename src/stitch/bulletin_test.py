@@ -7,6 +7,7 @@ from pathlib import Path
 
 from stitch.bulletin import FilesystemBulletinBoard
 from stitch.protocol import (
+    PointerRewind,
     VersionManifest,
     format_snapshot_identity,
     parse_snapshot_identity,
@@ -105,6 +106,46 @@ class SlimeLayoutBulletinTest(unittest.TestCase):
                 run_id="run-a",
             )
             self.assertEqual(board.read_latest(), ("run-a", 1))
+
+    def test_advance_is_monotonic_within_run_and_resets_across_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            board = FilesystemBulletinBoard(Path(tmp), layout="slime")
+
+            first = board.advance("run-a", 1)
+            self.assertEqual((first.run_id, first.version, first.reset), ("run-a", 1, True))
+            self.assertFalse(board.advance("run-a", 2).reset)
+            self.assertEqual(board.read_latest(), ("run-a", 2))
+
+            with self.assertRaises(PointerRewind):
+                board.advance("run-a", 2)
+            # A rejected advance leaves the pointer untouched.
+            self.assertEqual(board.read_latest(), ("run-a", 2))
+
+            crossed = board.advance("run-b", 1)
+            self.assertTrue(crossed.reset)
+            self.assertEqual(board.read_latest(), ("run-b", 1))
+
+    def test_claim_writes_empty_pointer_and_rejects_reuse(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            board = FilesystemBulletinBoard(Path(tmp), layout="slime")
+
+            move = board.claim("run-a")
+            self.assertTrue(move.reset)
+            self.assertEqual(board.read_latest(), ("run-a", 0))
+
+            board.advance("run-a", 1)
+            # Re-claiming the same run (a restart that reused its run_id) rewinds.
+            with self.assertRaises(PointerRewind):
+                board.claim("run-a")
+            # A fresh run id claims cleanly.
+            self.assertTrue(board.claim("run-b").reset)
+            self.assertEqual(board.read_latest(), ("run-b", 0))
+
+    def test_claim_requires_run_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            board = FilesystemBulletinBoard(Path(tmp), layout="slime")
+            with self.assertRaises(ValueError):
+                board.claim("")
 
     def test_unknown_layout_rejected(self) -> None:
         with self.assertRaises(ValueError):

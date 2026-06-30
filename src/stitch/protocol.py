@@ -14,6 +14,11 @@ from typing import Any, Protocol, runtime_checkable
 PROTOCOL_VERSION = 1
 LATEST_FILE = "latest.json"
 
+# The "empty" pointer a launch claims before publishing any delta: version 0 is
+# the run's base (every run forks at base, so a chain starts at v1 on top of v0).
+# A pool reconciling to ``<run_id>/weight_v000000`` resets to base weights.
+BASE_VERSION = 0
+
 
 class SyncState(str, Enum):
     IDLE = "IDLE"
@@ -401,6 +406,73 @@ def parse_snapshot_identity(text: str) -> tuple[str | None, int]:
     if version is None:
         return (None, 0)
     return (run_id, version)
+
+
+class PointerRewind(Exception):
+    """A pointer move would rewind ``latest`` within the same run.
+
+    The only writer of ``latest`` advances it monotonically *within a run*; a
+    move to an equal-or-lower version on the same run (e.g. a restarted trainer
+    that reused its run_id, or a duplicate claim) is rejected as a rewind rather
+    than silently serving stale weights. Crossing to a *different* run is not a
+    rewind — it forks at base (see :func:`decide_pointer_move`).
+    """
+
+    def __init__(
+        self, *, run_id: str | None, current_version: int, requested_version: int
+    ) -> None:
+        super().__init__(
+            f"latest is at version {current_version} (run {run_id!r}); "
+            f"refusing to rewind to {requested_version}"
+        )
+        self.run_id = run_id
+        self.current_version = int(current_version)
+        self.requested_version = int(requested_version)
+
+
+@dataclass(frozen=True)
+class PointerMove:
+    """An accepted move of the ``latest`` pointer.
+
+    ``reset`` is True when the move crosses to a different run, i.e. the pool
+    must re-materialize base and restart the version space (a claim, or a new
+    run's first publish); False for an ordinary monotonic advance within a run.
+    """
+
+    run_id: str | None
+    version: int
+    reset: bool
+
+
+def decide_pointer_move(
+    current_run_id: str | None,
+    current_version: int,
+    *,
+    run_id: str | None,
+    version: int,
+) -> PointerMove:
+    """Decide whether the single ``latest`` writer may move to ``(run_id, version)``.
+
+    The one rule both the trainer-as-writer (bulletin board) and the
+    frontdoor-as-writer (hot-load API) paths share, so they can't bake in
+    divergent semantics:
+
+    - A *different* run forks at base, so its version space restarts; accepting
+      it (even at a lower number, including the ``BASE_VERSION`` claim) is a
+      reset, not a rewind.
+    - Within the same run (and the run-less layout where both ids are None) the
+      move must be strictly newer; otherwise :class:`PointerRewind` is raised.
+    """
+    version = int(version)
+    if run_id != current_run_id:
+        return PointerMove(run_id=run_id, version=version, reset=True)
+    if version <= int(current_version):
+        raise PointerRewind(
+            run_id=current_run_id,
+            current_version=current_version,
+            requested_version=version,
+        )
+    return PointerMove(run_id=run_id, version=version, reset=False)
 
 
 def version_dir(root: str | Path, version: int) -> Path:
