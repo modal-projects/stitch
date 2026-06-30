@@ -42,8 +42,7 @@ prepared BF16 Hugging Face checkpoint directly.
 2. **Served NVFP4 base** (`--hf-checkpoint`): produced from the masters with
    miles' own `tools/convert_hf_to_nvfp4.py`, so the served packing equals the
    trainer's export packing **by construction** (smallest deltas, no byte-exact
-   risk). For Kimi, `nvidia/Kimi-K2.6-NVFP4` is the design anchor / validation
-   target — diff it against the prepared base — not the literal served bytes.
+   risk).
 3. **Megatron torch_dist** (`--load`/`--save`): trainer-internal rollout ckpts.
 
 The trainer reads the NVFP4 base for both the export quant config and the diff
@@ -135,7 +134,7 @@ m run -m cookbook.miles_disagg.modal_train::smoke_flash_pool --weight-version 3
 ```
 
 The full `kimi_k2_6_nvfp4_disagg` recipe is a 32×8 B200 trainer footprint that
-exceeds the probe budget — run the Moonlight de-risk first to validate the
+exceeds the de-risk budget — run the Moonlight de-risk first to validate the
 QAT → NVFP4-export → XOR-delta → SGLang-reload loop, then scale.
 
 ### Fork dependencies
