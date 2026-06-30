@@ -55,9 +55,12 @@ BASE_DIR = f"{CACHE_DIR}/qwen-base"
 
 # The decoder's slime checkout, pinned --no-deps exactly like the serving image:
 # the sidecar only needs slime.utils.disk_delta (numpy/zstandard/xxhash), never
-# Megatron. Override SLIME_REPO/SLIME_REF to match the trainer's encoder.
+# Megatron. `disk_delta` is a fork feature (absent from upstream `main`), so the
+# default ref is the SAME fork SHA the slime_disagg trainer image pins
+# (cookbook/slime_disagg/modal_train.py) — encoder == decoder. Override
+# SLIME_SMOKE_REPO/REF to track the trainer if it rolls slime forward.
 SLIME_REPO = os.environ.get("SLIME_SMOKE_REPO", "https://github.com/modal-projects/slime.git")
-SLIME_REF = os.environ.get("SLIME_SMOKE_REF", "main")
+SLIME_REF = os.environ.get("SLIME_SMOKE_REF", "ebfe153949b1a69c39e92f947ed5d475166dd724")
 SLIME_ROOT = "/opt/slime"
 
 cache_volume = modal.Volume.from_name("disagg-smoke-cache", create_if_missing=True)

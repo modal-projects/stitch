@@ -64,8 +64,10 @@ path is validated the same way.
 Override via env vars when launching:
 
 - `SLIME_SMOKE_REPO` / `SLIME_SMOKE_REF` — the slime checkout for the host-side
-  decoder. Pin these to the **same** ref the trainer encodes with (encoder ==
-  decoder).
+  decoder. `disk_delta` is a **fork feature** (not on upstream `main`), so
+  `SLIME_SMOKE_REF` defaults to the same fork SHA the `slime_disagg` trainer
+  image pins. Override both only to track the trainer if it rolls slime forward
+  (keep encoder == decoder).
 
 ## Tests
 
