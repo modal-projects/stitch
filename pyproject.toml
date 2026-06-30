@@ -22,5 +22,5 @@ packages = ["src/stitch"]
 exclude = ["*_test.py"]
 
 [tool.pytest.ini_options]
-testpaths = ["src"]
+testpaths = ["src", "cookbook"]
 python_files = ["*_test.py"]

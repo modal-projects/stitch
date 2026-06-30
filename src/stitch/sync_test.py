@@ -11,6 +11,14 @@ from stitch.protocol import SyncState, VersionManifest, WeightVersionPolicy
 from stitch.sync import PolicyViolation, RolloutAdmissionGate, WeightSyncManager
 
 
+async def _settle() -> None:
+    """Drain currently-ready callbacks so a task that is about to park on an
+    asyncio primitive reaches and parks at its await point. Deterministic
+    replacement for a wall-clock ``sleep`` when asserting a task is *blocked*."""
+    for _ in range(10):
+        await asyncio.sleep(0)
+
+
 def _write_slime_version(base: Path, version: int, prev: int) -> None:
     vdir = base / f"weight_v{version:06d}"
     vdir.mkdir(parents=True)
@@ -197,7 +205,7 @@ class SyncManagerTest(unittest.TestCase):
                         return exc.error["error"]["type"]
 
                 admit = asyncio.create_task(admit_exact_zero())
-                await asyncio.sleep(0.05)
+                await _settle()
                 # The admission must be gated, not validated against version 0.
                 self.assertFalse(admit.done())
 
@@ -275,7 +283,7 @@ class SyncManagerTest(unittest.TestCase):
                 exact_ctx = manager.request_context(WeightVersionPolicy(exact_version=0))
                 await exact_ctx.__aenter__()
                 sync = asyncio.create_task(manager.sync_to(1))
-                await asyncio.sleep(0.05)
+                await _settle()
                 self.assertFalse(engine.apply_started.is_set())
 
                 # Releasing the exact request lets the commit proceed.
@@ -295,7 +303,7 @@ class SyncManagerTest(unittest.TestCase):
                         return exc.error["error"]["type"]
 
                 gated = asyncio.create_task(admit_exact())
-                await asyncio.sleep(0.05)
+                await _settle()
                 self.assertFalse(gated.done())
 
                 engine.apply_gate.set()
@@ -351,10 +359,19 @@ class AdmissionGateCommitDriverTest(unittest.TestCase):
                 resume=resume,
             )
 
-            # Pause, apply, advance the served version, then resume — and the
-            # gate is reopened afterward.
+            # Pause, apply, advance the served version, then resume.
             self.assertEqual(events, ["pause", "apply", "applied", "resume"])
-            self.assertFalse(gate._committing)
+            # The gate reopened afterward: a second commit drives cleanly through.
+            await gate.commit_version(
+                apply=apply,
+                on_applied=lambda: events.append("applied"),
+                pause=pause,
+                resume=resume,
+            )
+            self.assertEqual(
+                events,
+                ["pause", "apply", "applied", "resume", "pause", "apply", "applied", "resume"],
+            )
 
         asyncio.run(run())
 
@@ -381,10 +398,20 @@ class AdmissionGateCommitDriverTest(unittest.TestCase):
                     resume=resume,
                 )
 
-            # quiesce never pauses; a failed apply advances nothing and the gate
-            # is cleared so admissions resume.
+            # quiesce never pauses; a failed apply advances nothing.
             self.assertEqual(events, ["apply"])
-            self.assertFalse(gate._committing)
+
+            async def ok_apply() -> None:
+                events.append("apply")
+
+            # The gate cleared despite the failure: a subsequent commit proceeds.
+            await gate.commit_version(
+                apply=ok_apply,
+                on_applied=lambda: events.append("applied"),
+                pause=pause,
+                resume=resume,
+            )
+            self.assertEqual(events, ["apply", "apply", "applied"])
 
         asyncio.run(run())
 
