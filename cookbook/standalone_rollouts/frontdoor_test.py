@@ -37,6 +37,14 @@ class AdvanceDecisionTest(unittest.TestCase):
         rewind = advance_latest_decision(None, 5, "weight_v000005", None)
         self.assertEqual(rewind["error"]["type"], "WeightRewindRejected")
 
+    def test_claim_is_a_base_version_signal_for_a_fresh_run(self) -> None:
+        # An explicit claim is just weight_v000000 with a fresh run id: a
+        # cross-run move, so it resets the pool to base before any delta.
+        self.assertEqual(
+            advance_latest_decision("run-a", 5, "weight_v000000", "run-b"),
+            {"run_id": "run-b", "version": 0, "reset": True},
+        )
+
     def test_rejects_unparseable_identity(self) -> None:
         self.assertEqual(
             advance_latest_decision(None, 0, "base", None)["error"]["type"], "InvalidIdentity"

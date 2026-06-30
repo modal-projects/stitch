@@ -9,8 +9,11 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from stitch.protocol import (
+    BASE_VERSION,
+    PointerMove,
     VersionManifest,
     atomic_write_text,
+    decide_pointer_move,
     format_snapshot_identity,
     parse_snapshot_identity,
     read_latest,
@@ -28,6 +31,10 @@ class BulletinBoard(Protocol):
     def read_latest(self) -> tuple[str | None, int]: ...
 
     def write_latest(self, run_id: str | None, version: int) -> None: ...
+
+    def advance(self, run_id: str | None, version: int) -> PointerMove: ...
+
+    def claim(self, run_id: str) -> PointerMove: ...
 
     def version_dir(self, run_id: str | None, version: int) -> Path: ...
 
@@ -99,10 +106,43 @@ class FilesystemBulletinBoard:
         return (None, read_latest(self.root))
 
     def write_latest(self, run_id: str | None, version: int) -> None:
+        """Overwrite the pointer unconditionally. Prefer :meth:`advance` /
+        :meth:`claim`, which enforce the monotonic-within-run rule; this raw
+        write is for callers that have already made the move decision."""
         if self.layout == "slime":
             atomic_write_text(self.root / "latest", format_snapshot_identity(run_id, version))
         else:
             write_latest(self.root, version)
+
+    def advance(self, run_id: str | None, version: int) -> PointerMove:
+        """Move ``latest`` to ``(run_id, version)`` under the shared monotonic
+        rule (see :func:`decide_pointer_move`), then write it.
+
+        Returns the :class:`PointerMove` (``reset=True`` when the move crosses
+        runs); raises :class:`PointerRewind` on a same-run rewind. This is the
+        single guarded writer both cookbook patterns publish through, so neither
+        can silently rewind the pointer onto stale weights.
+        """
+        current_run_id, current_version = self.read_latest()
+        move = decide_pointer_move(
+            current_run_id, current_version, run_id=run_id, version=version
+        )
+        self.write_latest(move.run_id, move.version)
+        return move
+
+    def claim(self, run_id: str) -> PointerMove:
+        """Claim the pool for a fresh run: advance to the empty pointer
+        ``<run_id>/weight_v000000``, resetting every replica to base before any
+        delta is published.
+
+        ``run_id`` is the run's epoch/fence token and must be unique per launch;
+        claiming a run already at the pointer is a rewind (a reused run_id after
+        a restart), which surfaces as :class:`PointerRewind` rather than leaving
+        the pool pinned to the dead incarnation's high-water mark.
+        """
+        if not run_id:
+            raise ValueError("claim requires a run_id (the run's per-launch epoch token)")
+        return self.advance(run_id, BASE_VERSION)
 
     def version_dir(self, run_id: str | None, version: int) -> Path:
         if self.layout == "slime":

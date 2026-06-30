@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from stitch.bulletin import FilesystemBulletinBoard
-from stitch.protocol import parse_weight_identity
+from stitch.protocol import BASE_VERSION, PointerRewind, parse_weight_identity
 from stitch.providers.modal import commit_volume, discover_flash_targets, volume_reloader, wake_targets
 
 
@@ -56,23 +56,56 @@ def commit_and_wake(
     version = parse_weight_identity(Path(version_dir).name)
     rank = distributed_rank()
 
-    # Rank 0 owns the `latest` pointer and writes it before committing, so the
+    # Rank 0 owns the `latest` pointer and advances it before committing, so the
     # committed bulletin is self-consistent for the poll/startup path. The pointer
     # lives at the transport root (the Volume mount) and is self-identifying —
     # `<run_id>/weight_vN` — while the trainer wrote the version dir under the run
-    # partition (update_weight_disk_dir = <root>/<run_id>), so a new run is a
-    # forward move of the pointer, never a colliding rewind.
+    # partition (update_weight_disk_dir = <root>/<run_id>). `advance` enforces the
+    # monotonic-within-run rule (the new run's first publish forks at base); a
+    # same-run rewind (e.g. a republish) is dropped rather than serving stale
+    # weights — never silently overwritten.
     if version is not None and rank in (None, 0):
-        FilesystemBulletinBoard(_transport_root(args), layout="slime").write_latest(
-            _run_id(args), version
-        )
+        board = FilesystemBulletinBoard(_transport_root(args), layout="slime")
+        try:
+            board.advance(_run_id(args), version)
+        except PointerRewind:
+            logger.warning(
+                "publish of version %s would rewind latest; dropping (run %r)",
+                version,
+                _run_id(args),
+                exc_info=True,
+            )
+            return
     commit_volume(_volume_name(args))
 
     if version is None or rank not in (None, 0):
         return
-    # Waking warm containers is a best-effort latency optimization: a transient
-    # Modal control-plane error must not kill the training step — `latest` is
-    # already committed and sidecars self-sync on their next poll.
+    _best_effort_wake(args, version, app_name_env=app_name_env, cls_name_env=cls_name_env)
+
+
+def claim_pool(args: Any, *, app_name_env: str, cls_name_env: str) -> None:
+    """Trainer launch hook (rank 0): claim the rollout pool for this run.
+
+    Write the empty pointer ``<run_id>/weight_v000000``, commit the Volume, and
+    wake the pool — so every replica (cold or already-warm on a finished run)
+    resets to base *before* the first delta publishes, instead of inferring the
+    reset from the first publish's run mismatch. ``run_id`` must be fresh per
+    launch (the run's epoch/fence token); claiming a run already at the pointer
+    raises :class:`PointerRewind`, which fails the launch loudly rather than
+    leaving the pool pinned to a dead incarnation's high-water mark.
+    """
+    if distributed_rank() not in (None, 0):
+        return
+    board = FilesystemBulletinBoard(_transport_root(args), layout="slime")
+    board.claim(_run_id(args))
+    commit_volume(_volume_name(args))
+    _best_effort_wake(args, BASE_VERSION, app_name_env=app_name_env, cls_name_env=cls_name_env)
+
+
+def _best_effort_wake(args: Any, version: int, *, app_name_env: str, cls_name_env: str) -> None:
+    """Nudge warm Flash containers to reconcile now. Best-effort: a transient
+    Modal control-plane error must not kill the training step — `latest` is
+    already committed and sidecars self-sync on their next poll/startup."""
     try:
         app_name = getattr(args, "rollout_modal_flash_app_name", None) or os.environ[app_name_env]
         cls_name = getattr(args, "rollout_modal_flash_server_cls_name", None) or os.getenv(
@@ -195,9 +228,21 @@ def _transport_root(args: Any) -> str:
 
 
 def _run_id(args: Any) -> str:
-    """The run partition (chain identity). Passed explicitly via custom_config,
-    falling back to the basename of the per-run write dir."""
-    return str(getattr(args, "run_id", None) or Path(bulletin_root(args)).name)
+    """The run partition (chain identity), passed explicitly via custom_config.
+
+    Required — never derived from the write-dir basename. A fresh run_id per
+    launch is the epoch/fence token that makes restart safe (a restart is just a
+    new epoch that claims and resets the pool); deriving it from a per-run dir
+    that a crash-restart could reuse is exactly the reuse hazard this design
+    removes, so a missing run_id is a launch misconfiguration, not a fallback.
+    """
+    run_id = getattr(args, "run_id", None)
+    if not run_id:
+        raise ValueError(
+            "run_id is required (pass it via custom_config_path); the bulletin "
+            "hooks no longer derive it from the write-dir basename"
+        )
+    return str(run_id)
 
 
 def _gate_board(args: Any) -> FilesystemBulletinBoard:

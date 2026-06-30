@@ -24,7 +24,6 @@ import modal.experimental
 from cookbook.slime_disagg import helpers
 from cookbook.standalone_rollouts import frontdoor as frontdoor_mod
 from stitch.bulletin import FilesystemBulletinBoard
-from stitch.protocol import format_snapshot_identity
 from stitch.providers.modal import (
     discover_flash_targets,
     resolve_flash_gateway_url,
@@ -482,10 +481,10 @@ class FrontDoor:
             # Singleton writer: a single small write is one atomic S3 PutObject,
             # so no rename dance is needed. The pointer is self-identifying
             # (`<run_id>/weight_vN`), so a new run is a forward move (not a rewind)
-            # and there is no separate run pointer to flip.
-            (S3_TRANSPORT_MOUNT_PATH / "latest").write_text(
-                format_snapshot_identity(run_id, version), encoding="utf-8"
-            )
+            # and there is no separate run pointer to flip. The monotonic/reset
+            # decision already ran in advance_latest_decision, so this writes the
+            # decided move through the same board the pool reconciles against.
+            board.write_latest(run_id, version)
 
         async def list_server_infos() -> list[dict]:
             targets = await asyncio.to_thread(
