@@ -20,7 +20,7 @@ Prerequisites the bring-up depends on (flagged, not yet automated):
   1. The training image's slime fork ref (modal_train.SLIME_REPO_REF) must include
      scripts/models/moonlight.sh, the deepseekv3 megatron_to_hf export, and the
      routing-replay code. The base image's SGLang (used by the rollout pool) is
-     independent and already verified by modal_probes/verify_mla_routing.
+     independent.
   2. Bridge-mode HF load is UNVERIFIED for Moonlight/DeepSeek-V3 (it is proven for
      Qwen here). If load fails, the fallback is the proven torch_dist path
      (tools/convert_hf_to_torch_dist.py + ref_load pointed at the converted dir).
