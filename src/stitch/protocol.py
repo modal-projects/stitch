@@ -539,7 +539,15 @@ class EngineAdapter(Protocol):
         ...
 
     async def apply_manifest(self, manifest: VersionManifest, version_path: str) -> None:
-        """Apply one published weight version to the engine."""
+        """Bring the engine to ``manifest.version``, replaying every intermediate
+        version from the currently applied one up to the target.
+
+        The sync manager composes a multi-version catch-up into a single call
+        (it verifies chain contiguity, then invokes this once for the whole
+        tail), so an adapter MUST advance across all skipped versions, not just
+        apply ``manifest`` as a single delta off the previous one. The canonical
+        adapter satisfies this because slime's ``apply_deltas`` chain-replays
+        from the applied version to ``manifest.version``."""
         ...
 
     async def pause_generation(self) -> None:
