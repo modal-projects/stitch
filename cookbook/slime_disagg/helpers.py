@@ -1,23 +1,19 @@
 """Trainer-specific helpers for the slime_disagg example.
 
-Ray cluster, sidecar, and process helpers are shared across trainers via
-:mod:`cookbook.ray_cluster` and :mod:`cookbook.sidecar_process`. This module
-provides slime-specific config preparation, train command building, and the
-Flash pool smoke check.
+Thin wrappers over the shared launch spine: Ray-cluster/sidecar/process helpers
+come from :mod:`cookbook.ray_cluster` / :mod:`cookbook.sidecar_process`, and
+config-prep / train-command / smoke-check come from :mod:`cookbook.trainer_helpers`.
+This module only supplies the slime-specific axes: the sidecar module path, the
+config-field tuple to materialize, the model-script attribute, and that the
+rollout pool runs with a warm floor (not scale-from-zero).
 """
 
 from __future__ import annotations
 
-import json
-import os
-import shlex
 import subprocess
-import time
-import urllib.error
-import urllib.request
 from typing import Any
 
-from stitch.providers.modal import discover_flash_targets, resolve_flash_gateway_url
+from cookbook.slime_disagg.configs.base import YAML_CONFIG_FIELDS
 
 # Re-export shared helpers so existing callers (modal_train.py) don't break.
 from cookbook.ray_cluster import (  # noqa: F401
@@ -31,6 +27,12 @@ from cookbook.ray_cluster import (  # noqa: F401
 from cookbook.sidecar_process import (  # noqa: F401
     terminate_process,
     wait_http,
+)
+from cookbook.trainer_helpers import (  # noqa: F401
+    VersionAheadError,
+    build_train_cmd as _build_train_cmd,
+    prepare_config,
+    smoke_flash_pool as _smoke_flash_pool,
 )
 
 
@@ -63,45 +65,14 @@ def start_sglang_sidecar(
     )
 
 
-# ── SLIME launch ──────────────────────────────────────────────────────────────
-
-
 def prepare_slime_config(slime_cfg: Any, tmpdir: str) -> None:
     """Resolve HF repo IDs to local paths and materialize inline YAML configs."""
-    from huggingface_hub import snapshot_download
-    import yaml
-
-    from cookbook.slime_disagg.configs.base import YAML_CONFIG_FIELDS
-
-    for attr in ("hf_checkpoint", "load", "ref_load", "critic_load"):
-        if (val := getattr(slime_cfg, attr, None)) and not str(val).startswith("/"):
-            setattr(slime_cfg, attr, snapshot_download(val, local_files_only=True))
-
-    for field in YAML_CONFIG_FIELDS:
-        if isinstance(val := getattr(slime_cfg, field, None), dict):
-            path = os.path.join(tmpdir, f"{field}.yaml")
-            with open(path, "w") as f:
-                yaml.dump(val, f)
-            setattr(slime_cfg, field, path)
+    prepare_config(slime_cfg, tmpdir, YAML_CONFIG_FIELDS)
 
 
 def build_train_cmd(slime_cfg: Any, slime_root: str) -> str:
-    """Build the training command, sourcing model arch args if needed."""
-    train_script = f"{slime_root}/{'train_async.py' if slime_cfg.async_mode else 'train.py'}"
-    if slime_cfg.slime_model_script:
-        inner = (
-            f"source {slime_root}/{slime_cfg.slime_model_script} && "
-            f"python3 {train_script} ${{MODEL_ARGS[@]}} {shlex.join(slime_cfg.cli_args())}"
-        )
-        return f"bash -c {shlex.quote(inner)}"
-    return f"python3 {train_script} {shlex.join(slime_cfg.cli_args())}"
-
-
-# ── Flash pool smoke check ────────────────────────────────────────────────────
-
-
-class VersionAheadError(RuntimeError):
-    """Raised when a monotonic rollout pool has already advanced past a smoke version."""
+    """Build the training command, sourcing slime's model arch args if needed."""
+    return _build_train_cmd(slime_cfg, slime_root, model_script_attr="slime_model_script")
 
 
 def smoke_flash_pool(
@@ -113,68 +84,13 @@ def smoke_flash_pool(
     expect_min_containers: int,
     timeout_seconds: int,
 ) -> None:
-    """Poll the Flash gateway and direct container URLs until the pool serves
-    completions at the expected weight version."""
-    deadline = time.time() + timeout_seconds
-    last_error: str | None = None
-    while True:
-        gateway = resolve_flash_gateway_url(app_name, cls_name)
-        targets = discover_flash_targets(app_name, cls_name)
-        if len(targets) < expect_min_containers:
-            last_error = f"expected at least {expect_min_containers} containers, found {len(targets)}: {targets}"
-        else:
-            try:
-                _check_flash_pool_once(gateway, targets, model_name, weight_version)
-                return
-            except VersionAheadError:
-                raise
-            except Exception as exc:  # noqa: BLE001
-                last_error = f"{type(exc).__name__}: {exc}"
-        if time.time() >= deadline:
-            raise TimeoutError(f"Flash pool smoke did not pass before timeout: {last_error}")
-        print(f"Waiting for Flash pool readiness: {last_error}")
-        time.sleep(10)
-
-
-def _check_flash_pool_once(gateway: str, targets: list[str], model_name: str, expected: int) -> None:
-    print(f"Gateway URL: {gateway}")
-    print(f"Direct container URLs ({len(targets)}):")
-    for target in targets:
-        print(f"  {target}")
-
-    for target in [gateway, *targets]:
-        info = _get_json(f"{target}/server_info", timeout=30)
-        print(f"{target} server_info={info}")
-        current = int(info["current_version"])
-        if current > expected:
-            raise VersionAheadError(f"{target} current_version={current} already passed expected {expected}")
-        if current != expected:
-            raise RuntimeError(f"{target} current_version={current} expected {expected}")
-
-    payload = {
-        "model": model_name,
-        "messages": [{"role": "user", "content": "Reply with exactly OK."}],
-        "max_tokens": 8,
-        "temperature": 0,
-        "weight_version": {"exact_version": expected},
-        "chat_template_kwargs": {"enable_thinking": False},
-    }
-    data = _post_json(f"{gateway}/v1/chat/completions", payload, timeout=180)
-    print(f"Gateway completion: {data}")
-    if int(data.get("weight_version_start", -1)) != expected or int(data.get("weight_version_end", -1)) != expected:
-        raise RuntimeError(f"unexpected gateway weight metadata: {data}")
-
-
-def _get_json(url: str, *, timeout: float) -> dict:
-    with urllib.request.urlopen(url, timeout=timeout) as resp:
-        return json.load(resp)
-
-
-def _post_json(url: str, payload: dict, *, timeout: float) -> dict:
-    request = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json"},
+    """Smoke the warm-floor slime rollout pool (min_containers > 0)."""
+    _smoke_flash_pool(
+        app_name=app_name,
+        cls_name=cls_name,
+        model_name=model_name,
+        weight_version=weight_version,
+        expect_min_containers=expect_min_containers,
+        timeout_seconds=timeout_seconds,
+        wake_on_demand=False,
     )
-    with urllib.request.urlopen(request, timeout=timeout) as resp:
-        return json.load(resp)

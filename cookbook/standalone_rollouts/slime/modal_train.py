@@ -18,6 +18,7 @@ import modal
 import modal.experimental
 
 from cookbook.standalone_rollouts import modal_serve as provider_app
+from cookbook.standalone_rollouts.slime import hooks
 from cookbook.slime_disagg import helpers
 from cookbook.slime_disagg.configs.base import (
     CHECKPOINTS_PATH,
@@ -199,6 +200,11 @@ class Trainer:
         cfg.custom_config_path = _custom_config(
             cfg, rollout_num_engines=getattr(run, "ROLLOUT_NUM_ENGINES", 1)
         )
+        # Claim the pool for this fresh run before any delta: reset `latest` to
+        # base via the front door so replicas reconcile to base up front instead
+        # of inferring the reset from the first publish (the explicit-claim model
+        # PR #5 established for the bulletin path, now mirrored here).
+        hooks.announce_claim(cfg, run_id=run_id)
         helpers.prepare_slime_config(cfg, tempfile.mkdtemp())
         cmd = helpers.build_train_cmd(cfg, SLIME_ROOT)
 

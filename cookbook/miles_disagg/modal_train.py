@@ -189,10 +189,13 @@ if getattr(exp, "PATCH_GLM4MOE_EXPERT_BIAS_FP32", False):
 # Local source mounted at container start (no rebuild on code edits). Modal puts
 # /root on PYTHONPATH, so both packages import from subprocesses (the sidecar, Ray
 # workers). MUST come after any .run_commands() above (Modal forbids run_commands
-# after a non-copy local mount).
+# after a non-copy local mount). The whole cookbook package is mounted (not just
+# the per-trainer subdir) so the trainer and the `python3 -m
+# cookbook.miles_disagg.sidecar` subprocess can import the shared cookbook spine
+# (helpers/hooks/sidecar) the thin adapters delegate to.
 image = image.add_local_python_source("stitch").add_local_dir(
-    Path(__file__).parent,
-    remote_path="/root/cookbook/miles_disagg",
+    Path(__file__).parent.parent,
+    remote_path="/root/cookbook",
     ignore=["**/__pycache__"],
 )
 
