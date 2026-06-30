@@ -89,6 +89,46 @@ class AnnounceAndWaitTest(unittest.TestCase):
         self.assertEqual(posted, [])
 
 
+class AnnounceClaimTest(unittest.TestCase):
+    def test_posts_base_pointer_under_fresh_run_on_rank_zero(self) -> None:
+        # Claim-at-launch parity with bulletin_hooks.claim_pool: POST the empty
+        # pointer (weight_v000000) under the fresh run id so the front door resets
+        # latest to base before the first delta.
+        posted: list[tuple[str | None, str, str]] = []
+
+        def fake_post(cfg, *, identity, previous_identity) -> None:
+            posted.append((cfg.run_id, identity, previous_identity))
+
+        args = Namespace(api_shim_base_url="http://provider")
+        with mock.patch.object(hooks, "_distributed_rank", return_value=0), mock.patch.object(
+            hooks, "_post_hot_load", fake_post
+        ):
+            hooks.announce_claim(args, run_id="run-a")
+        self.assertEqual(posted, [("run-a", "weight_v000000", "base")])
+
+    def test_is_noop_off_rank_zero(self) -> None:
+        posted: list[int] = []
+        args = Namespace(api_shim_base_url="http://provider")
+        with mock.patch.object(hooks, "_distributed_rank", return_value=1), mock.patch.object(
+            hooks, "_post_hot_load", lambda *a, **k: posted.append(1)
+        ):
+            hooks.announce_claim(args, run_id="run-a")
+        self.assertEqual(posted, [])
+
+    def test_swallows_claim_failure(self) -> None:
+        # Best-effort: a transient claim POST failure must not kill the launch
+        # (the first publish's cross-run reset still establishes base).
+        args = Namespace(api_shim_base_url="http://provider")
+
+        def boom(*a, **k) -> None:
+            raise RuntimeError("front door down")
+
+        with mock.patch.object(hooks, "_distributed_rank", return_value=0), mock.patch.object(
+            hooks, "_post_hot_load", boom
+        ):
+            hooks.announce_claim(args, run_id="run-a")  # must not raise
+
+
 class RolloutRequestHookTest(unittest.TestCase):
     def test_skips_pin_without_rollout_id_but_sets_affinity(self) -> None:
         # PR #5's request carries no rollout_id: the hook must not crash, must

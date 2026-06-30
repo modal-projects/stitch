@@ -22,6 +22,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from cookbook.rollout_control import apply_session_affinity, distributed_rank
 from stitch.bulletin import FilesystemBulletinBoard
 from stitch.protocol import BASE_VERSION, PointerRewind, parse_weight_identity
 from stitch.providers.modal import commit_volume, discover_flash_targets, volume_reloader, wake_targets
@@ -186,27 +187,11 @@ async def gated_rollout_request_hook(args: Any, sample: Any, request: dict[str, 
     request["max_retries"] = int(getattr(args, "rollout_request_retry_attempts", request.get("max_retries", 60)))
     request["retry_sleep"] = float(getattr(args, "rollout_request_retry_sleep", request.get("retry_sleep", 1.0)))
 
-    session_id = getattr(sample, "session_id", None)
-    if session_id:
-        header = str(getattr(args, "rollout_session_affinity_header", "x-session-affinity"))
-        headers = dict(request.get("headers") or {})
-        headers.setdefault(header, session_id)
-        request["headers"] = headers
+    header = str(getattr(args, "rollout_session_affinity_header", "x-session-affinity"))
+    apply_session_affinity(request, getattr(sample, "session_id", None), header)
 
 
 # ── Shared helpers ────────────────────────────────────────────────────────────
-
-
-def distributed_rank() -> int | None:
-    """Return the torch distributed rank, or None if not initialized."""
-    try:
-        import torch.distributed as dist
-
-        if dist.is_available() and dist.is_initialized():
-            return int(dist.get_rank())
-    except Exception:  # noqa: BLE001
-        return None
-    return None
 
 
 def _volume_name(args: Any) -> str:

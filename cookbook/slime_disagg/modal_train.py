@@ -113,11 +113,14 @@ image = (
     # Local source is mounted when containers start rather than copied into the
     # image, so code changes never trigger an image rebuild. Modal puts /root
     # on PYTHONPATH, which also makes both packages importable from
-    # subprocesses (the sidecar, Ray workers).
+    # subprocesses (the sidecar, Ray workers). The whole cookbook package is
+    # mounted (not just the per-trainer subdir) so the trainer and the
+    # `python3 -m cookbook.slime_disagg.sidecar` subprocess can import the shared
+    # cookbook spine (helpers/hooks/sidecar) the thin adapters delegate to.
     .add_local_python_source("stitch")
     .add_local_dir(
-        Path(__file__).parent,
-        remote_path="/root/cookbook/slime_disagg",
+        Path(__file__).parent.parent,
+        remote_path="/root/cookbook",
         ignore=["**/__pycache__"],
     )
 )
