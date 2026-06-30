@@ -60,8 +60,12 @@ def build_b200_serving_image(
     ``trainer_repo_url`` / ``trainer_repo_ref`` / ``trainer_root`` pin the
     ``--no-deps`` trainer checkout (so the pool's ``disk_delta`` matches the
     trainer's encoder). ``cookbook_dir`` is the per-trainer cookbook package dir;
-    it is mounted at ``/root/cookbook/<name>`` exactly as the trainer image mounts
-    it, so ``cookbook.<name>.sidecar`` imports identically in either container.
+    its parent (the whole ``cookbook`` package) is mounted at ``/root/cookbook``,
+    so the sidecar subprocess can import both ``cookbook.<name>.sidecar`` and the
+    shared ``cookbook.sidecar`` spine it delegates to. Mounting the package (not
+    just the subdir) is required because the sidecar is launched as
+    ``python3 -m cookbook.<name>.sidecar`` and is never imported at deploy time,
+    so Modal's import-time automounting never sees the shared module.
 
     ``shallow_clone`` does a ``--depth 1`` clone+fetch (fine when the ref is a
     branch tip or recent commit). ``clear_sglang_cache_at_end`` removes
@@ -125,11 +129,13 @@ def build_b200_serving_image(
         image.env({"EXPERIMENT_CONFIG": experiment, **SERVING_IMAGE_ENV})
         # Mounted at container start (not copied into the image) so code edits to
         # stitch / the sidecar never rebuild the image. Modal puts /root on
-        # PYTHONPATH for subprocesses (the sidecar).
+        # PYTHONPATH for subprocesses (the sidecar). The whole cookbook package is
+        # mounted (not just the per-trainer subdir) so the sidecar can import the
+        # shared cookbook.sidecar spine it is a thin adapter over.
         .add_local_python_source("stitch")
         .add_local_dir(
-            cookbook_dir,
-            remote_path=f"/root/cookbook/{cookbook_dir.name}",
+            cookbook_dir.parent,
+            remote_path="/root/cookbook",
             ignore=["**/__pycache__"],
         )
     )
