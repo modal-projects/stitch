@@ -23,15 +23,13 @@ fork (serving.py), proven for NVFP4.
 CHECKPOINT LIFECYCLE (three roles; see modal_train.prepare_checkpoints)
 -----------------------------------------------------------------------
 Neither published K2.6 checkpoint is bf16: ``moonshotai/Kimi-K2.6`` ships as
-compressed-tensors INT4, and ``nvidia/Kimi-K2.6-NVFP4`` is NVFP4. So:
+compressed-tensors INT4. So:
   * BF16 masters (``ref_load``): dequantize the moonshotai INT4 checkpoint with
     ``tools/convert_kimi_int4_to_bf16.py``.
   * Served NVFP4 base (``hf_checkpoint``): produce with miles'
     ``tools/convert_hf_to_nvfp4.py`` from the bf16 masters, so the served packing
     == the trainer's export packing BY CONSTRUCTION (smallest deltas, no byte-
-    exact risk). ``nvidia/Kimi-K2.6-NVFP4`` is the DESIGN ANCHOR / validation
-    target: prepare_checkpoints fetches it and diffs it against our base to
-    confirm SGLang serves the layout — it is not the literal served bytes.
+    exact risk).
   * Megatron torch_dist (``load``/``save``): trainer-internal rollout ckpts.
 
 The trainer reads ``hf_checkpoint`` (NVFP4 base) for the export quant config AND
@@ -72,9 +70,7 @@ DELTA_BULLETIN_ROOT = "/delta-bulletin"
 
 # Source checkpoints the prepare step consumes (see modal_train.prepare_checkpoints):
 #   SOURCE_MODEL  -> dequantize INT4 -> bf16 masters -> convert -> served NVFP4 base
-#   ANCHOR_MODEL  -> fetched for validation only (diff against our base)
 SOURCE_MODEL = "moonshotai/Kimi-K2.6"
-ANCHOR_MODEL = "nvidia/Kimi-K2.6-NVFP4"
 MODEL_TAG = "kimi-k2-6-nvfp4"
 
 SIDECAR_COMMIT_MODE = "in_place"
@@ -260,10 +256,9 @@ class _Miles(MilesConfig):
     # NOTE: the END carve-out is 0, NOT 1. A bf16 LAST MoE layer (layer 60) made the served
     # base's last-layer experts bf16 while SGLang's fused-MoE update_weights_from_disk RELOAD
     # loader allocates NVFP4 for every expert layer -> it can't load a bf16 [7168,2048] expert
-    # into the NVFP4-packed buffer (cold-load honors the carve-out, reload does not). The nvidia
-    # anchor quantizes all routed-expert layers incl. the last and reloads cleanly, so all-NVFP4
-    # routed experts is a proven, reload-safe scheme for this model. (If QAT later needs the
-    # last-layer bf16 carve-out, the alternative is patching SGLang's fused-MoE reload loader.)
+    # into the NVFP4-packed buffer (cold-load honors the carve-out, reload does not). So the
+    # reload-safe scheme is to keep all routed experts NVFP4; if QAT later needs the last-layer
+    # bf16 carve-out, the alternative is patching SGLang's fused-MoE reload loader.
     num_layers_at_start_in_bf16 = 1
     num_layers_at_end_in_bf16 = 0
 

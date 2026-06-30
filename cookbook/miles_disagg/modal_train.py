@@ -185,28 +185,6 @@ if getattr(exp, "USE_MODAL_TORCH_DIST_WRAPPER", False):
 if getattr(exp, "PATCH_GLM4MOE_EXPERT_BIAS_FP32", False):
     image = image.run_commands(f"python3 -c {shlex.quote(_GLM4MOE_EXPERT_BIAS_BAKE_PY)}")
 
-# R3 debug probe (env-gated, removable): log the actual EP all-to-all split sizes
-# right before token_dispatch's all_to_all, to diagnose the K2.6 routing-replay
-# "Split sizes doesn't match total dim 0 size" crash. Enable with R3_PROBE=1 at
-# deploy. Prepends a logging line before `global_input_tokens = all_to_all(`.
-if os.environ.get("R3_PROBE"):
-    _R3_PROBE_TARGET = "global_input_tokens = all_to_all("
-    _R3_PROBE_LOG = (
-        'import logging as _r3; _r3.getLogger("R3PROBE").warning('
-        'f"[R3PROBE] perm={permutated_local_input_tokens.size(0)} '
-        "in_sum={int(self.input_splits.sum())} out_sum={int(self.output_splits.sum())} "
-        'nout={int(self.num_out_tokens)} ep={self.ep_size} tp={self.tp_size}"); '
-    )
-    _R3_PROBE_PY = (
-        "import pathlib;"
-        f"p=pathlib.Path({_R3_DISPATCH_TARGET!r});"
-        "s=p.read_text();"
-        f"s=s.replace({_R3_PROBE_TARGET!r}, {_R3_PROBE_LOG + _R3_PROBE_TARGET!r}, 1);"
-        "p.write_text(s);"
-        "print('[R3 probe] injected all_to_all size logging')"
-    )
-    image = image.run_commands(f"python3 -c {shlex.quote(_R3_PROBE_PY)}")
-
 # Local source mounted at container start (no rebuild on code edits). Modal puts
 # /root on PYTHONPATH, so both packages import from subprocesses (the sidecar, Ray
 # workers). MUST come after any .run_commands() above (Modal forbids run_commands
@@ -528,7 +506,6 @@ def prepare_checkpoints() -> None:
          downloaded checkpoint IS the masters.
       2. served NVFP4 base: tools/convert_hf_to_nvfp4.py over the masters, so the
          served packing == the trainer's export packing by construction.
-      3. (optional) fetch ANCHOR_MODEL (nvidia NVFP4) for validation only.
     """
     if getattr(exp, "DISABLE_HF_XET", False):
         os.environ["HF_HUB_DISABLE_XET"] = "1"
@@ -580,7 +557,7 @@ def prepare_checkpoints() -> None:
         # (for Kimi VLMs it's nested under text_config). Strip it: the masters are
         # bf16, and convert_hf_to_nvfp4 inherits text_config verbatim — leaving it
         # would make the served NVFP4 base claim compressed-tensors INT4 there and
-        # diverge from the clean nvidia anchor (transformers/SGLang could then pick
+        # diverge from the clean served base (transformers/SGLang could then pick
         # the wrong quant loader for the language model).
         _strip_stale_quant_config(os.path.join(out, "config.json"))
 
@@ -606,9 +583,6 @@ def prepare_checkpoints() -> None:
             check=True,
         ),
     )
-    # 3. validation anchor (diff against nvfp4_dir to confirm SGLang-compatibility)
-    if anchor := getattr(exp, "ANCHOR_MODEL", None):
-        snapshot_download(anchor)
     prep_volume.commit()
     print(f"Prepared masters={bf16_dir} served_base={nvfp4_dir}")
 
