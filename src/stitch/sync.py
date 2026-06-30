@@ -353,34 +353,47 @@ class WeightSyncManager(RolloutAdmissionGate):
 
             self.sync_state = SyncState.PREFETCHING
             self.last_sync_error = None
+
+            # Verify the whole tail is a contiguous chain before touching the
+            # engine, so a broken chain fails before any pause/apply. apply_deltas
+            # re-verifies each step's base_version internally as it replays.
+            expected_base = self.current_version
+            target_manifest: VersionManifest | None = None
             for version in range(self.current_version + 1, latest + 1):
                 manifest = self.board.read_manifest(self.current_run_id, version)
-                if manifest.base_version != self.current_version:
+                if manifest.base_version != expected_base:
                     raise RuntimeError(
                         f"cannot apply version {version}: manifest base "
-                        f"{manifest.base_version} != current {self.current_version}"
+                        f"{manifest.base_version} != expected {expected_base}"
                     )
-                version_path = str(self.board.version_dir(self.current_run_id, version))
-                self.sync_state = SyncState.PREPARING
+                expected_base = version
+                target_manifest = manifest
+            assert target_manifest is not None  # latest > current_version, so the loop ran
+            target_path = str(self.board.version_dir(self.current_run_id, latest))
 
-                async def apply(manifest: VersionManifest = manifest, version_path: str = version_path) -> None:
-                    # quiesce flushes before applying; in_place skips the flush
-                    # (the gate paused the engine and stale KV resumes as-is).
-                    if self.commit_mode != "in_place":
-                        await self.engine.flush_cache()
-                    self.sync_state = SyncState.COMMITTING
-                    await self.engine.apply_manifest(manifest, version_path)
+            # Compose the tail and reload once: apply_manifest(target) replays
+            # every delta from the applied version up to `latest` host-side, then
+            # does a single engine reload — not one reload per intermediate version.
+            self.sync_state = SyncState.PREPARING
 
-                # on_applied bumps current_version under the gate (before
-                # continue_generation in in_place mode), so a request can never
-                # be admitted observing the stale version on mutated weights.
-                await self.commit_version(
-                    apply=apply,
-                    on_applied=lambda version=version: setattr(self, "current_version", version),
-                    pause=self.engine.pause_generation,
-                    resume=self.engine.continue_generation,
-                )
-                self.sync_state = SyncState.PREFETCHING
+            async def apply(manifest: VersionManifest = target_manifest, version_path: str = target_path) -> None:
+                # quiesce flushes before applying; in_place skips the flush
+                # (the gate paused the engine and stale KV resumes as-is).
+                if self.commit_mode != "in_place":
+                    await self.engine.flush_cache()
+                self.sync_state = SyncState.COMMITTING
+                await self.engine.apply_manifest(manifest, version_path)
+
+            # on_applied bumps current_version under the gate (before
+            # continue_generation in in_place mode), so a request can never be
+            # admitted observing the stale version on mutated weights.
+            await self.commit_version(
+                apply=apply,
+                on_applied=lambda: setattr(self, "current_version", latest),
+                pause=self.engine.pause_generation,
+                resume=self.engine.continue_generation,
+            )
+            self.sync_state = SyncState.PREFETCHING
 
             # Reached the board's latest for this run as captured at pass start; a
             # version published mid-pass is picked up by the next reconcile tick.
