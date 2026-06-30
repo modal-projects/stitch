@@ -100,4 +100,4 @@ Bounding the per-run replay with periodic recovery anchors is left for later.
 Sidecars default to `quiesce` commit mode, which drains in-flight requests
 before applying a delta. The `in_place` mode (set `SIDECAR_COMMIT_MODE` in
 the config module) applies without draining and relies on version-namespaced
-KV keys. It needs an SGLang build with the overlap-drain fix.
+KV keys.
