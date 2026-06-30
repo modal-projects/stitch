@@ -6,16 +6,54 @@ from pathlib import Path
 
 from stitch.bulletin import FilesystemBulletinBoard
 from stitch.protocol import (
+    BASE_VERSION,
     Artifact,
+    PointerRewind,
     RolloutPoolState,
     RolloutReplicaState,
     VersionManifest,
     WeightVersionPolicy,
+    decide_pointer_move,
     evaluate_version_policy,
     parse_weight_identity,
     read_latest,
     weight_identity,
 )
+
+
+class DecidePointerMoveTest(unittest.TestCase):
+    """The single accept/reset/rewind rule both the bulletin-board publish path
+    and the frontdoor hot-load path share (so they can't diverge)."""
+
+    def test_forward_within_run_is_a_non_reset_advance(self) -> None:
+        move = decide_pointer_move("run-a", 4, run_id="run-a", version=5)
+        self.assertEqual((move.run_id, move.version, move.reset), ("run-a", 5, False))
+
+    def test_same_or_lower_version_within_run_rewinds(self) -> None:
+        with self.assertRaises(PointerRewind):
+            decide_pointer_move("run-a", 5, run_id="run-a", version=5)
+        with self.assertRaises(PointerRewind) as cm:
+            decide_pointer_move("run-a", 5, run_id="run-a", version=3)
+        self.assertEqual(cm.exception.current_version, 5)
+        self.assertEqual(cm.exception.requested_version, 3)
+
+    def test_different_run_forks_at_base_as_a_reset(self) -> None:
+        # A new run is accepted even at a lower version (its space restarts) ...
+        move = decide_pointer_move("run-a", 5, run_id="run-b", version=1)
+        self.assertEqual((move.run_id, move.version, move.reset), ("run-b", 1, True))
+        # ... including the empty BASE_VERSION claim.
+        claim = decide_pointer_move("run-a", 5, run_id="run-b", version=BASE_VERSION)
+        self.assertEqual((claim.run_id, claim.version, claim.reset), ("run-b", 0, True))
+
+    def test_first_claim_against_empty_pointer_is_a_reset(self) -> None:
+        move = decide_pointer_move(None, 0, run_id="run-a", version=BASE_VERSION)
+        self.assertEqual((move.run_id, move.version, move.reset), ("run-a", 0, True))
+
+    def test_runless_layout_keeps_monotonic_cas(self) -> None:
+        move = decide_pointer_move(None, 2, run_id=None, version=3)
+        self.assertFalse(move.reset)
+        with self.assertRaises(PointerRewind):
+            decide_pointer_move(None, 3, run_id=None, version=3)
 
 
 class ProtocolTest(unittest.TestCase):
