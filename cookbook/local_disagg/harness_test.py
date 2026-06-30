@@ -163,7 +163,10 @@ class PoolClaimInvariantTest(unittest.TestCase):
 
                 self.assertEqual(latecomer.served_version, 2)
                 self.assertEqual(latecomer.served_run_id, new.run_id)
-                self.assertEqual(latecomer.engine.applied, [1, 2])
+                # The cold catch-up over the v1..v2 tail composes into a single
+                # engine apply at the target version (not one apply per
+                # intermediate version) — see WeightSyncManager._sync_once.
+                self.assertEqual(latecomer.engine.applied, [2])
 
         asyncio.run(run())
 
