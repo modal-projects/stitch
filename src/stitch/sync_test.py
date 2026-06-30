@@ -65,7 +65,7 @@ class FakeEngine:
 
 
 class SyncManagerTest(unittest.TestCase):
-    def test_startup_sync_applies_transition_chain(self) -> None:
+    def test_startup_sync_composes_tail_into_one_apply(self) -> None:
         async def run() -> None:
             with tempfile.TemporaryDirectory() as tmp:
                 board = FilesystemBulletinBoard(tmp)
@@ -78,7 +78,10 @@ class SyncManagerTest(unittest.TestCase):
 
                 self.assertEqual(manager.current_version, 2)
                 self.assertEqual(manager.sync_state, SyncState.IDLE)
-                self.assertEqual([v for v, _ in engine.applies], [1, 2])
+                # A multi-version catch-up composes the tail host-side and reloads
+                # once: a single apply at the target version, not one per version.
+                self.assertEqual([v for v, _ in engine.applies], [2])
+                self.assertEqual(engine.flushes, 1)
 
         asyncio.run(run())
 
@@ -96,7 +99,8 @@ class SyncManagerTest(unittest.TestCase):
                 await manager.startup_sync()
                 self.assertEqual(manager.current_run_id, "run-a")
                 self.assertEqual(manager.current_version, 2)
-                self.assertEqual([v for v, _ in engine.applies], [1, 2])
+                # The two-version tail is composed into one apply at the target.
+                self.assertEqual([v for v, _ in engine.applies], [2])
 
                 # A new run forks at base with its version space restarting at 1.
                 _write_slime_version(root / "run-b", 1, 0)
