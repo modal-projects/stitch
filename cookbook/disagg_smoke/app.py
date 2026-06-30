@@ -20,10 +20,13 @@ model (Qwen2.5-0.5B-Instruct), with no Kimi/large config and no Megatron trainer
     publishes a delta, and confirms the engine reloads it (real
     ``update_weights_from_disk``) and serves a version-pinned completion.
 
-Run (Modal creds required; the smoke needs one GPU):
+Run (Modal creds required; the smoke needs one GPU). Invoke by module path
+(``-m``), not file path, so the entrypoint resolves to its qualified package
+name ``cookbook.disagg_smoke.app`` and the container can import it (a bare file
+path names it ``app`` and the remote import fails):
 
-    modal run cookbook/disagg_smoke/app.py::control_plane_test
-    modal run cookbook/disagg_smoke/app.py::serving_smoke
+    modal run -m cookbook.disagg_smoke.app::control_plane_test
+    modal run -m cookbook.disagg_smoke.app::serving_smoke
 
 ``control_plane_test`` is the primary, cheap validation and asserts everything
 itself (it raises on failure). ``serving_smoke`` is the live-engine confirmation.

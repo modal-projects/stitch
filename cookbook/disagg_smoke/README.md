@@ -17,12 +17,18 @@ apply + reconcile path runs.
 
 ## Entrypoints
 
+Invoke by **module path** (`-m`), not file path — like the other cookbook apps
+(`modal deploy -m cookbook.slime_disagg.modal_train`). A bare file path names the
+entrypoint module `app`, which the container can't import (`ModuleNotFoundError:
+No module named 'app'`); `-m` resolves it to `cookbook.disagg_smoke.app`, which is
+importable from the mounted cookbook package.
+
 ```bash
 # GPU-free control-plane test (primary). Asserts everything itself; raises on failure.
-modal run cookbook/disagg_smoke/app.py::control_plane_test
+modal run -m cookbook.disagg_smoke.app::control_plane_test
 
 # 1x GPU live confirmation: real SGLang reload + version-pinned completion.
-modal run cookbook/disagg_smoke/app.py::serving_smoke
+modal run -m cookbook.disagg_smoke.app::serving_smoke
 ```
 
 ### `control_plane_test` (no GPU)
