@@ -574,8 +574,6 @@ def _start_provider_sidecar(*, base_checkpoint_dir: str) -> subprocess.Popen:
         LOCAL_CHECKPOINT_PATH,
         "--base-checkpoint-dir",
         base_checkpoint_dir,
-        "--commit-mode",
-        exp.COMMIT_MODE,
     ]
     print("Starting provider sidecar:", " ".join(cmd))
     return subprocess.Popen(cmd, start_new_session=True)

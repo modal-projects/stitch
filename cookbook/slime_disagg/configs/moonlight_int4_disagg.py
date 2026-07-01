@@ -30,8 +30,6 @@ DELTA_VOLUME_NAME = "slime-delta-bulletin-moonlight-int4"
 DELTA_BULLETIN_ROOT = "/delta-bulletin"
 
 INT4_GROUP_SIZE = "128"
-
-SIDECAR_COMMIT_MODE = "in_place"
 SIDECAR_DEBUG_REQUESTS = True
 
 # No build_serving_image: the pool reuses the trainer image, whose SGLang serves

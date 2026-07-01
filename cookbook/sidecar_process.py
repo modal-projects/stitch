@@ -23,7 +23,6 @@ def start_sglang_sidecar(
     local_checkpoint_dir: str,
     base_checkpoint_dir: str,
     volume_name: str,
-    commit_mode: str,
     debug_requests: bool = False,
 ) -> subprocess.Popen:
     """Launch the weight-sync sidecar as a subprocess.
@@ -49,8 +48,6 @@ def start_sglang_sidecar(
         base_checkpoint_dir,
         "--volume-name",
         volume_name,
-        "--commit-mode",
-        commit_mode,
     ]
     if debug_requests:
         cmd.append("--debug-requests")

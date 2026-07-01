@@ -66,11 +66,6 @@ DELTA_BULLETIN_ROOT = "/delta-bulletin"
 # group_size (see the INVARIANT in the module docstring).
 INT4_GROUP_SIZE = "32"
 
-# Async one-step off-policy: in_place applies weights without draining in-flight
-# rollouts; stale-version KV is isolated per weight version by the sidecar's
-# extra_key stamping and drains as those requests finish. min-version pins cross
-# commits freely; only exact pins are quiesced.
-SIDECAR_COMMIT_MODE = "in_place"
 SIDECAR_DEBUG_REQUESTS = True
 
 

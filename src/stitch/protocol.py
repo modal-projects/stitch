@@ -605,11 +605,6 @@ class EngineAdapter(Protocol):
 
     backend: str
 
-    async def flush_cache(self) -> None:
-        """Evict all cached state (KV, radix tree). Called before ``apply_manifest``
-        in quiesce mode; skipped in in_place mode."""
-        ...
-
     async def apply_manifest(self, manifest: VersionManifest, version_path: str) -> None:
         """Bring the engine to ``manifest.version``, replaying every intermediate
         version from the currently applied one up to the target.
@@ -623,8 +618,8 @@ class EngineAdapter(Protocol):
         ...
 
     async def pause_generation(self) -> None:
-        """Pause the engine's scheduler in place. Required for ``commit_mode="in_place"``;
-        in-flight requests stay resident and resume after ``continue_generation``."""
+        """Pause the engine's scheduler in place; in-flight requests stay resident and
+        resume after ``continue_generation``."""
         ...
 
     async def continue_generation(self) -> None:

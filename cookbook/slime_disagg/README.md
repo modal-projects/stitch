@@ -97,7 +97,6 @@ run they re-materialize the base and replay that run's chain from the start.
 Each run is isolated under its own `run_id`, so sequential runs never collide.
 Bounding the per-run replay with periodic recovery anchors is left for later.
 
-Sidecars default to `quiesce` commit mode, which drains in-flight requests
-before applying a delta. The `in_place` mode (set `SIDECAR_COMMIT_MODE` in
-the config module) applies without draining and relies on version-namespaced
-KV keys.
+Sidecars apply published deltas in place without draining in-flight requests.
+The version-namespaced `extra_key` keeps stale KV isolated per weight version,
+and the in-flight requests drain naturally as they finish.

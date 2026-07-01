@@ -207,8 +207,7 @@ def create_app(
             payload.pop("weight_version", None)
             # Inject a request id so the upstream generation can be aborted if
             # the client disconnects; otherwise abandoned requests keep
-            # generating, holding the commit quiesce point for their full
-            # remaining length.
+            # generating on the engine, wasting rollout compute.
             rid = payload.get("rid")
             if rid is None:
                 rid = uuid.uuid4().hex
@@ -234,12 +233,11 @@ def create_app(
                 started = asyncio.get_running_loop().time()
                 if versioned_route and manager.debug_requests:
                     logger.info(
-                        "sidecar_proxy start request_id=%s path=%s exact=%s current=%s active=%s",
+                        "sidecar_proxy start request_id=%s path=%s exact=%s current=%s",
                         request_id,
                         path,
                         policy.exact_version,
                         start_version,
-                        manager.active_requests,
                     )
 
                 async def _upstream_call() -> Any:
@@ -296,26 +294,25 @@ def create_app(
                 except Exception:
                     if versioned_route:
                         logger.exception(
-                            "sidecar_proxy error request_id=%s path=%s elapsed=%.2fs current=%s active=%s",
+                            "sidecar_proxy error request_id=%s path=%s elapsed=%.2fs current=%s",
                             request_id,
                             path,
                             asyncio.get_running_loop().time() - started,
                             manager.current_version,
-                            manager.active_requests,
                         )
                     raise
                 if versioned_route and manager.debug_requests:
                     logger.info(
-                        "sidecar_proxy end request_id=%s path=%s status=%s elapsed=%.2fs current=%s active=%s",
+                        "sidecar_proxy end request_id=%s path=%s status=%s elapsed=%.2fs current=%s",
                         request_id,
                         path,
                         resp.status_code,
                         asyncio.get_running_loop().time() - started,
                         manager.current_version,
-                        manager.active_requests,
                     )
-                # Captured while the request is still pinned, so a commit
-                # cannot advance the version between serving and reporting.
+                # The served version as of response time: an in-place commit
+                # may have advanced it since admission, so start/end can differ
+                # and both are reported honestly.
                 end_version = manager.current_version
         except PolicyViolation as exc:
             logger.info(

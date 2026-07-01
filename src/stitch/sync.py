@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections import defaultdict
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
-from typing import Any, Literal, Protocol
+from typing import Any, Protocol
 
 from stitch.bulletin import BulletinBoard
 from stitch.protocol import (
@@ -20,7 +19,6 @@ from stitch.protocol import (
 
 
 logger = logging.getLogger(__name__)
-CommitMode = Literal["quiesce", "in_place"]
 
 
 class PolicyViolation(Exception):
@@ -32,181 +30,21 @@ class PolicyViolation(Exception):
 
 
 class RolloutSyncManager(Protocol):
-    """The surface stitch.servers.sglang.create_app drives. WeightSyncManager
-    implements it, and both the bulletin-board sidecar and the hot-load provider
-    sidecar build one — they differ only in board backend and front-door surface.
-
-    create_app also probes optional members defensively (shutdown_sync, and the
-    sync-route trio queue_sync/queued_target_version/sync_state); those are not
-    part of this required contract.
-    """
+    """The surface stitch.servers.sglang.create_app drives."""
 
     debug_requests: bool
     current_version: int
-    active_requests: int
 
     async def startup_sync(self) -> None: ...
 
     async def server_info(self) -> dict[str, Any]: ...
 
-    def request_context(self, policy: WeightVersionPolicy | None = None) -> Any: ...
+    def request_context(self, policy: WeightVersionPolicy | None = None) -> Any:
+        ...
 
 
-class RolloutAdmissionGate:
-    """Shared request-admission + commit gate for rollout sync managers.
-
-    Owns the active-request accounting and the ``_committing`` gate, and
-    centralizes the lock discipline that keeps version reporting correct: a
-    request's policy is checked and its serving version captured under the same
-    ``_active_cond`` acquisition the committer uses, and commits hold the gate
-    across the engine apply *and* the version advance (cleared only after).
-    Subclasses provide ``current_version`` and override the hooks for their
-    policy / admission / exact-pin specifics. ``WeightSyncManager`` composes it
-    (so the bulletin-board and hot-load provider sidecars, both WeightSyncManager,
-    share the gate semantics and the P0.1 commit-window fix in one place).
-    """
-
-    def __init__(self, *, commit_mode: CommitMode = "quiesce") -> None:
-        self.commit_mode = commit_mode
-        self._active_cond = asyncio.Condition()
-        self._active_requests = 0
-        self._committing = False
-        # Exact-version pins in flight, summed across versions, so a commit can
-        # wait for strict traffic to drain. Tracked on the gate (not per
-        # subclass) so the bulletin-board manager and the hot-load shim share
-        # the in_place commit semantics.
-        self._exact_inflight: dict[int, int] = defaultdict(int)
-
-    @property
-    def active_requests(self) -> int:
-        return self._active_requests
-
-    @property
-    def inflight_exact_versions(self) -> dict[str, int]:
-        return {str(version): count for version, count in sorted(self._exact_inflight.items()) if count}
-
-    def _admission_gated(self, policy: WeightVersionPolicy) -> bool:
-        if not self._committing:
-            return False
-        if self.commit_mode == "in_place":
-            # Non-strict requests cross commits freely: stamped with the version
-            # current at admission, a mislabel around the commit is old-era
-            # impurity only. Exact pins must not cross.
-            return policy.exact_version is not None
-        return True
-
-    def _policy_error(self, policy: WeightVersionPolicy) -> dict[str, Any] | None:
-        return evaluate_version_policy(self.current_version, policy)
-
-    def _on_admit(self, policy: WeightVersionPolicy) -> None:
-        if policy.exact_version is not None:
-            self._exact_inflight[int(policy.exact_version)] += 1
-
-    def _on_release(self, policy: WeightVersionPolicy) -> None:
-        if policy.exact_version is not None:
-            key = int(policy.exact_version)
-            self._exact_inflight[key] -= 1
-            if not self._exact_inflight[key]:
-                del self._exact_inflight[key]
-
-    def _on_policy_violation(self, error: dict[str, Any]) -> None:
-        """Hook run under the lock when admission is rejected."""
-
-    def _commit_ready(self) -> bool:
-        """The predicate a commit waits on before closing the admission gate:
-        in_place drains only exact pins (so at most one exact version is ever
-        live); quiesce drains all in-flight proxied requests."""
-        if self.commit_mode == "in_place":
-            return not any(self._exact_inflight.values())
-        return self._active_requests == 0
-
-    @asynccontextmanager
-    async def request_context(self, policy: WeightVersionPolicy | None = None):
-        """Admit one request: gate on in-progress commits, enforce the policy,
-        and capture the serving version — all under one ``_active_cond``
-        acquisition, so the yielded version is exactly what the engine serves
-        the request on. Raises :class:`PolicyViolation` when the policy fails.
-        """
-        policy = policy or WeightVersionPolicy()
-        async with self._active_cond:
-            await self._active_cond.wait_for(lambda: not self._admission_gated(policy))
-            error = self._policy_error(policy)
-            if error is not None:
-                self._on_policy_violation(error)
-                raise PolicyViolation(error)
-            start_version = self.current_version
-            self._active_requests += 1
-            self._on_admit(policy)
-        try:
-            yield start_version
-        finally:
-            async with self._active_cond:
-                self._active_requests -= 1
-                self._on_release(policy)
-                self._active_cond.notify_all()
-
-    async def _begin_commit(self, ready: Callable[[], bool]) -> None:
-        """Wait for the quiesce predicate, then close the admission gate under
-        the same lock acquisition (so no request slips in between)."""
-        async with self._active_cond:
-            await self._active_cond.wait_for(ready)
-            self._committing = True
-
-    async def _end_commit(self) -> None:
-        async with self._active_cond:
-            self._committing = False
-            self._active_cond.notify_all()
-
-    async def commit_version(
-        self,
-        *,
-        apply: Callable[[], Awaitable[None]],
-        on_applied: Callable[[], None],
-        pause: Callable[[], Awaitable[None]] | None = None,
-        resume: Callable[[], Awaitable[None]] | None = None,
-    ) -> None:
-        """Drive one commit through the gate: wait for the commit point and
-        close the admission gate, apply the new weights, advance the served
-        version (``on_applied``) while the gate is still held, then reopen.
-
-        In ``in_place`` mode the engine is paused around the apply and resumed in
-        a finally, with the version advanced before resume so new admissions see
-        the new namespace. On failure the gate (and pause) are unwound and the
-        served version is left unchanged — ``on_applied`` runs only after a
-        successful apply. Both the bulletin-board manager and the hot-load shim
-        commit through here, so the gate sequencing lives in one place.
-        """
-        await self._begin_commit(self._commit_ready)
-        try:
-            if self.commit_mode == "in_place" and pause is not None:
-                await pause()
-                try:
-                    await apply()
-                    on_applied()
-                finally:
-                    if resume is not None:
-                        await resume()
-            else:
-                await apply()
-                on_applied()
-        finally:
-            await self._end_commit()
-
-
-class WeightSyncManager(RolloutAdmissionGate):
-    """Local rollout server sync manager.
-
-    Commit modes:
-
-    - ``quiesce`` (default): wait for active proxied requests per
-      ``commit_wait_policy``, flush the engine cache, then apply. Safe on any
-      engine build.
-    - ``in_place``: pause the engine in place, apply without flushing, and
-      continue — in-flight requests resume decoding on their existing KV.
-      Cross-version KV isolation comes from the sidecar stamping a composed,
-      version-namespaced ``extra_key`` onto every proxied request. Only
-      exact-version requests are quiesced/gated.
-    """
+class WeightSyncManager:
+    """Local rollout server sync manager."""
 
     def __init__(
         self,
@@ -214,10 +52,8 @@ class WeightSyncManager(RolloutAdmissionGate):
         board: BulletinBoard,
         engine: EngineAdapter,
         run_id: str | None = None,
-        commit_mode: CommitMode = "quiesce",
         debug_requests: bool = False,
     ) -> None:
-        super().__init__(commit_mode=commit_mode)
         self.board = board
         self.engine = engine
         self.run_id = run_id
@@ -246,7 +82,6 @@ class WeightSyncManager(RolloutAdmissionGate):
         return {
             "run_id": self.run_id,
             "backend": self.engine.backend,
-            "commit_mode": self.commit_mode,
             "current_run_id": self.current_run_id,
             "current_version": self.current_version,
             "latest_seen_version": self.latest_seen_version,
@@ -254,13 +89,42 @@ class WeightSyncManager(RolloutAdmissionGate):
             "sync_state": self.sync_state.value,
             "last_sync_error": self.last_sync_error,
             "sync_task_active": self._sync_task is not None and not self._sync_task.done(),
-            "active_requests": self._active_requests,
-            "inflight_exact_versions": self.inflight_exact_versions,
         }
+
+    def _policy_error(self, policy: WeightVersionPolicy) -> dict[str, Any] | None:
+        return evaluate_version_policy(self.current_version, policy)
 
     def _on_policy_violation(self, error: dict[str, Any]) -> None:
         if error["error"]["type"] == "WeightVersionNotReady":
             self.queue_sync(error["error"]["target_version"])
+
+    @asynccontextmanager
+    async def request_context(self, policy: WeightVersionPolicy | None = None):
+        policy = policy or WeightVersionPolicy()
+        error = self._policy_error(policy)
+        if error is not None:
+            self._on_policy_violation(error)
+            raise PolicyViolation(error)
+        yield self.current_version
+
+    async def commit_version(
+        self,
+        *,
+        apply: Callable[[], Awaitable[None]],
+        on_applied: Callable[[], None],
+        pause: Callable[[], Awaitable[None]] | None = None,
+        resume: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
+        paused = False
+        try:
+            if pause is not None:
+                await pause()
+                paused = True
+            await apply()
+            on_applied()
+        finally:
+            if paused and resume is not None:
+                await resume()
 
     async def validate_policy(self, policy: WeightVersionPolicy) -> tuple[bool, int, Mapping[str, Any] | None]:
         """Advisory pre-check. The authoritative check is in request_context."""
@@ -312,9 +176,9 @@ class WeightSyncManager(RolloutAdmissionGate):
 
         A new run forks at base (slime sets ``base_version=000000`` for v1 of every
         run), so switching chains means discarding the current weights and replaying
-        the new chain. The re-materialize runs through the commit gate (pause →
-        reset → resume) exactly like a version commit, so no in-flight request
-        decodes across the weight wipe.
+        the new chain. The re-materialize runs under the engine pause/reset/resume
+        sequence just like a version commit, so no in-flight request decodes across
+        the weight wipe.
         """
         logger.info(
             "run change %r -> %r: re-materializing base, resetting to v0",
@@ -377,16 +241,9 @@ class WeightSyncManager(RolloutAdmissionGate):
             self.sync_state = SyncState.PREPARING
 
             async def apply(manifest: VersionManifest = target_manifest, version_path: str = target_path) -> None:
-                # quiesce flushes before applying; in_place skips the flush
-                # (the gate paused the engine and stale KV resumes as-is).
-                if self.commit_mode != "in_place":
-                    await self.engine.flush_cache()
                 self.sync_state = SyncState.COMMITTING
                 await self.engine.apply_manifest(manifest, version_path)
 
-            # on_applied bumps current_version under the gate (before
-            # continue_generation in in_place mode), so a request can never be
-            # admitted observing the stale version on mutated weights.
             await self.commit_version(
                 apply=apply,
                 on_applied=lambda: setattr(self, "current_version", latest),

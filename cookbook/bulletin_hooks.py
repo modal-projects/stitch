@@ -174,7 +174,7 @@ async def gated_rollout_request_hook(args: Any, sample: Any, request: dict[str, 
     by a replica within ``lag`` versions of the newest weights; a lagging replica
     returns a retryable 409 (which also nudges it to sync forward), so the trainer
     never spends rollout compute on weights staler than its bound. ``min`` mode
-    (not ``exact``) lets the request cross in_place commits without being quiesced.
+    (not ``exact``) just means the request does not require an exact version match.
     """
     mode = str(getattr(args, "rollout_request_weight_version_mode", "min"))
     if mode != "none":

@@ -345,7 +345,6 @@ class Server:
             local_checkpoint_dir=LOCAL_CHECKPOINT_PATH,
             base_checkpoint_dir=MODEL_NAME,
             volume_name=exp.DELTA_VOLUME_NAME,
-            commit_mode=exp.SIDECAR_COMMIT_MODE,
             debug_requests=getattr(exp, "SIDECAR_DEBUG_REQUESTS", False),
         )
         helpers.wait_http(

@@ -29,8 +29,6 @@ DELTA_BULLETIN_ROOT = "/delta-bulletin"
 
 SOURCE_MODEL = "CharyZeng/Kimi-K2.5-2layer"  # INT4, KimiK25 arch, 2 layers
 MODEL_TAG = "kimi-k25-2layer-nvfp4"
-
-SIDECAR_COMMIT_MODE = "in_place"
 SIDECAR_DEBUG_REQUESTS = True
 
 

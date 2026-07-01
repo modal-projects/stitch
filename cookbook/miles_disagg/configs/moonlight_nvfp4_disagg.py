@@ -52,9 +52,6 @@ DELTA_BULLETIN_ROOT = "/delta-bulletin"
 SOURCE_MODEL = "moonshotai/Moonlight-16B-A3B-Instruct"
 MODEL_TAG = "moonlight-16b-nvfp4"  # names the prepared dirs under PREP_PATH
 
-# Async one-step off-policy: in_place applies weights without draining in-flight
-# rollouts; stale-version KV is isolated per weight version by the sidecar.
-SIDECAR_COMMIT_MODE = "in_place"
 SIDECAR_DEBUG_REQUESTS = True
 
 

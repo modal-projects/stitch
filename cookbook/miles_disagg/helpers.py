@@ -50,7 +50,6 @@ def start_sglang_sidecar(
     local_checkpoint_dir: str,
     base_checkpoint_dir: str,
     volume_name: str,
-    commit_mode: str,
     debug_requests: bool = False,
 ) -> subprocess.Popen:
     from cookbook.sidecar_process import start_sglang_sidecar as _start
@@ -63,7 +62,6 @@ def start_sglang_sidecar(
         local_checkpoint_dir=local_checkpoint_dir,
         base_checkpoint_dir=base_checkpoint_dir,
         volume_name=volume_name,
-        commit_mode=commit_mode,
         debug_requests=debug_requests,
     )
 

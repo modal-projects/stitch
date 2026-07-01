@@ -25,7 +25,7 @@ import uuid
 from stitch.bulletin import FilesystemBulletinBoard
 from stitch.engines.sglang import SGLangDiskDeltaAdapter
 from stitch.servers.sglang import create_app as create_sglang_app
-from stitch.sync import CommitMode, WeightSyncManager
+from stitch.sync import WeightSyncManager
 
 
 logger = logging.getLogger(__name__)
@@ -38,7 +38,6 @@ def build_manager(
     transport_root: str,
     local_checkpoint_dir: str,
     base_checkpoint_dir: str,
-    commit_mode: CommitMode = "in_place",
     run_id: str | None = None,
     debug_requests: bool = False,
 ) -> WeightSyncManager:
@@ -55,7 +54,6 @@ def build_manager(
         board=board,
         engine=engine,
         run_id=run_id,
-        commit_mode=commit_mode,
         debug_requests=debug_requests,
     )
 
@@ -94,11 +92,6 @@ def main() -> None:
         help="Base HF checkpoint the local copy is seeded from (deltas build on it).",
     )
     parser.add_argument(
-        "--commit-mode",
-        choices=("quiesce", "in_place"),
-        default=os.environ.get("STITCH_SHIM_COMMIT_MODE", "in_place"),
-    )
-    parser.add_argument(
         "--poll-interval",
         type=float,
         default=float(os.environ.get("STITCH_SHIM_POLL_INTERVAL", "5.0")),
@@ -127,7 +120,6 @@ def main() -> None:
         transport_root=args.transport_root,
         local_checkpoint_dir=args.local_checkpoint_dir,
         base_checkpoint_dir=args.base_checkpoint_dir,
-        commit_mode=args.commit_mode,
         run_id=args.run_id,
         debug_requests=args.debug_requests,
     )

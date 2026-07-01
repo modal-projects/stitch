@@ -20,9 +20,6 @@ class _FakeEngine:
         self.applies: list[int] = []
         self.events: list[str] = []
 
-    async def flush_cache(self) -> None:
-        self.events.append("flush")
-
     async def apply_manifest(self, manifest, version_path) -> None:
         self.applies.append(manifest.version)
         self.events.append("apply")
@@ -70,8 +67,6 @@ class BuildManagerTest(unittest.TestCase):
             self.assertIsInstance(manager.engine, SGLangDiskDeltaAdapter)
             self.assertEqual(manager.engine.local_checkpoint_dir, "/local")
             self.assertEqual(manager.engine.base_checkpoint_dir, "/base")
-            # The provider serves the customer; in_place is the perf default.
-            self.assertEqual(manager.commit_mode, "in_place")
 
 
 class ProviderSyncTest(unittest.TestCase):

@@ -109,14 +109,6 @@ class SGLangDiskDeltaAdapter:
         await asyncio.to_thread(shutil.rmtree, self.local_checkpoint_dir, ignore_errors=True)
         await self.prepare()
 
-    async def flush_cache(self) -> None:
-        import httpx
-
-        async with httpx.AsyncClient(timeout=120.0, trust_env=False) as client:
-            resp = await client.get(f"{self.upstream_url}/flush_cache")
-            if resp.status_code not in (200, 404):
-                resp.raise_for_status()
-
     async def pause_generation(self) -> None:
         """Pause the scheduler loop in place: in-flight requests stay resident
         and resume decoding on their existing KV after continue_generation."""
@@ -153,10 +145,10 @@ class SGLangDiskDeltaAdapter:
         payload = {
             "model_path": self.local_checkpoint_dir,
             "weight_version": str(manifest.version),
-            # The sync manager flushes via GET /flush_cache while quiesced.
-            # The engine-side post-apply flush hard-asserts on failure
-            # (killing the scheduler process) if any request slipped in, so
-            # it must stay disabled here.
+            # The engine-side post-apply flush must stay disabled because the
+            # sidecar never pauses requests for draining; in-flight requests stay resident
+            # across the in-place swap and their stale KV is isolated by the
+            # version-namespaced extra_key.
             "flush_cache": False,
         }
         async with httpx.AsyncClient(timeout=None, trust_env=False) as client:

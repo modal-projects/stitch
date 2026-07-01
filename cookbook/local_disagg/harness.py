@@ -46,9 +46,6 @@ class MemoryEngine:
     async def prepare(self) -> None:
         pass
 
-    async def flush_cache(self) -> None:
-        pass
-
     async def apply_manifest(self, manifest: VersionManifest, version_path: str) -> None:
         self.version = manifest.version
         self.applied.append(manifest.version)
@@ -77,7 +74,7 @@ class LocalReplica:
         from stitch.sync import WeightSyncManager
 
         self.engine = MemoryEngine()
-        self.manager = WeightSyncManager(board=board, engine=self.engine, commit_mode="in_place")
+        self.manager = WeightSyncManager(board=board, engine=self.engine)
 
     async def reconcile(self) -> None:
         await self.manager.sync_to()

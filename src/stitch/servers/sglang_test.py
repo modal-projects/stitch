@@ -15,9 +15,6 @@ class FakeEngine:
     def __init__(self) -> None:
         self.events: list[str] = []
 
-    async def flush_cache(self) -> None:
-        self.events.append("flush")
-
     async def apply_manifest(self, manifest, version_path) -> None:
         self.events.append("apply")
 
@@ -164,9 +161,7 @@ class SidecarInPlaceCommitTest(unittest.TestCase):
             with tempfile.TemporaryDirectory() as tmp:
                 board = FilesystemBulletinBoard(tmp)
                 engine = FakeEngine()
-                manager = WeightSyncManager(
-                    board=board, engine=engine, commit_mode="in_place"
-                )
+                manager = WeightSyncManager(board=board, engine=engine)
                 app = create_app(manager, upstream_url="http://127.0.0.1:9")
 
                 _BlockingUpstream.calls = []
@@ -187,7 +182,7 @@ class SidecarInPlaceCommitTest(unittest.TestCase):
                         slow = asyncio.create_task(
                             driver.post("/generate", json={"text": "slow"})
                         )
-                        await wait_for(lambda: manager.active_requests == 1)
+                        await wait_for(lambda: len(_BlockingUpstream.calls) == 1)
                         self.assertEqual(
                             _BlockingUpstream.calls[0]["extra_key"], "wv0;"
                         )
@@ -208,7 +203,6 @@ class SidecarInPlaceCommitTest(unittest.TestCase):
                         # The commit lands while the request is still in flight:
                         # in_place mode must not drain non-strict traffic.
                         await wait_for(lambda: manager.current_version == 1)
-                        self.assertEqual(manager.active_requests, 1)
                         self.assertEqual(engine.events, ["pause", "apply", "continue"])
 
                         _BlockingUpstream.release.set()

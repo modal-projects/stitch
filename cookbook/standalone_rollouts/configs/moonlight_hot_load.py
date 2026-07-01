@@ -23,7 +23,6 @@ HF_CACHE_PATH = Path("/root/.cache/huggingface")
 LOCAL_CHECKPOINT_PATH = "/local-checkpoint"
 # in_place pauses/applies/continues without flushing; stale-version KV is isolated
 # by the sidecar's extra_key stamping and drains as its in-flight requests finish.
-COMMIT_MODE = "in_place"
 S3_TRANSPORT_BUCKET_NAME = "modal-stitch-s3-transport"
 S3_TRANSPORT_KEY_PREFIX = "standalone-rollouts/moonlight"
 S3_TRANSPORT_MOUNT_PATH = Path("/mnt/stitch-s3-transport")

@@ -36,8 +36,8 @@ opinionated about supporting workloads that are:
 - `src/stitch/bulletin.py`: Bulletin board storage (filesystem-backed, with
   a pluggable refresh hook for remote volumes).
 - `src/stitch/sync.py`: Sync state machine that drives a server from its
-  current version to a target, with `quiesce` (drain, then apply) and
-  `in_place` (pause/apply/continue) commit modes.
+  current version to a target with a single in-place commit path
+  (pause/apply/advance/continue, no draining).
 - `src/stitch/servers/sglang.py`: HTTP sidecar that adds version semantics
   to an SGLang server.
 - `src/stitch/engines/sglang.py`: SGLang prepare/commit adapter using

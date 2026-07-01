@@ -9,13 +9,6 @@ APP_NAME = "slime-qwen3-4b-delta-flash"
 DELTA_VOLUME_NAME = "slime-delta-bulletin-qwen3-4b"
 DELTA_BULLETIN_ROOT = "/delta-bulletin"
 
-# How the rollout sidecar applies published weight versions. "in_place" pauses
-# the engine, applies, and resumes — in-flight requests keep decoding on stale
-# KV and cross-version isolation comes from extra_key stamping, so commits stop
-# blocking behind over-generation/eval stragglers and skip the full-tree flush.
-# "quiesce" is the safe fallback that drains in-flight requests before applying.
-SIDECAR_COMMIT_MODE = "in_place"
-
 # Log every versioned sidecar proxy request (start/end + injected rid) at INFO,
 # so a stuck rollout can be traced hop-by-hop: slime rid -> sidecar -> SGLang.
 SIDECAR_DEBUG_REQUESTS = True

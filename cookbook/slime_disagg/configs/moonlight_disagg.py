@@ -35,11 +35,6 @@ APP_NAME = "slime-moonlight-disagg"
 DELTA_VOLUME_NAME = "slime-delta-bulletin-moonlight"
 DELTA_BULLETIN_ROOT = "/delta-bulletin"
 
-# M3: in_place commit applies weights without draining in-flight rollouts. Stale
-# KV is isolated per weight version by the sidecar's extra_key stamping (so old
-# requests keep decoding on their version's KV and it drains as they finish);
-# min-version pins cross commits freely, only exact pins are quiesced.
-SIDECAR_COMMIT_MODE = "in_place"
 SIDECAR_DEBUG_REQUESTS = True
 
 # Moonlight serving on the elastic pool. MLA's compressed KV is tiny, so one
@@ -192,7 +187,3 @@ slime = _Slime()
 #   M1 (sync MoE bring-up): DONE.
 #   M2 (routing replay): DONE — use_rollout_routing_replay=True +
 #     --enable-return-routed-experts; num_layers(27)/moe_router_topk(6) from moonlight.sh.
-#   M3 (async-first): DONE above — async_mode=True (train_async one-step off-policy),
-#     SIDECAR_COMMIT_MODE="in_place" (in-flight updates + extra_key KV namespacing),
-#     min-version gate at latest-lag via gated_rollout_request_hook. Tune
-#     rollout_request_weight_version_lag for the staleness/throughput trade-off.

@@ -26,7 +26,7 @@ from typing import Callable
 from stitch.bulletin import FilesystemBulletinBoard
 from stitch.engines.sglang import SGLangDiskDeltaAdapter
 from stitch.servers.sglang import create_app
-from stitch.sync import CommitMode, WeightSyncManager
+from stitch.sync import WeightSyncManager
 
 
 logger = logging.getLogger(__name__)
@@ -115,7 +115,6 @@ def build_manager(
     base_copy_workers: int = 32,
     volume_name: str = "",
     run_id: str | None = None,
-    commit_mode: CommitMode = "in_place",
     debug_requests: bool = False,
 ) -> WeightSyncManager:
     """Build the reconciling :class:`WeightSyncManager` for one rollout replica.
@@ -153,7 +152,6 @@ def build_manager(
         board=board,
         engine=engine,
         run_id=run_id,
-        commit_mode=commit_mode,
         debug_requests=debug_requests,
     )
 
@@ -162,7 +160,7 @@ def run_sidecar(*, disk_delta_module: str, inject_apply_deltas: bool) -> None:
     """Parse args and run the sidecar uvicorn server.
 
     The per-trainer adapter calls this with its decoder module; ``run_sidecar``
-    owns every other knob (host/port/transport/commit-mode/timeout/...).
+    owns every other knob (host/port/transport/timeout/...).
     """
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="0.0.0.0")
@@ -189,17 +187,6 @@ def run_sidecar(*, disk_delta_module: str, inject_apply_deltas: bool) -> None:
         type=int,
         default=int(os.environ.get("SIDECAR_BASE_COPY_WORKERS", "32")),
         help="Threads used to materialize the base checkpoint (concurrent shard copy).",
-    )
-    parser.add_argument(
-        "--commit-mode",
-        choices=("quiesce", "in_place"),
-        default=os.environ.get("SIDECAR_COMMIT_MODE", "in_place"),
-        help=(
-            "in_place (default): pause/apply/continue without flushing; in-flight "
-            "requests keep decoding on stale KV and version isolation comes from "
-            "extra_key stamping. quiesce: wait out active requests and flush "
-            "before applying (safe on any build)."
-        ),
     )
     parser.add_argument(
         "--debug-requests",
@@ -237,7 +224,6 @@ def run_sidecar(*, disk_delta_module: str, inject_apply_deltas: bool) -> None:
         base_copy_workers=args.base_copy_workers,
         volume_name=args.volume_name,
         run_id=args.run_id,
-        commit_mode=args.commit_mode,
         debug_requests=args.debug_requests,
     )
     uvicorn.run(

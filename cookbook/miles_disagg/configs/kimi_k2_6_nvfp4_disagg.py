@@ -72,8 +72,6 @@ DELTA_BULLETIN_ROOT = "/delta-bulletin"
 #   SOURCE_MODEL  -> dequantize INT4 -> bf16 masters -> convert -> served NVFP4 base
 SOURCE_MODEL = "moonshotai/Kimi-K2.6"
 MODEL_TAG = "kimi-k2-6-nvfp4"
-
-SIDECAR_COMMIT_MODE = "in_place"
 SIDECAR_DEBUG_REQUESTS = True
 
 
