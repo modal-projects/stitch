@@ -71,15 +71,11 @@ MILES_ROOT = "/root/miles"
 # only in this source tree; miles' own launcher puts it on PYTHONPATH, and so
 # must we (we run train_async.py directly rather than via execute_train).
 MEGATRON_PATH = "/root/Megatron-LM"
-# Fork branch with the disaggregated-rollout features (opaque HTTP endpoint,
-# publish-only disk-delta, request hook) AND the NVFP4 / publish-only fixes
-# (NVFP4 export dispatch, publish-only semaphore + http client, 0-dim delta
-# encode, encoding_dsv4 import guard). See branch nvfp4-disagg-fixes.
+# Fork commit with the disaggregated-rollout features (opaque HTTP endpoint,
+# publish-only disk-delta, request hook) plus the NVFP4 fixes this cookbook
+# needs. Pin to an exact commit, not the branch tip (cached image layer); push
+# the ref to modal-projects/miles before deploying.
 MILES_REPO_URL = "https://github.com/modal-projects/miles.git"
-# nvfp4-disagg-v2 @ 9e98062af = merge(feat/disaggregated-rollout @121035147,
-# radixark/miles#1261 NVFP4 RL @f95c2c495) + our publish-only/0-dim/encoding_dsv4
-# fixes + KimiK25 mbridge import converter (miles_plugins/mbridge/kimi.py). PUSH
-# this branch to modal-projects/miles before deploying. (Built in /tmp/miles-merge.)
 MILES_REPO_REF = "e9ad52dbbe09b6113b4fa4dccfb5ace35341540e"
 
 # Build-time bake of the megatron R3 dispatch fix (see the .run_commands call
@@ -155,7 +151,6 @@ image = (
     # crash with "Split sizes doesn't match total dim 0 size". Derive it from the
     # actual per-expert counts instead (identical to size*topk in the dense
     # non-replay case). Idempotent: a no-op once the fork itself ships the fix.
-    # Source diff: cookbook/miles_disagg/megatron_r3_num_out_tokens.patch.
     .run_commands(f"python3 -c {shlex.quote(_R3_DISPATCH_BAKE_PY)}")
     .pip_install(
         "fastapi",  # stitch sidecar (rollout pool reuses this image only if no serving image)
@@ -218,9 +213,9 @@ def _select_server_image() -> modal.Image:
     if builder is None:
         return image
     return builder(
-        miles_repo_url=MILES_REPO_URL,
-        miles_repo_ref=MILES_REPO_REF,
-        miles_root=MILES_ROOT,
+        trainer_repo_url=MILES_REPO_URL,
+        trainer_repo_ref=MILES_REPO_REF,
+        trainer_root=MILES_ROOT,
         hf_cache_path=str(HF_CACHE_PATH),
         experiment=EXPERIMENT,
     )
@@ -582,7 +577,7 @@ def prepare_checkpoints() -> None:
         print(f"Prepared masters={bf16_dir} served_base={bf16_dir}")
         return
 
-    # 2. served NVFP4 base (TE-direct quantizer per radixark/miles#1261). bf16
+    # 2. served NVFP4 base (miles' TE-direct quantizer). bf16
     # carve-outs for the dense first / last layers must match the trainer's
     # --num-layers-at-start/end-in-bf16 so the served base == the export layout.
     _nvfp4_carveouts = []

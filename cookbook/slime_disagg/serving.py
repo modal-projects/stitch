@@ -9,8 +9,6 @@ clone (the slime ref is a branch-tip commit).
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import modal
 
 from cookbook.serving import build_b200_serving_image
@@ -18,17 +16,16 @@ from cookbook.serving import build_b200_serving_image
 
 def build_int4_b200_serving_image(
     *,
-    slime_repo_url: str,
-    slime_repo_ref: str,
-    slime_root: str,
+    trainer_repo_url: str,
+    trainer_repo_ref: str,
+    trainer_root: str,
     hf_cache_path: str,
     experiment: str,
 ) -> modal.Image:
     return build_b200_serving_image(
-        trainer_repo_url=slime_repo_url,
-        trainer_repo_ref=slime_repo_ref,
-        trainer_root=slime_root,
-        cookbook_dir=Path(__file__).parent,
+        trainer_repo_url=trainer_repo_url,
+        trainer_repo_ref=trainer_repo_ref,
+        trainer_root=trainer_root,
         hf_cache_path=hf_cache_path,
         experiment=experiment,
         shallow_clone=True,

@@ -49,10 +49,8 @@ SLIME_IMAGE_TAG = "slimerl/slime:nightly-dev-20260527a"
 SLIME_ROOT = "/root/slime"
 SLIME_REPO_URL = "https://github.com/modal-projects/slime.git"
 # Pin to an exact commit (see cookbook/slime_disagg/modal_train.py): the cached
-# clone layer otherwise leaves the container on a stale slime. This is PR #5
-# head (disaggregated-rollout): disk-delta publish-only + rollout_endpoint_url +
-# custom_rollout_request_hook_path.
-SLIME_REPO_REF = "ebfe153949b1a69c39e92f947ed5d475166dd724"  # incl. deepseekv3 router-dtype export fix + per-request rollout hook
+# clone layer otherwise leaves the container on a stale slime.
+SLIME_REPO_REF = "ebfe153949b1a69c39e92f947ed5d475166dd724"
 
 trainer_image = (
     modal.Image.from_registry(SLIME_IMAGE_TAG)
@@ -202,8 +200,8 @@ class Trainer:
         )
         # Claim the pool for this fresh run before any delta: reset `latest` to
         # base via the front door so replicas reconcile to base up front instead
-        # of inferring the reset from the first publish (the explicit-claim model
-        # PR #5 established for the bulletin path, now mirrored here).
+        # of inferring the reset from the first publish (mirrors the bulletin
+        # path's explicit-claim model).
         hooks.announce_claim(cfg, run_id=run_id)
         helpers.prepare_slime_config(cfg, tempfile.mkdtemp())
         cmd = helpers.build_train_cmd(cfg, SLIME_ROOT)

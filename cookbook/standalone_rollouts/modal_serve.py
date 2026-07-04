@@ -57,11 +57,11 @@ S3_TRANSPORT_OIDC_AUTH_ROLE_ARN = os.environ.get(
 SLIME_IMAGE_TAG = "slimerl/slime:nightly-dev-20260527a"
 SLIME_ROOT = "/root/slime"
 SLIME_REPO_URL = "https://github.com/modal-projects/slime.git"
-# PR #5 head (disaggregated-rollout, stacked on disk-delta-weight-sync). The
-# provider sidecar applies disk deltas host-side via slime.utils.disk_delta, so
-# the image must carry that branch's slime plus its checksum/compression deps.
-# Pin a SHA, not the branch tip: the clone is a cached image layer.
-SLIME_REPO_REF = "ebfe153949b1a69c39e92f947ed5d475166dd724"  # incl. deepseekv3 router-dtype export fix + per-request rollout hook
+# The provider sidecar applies disk deltas host-side via slime.utils.disk_delta,
+# so the image must carry the fork's slime plus its checksum/compression deps.
+# Pin a SHA, not the branch tip: the clone is a cached image layer (see
+# cookbook/slime_disagg/modal_train.py).
+SLIME_REPO_REF = "ebfe153949b1a69c39e92f947ed5d475166dd724"
 
 image = (
     modal.Image.from_registry(SLIME_IMAGE_TAG)

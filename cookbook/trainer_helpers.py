@@ -2,10 +2,10 @@
 
 slime and miles drive the same launch spine: resolve HF repo ids + materialize
 inline YAML configs, build the ``train.py`` command (optionally sourcing a model
-arch script), monitor host RAM, and smoke the deployed Flash rollout pool. The
-per-trainer ``helpers.py`` modules are thin wrappers that supply the only axes
-that actually differ: which config-field tuple to materialize, the model-script
-attribute name, and whether the rollout pool has a warm floor or scales from zero.
+arch script), and smoke the deployed Flash rollout pool. The per-trainer
+``helpers.py`` modules are thin wrappers that supply the only axes that actually
+differ: which config-field tuple to materialize, the model-script attribute
+name, and whether the rollout pool has a warm floor or scales from zero.
 """
 
 from __future__ import annotations
@@ -13,8 +13,6 @@ from __future__ import annotations
 import json
 import os
 import shlex
-import socket
-import threading
 import time
 import urllib.error
 import urllib.request
@@ -47,31 +45,6 @@ def prepare_config(cfg: Any, tmpdir: str, yaml_config_fields: Iterable[str]) -> 
             with open(path, "w") as f:
                 yaml.dump(val, f)
             setattr(cfg, field, path)
-
-
-def materialize_node_local_yaml(cfg: Any, field: str, dest_dir: str = "/root/.miles_node_yaml") -> None:
-    """Materialize a per-actor-read YAML config to a deterministic node-local path.
-
-    Some config files (notably miles' ``te_precision_config_file``, which
-    ``load_quantization_recipe`` re-reads on every Ray actor during model build)
-    are read independently on each trainer node — not just parsed once on the head.
-    ``prepare_config`` writes them under ``tempfile.mkdtemp()`` on the head only,
-    so on a multi-node cluster the other containers can't see that path.
-
-    Call this on EVERY node (SPMD train()), before the rank-0 gate: each node
-    writes identical content (from the shared payload) to the same fixed path, so
-    the path the head embeds in the args resolves locally on all actors. No volume
-    commit/reload race — Ray actors are long-lived and wouldn't see post-start
-    volume writes anyway.
-    """
-    import yaml
-
-    if isinstance(val := getattr(cfg, field, None), dict):
-        os.makedirs(dest_dir, exist_ok=True)
-        path = os.path.join(dest_dir, f"{field}.yaml")
-        with open(path, "w") as f:
-            yaml.dump(val, f)
-        setattr(cfg, field, path)
 
 
 def build_train_cmd(cfg: Any, trainer_root: str, *, model_script_attr: str) -> str:
@@ -216,56 +189,3 @@ def _post_json(url: str, payload: dict, *, timeout: float) -> dict:
     )
     with urllib.request.urlopen(request, timeout=timeout) as resp:
         return json.load(resp)
-
-
-# ── Host-RAM monitor ──────────────────────────────────────────────────────────
-
-
-def start_host_mem_monitor(interval_s: int = 20) -> None:
-    """Log this node's host-RAM trajectory to stdout from a daemon thread.
-
-    The trainer can OOM-kill on host-RAM exhaustion (the publish/update_weights
-    full-model gather is the peak consumer), but Megatron only reports GPU memory
-    and the kill leaves no durable peak behind. This logs MemTotal/MemAvailable +
-    the container cgroup usage every ``interval_s`` so a live ``modal app logs -f``
-    shows exactly which phase blows a big node and how high it peaks. Runs on EVERY
-    node (called from the SPMD enter()), so whichever rank OOMs has its own trace.
-    Best-effort: never raises."""
-    host = socket.gethostname()
-
-    def _meminfo() -> tuple[float, float]:
-        total = avail = 0.0
-        try:
-            with open("/proc/meminfo") as f:
-                for line in f:
-                    if line.startswith("MemTotal:"):
-                        total = int(line.split()[1]) / 1024 / 1024  # GiB
-                    elif line.startswith("MemAvailable:"):
-                        avail = int(line.split()[1]) / 1024 / 1024
-        except Exception:  # noqa: BLE001
-            pass
-        return total, avail
-
-    def _cgroup_used_gib() -> float:
-        for path in ("/sys/fs/cgroup/memory.current",  # cgroup v2
-                     "/sys/fs/cgroup/memory/memory.usage_in_bytes"):  # v1
-            try:
-                with open(path) as f:
-                    return int(f.read().strip()) / 1024**3
-            except Exception:  # noqa: BLE001
-                continue
-        return -1.0
-
-    def _loop() -> None:
-        while True:
-            total, avail = _meminfo()
-            used = total - avail
-            cg = _cgroup_used_gib()
-            print(
-                f"[hostmem] {host} used={used:.0f}GiB avail={avail:.0f}GiB "
-                f"total={total:.0f}GiB cgroup_used={cg:.0f}GiB",
-                flush=True,
-            )
-            time.sleep(interval_s)
-
-    threading.Thread(target=_loop, daemon=True, name="host-mem-monitor").start()

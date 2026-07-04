@@ -351,11 +351,6 @@ class VersionManifest:
             data["metadata"] = self.metadata
         return data
 
-    def transition_artifact_paths(self) -> list[str]:
-        if self.transition_files:
-            return list(self.transition_files)
-        return [a.path for a in self.artifacts if a.kind == "transition"]
-
 
 def weight_identity(version: int) -> str:
     """Canonical snapshot-identity string for an integer weight version."""
@@ -372,13 +367,10 @@ def parse_weight_identity(identity: str) -> int | None:
 
 
 def format_snapshot_identity(run_id: str | None, version: int) -> str:
-    """The canonical pointer/snapshot identity for a (run_id, version).
-
+    """The canonical pointer/snapshot identity for a (run_id, version):
     ``<run_id>/weight_v<NNNNNN>`` when a run is named, else the bare
-    ``weight_v<NNNNNN>`` (the degenerate single-run / customer flat layout). This
-    is the single self-identifying value written to the slime-layout ``latest``
-    pointer: a run-scoped chain can never be mistaken for a different run's, and
-    an old bare pointer parses back to ``run_id=None`` rather than a phantom run.
+    ``weight_v<NNNNNN>``. Self-identifying, so a run-scoped chain can never be
+    mistaken for a different run's.
     """
     identity = weight_identity(version)
     return f"{run_id}/{identity}" if run_id else identity
@@ -453,9 +445,8 @@ def decide_pointer_move(
 ) -> PointerMove:
     """Decide whether the single ``latest`` writer may move to ``(run_id, version)``.
 
-    The one rule both the trainer-as-writer (bulletin board) and the
-    frontdoor-as-writer (hot-load API) paths share, so they can't bake in
-    divergent semantics:
+    Every ``latest`` writer (trainer publish hook, hot-load front door) shares
+    this rule:
 
     - A *different* run forks at base, so its version space restarts; accepting
       it (even at a lower number, including the ``BASE_VERSION`` claim) is a
@@ -503,22 +494,11 @@ def write_latest(root: str | Path, version: int) -> None:
     )
 
 
-def version_not_ready_error(current: int, target: int) -> dict[str, Any]:
+def _version_error(kind: str, message: str, current: int, target: int) -> dict[str, Any]:
     return {
         "error": {
-            "type": "WeightVersionNotReady",
-            "message": f"server is at version {current}, target {target} is not ready",
-            "current_version": int(current),
-            "target_version": int(target),
-        }
-    }
-
-
-def version_too_old_error(current: int, target: int) -> dict[str, Any]:
-    return {
-        "error": {
-            "type": "WeightVersionTooOld",
-            "message": f"server is at version {current}, cannot roll back to {target}",
+            "type": kind,
+            "message": message,
             "current_version": int(current),
             "target_version": int(target),
         }
@@ -533,17 +513,32 @@ def evaluate_version_policy(
     Callers decide how to react to a not-ready error (pull toward the target vs
     reject): the bulletin-board manager queues a sync, the hot-load shim rejects.
     """
+    current = int(current_version)
     if policy.exact_version is not None:
         target = int(policy.exact_version)
-        if current_version < target:
-            return version_not_ready_error(current_version, target)
-        if current_version > target:
-            return version_too_old_error(current_version, target)
+        if current < target:
+            return _version_error(
+                "WeightVersionNotReady",
+                f"server is at version {current}, target {target} is not ready",
+                current,
+                target,
+            )
+        if current > target:
+            return _version_error(
+                "WeightVersionTooOld",
+                f"server is at version {current}, cannot roll back to {target}",
+                current,
+                target,
+            )
         return None
-    if policy.min_required_version is not None and current_version < int(
-        policy.min_required_version
-    ):
-        return version_not_ready_error(current_version, int(policy.min_required_version))
+    if policy.min_required_version is not None and current < int(policy.min_required_version):
+        target = int(policy.min_required_version)
+        return _version_error(
+            "WeightVersionNotReady",
+            f"server is at version {current}, target {target} is not ready",
+            current,
+            target,
+        )
     return None
 
 
