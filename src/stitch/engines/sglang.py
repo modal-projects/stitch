@@ -19,19 +19,13 @@ EXTRA_KEY_DELIMITER = ";"
 def compose_extra_key(
     version: int, user_extra_key: str | None = None, run_id: str | None = None
 ) -> str:
-    """Compose a weight-version-namespaced SGLang ``extra_key``.
+    """Compose a weight-version-namespaced SGLang radix-cache ``extra_key``,
+    e.g. ``wv7;my-key`` or ``wv1;run-a/my-key``.
 
-    The version segment sits at a fixed position (the prefix) and is
-    delimiter-terminated, so it parses unambiguously regardless of the user
-    key's content. sglang appends ``lora_id`` to ``extra_key`` with no
-    delimiter, so the version must never be parsed from the right.
-    Examples: ``wv7;`` (no user key), ``wv7;my-key``. This is an SGLang
-    radix-cache namespacing concern, not part of the engine-neutral protocol.
-
-    ``run_id`` is folded into the key *content* (after the delimiter), so two
-    runs that both restart version numbering at 1 get distinct radix namespaces
-    (``wv1;run-a/`` vs ``wv1;run-b/``) and a stale cross-run request can never
-    reuse another run's same-numbered KV. ``run_id=None`` keeps the bare form.
+    The version prefix namespaces the KV cache per weight version; folding
+    ``run_id`` into the key content keeps two runs that both restart version
+    numbering at 1 in distinct namespaces, so a stale cross-run request can
+    never reuse another run's same-numbered KV.
     """
     run_segment = f"{run_id}/" if run_id else ""
     return f"wv{int(version)}{EXTRA_KEY_DELIMITER}{run_segment}{user_extra_key or ''}"

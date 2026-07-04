@@ -56,19 +56,15 @@ class FilesystemBulletinBoard:
 
     Two on-disk layouts are supported:
 
-    - ``"stitch"`` (default): the engine-neutral protocol — ``versions/`` -nested
-      version dirs, a JSON ``latest.json`` pointer, and a ``manifest.json`` per
-      version.
-    - ``"slime"``: slime's native disk-delta publish output (and the customer's
-      object-store layout). Each run's chain lives under ``<run_id>/weight_v{N:06d}/``
-      and the single ``latest`` pointer holds the self-identifying snapshot identity
-      ``<run_id>/weight_v{N:06d}`` (a bare ``weight_v{N:06d}`` for the degenerate
-      run-less layout). The manifest is read from each version's
-      ``model.safetensors.index.json``. Run-id partitioning is what makes sequential
-      runs collision-free: a new run writes a fresh ``<run_id>/`` chain and the
-      pointer moves to it (a new run is not a rewind), so a finished run's chain can
-      never be overwritten or fast-forward a cold start. The pool reconciles against
-      ``latest``; the front door (or the publish hook) advances it.
+    - ``"stitch"`` (default): ``versions/``-nested version dirs, a JSON
+      ``latest.json`` pointer, and a ``manifest.json`` per version.
+    - ``"slime"``: slime's native disk-delta publish output. Each run's chain
+      lives under ``<run_id>/weight_v{N:06d}/``; the single ``latest`` pointer
+      holds the self-identifying identity ``<run_id>/weight_v{N:06d}`` (bare
+      ``weight_v{N:06d}`` when run-less), and the manifest is read from each
+      version's ``model.safetensors.index.json``. Run-id partitioning makes
+      sequential runs collision-free: a new run writes a fresh chain and the
+      pointer moves to it, which is not a rewind.
     """
 
     def __init__(

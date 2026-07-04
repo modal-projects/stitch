@@ -35,8 +35,9 @@ transport is the source of truth, and the elastic pool reconciles to it by pull.
 
 ## Compatibility Notes
 
-The provider targets slime's `disk-delta-weight-sync` branch + PR #5. Each
-version is a canonical HF/SafeTensors directory `weight_v{N}/` with a
+The provider targets the pinned modal-projects/slime fork commit (see
+`modal_serve.py`). Each version is a canonical HF/SafeTensors directory
+`weight_v{N}/` with a
 `model.safetensors.index.json`; the engine applies deltas **host-side** (slime
 `disk_delta`) onto a local full checkpoint and then reloads through the ordinary
 `update_weights_from_disk` path — there is no engine-side `load_format="delta"`

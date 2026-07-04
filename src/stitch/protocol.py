@@ -367,13 +367,10 @@ def parse_weight_identity(identity: str) -> int | None:
 
 
 def format_snapshot_identity(run_id: str | None, version: int) -> str:
-    """The canonical pointer/snapshot identity for a (run_id, version).
-
+    """The canonical pointer/snapshot identity for a (run_id, version):
     ``<run_id>/weight_v<NNNNNN>`` when a run is named, else the bare
-    ``weight_v<NNNNNN>`` (the degenerate single-run / customer flat layout). This
-    is the single self-identifying value written to the slime-layout ``latest``
-    pointer: a run-scoped chain can never be mistaken for a different run's, and
-    an old bare pointer parses back to ``run_id=None`` rather than a phantom run.
+    ``weight_v<NNNNNN>``. Self-identifying, so a run-scoped chain can never be
+    mistaken for a different run's.
     """
     identity = weight_identity(version)
     return f"{run_id}/{identity}" if run_id else identity
@@ -448,9 +445,8 @@ def decide_pointer_move(
 ) -> PointerMove:
     """Decide whether the single ``latest`` writer may move to ``(run_id, version)``.
 
-    The one rule both the trainer-as-writer (bulletin board) and the
-    frontdoor-as-writer (hot-load API) paths share, so they can't bake in
-    divergent semantics:
+    Every ``latest`` writer (trainer publish hook, hot-load front door) shares
+    this rule:
 
     - A *different* run forks at base, so its version space restarts; accepting
       it (even at a lower number, including the ``BASE_VERSION`` claim) is a

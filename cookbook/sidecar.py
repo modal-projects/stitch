@@ -49,7 +49,7 @@ def parallel_init_local_checkpoint(disk_delta_module: str, workers: int = 32) ->
     def _base_fingerprint(base_dir: str) -> str:
         """Identity of the base's bytes: (filename, size, mtime_ns) over every shard. Re-prep
         rewrites the shards (new mtime/size), so this changes even when the tensor index/shapes
-        don't — which is exactly the case that bit K2.6 (NVFP4 values changed, names didn't)."""
+        don't (e.g. requantized values under unchanged names)."""
         h = hashlib.sha256()
         for e in sorted(os.scandir(base_dir), key=lambda e: e.name):
             if e.is_file():

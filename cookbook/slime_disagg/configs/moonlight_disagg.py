@@ -1,10 +1,10 @@
-"""Moonlight-16B-A3B GRPO on Modal Flash, disaggregated (M1: synchronous bring-up).
+"""Moonlight-16B-A3B GRPO on Modal Flash, disaggregated.
 
 Moonlight-16B-A3B is Moonshot's small DeepSeek-V3-architecture MoE -- MLA plus
 DeepSeek-MoE (sigmoid router, shared experts, grouped top-k) -- i.e. the Kimi
-K2.6 family at a size that fits a single H200 rollout container. This config is
-the synchronous bring-up rung; routing replay and async-first layer on top (see
-the M2/M3 notes at the bottom).
+K2.6 family at a size that fits a single H200 rollout container. This is the
+cheap rung of the K2.6 ladder: async-first with routing replay, staleness
+gating, and in_place commits, at bring-up scale.
 
 Reshape provenance rule (colocated `run-moonlight-16B-A3B.sh` -> disagg config):
   ARCHITECTURE -> sourced from scripts/models/moonlight.sh via `slime_model_script`
@@ -15,15 +15,6 @@ Reshape provenance rule (colocated `run-moonlight-16B-A3B.sh` -> disagg config):
 
 Deploy as its own app:
     EXPERIMENT_CONFIG=moonlight_disagg m deploy --strategy recreate -m cookbook.slime_disagg.modal_train
-
-Prerequisites the bring-up depends on (flagged, not yet automated):
-  1. The training image's slime fork ref (modal_train.SLIME_REPO_REF) must include
-     scripts/models/moonlight.sh, the deepseekv3 megatron_to_hf export, and the
-     routing-replay code. The base image's SGLang (used by the rollout pool) is
-     independent.
-  2. Bridge-mode HF load is UNVERIFIED for Moonlight/DeepSeek-V3 (it is proven for
-     Qwen here). If load fails, the fallback is the proven torch_dist path
-     (tools/convert_hf_to_torch_dist.py + ref_load pointed at the converted dir).
 """
 
 from __future__ import annotations
@@ -35,7 +26,7 @@ APP_NAME = "slime-moonlight-disagg"
 DELTA_VOLUME_NAME = "slime-delta-bulletin-moonlight"
 DELTA_BULLETIN_ROOT = "/delta-bulletin"
 
-# M3: in_place commit applies weights without draining in-flight rollouts. Stale
+# in_place commit applies weights without draining in-flight rollouts. Stale
 # KV is isolated per weight version by the sidecar's extra_key stamping (so old
 # requests keep decoding on their version's KV and it drains as they finish);
 # min-version pins cross commits freely, only exact pins are quiesced.
@@ -49,10 +40,10 @@ SIDECAR_DEBUG_REQUESTS = True
 SGLANG_SERVER_ARGS = {
     "--context-length": "8192",
     "--mem-fraction-static": "0.85",
-    # M2 routing replay: the pool must emit per-token routed experts. slime
+    # Routing replay: the pool must emit per-token routed experts. slime
     # launches no engine in publish-only mode, so this is set here (not by
     # sglang_engine.py). num_layers/moe_router_topk come from moonlight.sh, so
-    # the rollout's [tokens, 27, 6] reshape matches the served model (M0-verified).
+    # the rollout's [tokens, 27, 6] reshape matches the served model.
     "--enable-return-routed-experts": "",
 }
 
@@ -64,8 +55,7 @@ class _Slime(SlimeConfig):
     # (the script carries MLA + the full DeepSeek-MoE arg set).
     slime_model_script = "scripts/models/moonlight.sh"
 
-    # Model + checkpoint. Bridge-mode HF load, same as the dense disagg example
-    # (see prerequisite 2 in the module docstring -- this is the main M1 unknown).
+    # Model + checkpoint. Bridge-mode HF load, same as the dense disagg example.
     hf_checkpoint = "moonshotai/Moonlight-16B-A3B-Instruct"
     ref_load = hf_checkpoint
     megatron_to_hf_mode = "bridge"
@@ -78,7 +68,7 @@ class _Slime(SlimeConfig):
     rollout_num_gpus = 0
     rollout_num_gpus_per_engine = 1  # 1xH200 per rollout container (MLA -> cheap KV)
     rollout_endpoint_url = None
-    # M3 staleness gate: each rollout request is pinned to
+    # Staleness gate: each rollout request is pinned to
     # min_required_version = latest_published - lag (derived out-of-band from the
     # bulletin `latest`, since the per-request hook gets no rollout_id). A replica
     # more than `lag` versions behind 409s -> retried, so no too-stale rollouts.
@@ -89,7 +79,7 @@ class _Slime(SlimeConfig):
     rollout_request_retry_sleep = 1.0
     rollout_session_affinity_header = "Modal-Session-ID"
 
-    # M3 async-first: one-step off-policy (train_async pipelines generate(N+1) with
+    # Async-first: one-step off-policy (train_async pipelines generate(N+1) with
     # train(N)); publish weights every step.
     async_mode = True
     update_weights_interval = 1
@@ -165,7 +155,7 @@ class _Slime(SlimeConfig):
     kl_loss_type = "low_var_kl"
     entropy_coef = 0.0
 
-    # Routing replay (M2): replay the rollout engine's per-token expert routing
+    # Routing replay: replay the rollout engine's per-token expert routing
     # during the training forward/backward to cut train-inference divergence
     # (R3, arxiv 2510.11370). Auto-implies use_routing_replay; needs the pool's
     # --enable-return-routed-experts (in SGLANG_SERVER_ARGS above).
@@ -187,12 +177,3 @@ class _Slime(SlimeConfig):
 
 
 slime = _Slime()
-
-# Milestone progression (kept here so it's legible):
-#   M1 (sync MoE bring-up): DONE.
-#   M2 (routing replay): DONE — use_rollout_routing_replay=True +
-#     --enable-return-routed-experts; num_layers(27)/moe_router_topk(6) from moonlight.sh.
-#   M3 (async-first): DONE above — async_mode=True (train_async one-step off-policy),
-#     SIDECAR_COMMIT_MODE="in_place" (in-flight updates + extra_key KV namespacing),
-#     min-version gate at latest-lag via gated_rollout_request_hook. Tune
-#     rollout_request_weight_version_lag for the staleness/throughput trade-off.
