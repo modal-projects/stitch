@@ -87,7 +87,7 @@ class ProtocolTest(unittest.TestCase):
             self.assertEqual(read_latest(root), 3)
             self.assertEqual(loaded.version, 3)
             self.assertEqual(loaded.base_version, 2)
-            self.assertEqual(loaded.transition_artifact_paths(), ["rank0000_flush000000.safetensors"])
+            self.assertEqual(loaded.transition_files, ["rank0000_flush000000.safetensors"])
             self.assertEqual(loaded.artifacts[0].checksum, "sha256:abc")
             self.assertEqual(loaded.run_id, "run-1")
             self.assertEqual(loaded.delta_encoding, "xor")

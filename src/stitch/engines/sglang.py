@@ -37,16 +37,6 @@ def compose_extra_key(
     return f"wv{int(version)}{EXTRA_KEY_DELIMITER}{run_segment}{user_extra_key or ''}"
 
 
-def parse_extra_key_version(extra_key: str) -> int | None:
-    """Inverse of :func:`compose_extra_key`. None for non-composed keys."""
-    if not extra_key.startswith("wv"):
-        return None
-    head, delim, _rest = extra_key.partition(EXTRA_KEY_DELIMITER)
-    if not delim or not head[2:].isdigit():
-        return None
-    return int(head[2:])
-
-
 @dataclass
 class SGLangDiskDeltaAdapter:
     """Applies disk-delta weight versions to one local SGLang server.

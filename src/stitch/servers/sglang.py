@@ -5,7 +5,7 @@ import contextlib
 import inspect
 import logging
 import uuid
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -44,7 +44,6 @@ def create_app(
     *,
     upstream_url: str,
     versioned_routes: Iterable[str] = ("generate", "v1/chat/completions"),
-    register_routes: Callable[[Any], None] | None = None,
     include_sync_routes: bool = True,
     upstream_timeout: float | None = 3600.0,
     background_sync_interval: float | None = None,
@@ -149,9 +148,6 @@ def create_app(
                 ),
                 "sync_state": _sync_state_value(getattr(manager, "sync_state", None)),
             }
-
-    if register_routes is not None:
-        register_routes(app)
 
     async def _watch_disconnect(request: Request) -> None:
         while True:

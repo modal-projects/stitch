@@ -262,13 +262,6 @@ class WeightSyncManager(RolloutAdmissionGate):
         if error["error"]["type"] == "WeightVersionNotReady":
             self.queue_sync(error["error"]["target_version"])
 
-    async def validate_policy(self, policy: WeightVersionPolicy) -> tuple[bool, int, Mapping[str, Any] | None]:
-        """Advisory pre-check. The authoritative check is in request_context."""
-        error = self._policy_error(policy)
-        if error is not None and error["error"]["type"] == "WeightVersionNotReady":
-            self.queue_sync(error["error"]["target_version"])
-        return error is None, self.current_version, error
-
     def queue_sync(self, target_version: int | None = None) -> None:
         run_id, latest = self.board.read_latest()
         self.latest_seen_version = max(self.latest_seen_version, latest)

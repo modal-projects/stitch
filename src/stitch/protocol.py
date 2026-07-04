@@ -351,11 +351,6 @@ class VersionManifest:
             data["metadata"] = self.metadata
         return data
 
-    def transition_artifact_paths(self) -> list[str]:
-        if self.transition_files:
-            return list(self.transition_files)
-        return [a.path for a in self.artifacts if a.kind == "transition"]
-
 
 def weight_identity(version: int) -> str:
     """Canonical snapshot-identity string for an integer weight version."""
@@ -503,22 +498,11 @@ def write_latest(root: str | Path, version: int) -> None:
     )
 
 
-def version_not_ready_error(current: int, target: int) -> dict[str, Any]:
+def _version_error(kind: str, message: str, current: int, target: int) -> dict[str, Any]:
     return {
         "error": {
-            "type": "WeightVersionNotReady",
-            "message": f"server is at version {current}, target {target} is not ready",
-            "current_version": int(current),
-            "target_version": int(target),
-        }
-    }
-
-
-def version_too_old_error(current: int, target: int) -> dict[str, Any]:
-    return {
-        "error": {
-            "type": "WeightVersionTooOld",
-            "message": f"server is at version {current}, cannot roll back to {target}",
+            "type": kind,
+            "message": message,
             "current_version": int(current),
             "target_version": int(target),
         }
@@ -533,17 +517,32 @@ def evaluate_version_policy(
     Callers decide how to react to a not-ready error (pull toward the target vs
     reject): the bulletin-board manager queues a sync, the hot-load shim rejects.
     """
+    current = int(current_version)
     if policy.exact_version is not None:
         target = int(policy.exact_version)
-        if current_version < target:
-            return version_not_ready_error(current_version, target)
-        if current_version > target:
-            return version_too_old_error(current_version, target)
+        if current < target:
+            return _version_error(
+                "WeightVersionNotReady",
+                f"server is at version {current}, target {target} is not ready",
+                current,
+                target,
+            )
+        if current > target:
+            return _version_error(
+                "WeightVersionTooOld",
+                f"server is at version {current}, cannot roll back to {target}",
+                current,
+                target,
+            )
         return None
-    if policy.min_required_version is not None and current_version < int(
-        policy.min_required_version
-    ):
-        return version_not_ready_error(current_version, int(policy.min_required_version))
+    if policy.min_required_version is not None and current < int(policy.min_required_version):
+        target = int(policy.min_required_version)
+        return _version_error(
+            "WeightVersionNotReady",
+            f"server is at version {current}, target {target} is not ready",
+            current,
+            target,
+        )
     return None
 
 

@@ -10,82 +10,38 @@ from stitch.trainers.slime import publish_delta_version, rollout_request_weight_
 
 
 class SlimeHooksTest(unittest.TestCase):
-    def test_rollout_request_hook_adds_exact_policy_retry_and_affinity(self) -> None:
+    def test_rollout_request_hook_sets_retries_and_affinity(self) -> None:
         args = Namespace(
-            rollout_request_weight_version_mode="exact",
-            rollout_request_weight_version_lag=1,
             rollout_request_retry_attempts=240,
             rollout_request_retry_sleep=0.25,
         )
         sample = Namespace(session_id="session-1")
-        request = {
-            "payload": {},
-            "headers": None,
-            "max_retries": 60,
-            "retry_sleep": 1.0,
-            "rollout_id": 3,
-            "evaluation": False,
-        }
+        request = {"payload": {}, "headers": None, "max_retries": 60, "retry_sleep": 1.0}
 
         rollout_request_weight_version_hook(args, sample, request)
 
-        self.assertEqual(request["payload"]["weight_version"], {"exact_version": 2})
         self.assertEqual(request["max_retries"], 240)
         self.assertEqual(request["retry_sleep"], 0.25)
         self.assertEqual(request["headers"]["x-session-affinity"], "session-1")
 
     def test_rollout_request_hook_uses_configured_affinity_header(self) -> None:
-        args = Namespace(
-            rollout_request_weight_version_mode="exact",
-            rollout_session_affinity_header="Modal-Session-ID",
-        )
+        args = Namespace(rollout_session_affinity_header="Modal-Session-ID")
         sample = Namespace(session_id="group-7")
-        request = {
-            "payload": {},
-            "headers": None,
-            "max_retries": 60,
-            "retry_sleep": 1.0,
-            "rollout_id": 3,
-            "evaluation": False,
-        }
+        request = {"payload": {}, "headers": None, "max_retries": 60, "retry_sleep": 1.0}
 
         rollout_request_weight_version_hook(args, sample, request)
 
         self.assertEqual(request["headers"]["Modal-Session-ID"], "group-7")
         self.assertNotIn("x-session-affinity", request["headers"])
 
-    def test_rollout_request_hook_can_add_min_policy(self) -> None:
-        args = Namespace(rollout_request_weight_version_mode="min")
+    def test_rollout_request_hook_skips_affinity_without_session(self) -> None:
+        args = Namespace()
         sample = Namespace(session_id=None)
-        request = {
-            "payload": {},
-            "headers": None,
-            "max_retries": 60,
-            "retry_sleep": 1.0,
-            "rollout_id": 3,
-            "evaluation": False,
-        }
-
-        rollout_request_weight_version_hook(args, sample, request)
-
-        self.assertEqual(request["payload"]["weight_version"], {"min_required_version": 3})
-        self.assertIsNone(request["headers"])
-
-    def test_rollout_request_hook_degrades_without_rollout_id(self) -> None:
-        # PR #5's request carries no rollout_id: skip the pin (no crash), still
-        # apply the retry budget and session affinity.
-        args = Namespace(
-            rollout_request_weight_version_mode="exact",
-            rollout_request_retry_attempts=240,
-        )
-        sample = Namespace(session_id="grp-9")
         request = {"payload": {}, "headers": None, "max_retries": 60, "retry_sleep": 1.0}
 
         rollout_request_weight_version_hook(args, sample, request)
 
-        self.assertNotIn("weight_version", request["payload"])
-        self.assertEqual(request["max_retries"], 240)
-        self.assertEqual(request["headers"]["x-session-affinity"], "grp-9")
+        self.assertIsNone(request["headers"])
 
     def test_publish_delta_version_writes_manifest_and_latest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
