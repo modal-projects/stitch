@@ -1,17 +1,18 @@
-"""Trainer-specific helpers for the miles_disagg example.
+"""Miles-specific wiring for the shared disagg launch spine.
 
-Thin wrappers over the shared launch spine: Ray-cluster/sidecar/process helpers
-come from :mod:`cookbook.ray_cluster` / :mod:`cookbook.sidecar_process`, and
-config-prep / train-command / smoke-check / host-RAM monitor come from
-:mod:`cookbook.trainer_helpers`. This module only supplies the miles-specific
-axes: the sidecar module path, the config-field tuple to materialize, the
-model-script attribute, and that the rollout pool scales from zero (wake on
-demand).
+The constants below are the axes where miles differs from slime; everything
+else is re-exported unchanged from the shared cookbook modules. This module
+also owns the two helpers only miles needs: the node-local YAML materializer
+(for ``te_precision_config_file``) and the host-RAM monitor.
 """
 
 from __future__ import annotations
 
+import os
+import socket
 import subprocess
+import threading
+import time
 from typing import Any
 
 from cookbook.miles_disagg.configs.base import YAML_CONFIG_FIELDS
@@ -26,46 +27,26 @@ from cookbook.ray_cluster import (  # noqa: F401
     training_nodes,
 )
 from cookbook.sidecar_process import (  # noqa: F401
+    start_sglang_sidecar as _start_sidecar,
     terminate_process,
     wait_http,
 )
 from cookbook.trainer_helpers import (  # noqa: F401
     VersionAheadError,
     build_train_cmd as _build_train_cmd,
-    materialize_node_local_yaml,
     prepare_config,
     smoke_flash_pool as _smoke_flash_pool,
-    start_host_mem_monitor,
 )
 
 
-SIDECAR_MODULE = "cookbook.miles_disagg.sidecar"
+SIDECAR_MODULE = "cookbook.miles_disagg.sidecar"  # `python3 -m` entry on each rollout replica
+MODEL_SCRIPT_ATTR = "miles_model_script"  # config attr naming the sourced MODEL_ARGS script
+WAKE_ON_DEMAND = True  # scale-from-zero rollout pool (the smoke completion wakes it)
 
 
-def start_sglang_sidecar(
-    *,
-    sidecar_port: int,
-    sglang_port: int,
-    bulletin_root: str,
-    local_checkpoint_dir: str,
-    base_checkpoint_dir: str,
-    volume_name: str,
-    commit_mode: str,
-    debug_requests: bool = False,
-) -> subprocess.Popen:
-    from cookbook.sidecar_process import start_sglang_sidecar as _start
-
-    return _start(
-        sidecar_module=SIDECAR_MODULE,
-        sidecar_port=sidecar_port,
-        sglang_port=sglang_port,
-        bulletin_root=bulletin_root,
-        local_checkpoint_dir=local_checkpoint_dir,
-        base_checkpoint_dir=base_checkpoint_dir,
-        volume_name=volume_name,
-        commit_mode=commit_mode,
-        debug_requests=debug_requests,
-    )
+def start_sglang_sidecar(**kwargs: Any) -> subprocess.Popen:
+    """Launch the sidecar (`python3 -m` on this recipe's sidecar module)."""
+    return _start_sidecar(sidecar_module=SIDECAR_MODULE, **kwargs)
 
 
 def prepare_miles_config(miles_cfg: Any, tmpdir: str) -> None:
@@ -80,26 +61,85 @@ def prepare_miles_config(miles_cfg: Any, tmpdir: str) -> None:
 
 def build_train_cmd(miles_cfg: Any, miles_root: str) -> str:
     """Build the training command, sourcing miles' model arch args if needed."""
-    return _build_train_cmd(miles_cfg, miles_root, model_script_attr="miles_model_script")
+    return _build_train_cmd(miles_cfg, miles_root, model_script_attr=MODEL_SCRIPT_ATTR)
 
 
-def smoke_flash_pool(
-    *,
-    app_name: str,
-    cls_name: str,
-    model_name: str,
-    weight_version: int,
-    expect_min_containers: int,
-    timeout_seconds: int,
-) -> None:
-    """Smoke the scale-from-zero miles rollout pool (min_containers=0): the
-    completion wakes it, then each warmed container is confirmed at the version."""
-    _smoke_flash_pool(
-        app_name=app_name,
-        cls_name=cls_name,
-        model_name=model_name,
-        weight_version=weight_version,
-        expect_min_containers=expect_min_containers,
-        timeout_seconds=timeout_seconds,
-        wake_on_demand=True,
-    )
+def smoke_flash_pool(**kwargs: Any) -> None:
+    """Smoke the scale-from-zero miles rollout pool: the completion wakes it,
+    then each warmed container is confirmed at the version."""
+    _smoke_flash_pool(wake_on_demand=WAKE_ON_DEMAND, **kwargs)
+
+
+def materialize_node_local_yaml(cfg: Any, field: str, dest_dir: str = "/root/.miles_node_yaml") -> None:
+    """Materialize a per-actor-read YAML config to a deterministic node-local path.
+
+    Some config files (notably ``te_precision_config_file``, which
+    ``load_quantization_recipe`` re-reads on every Ray actor during model build)
+    are read independently on each trainer node — not just parsed once on the head.
+    ``prepare_config`` writes them under ``tempfile.mkdtemp()`` on the head only,
+    so on a multi-node cluster the other containers can't see that path.
+
+    Call this on EVERY node (SPMD train()), before the rank-0 gate: each node
+    writes identical content (from the shared payload) to the same fixed path, so
+    the path the head embeds in the args resolves locally on all actors. No volume
+    commit/reload race — Ray actors are long-lived and wouldn't see post-start
+    volume writes anyway.
+    """
+    import yaml
+
+    if isinstance(val := getattr(cfg, field, None), dict):
+        os.makedirs(dest_dir, exist_ok=True)
+        path = os.path.join(dest_dir, f"{field}.yaml")
+        with open(path, "w") as f:
+            yaml.dump(val, f)
+        setattr(cfg, field, path)
+
+
+def start_host_mem_monitor(interval_s: int = 20) -> None:
+    """Log this node's host-RAM trajectory to stdout from a daemon thread.
+
+    The trainer can OOM-kill on host-RAM exhaustion (the publish/update_weights
+    full-model gather is the peak consumer), but Megatron only reports GPU memory
+    and the kill leaves no durable peak behind. This logs MemTotal/MemAvailable +
+    the container cgroup usage every ``interval_s`` so a live ``modal app logs -f``
+    shows exactly which phase blows a big node and how high it peaks. Runs on EVERY
+    node (called from the SPMD enter()), so whichever rank OOMs has its own trace.
+    Best-effort: never raises."""
+    host = socket.gethostname()
+
+    def _meminfo() -> tuple[float, float]:
+        total = avail = 0.0
+        try:
+            with open("/proc/meminfo") as f:
+                for line in f:
+                    if line.startswith("MemTotal:"):
+                        total = int(line.split()[1]) / 1024 / 1024  # GiB
+                    elif line.startswith("MemAvailable:"):
+                        avail = int(line.split()[1]) / 1024 / 1024
+        except Exception:  # noqa: BLE001
+            pass
+        return total, avail
+
+    def _cgroup_used_gib() -> float:
+        for path in ("/sys/fs/cgroup/memory.current",  # cgroup v2
+                     "/sys/fs/cgroup/memory/memory.usage_in_bytes"):  # v1
+            try:
+                with open(path) as f:
+                    return int(f.read().strip()) / 1024**3
+            except Exception:  # noqa: BLE001
+                continue
+        return -1.0
+
+    def _loop() -> None:
+        while True:
+            total, avail = _meminfo()
+            used = total - avail
+            cg = _cgroup_used_gib()
+            print(
+                f"[hostmem] {host} used={used:.0f}GiB avail={avail:.0f}GiB "
+                f"total={total:.0f}GiB cgroup_used={cg:.0f}GiB",
+                flush=True,
+            )
+            time.sleep(interval_s)
+
+    threading.Thread(target=_loop, daemon=True, name="host-mem-monitor").start()

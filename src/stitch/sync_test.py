@@ -135,30 +135,6 @@ class SyncManagerTest(unittest.TestCase):
 
         asyncio.run(run())
 
-    def test_exact_and_min_policy_errors_are_retryable(self) -> None:
-        async def run() -> None:
-            with tempfile.TemporaryDirectory() as tmp:
-                board = FilesystemBulletinBoard(tmp)
-                board.publish_manifest(VersionManifest(version=1, base_version=0, backend="fake", load_format="noop"))
-                manager = WeightSyncManager(board=board, engine=FakeEngine())
-
-                ok, current, error = await manager.validate_policy(WeightVersionPolicy(exact_version=1))
-                self.assertFalse(ok)
-                self.assertEqual(current, 0)
-                self.assertEqual(error["error"]["type"], "WeightVersionNotReady")
-
-                await manager.sync_to(1)
-                ok, current, error = await manager.validate_policy(WeightVersionPolicy(min_required_version=1))
-                self.assertTrue(ok)
-                self.assertEqual(current, 1)
-                self.assertIsNone(error)
-
-                ok, _current, error = await manager.validate_policy(WeightVersionPolicy(exact_version=0))
-                self.assertFalse(ok)
-                self.assertEqual(error["error"]["type"], "WeightVersionTooOld")
-
-        asyncio.run(run())
-
     def test_request_context_pins_and_reports_serving_version(self) -> None:
         async def run() -> None:
             with tempfile.TemporaryDirectory() as tmp:

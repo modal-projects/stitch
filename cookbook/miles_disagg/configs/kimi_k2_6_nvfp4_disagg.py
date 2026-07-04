@@ -208,17 +208,17 @@ class _Miles(MilesConfig):
     async_mode = True
     update_weights_interval = 1
 
-    # NVFP4 QAT — canonical miles recipe per radixark/miles#1261 (NVFP4 RL).
+    # NVFP4 QAT — miles' canonical NVFP4 RL recipe.
     fp4_format = "e2m1"
     fp4_recipe = "nvfp4"
-    # fp4_param_gather=False is canonical (#1261 never sets --fp4-param-gather):
-    # keeps NVFP4 GEMM compute QAT (config.fp4 in raw mode) with bf16 master params.
-    # With it True, params are TE NVFP4Tensor and Megatron DDP's param-buffer repoint
-    # (modify_underlying_storage -> TE replace_raw_data) crashes (TE: FP8 yes, NVFP4 no).
+    # fp4_param_gather=False keeps NVFP4 GEMM compute QAT (config.fp4 in raw
+    # mode) with bf16 master params. With it True, params are TE NVFP4Tensor and
+    # Megatron DDP's param-buffer repoint (modify_underlying_storage -> TE
+    # replace_raw_data) crashes (TE: FP8 yes, NVFP4 no).
     fp4_param_gather = False
-    # Per-module TE precision config (#1261's mechanism): NVFP4 ONLY on the routed
-    # expert GEMMs, everything else bf16 — matches the experts-only served base.
-    # Materialized to a temp YAML and passed as --te-precision-config-file.
+    # Per-module TE precision config: NVFP4 ONLY on the routed expert GEMMs,
+    # everything else bf16 — matches the experts-only served base. Materialized
+    # to a temp YAML and passed as --te-precision-config-file.
     te_precision_config_file = {
         "configs": {
             "nvfp4": {
@@ -346,8 +346,8 @@ class _Miles(MilesConfig):
         "NCCL_NVLS_ENABLE": "1",
         "NVSHMEM_DISABLE_NCCL": "1",
         "NCCL_TIMEOUT_MS": "360000000",
-        # NVFP4 numerics (radixark/miles#1261 NVFP4 train env). Without these the
-        # NVFP4 QAT is mis-configured even once the build/DDP/load gaps are cleared.
+        # NVFP4 numerics: without these the NVFP4 QAT is mis-configured even
+        # once the build/DDP/load gaps are cleared.
         "NVTE_NVFP4_DISABLE_2D_QUANTIZATION": "1",
         "NVTE_NVFP4_DISABLE_RHT": "1",
         "NVTE_NVFP4_DISABLE_STOCHASTIC_ROUNDING": "1",

@@ -62,12 +62,10 @@ class _Slime(SlimeConfig):
     use_rollout_routing_replay = True
 
     # Staleness is gated by the announce_and_wait readiness BARRIER (the publish
-    # hook below), so the request hook leaves the per-request version pin OFF and
-    # only carries auth headers, retries, and affinity.
+    # hook below); the request hook carries auth headers, retries, and affinity.
     custom_rollout_request_hook_path = (
         "cookbook.standalone_rollouts.slime.hooks.rollout_request_weight_version_hook"
     )
-    api_shim_rollout_request_weight_version_mode = "none"
     api_shim_rollout_request_retry_attempts = 240
     api_shim_rollout_request_retry_sleep = 1.0
 

@@ -8,7 +8,9 @@ dependencies = []
 [project.optional-dependencies]
 # providers/modal.py uses the Modal SDK and httpx (rollout-pool wake).
 modal = ["modal>=1.5.1.dev9", "httpx"]
-sglang = ["fastapi", "httpx", "uvicorn"]
+# The cookbook sidecars run the app under uvicorn, but Modal images install it
+# explicitly; the packaged server code needs only fastapi + httpx.
+sglang = ["fastapi", "httpx"]
 
 [dependency-groups]
 dev = ["pytest"]

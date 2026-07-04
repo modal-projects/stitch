@@ -58,7 +58,7 @@ class ModalConfig:
     # Flash autoscaler target: concurrent inputs (requests) per container before it
     # scales OUT. None = use sglang_server_concurrency (legacy). Set it well below the
     # SGLang engine concurrency so Flash adds containers instead of packing requests
-    # onto a few until their KV cache saturates (which 502'd / stalled the rollout).
+    # onto a few until their KV cache saturates and requests 502/stall.
     rollout_target_inputs: int | None = None
     proxy_regions: list[str] = ["us-west"]  # Flash gateway proxy regions
     # Ephemeral disk (MiB) for the rollout Server. The sidecar materializes a

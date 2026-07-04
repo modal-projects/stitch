@@ -5,7 +5,7 @@ import contextlib
 import inspect
 import logging
 import uuid
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -44,7 +44,6 @@ def create_app(
     *,
     upstream_url: str,
     versioned_routes: Iterable[str] = ("generate", "v1/chat/completions"),
-    register_routes: Callable[[Any], None] | None = None,
     include_sync_routes: bool = True,
     upstream_timeout: float | None = 3600.0,
     background_sync_interval: float | None = None,
@@ -54,12 +53,9 @@ def create_app(
     import httpx
 
     upstream_url = upstream_url.rstrip("/")
-    # Bound the wait for an upstream (SGLang) response. A generation that
-    # finishes but never delivers its HTTP body would otherwise hang this proxy
-    # forever (timeout=None), holding the request open and wedging the client
-    # awaiting it — exactly the failure mode that stalled a rollout for hours.
-    # On timeout the upstream call raises, surfacing as a 5xx the client can
-    # retry, instead of an infinite hold. connect stays short (upstream is
+    # Bound the wait for an upstream (SGLang) response: a generation that
+    # finishes but never delivers its HTTP body must surface as a retryable 5xx,
+    # not hold the request open forever. connect stays short (upstream is
     # localhost); pass None to opt out.
     upstream_request_timeout = httpx.Timeout(upstream_timeout, connect=10.0)
     versioned_route_set = {route.strip("/") for route in versioned_routes}
@@ -149,9 +145,6 @@ def create_app(
                 ),
                 "sync_state": _sync_state_value(getattr(manager, "sync_state", None)),
             }
-
-    if register_routes is not None:
-        register_routes(app)
 
     async def _watch_disconnect(request: Request) -> None:
         while True:
@@ -329,11 +322,8 @@ def create_app(
 
         if versioned_route and isinstance(data, dict):
             # Driven by the same `versioned_route` flag that gated and stamped the
-            # request, so injection can't diverge from gating (previously a fixed
-            # path list here meant /v1/completions got version metadata while
-            # going ungated, and a custom versioned route got gated but no
-            # metadata). /generate carries it in meta_info; OpenAI-style routes
-            # at the top level.
+            # request, so injection can't diverge from gating. /generate carries
+            # it in meta_info; OpenAI-style routes at the top level.
             if route == "generate":
                 meta = data.setdefault("meta_info", {})
                 meta["weight_version"] = str(start_version)

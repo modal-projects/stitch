@@ -62,10 +62,8 @@ SLIME_ROOT = "/root/slime"
 SLIME_REPO_URL = "https://github.com/modal-projects/slime.git"
 # Pin to an exact commit, not the branch tip: the build's `git fetch ... &&
 # checkout` is a cached image layer, so a moving branch tip silently leaves the
-# container on a stale slime. This is PR #5 head (disaggregated-rollout): disk-
-# delta publish-only + rollout_endpoint_url + custom_rollout_request_hook_path.
-# Bump this SHA to roll slime forward.
-SLIME_REPO_REF = "ebfe153949b1a69c39e92f947ed5d475166dd724"  # incl. deepseekv3 router-dtype export fix + per-request rollout hook
+# container on a stale slime. Bump this SHA to roll slime forward.
+SLIME_REPO_REF = "ebfe153949b1a69c39e92f947ed5d475166dd724"
 
 image = (
     modal.Image.from_registry(SLIME_IMAGE_TAG)
@@ -149,9 +147,9 @@ def _select_server_image() -> modal.Image:
     if builder is None:
         return image
     return builder(
-        slime_repo_url=SLIME_REPO_URL,
-        slime_repo_ref=SLIME_REPO_REF,
-        slime_root=SLIME_ROOT,
+        trainer_repo_url=SLIME_REPO_URL,
+        trainer_repo_ref=SLIME_REPO_REF,
+        trainer_root=SLIME_ROOT,
         hf_cache_path=str(HF_CACHE_PATH),
         experiment=EXPERIMENT,
     )

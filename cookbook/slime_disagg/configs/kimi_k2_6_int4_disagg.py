@@ -35,19 +35,15 @@ Reshape provenance (colocated scripts/low_precision/run-kimi-k2-Thinking-int4.sh
 Deploy as its own app:
     EXPERIMENT_CONFIG=kimi_k2_6_int4_disagg m deploy --strategy recreate -m cookbook.slime_disagg.modal_train
 
-Prerequisites the bring-up depends on (flagged, not yet automated):
-  1. hf_checkpoint must resolve to a native compressed-tensors INT4 (W4A16) Kimi
-     K2.6 checkpoint whose group_size equals INT4_GROUP_SIZE below. Verify the
-     repo id and its config.json (quant_method == "compressed-tensors"). If no
-     native-INT4 K2.6 exists yet, fall back by setting hf_checkpoint to
-     moonshotai/Kimi-K2-Thinking: it is a drop-in swap here — native W4A16 at
-     group_size 32 (matches INT4_GROUP_SIZE) with the same kimi-k2-thinking.sh
-     arch and a published slime int4 recipe.
-  2. kimi-k2-thinking.sh must describe K2.6's arch (rope scaling, norm eps). If
-     K2.6 diverges, add scripts/models/kimi-k2.6.sh to the slime fork and point
-     slime_model_script at it.
-  3. The serving image's SGLang fork must serve native-INT4 MLA MoE on Blackwell
-     (proven for NVFP4; verify on a warm container — see serving.py).
+Before running:
+  1. hf_checkpoint must resolve to a native compressed-tensors INT4 (W4A16)
+     checkpoint whose group_size equals INT4_GROUP_SIZE below
+     (moonshotai/Kimi-K2-Thinking is a drop-in swap if no native-INT4 K2.6 is
+     published: same arch script, W4A16 at group_size 32).
+  2. kimi-k2-thinking.sh must describe K2.6's arch (rope scaling, norm eps); if
+     K2.6 diverges, add a kimi-k2.6.sh model script to the slime fork.
+  3. The serving image's SGLang must serve native-INT4 MLA MoE on Blackwell
+     (verify on a warm container — see serving.py).
 
 The smaller `moonlight_int4_disagg` config is the same machinery at a size that
 fits a couple of GPUs — run it first to de-risk the INT4-QAT/disk-delta loop.

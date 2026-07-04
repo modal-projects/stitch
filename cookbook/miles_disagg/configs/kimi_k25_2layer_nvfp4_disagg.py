@@ -93,7 +93,7 @@ class _Miles(MilesConfig):
     async_mode = True
     update_weights_interval = 1
 
-    # NVFP4 QAT — canonical recipe (radixark/miles#1261), same as K2.6.
+    # NVFP4 QAT — same canonical recipe as K2.6.
     fp4_format = "e2m1"
     fp4_recipe = "nvfp4"
     fp4_param_gather = False

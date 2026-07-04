@@ -61,9 +61,7 @@ class RolloutAdmissionGate:
     ``_active_cond`` acquisition the committer uses, and commits hold the gate
     across the engine apply *and* the version advance (cleared only after).
     Subclasses provide ``current_version`` and override the hooks for their
-    policy / admission / exact-pin specifics. ``WeightSyncManager`` composes it
-    (so the bulletin-board and hot-load provider sidecars, both WeightSyncManager,
-    share the gate semantics and the P0.1 commit-window fix in one place).
+    policy / admission / exact-pin specifics.
     """
 
     def __init__(self, *, commit_mode: CommitMode = "quiesce") -> None:
@@ -173,8 +171,7 @@ class RolloutAdmissionGate:
         a finally, with the version advanced before resume so new admissions see
         the new namespace. On failure the gate (and pause) are unwound and the
         served version is left unchanged — ``on_applied`` runs only after a
-        successful apply. Both the bulletin-board manager and the hot-load shim
-        commit through here, so the gate sequencing lives in one place.
+        successful apply.
         """
         await self._begin_commit(self._commit_ready)
         try:
@@ -261,13 +258,6 @@ class WeightSyncManager(RolloutAdmissionGate):
     def _on_policy_violation(self, error: dict[str, Any]) -> None:
         if error["error"]["type"] == "WeightVersionNotReady":
             self.queue_sync(error["error"]["target_version"])
-
-    async def validate_policy(self, policy: WeightVersionPolicy) -> tuple[bool, int, Mapping[str, Any] | None]:
-        """Advisory pre-check. The authoritative check is in request_context."""
-        error = self._policy_error(policy)
-        if error is not None and error["error"]["type"] == "WeightVersionNotReady":
-            self.queue_sync(error["error"]["target_version"])
-        return error is None, self.current_version, error
 
     def queue_sync(self, target_version: int | None = None) -> None:
         run_id, latest = self.board.read_latest()

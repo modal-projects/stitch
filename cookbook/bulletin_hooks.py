@@ -9,9 +9,9 @@ Two hooks that any trainer (slime, miles, ...) plugs into via its
   staleness weight version so unusable (too-stale) rollouts are never generated.
 
 Both hooks read their config off the trainer's ``args`` namespace (the trainer's
-``--custom-config-path`` setattr's every key onto ``args``). The only
-trainer-specific axis is the env-var fallback for the Flash app / class name;
-callers pass those as ``app_name_env`` / ``cls_name_env``.
+``--custom-config-path`` setattr's every key onto ``args``), with
+``DELTA_APP_NAME`` / ``DELTA_SERVER_CLS_NAME`` env vars as the fallback for the
+Flash app / class name.
 """
 
 from __future__ import annotations
@@ -34,14 +34,7 @@ logger = logging.getLogger(__name__)
 # ── Publish hook ──────────────────────────────────────────────────────────────
 
 
-def commit_and_wake(
-    args: Any,
-    version_dir: str,
-    rollout_engines: list[Any],
-    *,
-    app_name_env: str,
-    cls_name_env: str,
-) -> None:
+def commit_and_wake(args: Any, version_dir: str, rollout_engines: list[Any]) -> None:
     """Trainer ``custom_delta_pre_push_path`` hook (publish-only, bulletin board).
 
     The trainer has written ``weight_v{N}/`` to the Modal Volume. Advance the
@@ -49,9 +42,6 @@ def commit_and_wake(
     ``reload`` sees the new version, then best-effort wake the Flash pool. The
     sidecars self-sync (wake RPC, periodic poll, startup), so a missed wake only
     costs latency.
-
-    ``app_name_env`` / ``cls_name_env`` are the env-var names the trainer uses
-    for the Flash app and server class (e.g. ``"SLIME_DELTA_APP_NAME"``).
     """
     del rollout_engines
     version = parse_weight_identity(Path(version_dir).name)
@@ -81,10 +71,10 @@ def commit_and_wake(
 
     if version is None or rank not in (None, 0):
         return
-    _best_effort_wake(args, version, app_name_env=app_name_env, cls_name_env=cls_name_env)
+    _best_effort_wake(args, version)
 
 
-def claim_pool(args: Any, *, app_name_env: str, cls_name_env: str) -> None:
+def claim_pool(args: Any) -> None:
     """Trainer launch hook (rank 0): claim the rollout pool for this run.
 
     Write the empty pointer ``<run_id>/weight_v000000``, commit the Volume, and
@@ -100,17 +90,17 @@ def claim_pool(args: Any, *, app_name_env: str, cls_name_env: str) -> None:
     board = FilesystemBulletinBoard(_transport_root(args), layout="slime")
     board.claim(_run_id(args))
     commit_volume(_volume_name(args))
-    _best_effort_wake(args, BASE_VERSION, app_name_env=app_name_env, cls_name_env=cls_name_env)
+    _best_effort_wake(args, BASE_VERSION)
 
 
-def _best_effort_wake(args: Any, version: int, *, app_name_env: str, cls_name_env: str) -> None:
+def _best_effort_wake(args: Any, version: int) -> None:
     """Nudge warm Flash containers to reconcile now. Best-effort: a transient
     Modal control-plane error must not kill the training step — `latest` is
     already committed and sidecars self-sync on their next poll/startup."""
     try:
-        app_name = getattr(args, "rollout_modal_flash_app_name", None) or os.environ[app_name_env]
+        app_name = getattr(args, "rollout_modal_flash_app_name", None) or os.environ["DELTA_APP_NAME"]
         cls_name = getattr(args, "rollout_modal_flash_server_cls_name", None) or os.getenv(
-            cls_name_env, "Server"
+            "DELTA_SERVER_CLS_NAME", "Server"
         )
         wake_targets(discover_flash_targets(app_name=app_name, cls_name=cls_name), version)
     except Exception:  # noqa: BLE001
