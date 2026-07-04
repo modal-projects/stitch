@@ -149,9 +149,9 @@ def _select_server_image() -> modal.Image:
     if builder is None:
         return image
     return builder(
-        slime_repo_url=SLIME_REPO_URL,
-        slime_repo_ref=SLIME_REPO_REF,
-        slime_root=SLIME_ROOT,
+        trainer_repo_url=SLIME_REPO_URL,
+        trainer_repo_ref=SLIME_REPO_REF,
+        trainer_root=SLIME_ROOT,
         hf_cache_path=str(HF_CACHE_PATH),
         experiment=EXPERIMENT,
     )

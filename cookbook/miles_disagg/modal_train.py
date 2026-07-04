@@ -217,9 +217,9 @@ def _select_server_image() -> modal.Image:
     if builder is None:
         return image
     return builder(
-        miles_repo_url=MILES_REPO_URL,
-        miles_repo_ref=MILES_REPO_REF,
-        miles_root=MILES_ROOT,
+        trainer_repo_url=MILES_REPO_URL,
+        trainer_repo_ref=MILES_REPO_REF,
+        trainer_root=MILES_ROOT,
         hf_cache_path=str(HF_CACHE_PATH),
         experiment=EXPERIMENT,
     )
