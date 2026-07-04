@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import shutil
 import time
 import urllib.error
@@ -235,43 +234,13 @@ def announce_claim(args: Any, *, run_id: str) -> None:
 def rollout_request_weight_version_hook(
     args: Any, sample: Any, request: dict[str, Any]
 ) -> None:
-    """SLIME ``custom_rollout_request_hook_path`` hook.
+    """SLIME ``custom_rollout_request_hook_path`` hook: retry budget, provider
+    auth headers, and session affinity for one rollout request.
 
-    The publish hook has already decided which versions are usable by polling the
-    provider pool. This request hook turns that trainer decision into provider
-    admission control, so requests routed to lagging replicas fail with a
-    retryable 409 instead of producing unusable samples.
+    Version admission needs no per-request pin here: announce_and_wait blocks
+    the next rollout until the pool serves the target, and a lagging replica
+    rejects with a retryable 409.
     """
-
-    mode = str(
-        getattr(
-            args,
-            "api_shim_rollout_request_weight_version_mode",
-            os.environ.get("STITCH_SHIM_ROLLOUT_REQUEST_WEIGHT_VERSION_MODE", "exact"),
-        )
-    )
-    # PR #5's apply_rollout_request_hook builds request={url,payload,headers,
-    # max_retries,retry_sleep} with NO rollout_id — that is per-rollout context,
-    # not per-request (sample.index is the batch position, not the trainer step).
-    # So the step-based version pin only runs if a caller supplies a rollout_id.
-    # announce_and_wait already blocks the next rollout until the pool serves the
-    # target, so skipping the pin is safe; it is belt-and-suspenders admission
-    # control for lagging replicas. TODO: re-derive a per-request target under
-    # the PR #5 contract (e.g. the latest published version) if pinning is wanted.
-    rollout_id = request.get("rollout_id")
-    if mode != "none" and rollout_id is not None:
-        target_version = _rollout_request_target_version(
-            args, int(rollout_id), bool(request.get("evaluation", False))
-        )
-        if mode == "exact":
-            request["payload"]["weight_version"] = {"exact_version": target_version}
-        elif mode == "min":
-            request["payload"]["weight_version"] = {"min_required_version": target_version}
-        else:
-            raise ValueError(
-                f"Unsupported api_shim_rollout_request_weight_version_mode: {mode!r}"
-            )
-
     # Generous retries on every rollout request so a cold/scaling/lagging replica
     # (a transient 503, or a 409 weight-version reject) is retried rather than
     # failing the rollout — the point of the elastic-pool readiness model. This
@@ -314,20 +283,6 @@ def rollout_request_weight_version_hook(
         default="x-session-affinity",
     )
     apply_session_affinity(request, getattr(sample, "session_id", None), affinity_header)
-
-
-def _rollout_request_target_version(args: Any, rollout_id: int, evaluation: bool) -> int:
-    lag = int(
-        _setting(
-            args,
-            "api_shim_rollout_request_version_lag",
-            "STITCH_SHIM_ROLLOUT_REQUEST_VERSION_LAG",
-            default="0",
-        )
-    )
-    if evaluation:
-        lag = 0
-    return max(0, int(rollout_id) - lag)
 
 
 def wait_until_ready(cfg: ShimConfig, identity: str) -> RolloutPoolState:

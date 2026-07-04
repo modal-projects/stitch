@@ -155,7 +155,6 @@ image = (
     # crash with "Split sizes doesn't match total dim 0 size". Derive it from the
     # actual per-expert counts instead (identical to size*topk in the dense
     # non-replay case). Idempotent: a no-op once the fork itself ships the fix.
-    # Source diff: cookbook/miles_disagg/megatron_r3_num_out_tokens.patch.
     .run_commands(f"python3 -c {shlex.quote(_R3_DISPATCH_BAKE_PY)}")
     .pip_install(
         "fastapi",  # stitch sidecar (rollout pool reuses this image only if no serving image)

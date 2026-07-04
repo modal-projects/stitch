@@ -146,10 +146,9 @@ fixes this cookbook needs: NVFP4 export dispatch
 and HTTP client, the 0-dim NVFP4-scale delta encode, and the `encoding_dsv4`
 import guard. Push that branch before deploying.
 
-The megatron routing-replay (R3) fix lives in `radixark/Megatron-LM` and is
-**baked into the trainer image at build time** (a `.run_commands` step in
-`modal_train.py`; source diff in `megatron_r3_num_out_tokens.patch`). The bake
-is idempotent — it becomes a no-op once the fork itself ships the fix.
+The megatron routing-replay (R3) fix is **baked into the trainer image at build
+time** (a `.run_commands` step in `modal_train.py`). The bake is idempotent — it
+becomes a no-op once the fork itself ships the fix.
 
 Dev iteration: overlay a local miles checkout at deploy time (no rebuild, no
 push). This only overlays miles; the megatron R3 fix still comes from the bake.

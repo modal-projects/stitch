@@ -205,9 +205,7 @@ request gate). The `custom_delta_pre_push_path` hook (`announce_and_wait`) copie
 the new version to the S3 transport, POSTs the customer hot-load API, and blocks
 until the front door reports **every live replica** ready on the new version
 (`readiness_threshold` 1.0) — so the next rollouts always run on current weights.
-The request hook therefore leaves the version gate off
-(`api_shim_rollout_request_weight_version_mode="none"`) and only carries auth
-headers, retries, and session affinity.
+The request hook carries only auth headers, retries, and session affinity.
 
 Routing replay requires the pool to return per-token routed experts: the provider
 config sets `--enable-return-routed-experts` and the trainer sets
