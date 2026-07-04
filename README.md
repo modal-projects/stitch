@@ -48,11 +48,14 @@ opinionated about supporting workloads that are:
 - `src/stitch/providers/modal.py`: Modal helpers for Volume commit/reload and
   Flash container discovery.
 - `cookbook/`: End-to-end examples.
+  - `local_disagg/`: minimal in-memory harness that exercises the sync
+    protocol with a fake engine — start here.
   - `slime_disagg/`: SLIME plus a stitch-managed Modal Flash/SGLang pool.
+  - `miles_disagg/`: the miles twin of `slime_disagg` (NVFP4 QAT on Blackwell).
   - `standalone_rollouts/`: standalone Modal/SGLang rollout provider with a hot-load API shim.
 
 The core package has no required dependencies; extras pull in what each
-adapter needs (`modal`, `sglang`, `slime`).
+adapter needs (`modal`, `sglang`).
 
 ## Adding adapters
 

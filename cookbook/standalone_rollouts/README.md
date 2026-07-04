@@ -37,28 +37,19 @@ transport is the source of truth, and the elastic pool reconciles to it by pull.
 
 The provider targets the pinned modal-projects/slime fork commit (see
 `modal_serve.py`). Each version is a canonical HF/SafeTensors directory
-`weight_v{N}/` with a
-`model.safetensors.index.json`; the engine applies deltas **host-side** (slime
-`disk_delta`) onto a local full checkpoint and then reloads through the ordinary
-`update_weights_from_disk` path — there is no engine-side `load_format="delta"`
-receiver. The delta format is XOR (or `overwrite`) encoding, zstd compression,
-and xxh3-128 (or blake3/adler32) per-tensor checksums; the version's
-`index.json` carries `delta_encoding`/`compression_format`/`checksum_format`.
+`weight_v{N}/` with a `model.safetensors.index.json`. Deltas are applied
+**host-side** (slime `disk_delta`: XOR or overwrite encoding, zstd compression,
+per-tensor checksums — all declared in the index's `metadata` block) onto a
+local full checkpoint, then reloaded through the ordinary
+`update_weights_from_disk` path; there is no engine-side delta receiver. The
+front door normalizes hot-load POST metadata into the index before advancing
+`latest`, so a customer-produced delta is directly applicable.
 
-A customer-produced delta (XOR + adler32 + zstd) is directly applicable by this
-applier. The only adapter work is metadata *location*: the customer sends
-`compression_format`/`checksum_format`/`previous_snapshot_identity` in the POST
-body and ships a weight-map-only `index.json`, whereas the applier reads those
-from the index's `metadata` block — so a customer-facing front door normalizes
-the POST metadata into the index before advancing `latest`.
-
-Session affinity is delegated to Modal's Flash gateway. External clients send
-the neutral `x-session-affinity` header to the **front door** (the advertised
-provider URL, an `App.server` in front of the pool); the front door rewrites it to
-`Modal-Session-ID` *before* the gateway, which then consistently routes related
-requests to the same replica. The rewrite must happen pre-gateway, so it lives
-in the front door rather than the per-container sidecar. Requests without the
-header are routed normally.
+Session affinity is delegated to Modal's Flash gateway: external clients send
+the neutral `x-session-affinity` header to the front door, which rewrites it to
+`Modal-Session-ID` *before* the gateway so related requests route to the same
+replica. The rewrite must happen pre-gateway, so it lives in the front door
+rather than the per-container sidecar.
 
 ## Deploy the Provider
 
@@ -201,17 +192,7 @@ SLIME publish-only mode: it launches no rollout engines, routes `/generate` to
 the provider front door, and writes each `weight_v{N}/` to a local disk dir.
 
 Staleness is gated by a **publish-hook readiness barrier**, not a per-request
-pin (this is the key difference from `slime_disagg`, which uses a min-version
-request gate). The `custom_delta_pre_push_path` hook (`announce_and_wait`) copies
-the new version to the S3 transport, POSTs the customer hot-load API, and blocks
-until the front door reports **every live replica** ready on the new version
-(`readiness_threshold` 1.0) — so the next rollouts always run on current weights.
-The request hook carries only auth headers, retries, and session affinity.
-
-Routing replay requires the pool to return per-token routed experts: the provider
-config sets `--enable-return-routed-experts` and the trainer sets
-`use_rollout_routing_replay=True` (the layer count / router top-k come from the
-sourced `scripts/models/moonlight.sh`).
-
-The first weight update only seeds SLIME's baseline snapshot and publishes
-nothing; subsequent updates publish `weight_v000001`, `weight_v000002`, … .
+pin (the key difference from `slime_disagg`, which uses a min-version request
+gate): the `announce_and_wait` publish hook copies each new version to the S3
+transport, POSTs the hot-load API, and blocks until the front door reports every
+live replica ready — so the next rollouts always run on current weights.

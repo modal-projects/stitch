@@ -51,12 +51,19 @@ m run -m cookbook.slime_disagg.modal_train::launch_train
 m run -m cookbook.slime_disagg.modal_train::smoke_flash_pool --weight-version 3
 ```
 
-To train again, just run `launch_train` again. Each launch gets a fresh run id
-and writes its delta chain under its own `<run_id>/` partition, so sequential
-runs never collide — no bulletin-board reset between runs. The warm `Trainer`
-cluster (Ray started once per container in `@modal.enter()`) goes straight to
-training, and the rollout pool re-materializes to the new run's base on its own
-when it sees the pointer move to the new `<run_id>`.
+To train again, just run `launch_train` again. Each launch gets a fresh
+`run_id`: the trainer writes that run's delta chain under
+`/delta-bulletin/<run_id>/weight_v{N}/` and a single `latest` pointer names the
+active snapshot (`<run_id>/weight_v{N}`), so sequential runs never collide — no
+bulletin-board reset between runs. Sidecars apply versions in order; when the
+pointer moves to a new run they re-materialize the base and replay that run's
+chain. The warm `Trainer` cluster (Ray started once per container in
+`@modal.enter()`) goes straight to training.
+
+Sidecars default to `quiesce` commit mode, which drains in-flight requests
+before applying a delta. The `in_place` mode (set `SIDECAR_COMMIT_MODE` in the
+config module) applies without draining and relies on version-namespaced KV
+keys.
 
 ## Configuration
 
@@ -86,18 +93,3 @@ searches (the app name is the config's `APP_NAME`):
 m app logs <app-name> --since 4h --search "passrate "
 m app logs <app-name> --since 4h --search "Published sparse delta"
 ```
-
-## Protocol notes
-
-Each launch gets a fresh `run_id`. The trainer writes that run's delta chain
-under `/delta-bulletin/<run_id>/weight_v{N}/`, and a single `/delta-bulletin/latest`
-pointer names the active snapshot (`<run_id>/weight_v{N}`). Sidecars apply
-versions in order from their current version; when the pointer moves to a new
-run they re-materialize the base and replay that run's chain from the start.
-Each run is isolated under its own `run_id`, so sequential runs never collide.
-Bounding the per-run replay with periodic recovery anchors is left for later.
-
-Sidecars default to `quiesce` commit mode, which drains in-flight requests
-before applying a delta. The `in_place` mode (set `SIDECAR_COMMIT_MODE` in
-the config module) applies without draining and relies on version-namespaced
-KV keys.
