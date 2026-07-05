@@ -4,7 +4,7 @@ import asyncio
 import unittest
 from unittest import mock
 
-from stitch.engines.sglang import SGLangDiskDeltaAdapter, compose_extra_key
+from stitch.engines.sglang import SGLangDiskDeltaAdapter, compose_extra_key, parse_reload_timing
 from stitch.protocol import VersionManifest
 
 
@@ -13,6 +13,7 @@ class _RecordingPost:
 
     last_url: str | None = None
     last_json: dict | None = None
+    response_json: dict = {"success": True}
 
     def __init__(self, *args, **kwargs) -> None:
         pass
@@ -28,7 +29,7 @@ class _RecordingPost:
 
         type(self).last_url = url
         type(self).last_json = json
-        return httpx.Response(200, json={"success": True}, request=httpx.Request("POST", url))
+        return httpx.Response(200, json=type(self).response_json, request=httpx.Request("POST", url))
 
 
 class SGLangDiskDeltaAdapterTest(unittest.TestCase):
@@ -65,6 +66,61 @@ class SGLangDiskDeltaAdapterTest(unittest.TestCase):
             )
 
         asyncio.run(run())
+
+    def test_staged_split_reports_metrics(self) -> None:
+        async def run() -> None:
+            apply_stats = [{"version": "000005", "apply_s": 1.2}]
+
+            adapter = SGLangDiskDeltaAdapter(
+                upstream_url="http://up",
+                local_checkpoint_dir="/local",
+                base_checkpoint_dir="/base",
+                apply_deltas=lambda local, root, version: apply_stats,
+                init_local_checkpoint=lambda local, base: None,
+            )
+            manifest = VersionManifest(
+                version=5, base_version=4, backend="disk_delta", load_format="auto"
+            )
+
+            stage_detail = await adapter.stage_manifest(manifest, "/bulletin/versions/weight_v000005")
+            self.assertIn("host_delta_apply_s", stage_detail)
+            # A decoder that returns per-version phase stats gets them surfaced.
+            self.assertEqual(stage_detail["versions"], apply_stats)
+
+            with mock.patch("httpx.AsyncClient", _RecordingPost):
+                _RecordingPost.response_json = {
+                    "success": True,
+                    "message": "Succeeded. [reload timing] iter_wait=1.50s load=4.20s postprocess=0.30s total=6.00s",
+                }
+                commit_detail = await adapter.commit_manifest(manifest, "/bulletin/versions/weight_v000005")
+                _RecordingPost.response_json = {"success": True}
+
+            self.assertIn("engine_reload_s", commit_detail)
+            # The instrumented fork's message suffix is lifted into metrics.
+            self.assertEqual(commit_detail["engine_load_s"], 4.20)
+            self.assertEqual(commit_detail["engine_total_s"], 6.00)
+
+        asyncio.run(run())
+
+
+class ParseReloadTimingTest(unittest.TestCase):
+    def test_parses_instrumented_message(self) -> None:
+        timing = parse_reload_timing(
+            "Succeeded to update model weights. [reload timing] iter_wait=12.30s load=45.60s "
+            "postprocess=7.80s total=70.10s Weight version updated to 5."
+        )
+        self.assertEqual(
+            timing,
+            {
+                "engine_iter_wait_s": 12.30,
+                "engine_load_s": 45.60,
+                "engine_postprocess_s": 7.80,
+                "engine_total_s": 70.10,
+            },
+        )
+
+    def test_uninstrumented_message_yields_nothing(self) -> None:
+        self.assertEqual(parse_reload_timing("Succeeded to update model weights."), {})
 
 
 class ExtraKeyTest(unittest.TestCase):

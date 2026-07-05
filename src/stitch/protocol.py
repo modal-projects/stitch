@@ -591,8 +591,16 @@ class EngineAdapter(Protocol):
 
     An adapter bridges the sync manager to one inference engine instance.
     Required methods are called during every version commit; optional methods
-    (``prepare``, ``reset``) are probed with ``getattr`` at startup and on run
-    switches, so adapters may omit them.
+    (``prepare``, ``reset``, ``stage_manifest``, ``commit_manifest``) are probed
+    with ``getattr``, so adapters may omit them.
+
+    An adapter that implements BOTH ``stage_manifest(manifest, version_path)``
+    and ``commit_manifest(manifest, version_path)`` gets the staged split:
+    the sync manager runs ``stage_manifest`` (host-side materialization) while
+    the engine still serves, and only ``commit_manifest`` (the engine reload)
+    under the commit gate / pause — instead of one combined ``apply_manifest``
+    inside the gate. Either may return an optional metrics dict, surfaced under
+    ``server_info()["metrics"]``.
 
     See :class:`stitch.engines.sglang.SGLangDiskDeltaAdapter` for the canonical
     implementation.
