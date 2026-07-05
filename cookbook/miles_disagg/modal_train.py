@@ -454,13 +454,17 @@ class Trainer:
         # carries the request-gating knobs). miles setattr's every key onto args,
         # so the publish + request hooks read them via getattr(args, ...).
         existing = dict(getattr(cfg, "custom_config_path", {}) or {})
-        cfg.custom_config_path = {
+        hook_knobs = {
             **existing,
             "update_weight_delta_volume_name": exp.DELTA_VOLUME_NAME,
             "rollout_modal_flash_app_name": APP_NAME,
             "rollout_modal_flash_server_cls_name": Server.__name__,
             "run_id": run_id,
         }
+        cfg.custom_config_path = hook_knobs
+        # prepare_miles_config materializes the YAML_CONFIG_FIELDS dicts (including
+        # custom_config_path) to temp YAML file PATHS on cfg — keep hook_knobs for
+        # the claim below, which needs the mapping, not the path.
         helpers.prepare_miles_config(cfg, tempfile.mkdtemp())
         cmd = helpers.build_train_cmd(cfg, MILES_ROOT)
 
@@ -471,7 +475,7 @@ class Trainer:
         from cookbook.miles_disagg import hooks
 
         hooks.claim_pool(
-            SimpleNamespace(update_weight_disk_dir=cfg.update_weight_disk_dir, **cfg.custom_config_path)
+            SimpleNamespace(update_weight_disk_dir=cfg.update_weight_disk_dir, **hook_knobs)
         )
 
         print(f"Training {experiment}: nodes={N_TRAIN_NODES}, rollout_endpoint={cfg.rollout_endpoint_url}")

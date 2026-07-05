@@ -362,12 +362,16 @@ class Trainer:
         run_id = uuid.uuid4().hex[:12]
         cfg.update_weight_disk_dir = f"{exp.DELTA_BULLETIN_ROOT}/{run_id}"
         # stitch's publish hooks read these off the slime args namespace.
-        cfg.custom_config_path = {
+        hook_knobs = {
             "update_weight_delta_volume_name": exp.DELTA_VOLUME_NAME,
             "rollout_modal_flash_app_name": APP_NAME,
             "rollout_modal_flash_server_cls_name": Server.__name__,
             "run_id": run_id,
         }
+        cfg.custom_config_path = hook_knobs
+        # prepare_slime_config materializes the YAML_CONFIG_FIELDS dicts (including
+        # custom_config_path) to temp YAML file PATHS on cfg — keep hook_knobs for
+        # the claim below, which needs the mapping, not the path.
         helpers.prepare_slime_config(cfg, tempfile.mkdtemp())
         cmd = helpers.build_train_cmd(cfg, SLIME_ROOT)
 
@@ -378,7 +382,7 @@ class Trainer:
         from cookbook.slime_disagg import hooks
 
         hooks.claim_pool(
-            SimpleNamespace(update_weight_disk_dir=cfg.update_weight_disk_dir, **cfg.custom_config_path)
+            SimpleNamespace(update_weight_disk_dir=cfg.update_weight_disk_dir, **hook_knobs)
         )
 
         print(
