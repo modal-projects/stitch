@@ -41,6 +41,11 @@ SERVING_IMAGE_ENV = {
     "SGLANG_DISABLE_CUDNN_CHECK": "1",
     "SGLANG_ENABLE_OVERLAP_PLAN_STREAM": "1",
     "SGLANG_TIMEOUT_KEEP_ALIVE": "300",
+    # Reload record/replay (fork model_loader/load_plan.py): the first reload
+    # records the dispatch plan, later ones replay it. Checksum-verified
+    # byte-identical on GLM-4.5-Air (218s -> ~57s) and Kimi K2.6 (~11%);
+    # opt-in per model class and degrade-safe, so pool-wide enable is safe.
+    "SGLANG_ENABLE_RELOAD_LOAD_PLAN": "1",
 }
 
 

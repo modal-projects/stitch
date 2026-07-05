@@ -316,3 +316,54 @@ def profile_anchor_reload(anchor_model: str = DEFAULT_ANCHOR_MODEL) -> None:
         endpoint.stop()
     except Exception:  # noqa: BLE001
         pass
+
+
+@probe_app.function(
+    image=mt.server_image,
+    gpu=f"{mt.modal_cfg.gpu}:{mt.miles_cfg.rollout_num_gpus_per_engine}",
+    cloud=mt.modal_cfg.cloud,
+    region=mt.modal_cfg.region,
+    ephemeral_disk=mt.modal_cfg.rollout_ephemeral_disk_mib,
+    timeout=20 * mt.MINUTES,
+    max_inputs=1,  # one sample per container: the whole point is fresh disk draws
+)
+def disk_survey(sample: int = 0, write_gb: int = 16) -> dict:
+    """One ephemeral-disk sample on a fresh container of the rollout pool's
+    exact shape: direct-IO write and read rates (bypassing the page cache,
+    which containers cannot drop) plus buffered/cached re-read, with placement
+    metadata. Evidence base for the observed 0.2-1.1 GB/s cold-read spread."""
+    import json
+
+    root = mt.LOCAL_CHECKPOINT_PATH
+    os.makedirs(root, exist_ok=True)
+    path = f"{root}/_disk_survey.bin"
+    blocks = max(1, (write_gb << 30) // (16 << 20))
+    result: dict[str, object] = {
+        "sample": sample,
+        "placement": {k: v for k, v in os.environ.items() if k.startswith("MODAL_") and len(v) < 80},
+    }
+
+    def timed_dd(label: str, args: list[str]) -> float:
+        t0 = time.perf_counter()
+        subprocess.run(args, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        gbps = (blocks * (16 << 20)) / 1e9 / (time.perf_counter() - t0)
+        result[label] = round(gbps, 2)
+        print(f"[disk survey {sample}] {label}: {gbps:.2f} GB/s")
+        return gbps
+
+    timed_dd("write_direct_gbps",
+             ["dd", "if=/dev/zero", f"of={path}", "bs=16M", f"count={blocks}", "oflag=direct", "conv=fsync"])
+    timed_dd("read_direct_gbps",
+             ["dd", f"if={path}", "of=/dev/null", "bs=16M", "iflag=direct"])
+    timed_dd("read_buffered_gbps", ["dd", f"if={path}", "of=/dev/null", "bs=16M"])
+    timed_dd("read_cached_gbps", ["dd", f"if={path}", "of=/dev/null", "bs=16M"])
+    os.remove(path)
+    print(f"[disk survey {sample}] {json.dumps(result)}")
+    return result
+
+
+@probe_app.local_entrypoint()
+def survey(samples: int = 4) -> None:
+    """Fan the disk survey across `samples` fresh containers and print each."""
+    for result in disk_survey.map(range(samples)):
+        print(result)
