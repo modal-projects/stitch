@@ -206,15 +206,18 @@ def profile_reload(delta_run_id: str = "", delta_version: int = 0, load_plan: in
             R["checksum_after_replay"] = _weights_checksum("after replay reload")
             R["plan_checksum_match"] = R.get("checksum_after_record") == R["checksum_after_replay"]
 
-    # 6b. with the load plan enabled: a second replay, confirming the replay
-    #     path is stable (not a one-shot) and measuring its steady-state cost
+    # 6b. with the load plan enabled: a second replay — the FAST pass executing
+    #     compiled copy programs — with its own checksum gate, since it is a
+    #     different code path than the observed/compile pass before it
     if load_plan and alive():
-        print("[phase] reload /local-checkpoint a third time (plan replay #2)...")
+        print("[phase] reload /local-checkpoint a third time (plan fast pass)...")
         try:
             R["reload_local_replay2_s"] = round(asyncio.run(_reload(local)), 1)
+            R["checksum_after_fast"] = _weights_checksum("after fast reload")
+            R["plan_checksum_match_fast"] = R.get("checksum_after_record") == R["checksum_after_fast"]
         except Exception as e:  # noqa: BLE001
             R["reload_local_replay2"] = f"CRASH: {str(e)[:120]}"
-            print(f"[phase] replay #2 CRASH: {e}")
+            print(f"[phase] fast reload CRASH: {e}")
 
     # 7. optional: host-side delta apply + reload (the full steady-state cycle)
     if delta_run_id and alive():
