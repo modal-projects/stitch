@@ -63,7 +63,7 @@ SLIME_REPO_URL = "https://github.com/modal-projects/slime.git"
 # Pin to an exact commit, not the branch tip: the build's `git fetch ... &&
 # checkout` is a cached image layer, so a moving branch tip silently leaves the
 # container on a stale slime. Bump this SHA to roll slime forward.
-SLIME_REPO_REF = "ebfe153949b1a69c39e92f947ed5d475166dd724"
+SLIME_REPO_REF = "11bb0fa48aa37d5c54fe297143c6bc1d40f311bf"
 
 image = (
     modal.Image.from_registry(SLIME_IMAGE_TAG)

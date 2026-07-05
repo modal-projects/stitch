@@ -30,8 +30,8 @@ import modal
 # prebuilt base image's kernels.
 SGLANG_IMAGE_TAG = "lmsysorg/sglang:v0.5.12"
 SGLANG_FORK_REPO = "https://github.com/modal-projects/sglang.git"
-SGLANG_FORK_BRANCH = "timmy/dflash-fa4-fp8"
-SGLANG_FORK_COMMIT = "dafb2b325b40298c5097564811463c585b7e9814"
+SGLANG_FORK_BRANCH = "weight-sync-instrumentation"
+SGLANG_FORK_COMMIT = "b3e32105b42b662886905e9978ed3394e9bbfda8"
 
 # SGLang runtime tunables carried over from the standalone B200 deployment.
 SERVING_IMAGE_ENV = {

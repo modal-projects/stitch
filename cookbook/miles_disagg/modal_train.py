@@ -76,7 +76,7 @@ MEGATRON_PATH = "/root/Megatron-LM"
 # needs. Pin to an exact commit, not the branch tip (cached image layer); push
 # the ref to modal-projects/miles before deploying.
 MILES_REPO_URL = "https://github.com/modal-projects/miles.git"
-MILES_REPO_REF = "e9ad52dbbe09b6113b4fa4dccfb5ace35341540e"
+MILES_REPO_REF = "97ce7cf5b5371e8af7a2d893ffedd56350aabfe8"
 
 # Build-time bake of the megatron R3 dispatch fix (see the .run_commands call
 # below). Kept as a string so the build step has no host-file dependency; the
