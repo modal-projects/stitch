@@ -82,15 +82,21 @@ def _dd_read_gbps(path: str, label: str, *, cold: bool = True) -> float:
         mt.exp.DELTA_BULLETIN_ROOT: mt.delta_volume,
     },
     ephemeral_disk=mt.modal_cfg.rollout_ephemeral_disk_mib,
-    timeout=60 * mt.MINUTES,
+    timeout=120 * mt.MINUTES,
 )
-def profile_reload(delta_run_id: str = "", delta_version: int = 0) -> None:
+def profile_reload(delta_run_id: str = "", delta_version: int = 0, load_plan: int = 0) -> None:
     import asyncio
 
     import httpx
     from autoinference_utils.endpoint import SGLangEndpoint
 
     from cookbook.sidecar import parallel_init_local_checkpoint
+
+    if load_plan:
+        # Reload record/replay fast path (fork's model_loader/load_plan.py):
+        # reload #1 records the dispatch plan, #2/#3 replay it. Inherited by
+        # the SGLang server subprocess.
+        os.environ["SGLANG_ENABLE_RELOAD_LOAD_PLAN"] = "1"
 
     base = mt.MODEL_NAME  # the served base on /prep
     local = mt.LOCAL_CHECKPOINT_PATH  # /local-checkpoint (ephemeral)
@@ -117,6 +123,21 @@ def profile_reload(delta_run_id: str = "", delta_version: int = 0) -> None:
                 raise RuntimeError(f"reject: {body}")
             print(f"[reload message] {body.get('message')}")
         return time.perf_counter() - t
+
+    def _weights_checksum(label: str) -> str:
+        """Per-GPU weight checksums via /weights_checker — identical bytes in
+        must yield identical checksums out, which is the record-vs-replay
+        correctness gate for the load plan."""
+        try:
+            r = httpx.post(f"{sglang_url}/weights_checker",
+                           json={"action": "checksum"}, timeout=1800.0)
+            r.raise_for_status()
+            digest = str(r.json())
+            print(f"[checksum] {label}: {digest[:160]}")
+            return digest
+        except Exception as e:  # noqa: BLE001
+            print(f"[checksum] {label} failed: {e}")
+            return f"ERROR: {e}"
 
     print(f"=== PROBE START — base={base} tp={mt.miles_cfg.rollout_num_gpus_per_engine} ===")
     R["base_shards"] = len(base_shards())
@@ -156,7 +177,8 @@ def profile_reload(delta_run_id: str = "", delta_version: int = 0) -> None:
         )
 
     # 5. reload from /local-checkpoint with a cold page cache (the steady-state
-    #    worst case: the checkpoint got evicted during the rollout)
+    #    worst case: the checkpoint got evicted during the rollout). With
+    #    load_plan=1 this reload RECORDS the dispatch plan.
     if alive():
         print("[phase] reload /local-checkpoint (cold page cache)...")
         R["page_cache_dropped"] = _drop_page_caches()
@@ -165,10 +187,13 @@ def profile_reload(delta_run_id: str = "", delta_version: int = 0) -> None:
         except Exception as e:  # noqa: BLE001
             R["reload_local_cold"] = f"CRASH: {str(e)[:120]}"
             print(f"[phase] cold reload CRASH: {e}")
+        if load_plan:
+            R["checksum_after_record"] = _weights_checksum("after record reload")
 
     # 6. immediate second reload (warm page cache) — isolates disk reads from
     #    dispatch+postprocess, and gates on the quant postprocess surviving
-    #    consecutive reloads in one process
+    #    consecutive reloads in one process. With load_plan=1 this is the first
+    #    REPLAY of the plan recorded by the previous reload.
     if alive():
         print("[phase] reload /local-checkpoint again (warm page cache)...")
         try:
@@ -177,6 +202,19 @@ def profile_reload(delta_run_id: str = "", delta_version: int = 0) -> None:
         except Exception as e:  # noqa: BLE001
             R["consecutive_reload"] = f"CRASH: {str(e)[:120]}"
             print(f"[phase] warm reload CRASH: {e}")
+        if load_plan:
+            R["checksum_after_replay"] = _weights_checksum("after replay reload")
+            R["plan_checksum_match"] = R.get("checksum_after_record") == R["checksum_after_replay"]
+
+    # 6b. with the load plan enabled: a second replay, confirming the replay
+    #     path is stable (not a one-shot) and measuring its steady-state cost
+    if load_plan and alive():
+        print("[phase] reload /local-checkpoint a third time (plan replay #2)...")
+        try:
+            R["reload_local_replay2_s"] = round(asyncio.run(_reload(local)), 1)
+        except Exception as e:  # noqa: BLE001
+            R["reload_local_replay2"] = f"CRASH: {str(e)[:120]}"
+            print(f"[phase] replay #2 CRASH: {e}")
 
     # 7. optional: host-side delta apply + reload (the full steady-state cycle)
     if delta_run_id and alive():
