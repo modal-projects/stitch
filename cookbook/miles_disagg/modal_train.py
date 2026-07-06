@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import importlib
 import os
-import shlex
 import subprocess
 import tempfile
 import uuid
@@ -78,24 +77,6 @@ MEGATRON_PATH = "/root/Megatron-LM"
 MILES_REPO_URL = "https://github.com/modal-projects/miles.git"
 MILES_REPO_REF = "852fb9a5cfb3c4630691b643ed354a9703ff3722"
 
-# Build-time bake of the megatron R3 dispatch fix (see the .run_commands call
-# below). Kept as a string so the build step has no host-file dependency; the
-# replace targets a single, stable line and reports how many sites it hit.
-_R3_DISPATCH_TARGET = "/root/Megatron-LM/megatron/core/transformer/moe/token_dispatcher.py"
-_R3_DISPATCH_OLD = "self.num_out_tokens = routing_map.size(0) * self.config.moe_router_topk"
-_R3_DISPATCH_NEW = (
-    "self.num_out_tokens = num_local_tokens_per_expert.sum()\n"
-    '            self._maybe_update_cuda_sync_point("before_permutation_1")'
-)
-_R3_DISPATCH_BAKE_PY = (
-    "import pathlib;"
-    f"p=pathlib.Path({_R3_DISPATCH_TARGET!r});"
-    "s=p.read_text();"
-    f"n=s.count({_R3_DISPATCH_OLD!r});"
-    f"p.write_text(s.replace({_R3_DISPATCH_OLD!r}, {_R3_DISPATCH_NEW!r}));"
-    "print(f'[R3 bake] patched {n} dispatch site(s) in token_dispatcher.py')"
-)
-
 TORCH_DIST_CONVERT_WRAPPER = "/root/convert_hf_to_torch_dist_modal.py"
 
 image = (
@@ -124,14 +105,6 @@ image = (
         f" && git checkout FETCH_HEAD"
         f" && python3 -m pip install --no-deps -e {MILES_ROOT}"
     )
-    # R3 routing-replay fix for the baked radixark/Megatron-LM. The dropless MoE
-    # token dispatcher computes num_out_tokens = routing_map.size(0) * topk, which
-    # assumes topk distinct experts/token — false under routing replay (duplicate
-    # / -1 experts collapse in the boolean map), causing the EP all-to-all to
-    # crash with "Split sizes doesn't match total dim 0 size". Derive it from the
-    # actual per-expert counts instead (identical to size*topk in the dense
-    # non-replay case). Idempotent: a no-op once the fork itself ships the fix.
-    .run_commands(f"python3 -c {shlex.quote(_R3_DISPATCH_BAKE_PY)}")
     .pip_install(
         "fastapi",  # stitch sidecar (rollout pool reuses this image only if no serving image)
         "httpx",
@@ -365,6 +338,11 @@ class Trainer:
     @modal.enter()
     def start_ray(self) -> None:
         rank, master_addr, my_ip = helpers.get_modal_cluster_context(N_TRAIN_NODES)
+        # /root/Megatron-LM is editable-installed from the image checkout, so
+        # patch the on-disk source here on every node before Ray starts.
+        helpers.apply_megatron_runtime_patches(
+            list(getattr(exp, "MEGATRON_RUNTIME_PATCHES", [])), repo_dir=MEGATRON_PATH
+        )
         self.rank = rank
         # Per-node host-RAM trace: the trainer can OOM-kill at host-RAM exhaustion
         # (the publish/update_weights gather is the peak), and Modal's kill leaves no

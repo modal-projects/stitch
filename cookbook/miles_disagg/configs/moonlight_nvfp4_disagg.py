@@ -56,6 +56,10 @@ MODEL_TAG = "moonlight-16b-nvfp4"  # names the prepared dirs under PREP_PATH
 # rollouts; stale-version KV is isolated per weight version by the sidecar.
 SIDECAR_COMMIT_MODE = "in_place"
 SIDECAR_DEBUG_REQUESTS = True
+# R3 routing-replay needs the dropless Megatron dispatch fix at startup.
+MEGATRON_RUNTIME_PATCHES = [
+    "/root/cookbook/miles_disagg/patches/megatron-r3-dispatch.patch",
+]
 
 
 def build_serving_image(**kwargs):
