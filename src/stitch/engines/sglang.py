@@ -157,14 +157,26 @@ class SGLangDiskDeltaAdapter:
             detail["versions"] = stats
         return detail
 
-    async def commit_manifest(self, manifest: VersionManifest, version_path: str) -> dict[str, Any] | None:
-        """Reload the full staged local checkpoint into the engine. The sync
+    async def commit_manifest(
+        self,
+        manifest: VersionManifest,
+        version_path: str,
+        weight_names: list[str] | None = None,
+    ) -> dict[str, Any] | None:
+        """Reload the staged local checkpoint into the engine. The sync
         manager calls this under the commit gate (engine paused in in_place
-        mode), after :meth:`stage_manifest` has materialized the version."""
+        mode), after :meth:`stage_manifest` has materialized the version.
+
+        ``weight_names`` is the tail's union of touched tensor names; an
+        engine with the reload load plan uses it to reload only the touched
+        modules (O(delta)) and silently full-reloads otherwise. Set
+        ``STITCH_PARTIAL_RELOAD=0`` to withhold the names entirely."""
+        import os
+
         import httpx
 
         _t_reload = time.perf_counter()
-        payload = {
+        payload: dict[str, Any] = {
             "model_path": self.local_checkpoint_dir,
             "weight_version": str(manifest.version),
             # The sync manager flushes via GET /flush_cache while quiesced.
@@ -173,6 +185,8 @@ class SGLangDiskDeltaAdapter:
             # it must stay disabled here.
             "flush_cache": False,
         }
+        if weight_names and os.environ.get("STITCH_PARTIAL_RELOAD", "1") == "1":
+            payload["weight_names"] = list(weight_names)
         async with httpx.AsyncClient(timeout=None, trust_env=False) as client:
             resp = await client.post(f"{self.upstream_url}/update_weights_from_disk", json=payload)
             resp.raise_for_status()

@@ -220,19 +220,55 @@ def profile_reload(delta_run_id: str = "", delta_version: int = 0, load_plan: in
             R["reload_local_replay2"] = f"CRASH: {str(e)[:120]}"
             print(f"[phase] fast reload CRASH: {e}")
 
-    # 7. optional: host-side delta apply + reload (the full steady-state cycle)
+    # 7. optional: the full steady-state O(delta) cycle against REAL published
+    #    deltas — host-apply the chain, PARTIAL reload (touched names only),
+    #    then prove it byte-equivalent to a FULL reload of the same bytes.
     if delta_run_id and alive():
+        import json as _json
+
         from miles.utils.disk_delta import apply_deltas
 
         delta_root = f"{mt.exp.DELTA_BULLETIN_ROOT}/{delta_run_id}"
-        print(f"[phase] apply delta chain {delta_root} up to v{delta_version} + reload...")
+        print(f"[phase] apply delta chain {delta_root} up to v{delta_version}...")
         t0 = time.perf_counter()
         R["delta_apply_stats"] = apply_deltas(local, delta_root, delta_version)
         R["delta_apply_s"] = round(time.perf_counter() - t0, 1)
+
+        touched: set[str] = set()
+        for v in range(1, delta_version + 1):
+            index = f"{delta_root}/weight_v{v:06d}/model.safetensors.index.json"
+            with open(index) as f:
+                touched.update(_json.load(f)["weight_map"])
+        R["delta_touched_names"] = len(touched)
+
+        async def _partial_reload() -> float:
+            t = time.perf_counter()
+            async with httpx.AsyncClient(timeout=None, trust_env=False) as c:
+                r = await c.post(f"{sglang_url}/update_weights_from_disk",
+                                 json={"model_path": local, "weight_version": "probe-partial",
+                                       "flush_cache": False, "weight_names": sorted(touched)})
+                r.raise_for_status()
+                body = r.json()
+                if body.get("success") is False:
+                    raise RuntimeError(f"reject: {body}")
+                print(f"[reload message] {body.get('message')}")
+            return time.perf_counter() - t
+
         try:
-            R["reload_after_delta_s"] = round(asyncio.run(_reload(local)), 1)
+            print(f"[phase] PARTIAL reload ({len(touched)} touched names)...")
+            R["partial_reload_s"] = round(asyncio.run(_partial_reload()), 1)
+            R["checksum_after_partial"] = _weights_checksum("after partial reload")
+            print("[phase] FULL reload of the same bytes (equivalence reference)...")
+            R["full_reload_after_delta_s"] = round(asyncio.run(_reload(local)), 1)
+            R["checksum_after_full"] = _weights_checksum("after full reload")
+            R["partial_checksum_match"] = (
+                R["checksum_after_partial"] == R["checksum_after_full"]
+            )
+            # steady-state partial timing, engine state already at the target
+            R["partial_reload2_s"] = round(asyncio.run(_partial_reload()), 1)
         except Exception as e:  # noqa: BLE001
-            R["reload_after_delta"] = f"CRASH: {str(e)[:120]}"
+            R["partial_reload"] = f"CRASH: {str(e)[:120]}"
+            print(f"[phase] partial reload CRASH: {e}")
 
     print("=== PROBE SUMMARY ===")
     for k, v in R.items():

@@ -374,6 +374,9 @@ class WeightSyncManager(RolloutAdmissionGate):
         expected_base = self.current_version
         target_manifest: VersionManifest | None = None
         tail_transition_files = 0
+        # Union of the tail's touched tensor names, for engines that support
+        # partial reloads. Any manifest without names makes the tail unknown.
+        tail_weights: set[str] | None = set()
         for version in range(self.current_version + 1, latest + 1):
             manifest = self.board.read_manifest(self.current_run_id, version)
             if manifest.base_version != expected_base:
@@ -383,6 +386,10 @@ class WeightSyncManager(RolloutAdmissionGate):
                 )
             expected_base = version
             tail_transition_files += len(manifest.transition_files)
+            if tail_weights is not None and manifest.transition_weights:
+                tail_weights.update(manifest.transition_weights)
+            elif manifest.transition_files:
+                tail_weights = None  # a version with files but unknown names
             target_manifest = manifest
         assert target_manifest is not None  # latest > current_version, so the loop ran
         target_path = str(self.board.version_dir(self.current_run_id, latest))
@@ -390,6 +397,8 @@ class WeightSyncManager(RolloutAdmissionGate):
         metrics["target_version"] = latest
         metrics["tail_versions"] = latest - self.current_version
         metrics["tail_transition_files"] = tail_transition_files
+        if tail_weights is not None:
+            metrics["tail_weights"] = len(tail_weights)
 
         # Compose the tail and reload once: the adapter replays every delta from
         # the applied version up to `latest` host-side, then does a single engine
@@ -442,7 +451,11 @@ class WeightSyncManager(RolloutAdmissionGate):
                 self.sync_state = SyncState.COMMITTING
                 t = time.perf_counter()
                 if staged:
-                    commit_detail = await commit(manifest, version_path)
+                    commit_detail = await commit(
+                        manifest,
+                        version_path,
+                        weight_names=sorted(tail_weights) if tail_weights else None,
+                    )
                     if commit_detail:
                         metrics["commit_detail"] = commit_detail
                 else:

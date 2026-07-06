@@ -72,15 +72,22 @@ class StagedEngine(FakeEngine):
     """FakeEngine plus the optional staged split (stage/commit instead of the
     combined apply)."""
 
+    def __init__(self) -> None:
+        super().__init__()
+        self.commit_weight_names: list[list[str] | None] = []
+
     async def stage_manifest(self, manifest: VersionManifest, version_path: str) -> dict | None:
         self.events.append("stage")
         return {"host_delta_apply_s": 0.0}
 
-    async def commit_manifest(self, manifest: VersionManifest, version_path: str) -> dict | None:
+    async def commit_manifest(
+        self, manifest: VersionManifest, version_path: str, weight_names: list[str] | None = None
+    ) -> dict | None:
         self.apply_started.set()
         if self.apply_gate is not None:
             await self.apply_gate.wait()
         self.applies.append((manifest.version, version_path))
+        self.commit_weight_names.append(weight_names)
         self.events.append("commit")
         return {"engine_reload_s": 0.0}
 
@@ -371,6 +378,41 @@ class SyncManagerTest(unittest.TestCase):
                 await manager.sync_to()
                 self.assertEqual(manager.current_version, 3)
                 self.assertEqual(engine.events, ["stage", "stage", "pause", "commit", "continue"])
+
+        asyncio.run(run())
+
+    def test_tail_weight_names_reach_commit(self) -> None:
+        """The tail's union of touched tensor names flows to commit_manifest
+        (for engine-side partial reloads); a tail version with files but no
+        names withholds the whole set."""
+
+        async def run() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                board = FilesystemBulletinBoard(root, layout="slime")
+                _write_slime_version(root, 1, 0, weight_map={"a": "f1", "b": "f1"})
+                _write_slime_version(root, 2, 1, weight_map={"b": "f1", "c": "f2"})
+                board.write_latest(None, 2)
+                engine = StagedEngine()
+                manager = WeightSyncManager(board=board, engine=engine, commit_mode="in_place")
+                await manager.startup_sync()
+                self.assertEqual(engine.commit_weight_names, [["a", "b", "c"]])
+                info = await manager.server_info()
+                self.assertEqual(info["metrics"]["tail_weights"], 3)
+
+                # A slime-layout version always names its weights, so simulate
+                # an unknown-names version via the stitch layout instead.
+                board2 = FilesystemBulletinBoard(tmp + "-stitch")
+                board2.publish_manifest(
+                    VersionManifest(
+                        version=1, base_version=0, backend="disk_delta",
+                        load_format="auto", transition_files=["model-00001.safetensors"],
+                    )
+                )
+                engine2 = StagedEngine()
+                manager2 = WeightSyncManager(board=board2, engine=engine2, commit_mode="in_place")
+                await manager2.startup_sync()
+                self.assertEqual(engine2.commit_weight_names, [None])
 
         asyncio.run(run())
 
