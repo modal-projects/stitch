@@ -498,12 +498,6 @@ def prepare_checkpoints() -> None:
       2. served NVFP4 base: tools/convert_hf_to_nvfp4.py over the masters, so the
          served packing == the trainer's export packing by construction.
     """
-    if getattr(exp, "DISABLE_HF_XET", False):
-        os.environ["HF_HUB_DISABLE_XET"] = "1"
-        os.environ.pop("HF_XET_HIGH_PERFORMANCE", None)
-    if getattr(exp, "DISABLE_HF_TRANSFER", False):
-        os.environ.pop("HF_HUB_ENABLE_HF_TRANSFER", None)
-
     from huggingface_hub import snapshot_download
 
     prep_volume.reload()

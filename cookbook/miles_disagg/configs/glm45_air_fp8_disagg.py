@@ -14,9 +14,6 @@ ROLLOUT_SOURCE_MODEL = "zai-org/GLM-4.5-Air-FP8"
 MODEL_TAG = "glm45-air-bf16"
 SERVED_CHECKPOINT_FORMAT = "fp8"
 USE_MODAL_TORCH_DIST_WRAPPER = True
-# The standard HF downloader was the path that finished reliably for this model.
-DISABLE_HF_XET = True
-DISABLE_HF_TRANSFER = True
 
 SIDECAR_COMMIT_MODE = "quiesce"
 SIDECAR_DEBUG_REQUESTS = True
