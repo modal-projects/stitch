@@ -285,6 +285,16 @@ class WeightSyncManager(RolloutAdmissionGate):
         while True:
             try:
                 reached = await self._sync_once()
+                if reached:
+                    # A wake/publish can land while _sync_once is already
+                    # committing an older board snapshot. Re-check before going
+                    # idle so the active sync task does not drop that work.
+                    await self.board.refresh()
+                    run_id, latest = self.board.read_latest()
+                    self.latest_seen_version = max(self.latest_seen_version, latest)
+                    queued = self.queued_target_version or 0
+                    if run_id != self.current_run_id or max(latest, queued) > self.current_version:
+                        reached = False
             except Exception as exc:  # noqa: BLE001
                 self.last_sync_error = str(exc)
                 self.sync_state = SyncState.ERROR

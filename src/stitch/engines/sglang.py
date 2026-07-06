@@ -16,6 +16,13 @@ logger = logging.getLogger(__name__)
 EXTRA_KEY_DELIMITER = ";"
 
 
+def _transition_files(manifest: VersionManifest) -> list[str]:
+    files = list(manifest.transition_files)
+    if not files:
+        files = [artifact.path for artifact in manifest.artifacts if artifact.kind == "transition"]
+    return files
+
+
 def compose_extra_key(
     version: int, user_extra_key: str | None = None, run_id: str | None = None
 ) -> str:
@@ -132,6 +139,12 @@ class SGLangDiskDeltaAdapter:
         logger.info(
             "[apply timing] v=%s host_delta_apply=%.2fs", manifest.version, time.perf_counter() - _t_apply
         )
+        if not _transition_files(manifest):
+            logger.info(
+                "[apply timing] v=%s engine_reload=skipped empty_delta",
+                manifest.version,
+            )
+            return
 
         _t_reload = time.perf_counter()
         payload = {

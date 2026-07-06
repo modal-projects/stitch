@@ -1,0 +1,393 @@
+diff --git a/python/sglang/srt/layers/quantization/compressed_tensors/schemes/compressed_tensors_w8a8_fp8.py b/python/sglang/srt/layers/quantization/compressed_tensors/schemes/compressed_tensors_w8a8_fp8.py
+index d4dafa224b..d62c1f480f 100644
+--- a/python/sglang/srt/layers/quantization/compressed_tensors/schemes/compressed_tensors_w8a8_fp8.py
++++ b/python/sglang/srt/layers/quantization/compressed_tensors/schemes/compressed_tensors_w8a8_fp8.py
+@@ -36,6 +36,123 @@ if _use_aiter:
+     from aiter.ops.shuffle import shuffle_weight
+
+
++
++import types
++
++
++_RELOAD_METHOD_NAMES = (
++    "load_column_parallel_weight",
++    "load_row_parallel_weight",
++    "load_merged_column_weight",
++    "load_qkv_weight",
++    "_assert_and_load",
++    "_load_into_shard_id",
++    "_shard_id_as_int",
++    "adjust_shard_indexes_for_packing",
++)
++
++
++def _copy_reload_methods(src, dst):
++    # Fallback for Parameter wrappers that cannot preserve the original subclass.
++    # The saved weight_loader still calls the subclass sharding helpers.
++    for name in _RELOAD_METHOD_NAMES:
++        method = getattr(src, name, None)
++        func = getattr(method, "__func__", None)
++        if func is None:
++            func = getattr(type(src), name, None)
++        if callable(func):
++            setattr(dst, name, types.MethodType(func, dst))
++    return dst
++
++
++def _reload_attrs(src, *, transpose_2d: bool = False):
++    # Keep sharding-aware loader attrs after FP8 postprocess wraps Parameters.
++    out = dict(getattr(src, "__dict__", {}))
++    out.pop("_sglang_fp8_reload_ready", None)
++    out.pop("_sglang_fp8_reload_transposed", None)
++
++    attrs = (
++        "weight_padded",
++        "is_transposed",
++        "is_metadata",
++        "needs_scalar_to_array",
++        "ignore_warning",
++        "quant_method",
++        "_sglang_require_global_experts",
++    )
++    for attr in attrs:
++        if not hasattr(src, attr):
++            continue
++        out[attr] = getattr(src, attr)
++    if transpose_2d:
++        for attr in ("_input_dim", "_output_dim"):
++            value = out.get(attr)
++            if isinstance(value, int):
++                out[attr] = 1 - value
++    return out
++
++
++def _apply_reload_attrs(dst, attrs):
++    for attr, value in attrs.items():
++        try:
++            setattr(dst, attr, value)
++        except AttributeError:
++            # Read-only properties on SGLang parameter subclasses are backed by
++            # private attrs that are already copied from __dict__.
++            pass
++    return dst
++
++
++def _parameter_like(src, data, attrs):
++    cls = type(src)
++    try:
++        dst = cls.__new__(cls, data)
++        dst.requires_grad_(False)
++    except Exception:
++        dst = Parameter(data, requires_grad=False)
++    _apply_reload_attrs(dst, attrs)
++    _copy_reload_methods(src, dst)
++    return dst
++
++
++def _mark_reload_ready(dst, *, transposed: bool = False):
++    dst._sglang_fp8_reload_ready = True
++    dst._sglang_fp8_reload_transposed = transposed
++    return dst
++
++
++def _preserve_reload_attrs(src, dst):
++    dst = _parameter_like(src, dst.data, _reload_attrs(src))
++    return _mark_reload_ready(dst)
++
++
++def _preserve_transposed_reload_attrs(src, dst):
++    original_attrs = _reload_attrs(src)
++    transposed_attrs = _reload_attrs(src, transpose_2d=True)
++    dst = _parameter_like(src, dst.data, transposed_attrs)
++    original_loader = original_attrs.get("_weight_loader") or getattr(src, "weight_loader", None)
++    if original_loader is None:
++        return _mark_reload_ready(dst, transposed=True)
++    load_shape = tuple(src.data.shape)
++    load_stride = tuple(src.data.stride())
++    load_dtype = src.data.dtype
++
++    def transposed_weight_loader(param, loaded_weight, *args, **kwargs):
++        tmp = _parameter_like(
++            src,
++            torch.empty_strided(load_shape, load_stride, dtype=load_dtype, device=param.data.device),
++            original_attrs,
++        )
++        original_loader(tmp, loaded_weight, *args, **kwargs)
++        param.data.copy_(tmp.data.t())
++
++    try:
++        dst._weight_loader = transposed_weight_loader
++    except Exception:
++        dst.weight_loader = transposed_weight_loader
++    return _mark_reload_ready(dst, transposed=True)
++
++
+ strategy_to_parameter_type = {
+     QuantizationStrategy.BLOCK: BlockQuantScaleParameter,
+     QuantizationStrategy.CHANNEL: ChannelQuantScaleParameter,
+@@ -141,6 +258,9 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsLinearScheme):
+             layer.register_parameter("input_scale", input_scale)
+
+     def process_weights_after_loading(self, layer) -> None:
++        if getattr(layer.weight, "_sglang_fp8_reload_ready", False):
++            return
++
+         if self.strategy == QuantizationStrategy.TENSOR:
+             max_w_scale, weight = requantize_with_max_scale(
+                 weight=layer.weight,
+@@ -156,8 +276,14 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsLinearScheme):
+                 )
+                 if input_scale is not None:
+                     layer.input_scale = Parameter(input_scale, requires_grad=False)
+-            layer.weight = Parameter(weight.t(), requires_grad=False)
+-            layer.weight_scale = Parameter(max_w_scale, requires_grad=False)
++            old_weight = layer.weight
++            old_weight_scale = layer.weight_scale
++            layer.weight = _preserve_transposed_reload_attrs(
++                old_weight, Parameter(weight.t(), requires_grad=False)
++            )
++            layer.weight_scale = _preserve_reload_attrs(
++                old_weight_scale, Parameter(max_w_scale, requires_grad=False)
++            )
+
+         elif self.strategy == QuantizationStrategy.CHANNEL:
+             weight = layer.weight
+@@ -175,16 +301,23 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsLinearScheme):
+             else:
+                 weight_scale = layer.weight_scale.data
+
++            old_weight = layer.weight
++            old_weight_scale = layer.weight_scale
+             if _use_aiter:
+                 # keep the weight as (N, K)
+-                layer.weight = Parameter(
+-                    shuffle_weight(weight, (16, 16)), requires_grad=False
++                layer.weight = _preserve_reload_attrs(
++                    old_weight,
++                    Parameter(shuffle_weight(weight, (16, 16)), requires_grad=False),
+                 )
+             else:
+-                layer.weight = Parameter(weight.t(), requires_grad=False)
++                layer.weight = _preserve_transposed_reload_attrs(
++                    old_weight, Parameter(weight.t(), requires_grad=False)
++                )
+
+             # required by torch.compile to be torch.nn.Parameter
+-            layer.weight_scale = Parameter(weight_scale, requires_grad=False)
++            layer.weight_scale = _preserve_reload_attrs(
++                old_weight_scale, Parameter(weight_scale, requires_grad=False)
++            )
+
+         elif self.strategy == QuantizationStrategy.BLOCK:
+             assert self.is_static_input_scheme is False
+@@ -203,7 +336,10 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsLinearScheme):
+
+         # INPUT SCALE
+         if self.is_static_input_scheme and hasattr(layer, "input_scale"):
+-            layer.input_scale = Parameter(layer.input_scale.max(), requires_grad=False)
++            old_input_scale = layer.input_scale
++            layer.input_scale = _preserve_reload_attrs(
++                old_input_scale, Parameter(old_input_scale.max(), requires_grad=False)
++            )
+         else:
+             layer.input_scale = None
+
+diff --git a/python/sglang/srt/layers/quantization/w8a8_fp8.py b/python/sglang/srt/layers/quantization/w8a8_fp8.py
+index aeea826cd5..f4f4fd1d0d 100644
+--- a/python/sglang/srt/layers/quantization/w8a8_fp8.py
++++ b/python/sglang/srt/layers/quantization/w8a8_fp8.py
+@@ -36,6 +36,122 @@ if TYPE_CHECKING:
+ _is_fp8_fnuz = is_fp8_fnuz()
+
+
++import types
++
++
++_RELOAD_METHOD_NAMES = (
++    "load_column_parallel_weight",
++    "load_row_parallel_weight",
++    "load_merged_column_weight",
++    "load_qkv_weight",
++    "_assert_and_load",
++    "_load_into_shard_id",
++    "_shard_id_as_int",
++    "adjust_shard_indexes_for_packing",
++)
++
++
++def _copy_reload_methods(src, dst):
++    # Fallback for Parameter wrappers that cannot preserve the original subclass.
++    # The saved weight_loader still calls the subclass sharding helpers.
++    for name in _RELOAD_METHOD_NAMES:
++        method = getattr(src, name, None)
++        func = getattr(method, "__func__", None)
++        if func is None:
++            func = getattr(type(src), name, None)
++        if callable(func):
++            setattr(dst, name, types.MethodType(func, dst))
++    return dst
++
++
++def _reload_attrs(src, *, transpose_2d: bool = False):
++    # Keep sharding-aware loader attrs after FP8 postprocess wraps Parameters.
++    out = dict(getattr(src, "__dict__", {}))
++    out.pop("_sglang_fp8_reload_ready", None)
++    out.pop("_sglang_fp8_reload_transposed", None)
++
++    attrs = (
++        "weight_padded",
++        "is_transposed",
++        "is_metadata",
++        "needs_scalar_to_array",
++        "ignore_warning",
++        "quant_method",
++        "_sglang_require_global_experts",
++    )
++    for attr in attrs:
++        if not hasattr(src, attr):
++            continue
++        out[attr] = getattr(src, attr)
++    if transpose_2d:
++        for attr in ("_input_dim", "_output_dim"):
++            value = out.get(attr)
++            if isinstance(value, int):
++                out[attr] = 1 - value
++    return out
++
++
++def _apply_reload_attrs(dst, attrs):
++    for attr, value in attrs.items():
++        try:
++            setattr(dst, attr, value)
++        except AttributeError:
++            # Read-only properties on SGLang parameter subclasses are backed by
++            # private attrs that are already copied from __dict__.
++            pass
++    return dst
++
++
++def _parameter_like(src, data, attrs):
++    cls = type(src)
++    try:
++        dst = cls.__new__(cls, data)
++        dst.requires_grad_(False)
++    except Exception:
++        dst = Parameter(data, requires_grad=False)
++    _apply_reload_attrs(dst, attrs)
++    _copy_reload_methods(src, dst)
++    return dst
++
++
++def _mark_reload_ready(dst, *, transposed: bool = False):
++    dst._sglang_fp8_reload_ready = True
++    dst._sglang_fp8_reload_transposed = transposed
++    return dst
++
++
++def _preserve_reload_attrs(src, dst):
++    dst = _parameter_like(src, dst.data, _reload_attrs(src))
++    return _mark_reload_ready(dst)
++
++
++def _preserve_transposed_reload_attrs(src, dst):
++    original_attrs = _reload_attrs(src)
++    transposed_attrs = _reload_attrs(src, transpose_2d=True)
++    dst = _parameter_like(src, dst.data, transposed_attrs)
++    original_loader = original_attrs.get("_weight_loader") or getattr(src, "weight_loader", None)
++    if original_loader is None:
++        return _mark_reload_ready(dst, transposed=True)
++    load_shape = tuple(src.data.shape)
++    load_stride = tuple(src.data.stride())
++    load_dtype = src.data.dtype
++
++    def transposed_weight_loader(param, loaded_weight, *args, **kwargs):
++        tmp = _parameter_like(
++            src,
++            torch.empty_strided(load_shape, load_stride, dtype=load_dtype, device=param.data.device),
++            original_attrs,
++        )
++        original_loader(tmp, loaded_weight, *args, **kwargs)
++        param.data.copy_(tmp.data.t())
++
++    try:
++        dst._weight_loader = transposed_weight_loader
++    except Exception:
++        dst.weight_loader = transposed_weight_loader
++    return _mark_reload_ready(dst, transposed=True)
++
++
+ class W8A8Fp8Config(QuantizationConfig):
+     """Config class for W8A8 FP8 Quantization.
+
+@@ -107,6 +223,8 @@ class W8A8Fp8LinearMethod(LinearMethodBase):
+         self.quantization_config = quantization_config
+
+     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
++        if getattr(layer.weight, "_sglang_fp8_reload_transposed", False):
++            return
+         weight = layer.weight
+
+         if self.quantization_config.is_checkpoint_fp8_serialized:
+@@ -117,8 +235,14 @@ class W8A8Fp8LinearMethod(LinearMethodBase):
+                     weight=weight, weight_scale=weight_scale
+                 )
+
+-            layer.weight = Parameter(weight.t(), requires_grad=False)
+-            layer.weight_scale = Parameter(weight_scale, requires_grad=False)
++            old_weight = layer.weight
++            old_weight_scale = layer.weight_scale
++            layer.weight = _preserve_transposed_reload_attrs(
++                old_weight, Parameter(weight.t(), requires_grad=False)
++            )
++            layer.weight_scale = _preserve_reload_attrs(
++                old_weight_scale, Parameter(weight_scale, requires_grad=False)
++            )
+         else:
+             # If checkpoint not offline quantized, quantize the weights with per-channel quantization.
+             if self.cutlass_fp8_supported:
+@@ -134,8 +258,14 @@ class W8A8Fp8LinearMethod(LinearMethodBase):
+                 qweight, weight_scale = input_to_float8(layer.weight, dtype=fp8_dtype)
+
+             # Update the layer with the new values.
+-            layer.weight = Parameter(qweight.t(), requires_grad=False)
+-            layer.weight_scale = Parameter(weight_scale, requires_grad=False)
++            old_weight = layer.weight
++            old_weight_scale = layer.weight_scale
++            layer.weight = _preserve_transposed_reload_attrs(
++                old_weight, Parameter(qweight.t(), requires_grad=False)
++            )
++            layer.weight_scale = _preserve_reload_attrs(
++                old_weight_scale, Parameter(weight_scale, requires_grad=False)
++            )
+             layer.input_scale = None
+
+     def create_weights(
+@@ -271,13 +401,21 @@ class W8A8FP8MoEMethod(FusedMoEMethodBase):
+         layer.register_parameter("w2_input_scale", w2_input_scale)
+
+     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+-        layer.w13_weight = Parameter(layer.w13_weight, requires_grad=False)
+-        layer.w2_weight = Parameter(layer.w2_weight, requires_grad=False)
+-        layer.w13_weight_scale = Parameter(
+-            layer.w13_weight_scale.data, requires_grad=False
++        old_w13_weight = layer.w13_weight
++        old_w2_weight = layer.w2_weight
++        old_w13_weight_scale = layer.w13_weight_scale
++        old_w2_weight_scale = layer.w2_weight_scale
++        layer.w13_weight = _preserve_reload_attrs(
++            old_w13_weight, Parameter(old_w13_weight.data, requires_grad=False)
++        )
++        layer.w2_weight = _preserve_reload_attrs(
++            old_w2_weight, Parameter(old_w2_weight.data, requires_grad=False)
++        )
++        layer.w13_weight_scale = _preserve_reload_attrs(
++            old_w13_weight_scale, Parameter(old_w13_weight_scale.data, requires_grad=False)
+         )
+-        layer.w2_weight_scale = Parameter(
+-            layer.w2_weight_scale.data, requires_grad=False
++        layer.w2_weight_scale = _preserve_reload_attrs(
++            old_w2_weight_scale, Parameter(old_w2_weight_scale.data, requires_grad=False)
+         )
+
+     def create_moe_runner(

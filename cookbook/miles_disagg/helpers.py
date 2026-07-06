@@ -70,6 +70,38 @@ def smoke_flash_pool(**kwargs: Any) -> None:
     _smoke_flash_pool(wake_on_demand=WAKE_ON_DEMAND, **kwargs)
 
 
+def apply_sglang_runtime_patches(patch_paths: list[str], repo_dir: str = "/sgl-workspace/sglang") -> None:
+    """Apply git patches to the runtime SGLang checkout before server start."""
+    for patch_path in patch_paths:
+        if not os.path.exists(patch_path):
+            raise FileNotFoundError(f"SGLang runtime patch not found: {patch_path}")
+
+        check = subprocess.run(
+            ["git", "-C", repo_dir, "apply", "--check", patch_path],
+            capture_output=True,
+            text=True,
+        )
+        if check.returncode == 0:
+            subprocess.run(["git", "-C", repo_dir, "apply", patch_path], check=True)
+            print(f"[SGLang patch] applied {patch_path}", flush=True)
+            continue
+
+        reverse = subprocess.run(
+            ["git", "-C", repo_dir, "apply", "--reverse", "--check", patch_path],
+            capture_output=True,
+            text=True,
+        )
+        if reverse.returncode == 0:
+            print(f"[SGLang patch] already applied {patch_path}", flush=True)
+            continue
+
+        raise RuntimeError(
+            f"Cannot apply SGLang runtime patch {patch_path}\n"
+            f"apply --check stderr:\n{check.stderr}\n"
+            f"reverse --check stderr:\n{reverse.stderr}"
+        )
+
+
 def materialize_node_local_yaml(cfg: Any, field: str, dest_dir: str = "/root/.miles_node_yaml") -> None:
     """Materialize a per-actor-read YAML config to a deterministic node-local path.
 
