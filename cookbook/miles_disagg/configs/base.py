@@ -55,6 +55,7 @@ class ModalConfig:
     cloud: str | None = None  # e.g. "aws", "gcp"
     region: str | None = None  # e.g. "us-east-2"
     rollout_min_containers: int = 2  # warm Flash rollout containers
+    rollout_max_containers: int | None = None  # cap Flash rollout containers; None = no explicit cap
     # Flash autoscaler target: concurrent inputs (requests) per container before it
     # scales OUT. None = use sglang_server_concurrency (legacy). Set it well below the
     # SGLang engine concurrency so Flash adds containers instead of packing requests

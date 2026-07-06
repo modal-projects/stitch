@@ -85,6 +85,32 @@ class SyncManagerTest(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_sync_keeps_queued_work_that_arrives_during_commit(self) -> None:
+        async def run() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                board = FilesystemBulletinBoard(tmp)
+                board.publish_manifest(VersionManifest(version=1, base_version=0, backend="fake", load_format="noop"))
+                engine = FakeEngine()
+                engine.apply_gate = asyncio.Event()
+                manager = WeightSyncManager(board=board, engine=engine)
+
+                sync = asyncio.create_task(manager.sync_to())
+                await engine.apply_started.wait()
+
+                board.publish_manifest(VersionManifest(version=2, base_version=1, backend="fake", load_format="noop"))
+                manager.queue_sync(2)
+                self.assertEqual(manager.queued_target_version, 2)
+
+                engine.apply_gate.set()
+                await sync
+
+                self.assertEqual(manager.current_version, 2)
+                self.assertEqual(manager.sync_state, SyncState.IDLE)
+                self.assertIsNone(manager.queued_target_version)
+                self.assertEqual([version for version, _ in engine.applies], [1, 2])
+
+        asyncio.run(run())
+
     def test_run_change_rematerializes_and_resets_under_gate(self) -> None:
         async def run() -> None:
             with tempfile.TemporaryDirectory() as tmp:

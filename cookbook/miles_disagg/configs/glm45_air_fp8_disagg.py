@@ -1,24 +1,28 @@
-"""GLM-4.5-Air BF16 disaggregated Miles rollout on Modal."""
+"""GLM-4.5-Air BF16 training with native HF FP8 SGLang rollout on Modal."""
 
 from __future__ import annotations
 
 from cookbook.miles_disagg.configs.base import DATA_PATH, PREP_PATH, ModalConfig, MilesConfig
 
 
-APP_NAME = "miles-glm45-air-bf16-disagg"
-DELTA_VOLUME_NAME = "miles-delta-bulletin-glm45-air-bf16"
+APP_NAME = "miles-glm45-air-fp8-disagg"
+DELTA_VOLUME_NAME = "miles-delta-bulletin-glm45-air-fp8"
 DELTA_BULLETIN_ROOT = "/delta-bulletin"
 
 SOURCE_MODEL = "zai-org/GLM-4.5-Air"
+ROLLOUT_SOURCE_MODEL = "zai-org/GLM-4.5-Air-FP8"
 MODEL_TAG = "glm45-air-bf16"
-SERVED_CHECKPOINT_FORMAT = "bf16"
+SERVED_CHECKPOINT_FORMAT = "fp8"
 USE_MODAL_TORCH_DIST_WRAPPER = True
 # The standard HF downloader was the path that finished reliably for this model.
 DISABLE_HF_XET = True
 DISABLE_HF_TRANSFER = True
 
-SIDECAR_COMMIT_MODE = "in_place"
+SIDECAR_COMMIT_MODE = "quiesce"
 SIDECAR_DEBUG_REQUESTS = True
+SGLANG_RUNTIME_PATCHES = [
+    "/root/cookbook/miles_disagg/patches/sglang-fp8-reload-attrs.patch",
+]
 
 
 def build_serving_image(**kwargs):
@@ -28,12 +32,17 @@ def build_serving_image(**kwargs):
 
 
 SGLANG_SERVER_ARGS = {
+    "--dtype": "auto",
     "--reasoning-parser": "glm45",
     "--tool-call-parser": "glm45",
     "--dist-timeout": "3600",
     "--context-length": "32768",
-    "--mem-fraction-static": "0.8",
-    "--chunked-prefill-size": "16384",
+    "--mem-fraction-static": "0.7",
+    "--chunked-prefill-size": "8192",
+    "--max-prefill-tokens": "16384",
+    # Keep CUDA graph enabled, but avoid H200 cold-start hangs while compiling
+    # the largest FP8 piecewise graph shape.
+    "--piecewise-cuda-graph-max-tokens": "2048",
     "--model-loader-extra-config": '{"enable_multithread_load":true,"num_threads":8}',
     "--skip-server-warmup": "",
 }
@@ -42,7 +51,8 @@ modal = ModalConfig(
     gpu="H200",
     region="us",
     memory=1_048_576,
-    rollout_min_containers=1,
+    rollout_min_containers=2,
+    rollout_max_containers=2,
     rollout_target_inputs=32,
     proxy_regions=["us-west"],
     rollout_ephemeral_disk_mib=819_200,
@@ -62,7 +72,9 @@ modal = ModalConfig(
 class _Miles(MilesConfig):
     miles_model_script = "scripts/models/glm4.5-106B-A12B.sh"
 
-    hf_checkpoint = f"{PREP_PATH}/{MODEL_TAG}/bf16"
+    # hf_checkpoint is the native FP8 rollout checkpoint. The trainer weights
+    # come from ref_load below.
+    hf_checkpoint = f"{PREP_PATH}/{MODEL_TAG}/fp8"
     ref_load = f"{PREP_PATH}/{MODEL_TAG}/torch_dist"
     megatron_to_hf_mode = "raw"
     model_name = "glm4moe"
@@ -72,7 +84,7 @@ class _Miles(MilesConfig):
     num_gpus_per_node = 8
     colocate = False
     rollout_num_gpus = 0
-    rollout_num_gpus_per_engine = 8
+    rollout_num_gpus_per_engine = 4
     rollout_endpoint_url = None
     use_miles_router = True
 
@@ -105,8 +117,10 @@ class _Miles(MilesConfig):
     rm_type = "deepscaler"
     eval_interval = None
 
-    num_rollout = 3
-    save_interval = 20
+    num_rollout = 10
+    # Leave checkpoint saving disabled. Miles forces a final save whenever
+    # --save-interval is set, regardless of how large the interval is.
+    save_interval = None
     rollout_batch_size = 16
     rollout_max_response_len = 4096
     rollout_temperature = 0.8

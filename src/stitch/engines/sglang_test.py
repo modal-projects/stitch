@@ -46,7 +46,11 @@ class SGLangDiskDeltaAdapterTest(unittest.TestCase):
 
             await adapter.prepare()
             manifest = VersionManifest(
-                version=5, base_version=4, backend="disk_delta", load_format="auto"
+                version=5,
+                base_version=4,
+                backend="disk_delta",
+                load_format="auto",
+                transition_files=["model-00000-of-00001.safetensors"],
             )
             with mock.patch("httpx.AsyncClient", _RecordingPost):
                 _RecordingPost.last_json = None
@@ -63,6 +67,34 @@ class SGLangDiskDeltaAdapterTest(unittest.TestCase):
                 _RecordingPost.last_json,
                 {"model_path": "/local", "weight_version": "5", "flush_cache": False},
             )
+
+        asyncio.run(run())
+
+    def test_apply_manifest_skips_engine_reload_for_empty_delta(self) -> None:
+        async def run() -> None:
+            calls: dict[str, list] = {"apply": [], "init": []}
+
+            adapter = SGLangDiskDeltaAdapter(
+                upstream_url="http://up/",
+                local_checkpoint_dir="/local",
+                base_checkpoint_dir="/base",
+                apply_deltas=lambda local, root, version: calls["apply"].append((local, root, version)),
+                init_local_checkpoint=lambda local, base: calls["init"].append((local, base)),
+            )
+
+            manifest = VersionManifest(
+                version=5,
+                base_version=4,
+                backend="disk_delta",
+                load_format="auto",
+                transition_files=[],
+            )
+            with mock.patch("httpx.AsyncClient", _RecordingPost):
+                _RecordingPost.last_json = None
+                await adapter.apply_manifest(manifest, "/bulletin/versions/weight_v000005")
+
+            self.assertEqual(calls["apply"], [("/local", "/bulletin/versions", 5)])
+            self.assertIsNone(_RecordingPost.last_json)
 
         asyncio.run(run())
 
