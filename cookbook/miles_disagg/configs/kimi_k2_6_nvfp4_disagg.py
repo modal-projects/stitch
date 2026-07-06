@@ -75,6 +75,10 @@ MODEL_TAG = "kimi-k2-6-nvfp4"
 
 SIDECAR_COMMIT_MODE = "in_place"
 SIDECAR_DEBUG_REQUESTS = True
+# R3 routing-replay needs the dropless Megatron dispatch fix at startup.
+MEGATRON_RUNTIME_PATCHES = [
+    "/root/cookbook/miles_disagg/patches/megatron-r3-dispatch.patch",
+]
 
 
 def build_serving_image(**kwargs):

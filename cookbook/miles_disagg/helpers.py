@@ -70,11 +70,10 @@ def smoke_flash_pool(**kwargs: Any) -> None:
     _smoke_flash_pool(wake_on_demand=WAKE_ON_DEMAND, **kwargs)
 
 
-def apply_sglang_runtime_patches(patch_paths: list[str], repo_dir: str = "/sgl-workspace/sglang") -> None:
-    """Apply git patches to the runtime SGLang checkout before server start."""
+def _apply_git_patches(patch_paths: list[str], repo_dir: str, label: str, runtime_name: str) -> None:
     for patch_path in patch_paths:
         if not os.path.exists(patch_path):
-            raise FileNotFoundError(f"SGLang runtime patch not found: {patch_path}")
+            raise FileNotFoundError(f"{runtime_name} not found: {patch_path}")
 
         check = subprocess.run(
             ["git", "-C", repo_dir, "apply", "--check", patch_path],
@@ -83,7 +82,7 @@ def apply_sglang_runtime_patches(patch_paths: list[str], repo_dir: str = "/sgl-w
         )
         if check.returncode == 0:
             subprocess.run(["git", "-C", repo_dir, "apply", patch_path], check=True)
-            print(f"[SGLang patch] applied {patch_path}", flush=True)
+            print(f"[{label}] applied {patch_path}", flush=True)
             continue
 
         reverse = subprocess.run(
@@ -92,14 +91,24 @@ def apply_sglang_runtime_patches(patch_paths: list[str], repo_dir: str = "/sgl-w
             text=True,
         )
         if reverse.returncode == 0:
-            print(f"[SGLang patch] already applied {patch_path}", flush=True)
+            print(f"[{label}] already applied {patch_path}", flush=True)
             continue
 
         raise RuntimeError(
-            f"Cannot apply SGLang runtime patch {patch_path}\n"
+            f"Cannot apply {runtime_name} {patch_path}\n"
             f"apply --check stderr:\n{check.stderr}\n"
             f"reverse --check stderr:\n{reverse.stderr}"
         )
+
+
+def apply_sglang_runtime_patches(patch_paths: list[str], repo_dir: str = "/sgl-workspace/sglang") -> None:
+    """Apply git patches to the runtime SGLang checkout before server start."""
+    _apply_git_patches(patch_paths, repo_dir, "SGLang patch", "SGLang runtime patch")
+
+
+def apply_megatron_runtime_patches(patch_paths: list[str], repo_dir: str = "/root/Megatron-LM") -> None:
+    """Apply git patches to the runtime Megatron checkout before trainer start."""
+    _apply_git_patches(patch_paths, repo_dir, "Megatron patch", "Megatron runtime patch")
 
 
 def materialize_node_local_yaml(cfg: Any, field: str, dest_dir: str = "/root/.miles_node_yaml") -> None:
