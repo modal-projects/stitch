@@ -1,8 +1,9 @@
 # Disaggregated miles on Modal
 
 Train Kimi K2.6 or Moonlight with GRPO under **native NVFP4 QAT**, or run
-GLM-4.5-Air as a BF16 H200 experiment, while rollouts run on a separate,
-elastic pool of SGLang servers. The miles twin of
+GLM-4.5-Air as a BF16-trainer H200 experiment with BF16 or native HF FP8
+rollout weights, while rollouts run on a separate, elastic pool of SGLang
+servers. The miles twin of
 [`../slime_disagg`](../slime_disagg): same two-half architecture and the same
 `stitch` bulletin-board / sidecar machinery, but the trainer is **miles**.
 
@@ -13,7 +14,7 @@ The app has two halves.
   exports BF16. After each step it writes a sparse XOR weight delta to a Modal
   Volume (the "bulletin board") and publishes a new weight version.
 - **`Server`** is a Modal Flash pool of SGLang servers on the configured GPU
-  type: B200 for NVFP4 configs, H200 for GLM-4.5-Air BF16. A sidecar in each
+  type: B200 for NVFP4 configs, H200 for GLM-4.5-Air. A sidecar in each
   container watches the bulletin board, applies deltas in order, and serves
   rollouts pinned to an exact weight version. Requests for a version a container
   hasn't reached get `409` and miles retries.
@@ -28,8 +29,10 @@ NVFP4 QAT is native Megatron FP4 training (`NVFP4BlockScaling`, TransformerEngin
 rollout pool run on B200 — unlike the INT4 recipe, which fake-quantizes on H200.
 There is no simulated/non-Blackwell NVFP4 weight-QAT path.
 
-`glm45_air_bf16_disagg` is the exception: a BF16 experiment on H200 with no
-NVFP4 anywhere (see the variant note below).
+`glm45_air_bf16_disagg` and `glm45_air_fp8_disagg` are the exceptions: they are
+BF16 trainer experiments on H200. They do not use NVFP4 QAT or run
+`convert_hf_to_nvfp4.py`; the rollout base is either the prepared BF16 Hugging
+Face checkpoint or the native `zai-org/GLM-4.5-Air-FP8` checkpoint.
 
 ## Checkpoint lifecycle (three roles)
 
@@ -101,16 +104,42 @@ between the prep and deploy steps. Keep `POOL_MIN_CONTAINERS=0` during prep so
 warm containers don't crash-loop on the missing model path, and let each prep
 job finish before starting the next.
 
+### GLM-4.5-Air FP8 rollout variant
+
+`glm45_air_fp8_disagg` trains from the same BF16 Megatron `torch_dist` checkpoint
+as the BF16 variant, but serves the native Hugging Face FP8 checkpoint
+`zai-org/GLM-4.5-Air-FP8` in SGLang. The prepared paths are:
+
+- `/prep/glm45-air-bf16/bf16`: BF16 Hugging Face masters used to build
+  `torch_dist`.
+- `/prep/glm45-air-bf16/fp8`: native FP8 rollout base; this is miles
+  `--hf-checkpoint`, the SGLang served base, and the disk-delta baseline/export
+  quant config source.
+- `/prep/glm45-air-bf16/torch_dist`: Megatron raw-mode checkpoint loaded by the
+  trainer via `--ref-load`.
+
+Run the same GLM flow with `EXPERIMENT_CONFIG=glm45_air_fp8_disagg`. Keep
+`POOL_MIN_CONTAINERS=0` for `prepare_checkpoints`, `prepare_torch_dist`, and
+`prepare_dataset`; deploy afterward, smoke version 0, then launch training. The
+rollout pool is capped at two H200 containers, each using four GPUs. Each
+rollout container applies `patches/sglang-fp8-reload-attrs.patch` to the SGLang
+checkout at startup so online FP8 reload preserves SGLang's sharded parameter
+loaders.
+
 ### Fork dependencies
 
-The image pins a miles fork commit (`MILES_REPO_REF` in `modal_train.py`) that
-carries the disaggregated-rollout features plus the NVFP4/publish-only fixes
-this cookbook needs; push the ref to `modal-projects/miles` before deploying.
+The image pins `modal-projects/miles` branch `nvfp4-disagg-v2` by commit
+(`MILES_REPO_REF`). That branch carries the disaggregated-rollout features, the
+publish-only / NVFP4 fixes, and the GLM-Air native FP8 disk-delta export support
+needed by `glm45_air_fp8_disagg`.
+
 The megatron routing-replay (R3) fix is baked into the trainer image at build
 time (idempotent — a no-op once the fork ships it).
 
 Dev iteration: overlay a local miles checkout at deploy time (no rebuild, no
-push). This only overlays miles; the megatron R3 fix still comes from the bake.
+push). This is optional; the committed GLM-Air FP8 path does not require a local
+overlay. This only overlays miles; the megatron R3 fix still comes from the
+bake.
 
 ```bash
 MILES_LOCAL_DIR=/path/to/miles EXPERIMENT_CONFIG=moonlight_nvfp4_disagg \

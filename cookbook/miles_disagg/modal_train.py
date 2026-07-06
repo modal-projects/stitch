@@ -45,13 +45,13 @@ miles_cfg = exp.miles
 
 # The rollout Server pool warm-boots `min_containers` replicas the moment this app
 # is materialized — by a deploy OR by `modal run` of ANY function in it. Those
-# replicas serve the prepared NVFP4 base (miles_cfg.hf_checkpoint), so before that
+# replicas serve the prepared rollout base (miles_cfg.hf_checkpoint), so before that
 # base exists they crash-loop on a missing --model-path. prepare_checkpoints builds
 # the base, so it must run with the pool down: POOL_MIN_CONTAINERS=0.
 POOL_MIN_CONTAINERS = int(os.environ.get("POOL_MIN_CONTAINERS", modal_cfg.rollout_min_containers))
 
 APP_NAME = exp.APP_NAME
-MODEL_NAME = miles_cfg.hf_checkpoint  # the served NVFP4 base (a prepared local path)
+MODEL_NAME = miles_cfg.hf_checkpoint
 ROLLOUT_CONCURRENCY = modal_cfg.rollout_target_inputs or miles_cfg.sglang_server_concurrency
 N_TRAIN_NODES = helpers.training_nodes(miles_cfg)
 
@@ -72,11 +72,11 @@ MILES_ROOT = "/root/miles"
 # must we (we run train_async.py directly rather than via execute_train).
 MEGATRON_PATH = "/root/Megatron-LM"
 # Fork commit with the disaggregated-rollout features (opaque HTTP endpoint,
-# publish-only disk-delta, request hook) plus the NVFP4 fixes this cookbook
-# needs. Pin to an exact commit, not the branch tip (cached image layer); push
-# the ref to modal-projects/miles before deploying.
+# publish-only disk-delta, request hook) plus the NVFP4 and GLM-Air FP8 fixes
+# this cookbook needs. Pin to an exact commit, not the branch tip (cached image
+# layer); push the ref to modal-projects/miles before deploying.
 MILES_REPO_URL = "https://github.com/modal-projects/miles.git"
-MILES_REPO_REF = "e9ad52dbbe09b6113b4fa4dccfb5ace35341540e"
+MILES_REPO_REF = "852fb9a5cfb3c4630691b643ed354a9703ff3722"
 
 # Build-time bake of the megatron R3 dispatch fix (see the .run_commands call
 # below). Kept as a string so the build step has no host-file dependency; the
@@ -94,26 +94,6 @@ _R3_DISPATCH_BAKE_PY = (
     f"n=s.count({_R3_DISPATCH_OLD!r});"
     f"p.write_text(s.replace({_R3_DISPATCH_OLD!r}, {_R3_DISPATCH_NEW!r}));"
     "print(f'[R3 bake] patched {n} dispatch site(s) in token_dispatcher.py')"
-)
-
-# Keep GLM4Moe expert-bias exports fp32 for BF16 disk-delta byte-shape parity.
-_GLM4MOE_EXPERT_BIAS_TARGET = f"{MILES_ROOT}/miles/backends/megatron_utils/megatron_to_hf/glm4moe.py"
-_GLM4MOE_EXPERT_BIAS_OLD = (
-    '        elif rest == "mlp.router.expert_bias":\n'
-    '            return [(f"model.layers.{layer_idx}.mlp.gate.e_score_correction_bias", to_model_dtype(args, param))]'
-)
-_GLM4MOE_EXPERT_BIAS_NEW = (
-    '        elif rest == "mlp.router.expert_bias":\n'
-    "            return [(f\"model.layers.{layer_idx}.mlp.gate.e_score_correction_bias\", param)]"
-)
-_GLM4MOE_EXPERT_BIAS_BAKE_PY = (
-    "import pathlib;"
-    f"p=pathlib.Path({_GLM4MOE_EXPERT_BIAS_TARGET!r});"
-    "s=p.read_text();"
-    f"n=s.count({_GLM4MOE_EXPERT_BIAS_OLD!r});"
-    "assert n == 1, f'expected exactly one GLM4Moe expert-bias export site, found {n}';"
-    f"p.write_text(s.replace({_GLM4MOE_EXPERT_BIAS_OLD!r}, {_GLM4MOE_EXPERT_BIAS_NEW!r}));"
-    "print(f'[GLM4Moe bake] patched {n} expert-bias dtype export site(s) in glm4moe.py')"
 )
 
 TORCH_DIST_CONVERT_WRAPPER = "/root/convert_hf_to_torch_dist_modal.py"
@@ -177,9 +157,6 @@ if getattr(exp, "USE_MODAL_TORCH_DIST_WRAPPER", False):
         TORCH_DIST_CONVERT_WRAPPER,
         copy=True,
     )
-
-if getattr(exp, "PATCH_GLM4MOE_EXPERT_BIAS_FP32", False):
-    image = image.run_commands(f"python3 -c {shlex.quote(_GLM4MOE_EXPERT_BIAS_BAKE_PY)}")
 
 # Local source mounted at container start (no rebuild on code edits). Modal puts
 # /root on PYTHONPATH, so both packages import from subprocesses (the sidecar, Ray
@@ -290,6 +267,7 @@ WARMUP_PAYLOAD = {
         exp.DELTA_BULLETIN_ROOT: delta_volume,
     },
     min_containers=POOL_MIN_CONTAINERS,
+    max_containers=getattr(modal_cfg, "rollout_max_containers", None),
     timeout=40 * MINUTES,
     scaledown_window=15 * MINUTES,
     # The sidecar copies the full served base (~591 GB for K2.6) to
@@ -314,6 +292,7 @@ class Server:
 
     @modal.enter()
     def startup(self) -> None:
+        helpers.apply_sglang_runtime_patches(list(getattr(exp, "SGLANG_RUNTIME_PATCHES", [])))
         self.endpoint = SGLangEndpoint(
             model_path=MODEL_NAME,
             worker_port=SGLANG_PORT,
@@ -330,9 +309,8 @@ class Server:
             request_timeout=120.0,
             max_attempts_per_request=3,
         )
-        # The served NVFP4 base is a prepared directory on the prep Volume
-        # (MODEL_NAME is its absolute path); deltas are applied host-side onto a
-        # copy of it.
+        # The served base is a prepared directory (MODEL_NAME is its absolute
+        # path); deltas are applied host-side onto a copy of it.
         self.sidecar = helpers.start_sglang_sidecar(
             sidecar_port=SIDECAR_PORT,
             sglang_port=SGLANG_PORT,
@@ -448,19 +426,25 @@ class Trainer:
         # run is a forward pointer move, never a colliding rewind.
         run_id = uuid.uuid4().hex[:12]
         cfg.update_weight_disk_dir = f"{exp.DELTA_BULLETIN_ROOT}/{run_id}"
-        cfg.load = f"{CHECKPOINTS_PATH}/{run_id}/checkpoints"
-        cfg.save = f"{CHECKPOINTS_PATH}/{run_id}/checkpoints"
+        if getattr(cfg, "save_interval", None) is None:
+            cfg.load = None
+            cfg.save = None
+            cfg.save_hf = None
+        else:
+            cfg.load = f"{CHECKPOINTS_PATH}/{run_id}/checkpoints"
+            cfg.save = f"{CHECKPOINTS_PATH}/{run_id}/checkpoints"
         # Merge the dynamic bulletin identity into custom_config_path (which already
         # carries the request-gating knobs). miles setattr's every key onto args,
         # so the publish + request hooks read them via getattr(args, ...).
         existing = dict(getattr(cfg, "custom_config_path", {}) or {})
-        cfg.custom_config_path = {
+        custom_config = {
             **existing,
             "update_weight_delta_volume_name": exp.DELTA_VOLUME_NAME,
             "rollout_modal_flash_app_name": APP_NAME,
             "rollout_modal_flash_server_cls_name": Server.__name__,
             "run_id": run_id,
         }
+        cfg.custom_config_path = custom_config
         helpers.prepare_miles_config(cfg, tempfile.mkdtemp())
         cmd = helpers.build_train_cmd(cfg, MILES_ROOT)
 
@@ -470,9 +454,7 @@ class Trainer:
         # reconcile to a finished run's stale high-water version.
         from cookbook.miles_disagg import hooks
 
-        hooks.claim_pool(
-            SimpleNamespace(update_weight_disk_dir=cfg.update_weight_disk_dir, **cfg.custom_config_path)
-        )
+        hooks.claim_pool(SimpleNamespace(update_weight_disk_dir=cfg.update_weight_disk_dir, **custom_config))
 
         print(f"Training {experiment}: nodes={N_TRAIN_NODES}, rollout_endpoint={cfg.rollout_endpoint_url}")
         print(f"Command: {cmd}")
@@ -527,9 +509,10 @@ def prepare_checkpoints() -> None:
     prep_volume.reload()
     tag = exp.MODEL_TAG
     bf16_dir = f"{PREP_PATH}/{tag}/bf16"
+    fp8_dir = f"{PREP_PATH}/{tag}/fp8"
     nvfp4_dir = f"{PREP_PATH}/{tag}/nvfp4"
     served_checkpoint_format = getattr(exp, "SERVED_CHECKPOINT_FORMAT", "nvfp4")
-    if served_checkpoint_format not in {"bf16", "nvfp4"}:
+    if served_checkpoint_format not in {"bf16", "fp8", "nvfp4"}:
         raise SystemExit(f"Unsupported SERVED_CHECKPOINT_FORMAT={served_checkpoint_format!r}")
     tools = f"{MILES_ROOT}/tools"
 
@@ -575,6 +558,20 @@ def prepare_checkpoints() -> None:
     if served_checkpoint_format == "bf16":
         prep_volume.commit()
         print(f"Prepared masters={bf16_dir} served_base={bf16_dir}")
+        return
+
+    if served_checkpoint_format == "fp8":
+        fp8_source_model = getattr(exp, "ROLLOUT_SOURCE_MODEL", None)
+        if not fp8_source_model:
+            raise SystemExit("SERVED_CHECKPOINT_FORMAT='fp8' requires ROLLOUT_SOURCE_MODEL")
+
+        def _build_fp8(out: str) -> None:
+            fp8_src = snapshot_download(fp8_source_model)
+            subprocess.run(f"cp -aL {fp8_src}/. {out}/", shell=True, check=True)
+
+        _staged(fp8_dir, _build_fp8)
+        prep_volume.commit()
+        print(f"Prepared masters={bf16_dir} served_base={fp8_dir}")
         return
 
     # 2. served NVFP4 base (miles' TE-direct quantizer). bf16
