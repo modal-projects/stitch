@@ -19,6 +19,9 @@ DISABLE_HF_TRANSFER = True
 
 SIDECAR_COMMIT_MODE = "in_place"
 SIDECAR_DEBUG_REQUESTS = True
+MILES_RUNTIME_PATCHES = [
+    "/root/cookbook/miles_disagg/patches/miles-glm4moe-expert-bias-fp32.patch",
+]
 
 
 def build_serving_image(**kwargs):

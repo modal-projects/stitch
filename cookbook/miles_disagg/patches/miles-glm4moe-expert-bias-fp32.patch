@@ -1,0 +1,13 @@
+diff --git a/miles/backends/megatron_utils/megatron_to_hf/glm4moe.py b/miles/backends/megatron_utils/megatron_to_hf/glm4moe.py
+index 11819bddc..a0cee1d14 100644
+--- a/miles/backends/megatron_utils/megatron_to_hf/glm4moe.py
++++ b/miles/backends/megatron_utils/megatron_to_hf/glm4moe.py
+@@ -114,7 +114,7 @@ def convert_glm4moe_to_hf(args, name, param):
+             return [(hf_name, to_model_dtype(args, param, hf_name))]
+         elif rest == "mlp.router.expert_bias":
+             hf_name = f"model.layers.{layer_idx}.mlp.gate.e_score_correction_bias"
+-            return [(hf_name, to_model_dtype(args, param, hf_name))]
++            return [(hf_name, param)]
+ 
+         # qk norm
+         elif rest == "self_attention.q_layernorm.weight":

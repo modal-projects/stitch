@@ -365,6 +365,11 @@ class Trainer:
     @modal.enter()
     def start_ray(self) -> None:
         rank, master_addr, my_ip = helpers.get_modal_cluster_context(N_TRAIN_NODES)
+        # /root/miles is editable-installed from the image checkout, so imports
+        # read on-disk source; patch every node here before Ray starts.
+        helpers.apply_miles_runtime_patches(
+            list(getattr(exp, "MILES_RUNTIME_PATCHES", [])), repo_dir=MILES_ROOT
+        )
         self.rank = rank
         # Per-node host-RAM trace: the trainer can OOM-kill at host-RAM exhaustion
         # (the publish/update_weights gather is the peak), and Modal's kill leaves no

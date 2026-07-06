@@ -23,6 +23,9 @@ SIDECAR_DEBUG_REQUESTS = True
 SGLANG_RUNTIME_PATCHES = [
     "/root/cookbook/miles_disagg/patches/sglang-fp8-reload-attrs.patch",
 ]
+MILES_RUNTIME_PATCHES = [
+    "/root/cookbook/miles_disagg/patches/miles-glm4moe-expert-bias-fp32.patch",
+]
 
 
 def build_serving_image(**kwargs):

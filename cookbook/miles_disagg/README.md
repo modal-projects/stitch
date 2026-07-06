@@ -136,6 +136,10 @@ needed by `glm45_air_fp8_disagg`.
 The megatron routing-replay (R3) fix is baked into the trainer image at build
 time (idempotent — a no-op once the fork ships it).
 
+The GLM4Moe expert-bias fp32-export fix is applied at trainer startup as
+`patches/miles-glm4moe-expert-bias-fp32.patch` via `MILES_RUNTIME_PATCHES`
+against the `/root/miles` checkout (idempotent).
+
 Dev iteration: overlay a local miles checkout at deploy time (no rebuild, no
 push). This is optional; the committed GLM-Air FP8 path does not require a local
 overlay. This only overlays miles; the megatron R3 fix still comes from the
