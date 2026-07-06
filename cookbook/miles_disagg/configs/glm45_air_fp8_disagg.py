@@ -23,6 +23,10 @@ SIDECAR_DEBUG_REQUESTS = True
 SGLANG_RUNTIME_PATCHES = [
     "/root/cookbook/miles_disagg/patches/sglang-fp8-reload-attrs.patch",
 ]
+# R3 routing-replay needs the dropless Megatron dispatch fix at startup.
+MEGATRON_RUNTIME_PATCHES = [
+    "/root/cookbook/miles_disagg/patches/megatron-r3-dispatch.patch",
+]
 
 
 def build_serving_image(**kwargs):

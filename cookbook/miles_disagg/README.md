@@ -133,13 +133,14 @@ The image pins `modal-projects/miles` branch `nvfp4-disagg-v2` by commit
 publish-only / NVFP4 fixes, and the GLM-Air native FP8 disk-delta export support
 needed by `glm45_air_fp8_disagg`.
 
-The megatron routing-replay (R3) fix is baked into the trainer image at build
-time (idempotent — a no-op once the fork ships it).
+The megatron routing-replay (R3) fix is applied at trainer startup as
+`patches/megatron-r3-dispatch.patch` via `MEGATRON_RUNTIME_PATCHES` against the
+`/root/Megatron-LM` checkout (idempotent).
 
 Dev iteration: overlay a local miles checkout at deploy time (no rebuild, no
-push). This is optional; the committed GLM-Air FP8 path does not require a local
-overlay. This only overlays miles; the megatron R3 fix still comes from the
-bake.
+push). This is optional; the committed GLM-Air FP8 path does not require a
+local overlay. This only overlays miles; the megatron R3 fix still comes from
+the runtime patch.
 
 ```bash
 MILES_LOCAL_DIR=/path/to/miles EXPERIMENT_CONFIG=moonlight_nvfp4_disagg \
