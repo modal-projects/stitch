@@ -295,6 +295,9 @@ WARMUP_PAYLOAD = {
     # The sidecar copies the full served base (~591 GB for K2.6) to
     # /local-checkpoint on ephemeral disk; Modal's default is too small.
     ephemeral_disk=modal_cfg.rollout_ephemeral_disk_mib,
+    # Keep the local checkpoint page-cache resident across reloads (see
+    # configs/base.py rollout_memory_mib).
+    memory=modal_cfg.rollout_memory_mib,
     include_source=False,
 )
 @modal.experimental.http_server(

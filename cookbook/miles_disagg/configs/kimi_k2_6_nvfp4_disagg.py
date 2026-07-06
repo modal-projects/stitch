@@ -129,6 +129,9 @@ modal = ModalConfig(
     # The served NVFP4 base is ~591 GB; the sidecar copies it to /local-checkpoint
     # on ephemeral disk. 800 GiB covers the copy plus in-place delta-apply headroom.
     rollout_ephemeral_disk_mib=819_200,
+    # 700 GiB host-RAM request: the 595 GB local checkpoint must stay
+    # page-cache resident or every reload pays ~120s of capacity misses.
+    rollout_memory_mib=716_800,
     # Trainer nodes: Ray logs + object spill (rollout batches + per-publish full-model
     # gathers) accumulate under /tmp/ray over the run; the default disk progressively
     # ENOSPC'd. 2 TiB of the B200:8 local NVMe gives ample headroom.

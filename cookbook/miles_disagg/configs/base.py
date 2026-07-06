@@ -66,6 +66,12 @@ class ModalConfig:
     # disk; large models exceed Modal's default. None = Modal default (fine for
     # small bases like Moonlight).
     rollout_ephemeral_disk_mib: int | None = None
+    # Host-RAM request (MiB) for the rollout Server. Reloads read the whole
+    # local checkpoint through the page cache; when it doesn't fit, every
+    # reload pays capacity misses at disk speed (measured ~120s of iter_wait
+    # on K2.6's 595 GB base). Request checkpoint size + engine headroom so the
+    # base stays resident. None = Modal default.
+    rollout_memory_mib: int | None = None
     # Nodes x GPUs/node for the prepare_torch_dist conversion. The full 1T K2.6
     # needs >=2 nodes (8-way OOMs); a small proxy (e.g. 2-layer) fits 1 GPU (the
     # convert auto-derives pp=world_size and asserts pp <= num_layers).

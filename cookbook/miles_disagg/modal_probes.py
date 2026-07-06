@@ -82,6 +82,7 @@ def _dd_read_gbps(path: str, label: str, *, cold: bool = True) -> float:
         mt.exp.DELTA_BULLETIN_ROOT: mt.delta_volume,
     },
     ephemeral_disk=mt.modal_cfg.rollout_ephemeral_disk_mib,
+    memory=mt.modal_cfg.rollout_memory_mib,
     timeout=120 * mt.MINUTES,
 )
 def profile_reload(delta_run_id: str = "", delta_version: int = 0, load_plan: int = 0) -> None:
