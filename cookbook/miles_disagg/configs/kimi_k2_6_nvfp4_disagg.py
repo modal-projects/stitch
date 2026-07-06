@@ -97,6 +97,10 @@ SGLANG_SERVER_ARGS = {
     "--mem-fraction-static": "0.85",
     "--chunked-prefill-size": "16384",
     "--schedule-conservativeness": "0.5",
+    # Reload disk term: 24 reader threads (default 8). RAM requests up to
+    # 800 GiB did NOT keep the 595 GB base page-cache resident (~120s of
+    # capacity-miss iter_wait regardless), so read wider instead.
+    "--model-loader-extra-config": '{"enable_multithread_load":true,"num_threads":24}',
     "--schedule-policy": "lpm",
     "--enable-hierarchical-cache": "",
     "--hicache-ratio": "2",
@@ -129,11 +133,6 @@ modal = ModalConfig(
     # The served NVFP4 base is ~591 GB; the sidecar copies it to /local-checkpoint
     # on ephemeral disk. 800 GiB covers the copy plus in-place delta-apply headroom.
     rollout_ephemeral_disk_mib=819_200,
-    # 800 GiB host-RAM request (B200:4 half-node ceiling ~880 GiB): the 595 GB
-    # local checkpoint competes with the loader's ~80 GB of transient shard
-    # tensors and engine host state inside the cgroup — at 700 GiB the kernel
-    # still evicted the checkpoint every reload (~130s of capacity misses).
-    rollout_memory_mib=819_200,
     # Trainer nodes: Ray logs + object spill (rollout batches + per-publish full-model
     # gathers) accumulate under /tmp/ray over the run; the default disk progressively
     # ENOSPC'd. 2 TiB of the B200:8 local NVMe gives ample headroom.
