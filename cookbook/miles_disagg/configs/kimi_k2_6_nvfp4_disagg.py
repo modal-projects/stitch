@@ -97,10 +97,6 @@ SGLANG_SERVER_ARGS = {
     "--mem-fraction-static": "0.85",
     "--chunked-prefill-size": "16384",
     "--schedule-conservativeness": "0.5",
-    # Reload disk term: 24 reader threads (default 8). RAM requests up to
-    # 800 GiB did NOT keep the 595 GB base page-cache resident (~120s of
-    # capacity-miss iter_wait regardless), so read wider instead.
-    "--model-loader-extra-config": '{"enable_multithread_load":true,"num_threads":24}',
     "--schedule-policy": "lpm",
     "--enable-hierarchical-cache": "",
     "--hicache-ratio": "2",
