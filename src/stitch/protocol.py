@@ -242,6 +242,10 @@ class VersionManifest:
     compression_format: str | None = None
     checksum_format: str | None = None
     transition_files: list[str] = field(default_factory=list)
+    # The touched checkpoint tensor names (the delta index's weight_map keys).
+    # Engines that support partial reloads use these to reload only the
+    # modules a version actually changed; empty means unknown -> full reload.
+    transition_weights: list[str] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
     protocol_version: int = PROTOCOL_VERSION
     artifacts: list[Artifact] = field(default_factory=list)
@@ -264,6 +268,7 @@ class VersionManifest:
         transition_files = [str(x) for x in data.get("transition_files", [])]
         if not transition_files:
             transition_files = [a.path for a in artifacts if a.kind == "transition"]
+        transition_weights = [str(x) for x in data.get("transition_weights", [])]
         return cls(
             version=int(data["version"]),
             base_version=int(data["base_version"]),
@@ -273,6 +278,7 @@ class VersionManifest:
             compression_format=_optional_str(data.get("compression_format")),
             checksum_format=_optional_str(data.get("checksum_format")),
             transition_files=transition_files,
+            transition_weights=transition_weights,
             created_at=float(data.get("created_at", 0.0)),
             protocol_version=protocol_version,
             artifacts=artifacts,
@@ -304,7 +310,8 @@ class VersionManifest:
         with index_path.open("r", encoding="utf-8") as f:
             index = json.load(f)
         meta = index.get("metadata") or {}
-        files = sorted({str(name) for name in (index.get("weight_map") or {}).values()})
+        weight_map = index.get("weight_map") or {}
+        files = sorted({str(name) for name in weight_map.values()})
         return cls(
             version=int(meta["version"]),
             base_version=int(meta["base_version"]),
@@ -314,6 +321,7 @@ class VersionManifest:
             compression_format=_optional_str(meta.get("compression_format")),
             checksum_format=_optional_str(meta.get("checksum_format")),
             transition_files=files,
+            transition_weights=sorted(str(name) for name in weight_map),
             artifacts=[Artifact(kind="transition", path=path) for path in files],
             run_id=run_id,
             base_model=base_model,
@@ -341,6 +349,8 @@ class VersionManifest:
             data["compression_format"] = self.compression_format
         if self.checksum_format is not None:
             data["checksum_format"] = self.checksum_format
+        if self.transition_weights:
+            data["transition_weights"] = list(self.transition_weights)
         if self.run_id is not None:
             data["run_id"] = self.run_id
         if self.base_model is not None:
@@ -591,8 +601,19 @@ class EngineAdapter(Protocol):
 
     An adapter bridges the sync manager to one inference engine instance.
     Required methods are called during every version commit; optional methods
-    (``prepare``, ``reset``) are probed with ``getattr`` at startup and on run
-    switches, so adapters may omit them.
+    (``prepare``, ``reset``, ``stage_manifest``, ``commit_manifest``) are probed
+    with ``getattr``, so adapters may omit them.
+
+    An adapter that implements BOTH ``stage_manifest(manifest, version_path)``
+    and ``commit_manifest(manifest, version_path, weight_names=None)`` gets the
+    staged split: the sync manager runs ``stage_manifest`` (host-side
+    materialization) while the engine still serves, and only
+    ``commit_manifest`` (the engine reload) under the commit gate / pause —
+    instead of one combined ``apply_manifest`` inside the gate.
+    ``weight_names`` is the tail's union of touched tensor names (from
+    ``transition_weights``), or None when any tail version left them unknown;
+    adapters may use it for partial reloads. Either hook may return an
+    optional metrics dict, surfaced under ``server_info()["metrics"]``.
 
     See :class:`stitch.engines.sglang.SGLangDiskDeltaAdapter` for the canonical
     implementation.
