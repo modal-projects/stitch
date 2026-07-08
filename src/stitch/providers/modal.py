@@ -58,7 +58,9 @@ def resolve_flash_gateway_url(app_name: str, cls_name: str) -> str:
     return str(urls[0]).rstrip("/")
 
 
-def wake_targets(targets: list[str], version: int, *, timeout: float = 5.0) -> None:
+def wake_targets(
+    targets: list[str], version: int, *, run_id: str | None = None, timeout: float = 5.0
+) -> None:
     import logging
     from concurrent.futures import ThreadPoolExecutor
 
@@ -75,10 +77,14 @@ def wake_targets(targets: list[str], version: int, *, timeout: float = 5.0) -> N
     # trust_env=False keeps proxy env vars from rerouting localhost/gateway hops.
     with httpx.Client(timeout=timeout, trust_env=False) as client:
 
+        body: dict[str, object] = {"target_version": int(version)}
+        if run_id is not None:
+            body["run_id"] = run_id
+
         def wake_one(target: str) -> None:
             url = f"{target}/rpc_sync_from_bulletin_board"
             try:
-                resp = client.post(url, json={"target_version": int(version)})
+                resp = client.post(url, json=body)
                 resp.raise_for_status()
                 logger.info("Wake sync accepted by %s: %s", target, resp.text[:200])
             except Exception as exc:  # noqa: BLE001

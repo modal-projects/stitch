@@ -48,7 +48,16 @@ def create_app(
     include_sync_routes: bool = True,
     upstream_timeout: float | None = 3600.0,
     background_sync_interval: float | None = None,
+    run_resolver: Callable[[dict[str, Any]], str | None] | None = None,
 ):
+    """Build the versioned weight-sync proxy app for one rollout engine.
+
+    ``run_resolver`` extracts which run/chain a request's payload addresses
+    (e.g. ``lambda payload: payload.get("lora_path")`` for a multi-adapter
+    pool), keying the version gate and the KV namespace to that chain. None —
+    the default, and the only mode single-chain managers support — gates every
+    request against the manager's one served version.
+    """
     from fastapi import FastAPI, Request
     from fastapi.responses import JSONResponse, Response
     import httpx
@@ -140,7 +149,10 @@ def create_app(
         async def rpc_sync_from_bulletin_board(request: Request) -> dict[str, Any]:
             payload = await request.json()
             target = payload.get("target_version")
-            manager.queue_sync(int(target) if target is not None else None)
+            manager.queue_sync(
+                int(target) if target is not None else None,
+                run_id=payload.get("run_id"),
+            )
             return {
                 "accepted": True,
                 "current_version": manager.current_version,
@@ -198,6 +210,7 @@ def create_app(
             if versioned_route
             else WeightVersionPolicy()
         )
+        request_run = run_resolver(payload) if (run_resolver and payload) else None
         request_id = request.headers.get("x-slime-request-id", "-")
 
         forward_headers = _forward_headers(request.headers)
@@ -215,13 +228,16 @@ def create_app(
                 payload["rid"] = rid
 
         try:
-            ctx = manager.request_context(policy if versioned_route else None)
+            ctx = manager.request_context(
+                policy if versioned_route else None, run_id=request_run
+            )
             async with ctx as start_version:
                 if versioned_route and payload is not None:
                     # Stamp the serving version into the engine's KV cache
                     # namespace: requests admitted under different versions
-                    # structurally cannot share radix-tree prefixes.
-                    run_id = getattr(manager, "current_run_id", None)
+                    # structurally cannot share radix-tree prefixes. On a
+                    # multi-run manager the namespace is the REQUEST's chain.
+                    run_id = request_run or getattr(manager, "current_run_id", None)
                     user_key = payload.get("extra_key")
                     if isinstance(user_key, list):
                         payload["extra_key"] = [
@@ -316,7 +332,13 @@ def create_app(
                     )
                 # Captured while the request is still pinned, so a commit
                 # cannot advance the version between serving and reporting.
-                end_version = manager.current_version
+                # A run-keyed request reports its own chain's version (a
+                # run_resolver implies a run-aware manager).
+                end_version = (
+                    manager._version_for(request_run)
+                    if request_run is not None
+                    else manager.current_version
+                )
         except PolicyViolation as exc:
             logger.info(
                 "sidecar_proxy reject request_id=%s path=%s current=%s error=%s",

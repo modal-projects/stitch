@@ -49,7 +49,9 @@ class RolloutSyncManager(Protocol):
 
     async def server_info(self) -> dict[str, Any]: ...
 
-    def request_context(self, policy: WeightVersionPolicy | None = None) -> Any: ...
+    def request_context(
+        self, policy: WeightVersionPolicy | None = None, run_id: str | None = None
+    ) -> Any: ...
 
 
 class RolloutAdmissionGate:
@@ -95,8 +97,18 @@ class RolloutAdmissionGate:
             return policy.exact_version is not None
         return True
 
-    def _policy_error(self, policy: WeightVersionPolicy) -> dict[str, Any] | None:
-        return evaluate_version_policy(self.current_version, policy)
+    def _version_for(self, run_id: str | None) -> int:
+        """The served version a request's policy is checked against (and the
+        version stamped on it). Single-chain managers serve one version and
+        ignore the key; a multi-run manager (N adapter chains behind one gate)
+        overrides this to resolve the request's own chain."""
+        del run_id
+        return self.current_version
+
+    def _policy_error(
+        self, policy: WeightVersionPolicy, run_id: str | None = None
+    ) -> dict[str, Any] | None:
+        return evaluate_version_policy(self._version_for(run_id), policy)
 
     def _on_admit(self, policy: WeightVersionPolicy) -> None:
         if policy.exact_version is not None:
@@ -109,7 +121,7 @@ class RolloutAdmissionGate:
             if not self._exact_inflight[key]:
                 del self._exact_inflight[key]
 
-    def _on_policy_violation(self, error: dict[str, Any]) -> None:
+    def _on_policy_violation(self, error: dict[str, Any], run_id: str | None = None) -> None:
         """Hook run under the lock when admission is rejected."""
 
     def _commit_ready(self) -> bool:
@@ -121,20 +133,25 @@ class RolloutAdmissionGate:
         return self._active_requests == 0
 
     @asynccontextmanager
-    async def request_context(self, policy: WeightVersionPolicy | None = None):
+    async def request_context(
+        self, policy: WeightVersionPolicy | None = None, run_id: str | None = None
+    ):
         """Admit one request: gate on in-progress commits, enforce the policy,
         and capture the serving version — all under one ``_active_cond``
         acquisition, so the yielded version is exactly what the engine serves
         the request on. Raises :class:`PolicyViolation` when the policy fails.
+
+        ``run_id`` keys the check to one chain on a multi-run manager (see
+        :meth:`_version_for`); single-chain managers ignore it.
         """
         policy = policy or WeightVersionPolicy()
         async with self._active_cond:
             await self._active_cond.wait_for(lambda: not self._admission_gated(policy))
-            error = self._policy_error(policy)
+            error = self._policy_error(policy, run_id)
             if error is not None:
-                self._on_policy_violation(error)
+                self._on_policy_violation(error, run_id)
                 raise PolicyViolation(error)
-            start_version = self.current_version
+            start_version = self._version_for(run_id)
             self._active_requests += 1
             self._on_admit(policy)
         try:
@@ -258,9 +275,9 @@ class WeightSyncManager(RolloutAdmissionGate):
             "inflight_exact_versions": self.inflight_exact_versions,
         }
 
-    def _on_policy_violation(self, error: dict[str, Any]) -> None:
+    def _on_policy_violation(self, error: dict[str, Any], run_id: str | None = None) -> None:
         if error["error"]["type"] == "WeightVersionNotReady":
-            self.queue_sync(error["error"]["target_version"])
+            self.queue_sync(error["error"]["target_version"], run_id=run_id)
 
     async def validate_policy(self, policy: WeightVersionPolicy) -> tuple[bool, int, Mapping[str, Any] | None]:
         """Advisory pre-check. The authoritative check is in request_context."""
@@ -269,14 +286,17 @@ class WeightSyncManager(RolloutAdmissionGate):
             self.queue_sync(error["error"]["target_version"])
         return error is None, self.current_version, error
 
-    def queue_sync(self, target_version: int | None = None) -> None:
-        run_id, latest = self.board.read_latest()
+    def queue_sync(self, target_version: int | None = None, run_id: str | None = None) -> None:
+        # ``run_id`` exists for interface parity with multi-run managers and is
+        # ignored: this manager follows the board's single chain.
+        del run_id
+        board_run_id, latest = self.board.read_latest()
         self.latest_seen_version = max(self.latest_seen_version, latest)
         hint = int(target_version) if target_version is not None else 0
         # A run change is always work (the pointer moved to a fresh chain, even if
         # its version number is lower than what we serve); within a run it's work
         # only when the target exceeds what we've applied.
-        needs_switch = run_id != self.current_run_id
+        needs_switch = board_run_id != self.current_run_id
         if not needs_switch and max(latest, hint) <= self.current_version:
             return
         self.queued_target_version = max(latest, hint, self.queued_target_version or 0)

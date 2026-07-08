@@ -338,6 +338,62 @@ class SyncManagerTest(unittest.TestCase):
         asyncio.run(run())
 
 
+class RunKeyedGateTest(unittest.TestCase):
+    """The optional ``run_id`` threading a multi-run manager builds on: policy
+    checks, the yielded serving version, and the violation hook are all keyed
+    by the request's chain via ``_version_for``."""
+
+    class MultiRunGate(RolloutAdmissionGate):
+        def __init__(self) -> None:
+            super().__init__()
+            self.versions = {"run-a": 3, "run-b": 1}
+            self.violations: list[tuple[str, str | None]] = []
+
+        def _version_for(self, run_id: str | None) -> int:
+            return self.versions.get(run_id, 0)
+
+        def _on_policy_violation(self, error, run_id=None) -> None:
+            self.violations.append((error["error"]["type"], run_id))
+
+    def test_policy_and_serving_version_resolve_per_run(self) -> None:
+        async def run() -> None:
+            gate = self.MultiRunGate()
+
+            async with gate.request_context(
+                WeightVersionPolicy(min_required_version=3), run_id="run-a"
+            ) as version:
+                self.assertEqual(version, 3)
+
+            with self.assertRaises(PolicyViolation):
+                async with gate.request_context(
+                    WeightVersionPolicy(min_required_version=3), run_id="run-b"
+                ):
+                    pass
+            self.assertEqual(gate.violations, [("WeightVersionNotReady", "run-b")])
+
+            # An unkeyed request on a run-aware gate resolves like an unknown
+            # chain (version 0): base traffic, no policy -> admitted.
+            async with gate.request_context() as version:
+                self.assertEqual(version, 0)
+
+        asyncio.run(run())
+
+    def test_single_chain_managers_ignore_the_key(self) -> None:
+        async def run() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                board = FilesystemBulletinBoard(tmp)
+                board.publish_manifest(VersionManifest(version=1, base_version=0, backend="fake", load_format="noop"))
+                manager = WeightSyncManager(board=board, engine=FakeEngine())
+                await manager.sync_to(1)
+
+                async with manager.request_context(
+                    WeightVersionPolicy(min_required_version=1), run_id="anything"
+                ) as version:
+                    self.assertEqual(version, 1)
+
+        asyncio.run(run())
+
+
 class AdmissionGateCommitDriverTest(unittest.TestCase):
     """The shared commit_version driver both WeightSyncManager and the hot-load
     ProviderShim commit through."""

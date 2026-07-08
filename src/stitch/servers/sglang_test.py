@@ -291,6 +291,102 @@ class SidecarStampingTest(unittest.TestCase):
                 self.assertNotIn("weight_version_end", resp.json())
 
 
+class _MultiRunManager:
+    """Minimal run-aware RolloutSyncManager: per-chain versions behind one gate."""
+
+    def __init__(self, versions: dict[str, int]) -> None:
+        from stitch.sync import RolloutAdmissionGate
+
+        class _Gate(RolloutAdmissionGate):
+            def _version_for(self, run_id):
+                return versions.get(run_id, 0)
+
+        self._gate = _Gate()
+        self.versions = versions
+        self.debug_requests = False
+        self.current_run_id = None
+        self.queued: list[tuple[int | None, str | None]] = []
+
+    @property
+    def current_version(self) -> int:
+        return max(self.versions.values(), default=0)
+
+    @property
+    def active_requests(self) -> int:
+        return self._gate.active_requests
+
+    def _version_for(self, run_id):
+        return self._gate._version_for(run_id)
+
+    def request_context(self, policy=None, run_id=None):
+        return self._gate.request_context(policy, run_id=run_id)
+
+    def queue_sync(self, target_version=None, run_id=None) -> None:
+        self.queued.append((target_version, run_id))
+
+    async def startup_sync(self) -> None:
+        return None
+
+    async def server_info(self) -> dict:
+        return {"chains": dict(self.versions)}
+
+
+class RunResolverTest(unittest.TestCase):
+    """run_resolver keys gating, KV stamping, and version reporting to the
+    request's own chain (the multi-tenant LoRA pool contract)."""
+
+    def _client(self, versions: dict[str, int]):
+        from fastapi.testclient import TestClient
+
+        from stitch.servers.sglang import create_app
+
+        manager = _MultiRunManager(versions)
+        app = create_app(
+            manager,
+            upstream_url="http://127.0.0.1:9",
+            run_resolver=lambda payload: payload.get("lora_path"),
+        )
+        return manager, TestClient(app)
+
+    def test_requests_are_gated_and_stamped_per_chain(self) -> None:
+        manager, client = self._client({"job-a": 3, "job-b": 1})
+        with client, mock.patch("httpx.AsyncClient", _RecordingUpstream):
+            resp = client.post(
+                "/generate",
+                json={
+                    "text": "hi",
+                    "lora_path": "job-a",
+                    "weight_version": {"min_required_version": 3},
+                },
+            )
+            self.assertEqual(resp.status_code, 200)
+            # KV namespace and reported version are job-a's chain, not the
+            # manager-wide max or another chain's version.
+            self.assertEqual(_RecordingUpstream.last_json["extra_key"], "wv3;job-a/")
+            self.assertEqual(resp.json()["meta_info"]["weight_version_start"], 3)
+
+            resp = client.post(
+                "/generate",
+                json={
+                    "text": "hi",
+                    "lora_path": "job-b",
+                    "weight_version": {"min_required_version": 3},
+                },
+            )
+            self.assertEqual(resp.status_code, 409)
+            self.assertEqual(resp.json()["error"]["type"], "WeightVersionNotReady")
+
+    def test_wake_rpc_carries_the_run(self) -> None:
+        manager, client = self._client({"job-a": 3})
+        with client:
+            resp = client.post(
+                "/rpc_sync_from_bulletin_board",
+                json={"target_version": 4, "run_id": "job-a"},
+            )
+            self.assertTrue(resp.json()["accepted"])
+            self.assertEqual(manager.queued, [(4, "job-a")])
+
+
 class _CountingUpstream(_RecordingUpstream):
     instances = 0
 
