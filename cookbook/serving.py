@@ -31,7 +31,7 @@ import modal
 SGLANG_IMAGE_TAG = "lmsysorg/sglang:v0.5.12"
 SGLANG_FORK_REPO = "https://github.com/modal-projects/sglang.git"
 SGLANG_FORK_BRANCH = "weight-sync-upstream"
-SGLANG_FORK_COMMIT = "ddfa448a7f08fa5a21b0672a9523cb499def340d"
+SGLANG_FORK_COMMIT = "7fd4288bc0c61549c45a9fe92134437ac3bbb03a"
 
 # SGLang runtime tunables carried over from the standalone B200 deployment.
 SERVING_IMAGE_ENV = {
