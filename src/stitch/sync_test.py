@@ -19,14 +19,18 @@ async def _settle() -> None:
         await asyncio.sleep(0)
 
 
-def _write_slime_version(base: Path, version: int, prev: int) -> None:
+def _write_slime_version(
+    base: Path, version: int, prev: int, *, weight_map: dict[str, str] | None = None
+) -> None:
     vdir = base / f"weight_v{version:06d}"
     vdir.mkdir(parents=True)
+    if weight_map is None:
+        weight_map = {"w": "model-00001-of-00001.safetensors"}
     (vdir / "model.safetensors.index.json").write_text(
         json.dumps(
             {
                 "metadata": {"version": f"{version:06d}", "base_version": f"{prev:06d}"},
-                "weight_map": {"w": "model-00001-of-00001.safetensors"},
+                "weight_map": weight_map,
             }
         ),
         encoding="utf-8",
@@ -62,6 +66,30 @@ class FakeEngine:
 
     async def continue_generation(self) -> None:
         self.events.append("continue")
+
+
+class StagedEngine(FakeEngine):
+    """FakeEngine plus the optional staged split (stage/commit instead of the
+    combined apply)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.commit_weight_names: list[list[str] | None] = []
+
+    async def stage_manifest(self, manifest: VersionManifest, version_path: str) -> dict | None:
+        self.events.append("stage")
+        return {"host_delta_apply_s": 0.0}
+
+    async def commit_manifest(
+        self, manifest: VersionManifest, version_path: str, weight_names: list[str] | None = None
+    ) -> dict | None:
+        self.apply_started.set()
+        if self.apply_gate is not None:
+            await self.apply_gate.wait()
+        self.applies.append((manifest.version, version_path))
+        self.commit_weight_names.append(weight_names)
+        self.events.append("commit")
+        return {"engine_reload_s": 0.0}
 
 
 class SyncManagerTest(unittest.TestCase):
@@ -316,6 +344,101 @@ class SyncManagerTest(unittest.TestCase):
                 await sync
                 self.assertEqual(manager.current_version, 1)
                 self.assertEqual(await gated, "WeightVersionTooOld")
+
+        asyncio.run(run())
+
+    def test_staged_adapter_applies_host_side_before_pause(self) -> None:
+        """An adapter with the stage/commit split gets its host-side apply run
+        BEFORE the engine pause, so the pause covers only the reload."""
+
+        async def run() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                board = FilesystemBulletinBoard(tmp)
+                board.publish_manifest(VersionManifest(version=1, base_version=0, backend="fake", load_format="noop"))
+                engine = StagedEngine()
+                manager = WeightSyncManager(board=board, engine=engine, commit_mode="in_place")
+                await manager.sync_to(1)
+
+                self.assertEqual(manager.current_version, 1)
+                self.assertEqual(engine.events, ["stage", "pause", "commit", "continue"])
+                self.assertEqual([v for v, _ in engine.applies], [1])
+                # The stage/commit breakdown is surfaced for scraping.
+                info = await manager.server_info()
+                metrics = info["metrics"]
+                self.assertEqual(metrics["target_version"], 1)
+                self.assertEqual(metrics["stage_detail"], {"host_delta_apply_s": 0.0})
+                self.assertEqual(metrics["commit_detail"], {"engine_reload_s": 0.0})
+                for key in ("board_refresh_s", "stage_s", "pause_s", "commit_s", "resume_s", "gate_s", "drain_wait_s"):
+                    self.assertIn(key, metrics)
+
+        asyncio.run(run())
+
+    def test_empty_delta_tail_advances_version_without_reload(self) -> None:
+        """A disk-delta tail that touches zero tensors (all-empty publishes)
+        advances the served version without pausing or reloading the engine."""
+
+        async def run() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                # Run-less slime layout: no startup run switch to pause through.
+                board = FilesystemBulletinBoard(root, layout="slime")
+                _write_slime_version(root, 1, 0, weight_map={})
+                _write_slime_version(root, 2, 1, weight_map={})
+                board.write_latest(None, 2)
+                engine = StagedEngine()
+                manager = WeightSyncManager(board=board, engine=engine, commit_mode="in_place")
+
+                await manager.startup_sync()
+
+                self.assertEqual(manager.current_version, 2)
+                # Staged (host marker advanced), but never paused or reloaded.
+                self.assertEqual(engine.events, ["stage"])
+                self.assertEqual(engine.applies, [])
+                info = await manager.server_info()
+                self.assertTrue(info["metrics"]["skipped_noop_reload"])
+                self.assertEqual(info["metrics"]["tail_transition_files"], 0)
+
+                # A later non-empty version reloads as usual.
+                _write_slime_version(root, 3, 2)
+                board.write_latest(None, 3)
+                await manager.sync_to()
+                self.assertEqual(manager.current_version, 3)
+                self.assertEqual(engine.events, ["stage", "stage", "pause", "commit", "continue"])
+
+        asyncio.run(run())
+
+    def test_tail_weight_names_reach_commit(self) -> None:
+        """The tail's union of touched tensor names flows to commit_manifest
+        (for engine-side partial reloads); a tail version with files but no
+        names withholds the whole set."""
+
+        async def run() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                board = FilesystemBulletinBoard(root, layout="slime")
+                _write_slime_version(root, 1, 0, weight_map={"a": "f1", "b": "f1"})
+                _write_slime_version(root, 2, 1, weight_map={"b": "f1", "c": "f2"})
+                board.write_latest(None, 2)
+                engine = StagedEngine()
+                manager = WeightSyncManager(board=board, engine=engine, commit_mode="in_place")
+                await manager.startup_sync()
+                self.assertEqual(engine.commit_weight_names, [["a", "b", "c"]])
+                info = await manager.server_info()
+                self.assertEqual(info["metrics"]["tail_weights"], 3)
+
+                # A slime-layout version always names its weights, so simulate
+                # an unknown-names version via the stitch layout instead.
+                board2 = FilesystemBulletinBoard(tmp + "-stitch")
+                board2.publish_manifest(
+                    VersionManifest(
+                        version=1, base_version=0, backend="disk_delta",
+                        load_format="auto", transition_files=["model-00001.safetensors"],
+                    )
+                )
+                engine2 = StagedEngine()
+                manager2 = WeightSyncManager(board=board2, engine=engine2, commit_mode="in_place")
+                await manager2.startup_sync()
+                self.assertEqual(engine2.commit_weight_names, [None])
 
         asyncio.run(run())
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections import defaultdict
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
@@ -228,6 +229,12 @@ class WeightSyncManager(RolloutAdmissionGate):
         self.queued_target_version: int | None = None
         self.sync_state = SyncState.IDLE
         self.last_sync_error: str | None = None
+        # Per-stage wall-clock breakdown of the most recent sync pass (seconds),
+        # exposed via server_info()["metrics"] so a scraper can attribute sync
+        # latency to board refresh / host apply / drain / pause / reload without
+        # log access. Written whole (never mutated in place) at the end of each
+        # pass, including failed ones (with an "error" key).
+        self.last_sync_metrics: dict[str, Any] = {}
         self._sync_task: asyncio.Task[None] | None = None
         self._sync_lock = asyncio.Lock()
 
@@ -253,6 +260,7 @@ class WeightSyncManager(RolloutAdmissionGate):
             "sync_task_active": self._sync_task is not None and not self._sync_task.done(),
             "active_requests": self._active_requests,
             "inflight_exact_versions": self.inflight_exact_versions,
+            "metrics": self.last_sync_metrics,
         }
 
     def _on_policy_violation(self, error: dict[str, Any]) -> None:
@@ -343,58 +351,158 @@ class WeightSyncManager(RolloutAdmissionGate):
 
     async def _sync_once(self) -> bool:
         async with self._sync_lock:
-            await self.board.refresh()
-            run_id, latest = self.board.read_latest()
-            if run_id != self.current_run_id:
-                await self._switch_run(run_id)
-            self.latest_seen_version = max(self.latest_seen_version, latest)
-            if latest <= self.current_version:
-                return True
+            metrics: dict[str, Any] = {}
+            try:
+                return await self._sync_once_measured(metrics)
+            except Exception as exc:
+                metrics["error"] = str(exc)
+                raise
+            finally:
+                # A pass that found no work leaves the previous breakdown alone.
+                if len(metrics) > 1 or "error" in metrics:
+                    metrics["recorded_at"] = time.time()
+                    self.last_sync_metrics = metrics
 
-            self.sync_state = SyncState.PREFETCHING
-            self.last_sync_error = None
+    async def _sync_once_measured(self, metrics: dict[str, Any]) -> bool:
+        t0 = time.perf_counter()
+        await self.board.refresh()
+        metrics["board_refresh_s"] = round(time.perf_counter() - t0, 3)
+        run_id, latest = self.board.read_latest()
+        if run_id != self.current_run_id:
+            await self._switch_run(run_id)
+        self.latest_seen_version = max(self.latest_seen_version, latest)
+        if latest <= self.current_version:
+            return True
 
-            # Verify the whole tail is a contiguous chain before touching the
-            # engine, so a broken chain fails before any pause/apply. apply_deltas
-            # re-verifies each step's base_version internally as it replays.
-            expected_base = self.current_version
-            target_manifest: VersionManifest | None = None
-            for version in range(self.current_version + 1, latest + 1):
-                manifest = self.board.read_manifest(self.current_run_id, version)
-                if manifest.base_version != expected_base:
-                    raise RuntimeError(
-                        f"cannot apply version {version}: manifest base "
-                        f"{manifest.base_version} != expected {expected_base}"
-                    )
-                expected_base = version
-                target_manifest = manifest
-            assert target_manifest is not None  # latest > current_version, so the loop ran
-            target_path = str(self.board.version_dir(self.current_run_id, latest))
+        self.sync_state = SyncState.PREFETCHING
+        self.last_sync_error = None
 
-            # Compose the tail and reload once: apply_manifest(target) replays
-            # every delta from the applied version up to `latest` host-side, then
-            # does a single engine reload — not one reload per intermediate version.
-            self.sync_state = SyncState.PREPARING
+        # Verify the whole tail is a contiguous chain before touching the
+        # engine, so a broken chain fails before any pause/apply. apply_deltas
+        # re-verifies each step's base_version internally as it replays.
+        t0 = time.perf_counter()
+        expected_base = self.current_version
+        target_manifest: VersionManifest | None = None
+        tail_transition_files = 0
+        # Union of the tail's touched tensor names, for engines that support
+        # partial reloads. Any manifest without names makes the tail unknown.
+        tail_weights: set[str] | None = set()
+        for version in range(self.current_version + 1, latest + 1):
+            manifest = self.board.read_manifest(self.current_run_id, version)
+            if manifest.base_version != expected_base:
+                raise RuntimeError(
+                    f"cannot apply version {version}: manifest base "
+                    f"{manifest.base_version} != expected {expected_base}"
+                )
+            expected_base = version
+            tail_transition_files += len(manifest.transition_files)
+            if tail_weights is not None and manifest.transition_weights:
+                tail_weights.update(manifest.transition_weights)
+            elif manifest.transition_files:
+                tail_weights = None  # a version with files but unknown names
+            target_manifest = manifest
+        assert target_manifest is not None  # latest > current_version, so the loop ran
+        target_path = str(self.board.version_dir(self.current_run_id, latest))
+        metrics["manifest_verify_s"] = round(time.perf_counter() - t0, 3)
+        metrics["target_version"] = latest
+        metrics["tail_versions"] = latest - self.current_version
+        metrics["tail_transition_files"] = tail_transition_files
+        if tail_weights is not None:
+            metrics["tail_weights"] = len(tail_weights)
+
+        # Compose the tail and reload once: the adapter replays every delta from
+        # the applied version up to `latest` host-side, then does a single engine
+        # reload — not one reload per intermediate version.
+        self.sync_state = SyncState.PREPARING
+
+        # An adapter that offers the staged split gets the host-side patch done
+        # BEFORE the commit gate: between reloads nothing reads the local
+        # checkpoint (weights live on the GPU), so staging can run while the
+        # engine still serves and the pause covers only the engine reload.
+        stage = getattr(self.engine, "stage_manifest", None)
+        commit = getattr(self.engine, "commit_manifest", None)
+        staged = stage is not None and commit is not None
+        if staged:
+            t0 = time.perf_counter()
+            stage_detail = await stage(target_manifest, target_path)
+            metrics["stage_s"] = round(time.perf_counter() - t0, 3)
+            if stage_detail:
+                metrics["stage_detail"] = stage_detail
+
+        def on_applied() -> None:
+            self.current_version = latest
+
+        # A tail that changes zero bytes (an all-empty disk-delta publish, the
+        # common case for low-churn QAT) still must advance the served version,
+        # but reloading identical weights would pause the engine for nothing —
+        # commit the version bump without pause, flush, or reload. Stale KV
+        # stays numerically valid because the weights are byte-identical.
+        if target_manifest.backend == "disk_delta" and tail_transition_files == 0:
+
+            async def apply_nothing() -> None:
+                self.sync_state = SyncState.COMMITTING
+
+            t0 = time.perf_counter()
+            await self.commit_version(apply=apply_nothing, on_applied=on_applied)
+            metrics["gate_s"] = round(time.perf_counter() - t0, 3)
+            metrics["skipped_noop_reload"] = True
+            logger.info(
+                "v=%s: empty delta tail — advanced version without engine reload", latest
+            )
+        else:
 
             async def apply(manifest: VersionManifest = target_manifest, version_path: str = target_path) -> None:
                 # quiesce flushes before applying; in_place skips the flush
                 # (the gate paused the engine and stale KV resumes as-is).
                 if self.commit_mode != "in_place":
+                    t = time.perf_counter()
                     await self.engine.flush_cache()
+                    metrics["flush_s"] = round(time.perf_counter() - t, 3)
                 self.sync_state = SyncState.COMMITTING
-                await self.engine.apply_manifest(manifest, version_path)
+                t = time.perf_counter()
+                if staged:
+                    commit_detail = await commit(
+                        manifest,
+                        version_path,
+                        weight_names=sorted(tail_weights) if tail_weights else None,
+                    )
+                    if commit_detail:
+                        metrics["commit_detail"] = commit_detail
+                else:
+                    await self.engine.apply_manifest(manifest, version_path)
+                metrics["commit_s"] = round(time.perf_counter() - t, 3)
+
+            async def pause() -> None:
+                t = time.perf_counter()
+                await self.engine.pause_generation()
+                metrics["pause_s"] = round(time.perf_counter() - t, 3)
+
+            async def resume() -> None:
+                t = time.perf_counter()
+                await self.engine.continue_generation()
+                metrics["resume_s"] = round(time.perf_counter() - t, 3)
 
             # on_applied bumps current_version under the gate (before
             # continue_generation in in_place mode), so a request can never be
             # admitted observing the stale version on mutated weights.
+            t0 = time.perf_counter()
             await self.commit_version(
                 apply=apply,
-                on_applied=lambda: setattr(self, "current_version", latest),
-                pause=self.engine.pause_generation,
-                resume=self.engine.continue_generation,
+                on_applied=on_applied,
+                pause=pause,
+                resume=resume,
             )
-            self.sync_state = SyncState.PREFETCHING
+            metrics["gate_s"] = round(time.perf_counter() - t0, 3)
+            # The gate time not spent in a measured sub-stage is the wait for
+            # in-flight requests to drain (exact pins in in_place mode; all
+            # proxied requests in quiesce mode).
+            metrics["drain_wait_s"] = round(
+                metrics["gate_s"]
+                - sum(metrics.get(k, 0.0) for k in ("flush_s", "commit_s", "pause_s", "resume_s")),
+                3,
+            )
+        self.sync_state = SyncState.PREFETCHING
 
-            # Reached the board's latest for this run as captured at pass start; a
-            # version published mid-pass is picked up by the next reconcile tick.
-            return self.current_version >= latest
+        # Reached the board's latest for this run as captured at pass start; a
+        # version published mid-pass is picked up by the next reconcile tick.
+        return self.current_version >= latest
