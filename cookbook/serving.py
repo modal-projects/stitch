@@ -30,8 +30,8 @@ import modal
 # prebuilt base image's kernels.
 SGLANG_IMAGE_TAG = "lmsysorg/sglang:v0.5.12"
 SGLANG_FORK_REPO = "https://github.com/modal-projects/sglang.git"
-SGLANG_FORK_BRANCH = "timmy/dflash-fa4-fp8"
-SGLANG_FORK_COMMIT = "dafb2b325b40298c5097564811463c585b7e9814"
+SGLANG_FORK_BRANCH = "weight-sync-upstream"
+SGLANG_FORK_COMMIT = "7fd4288bc0c61549c45a9fe92134437ac3bbb03a"
 
 # SGLang runtime tunables carried over from the standalone B200 deployment.
 SERVING_IMAGE_ENV = {
@@ -41,6 +41,11 @@ SERVING_IMAGE_ENV = {
     "SGLANG_DISABLE_CUDNN_CHECK": "1",
     "SGLANG_ENABLE_OVERLAP_PLAN_STREAM": "1",
     "SGLANG_TIMEOUT_KEEP_ALIVE": "300",
+    # Reload record/replay (fork model_loader/load_plan.py): the first reload
+    # records the dispatch plan, later ones replay it. Checksum-verified
+    # byte-identical on GLM-4.5-Air (218s -> ~57s) and Kimi K2.6 (~11%);
+    # opt-in per model class and degrade-safe, so pool-wide enable is safe.
+    "SGLANG_ENABLE_RELOAD_LOAD_PLAN": "1",
 }
 
 
