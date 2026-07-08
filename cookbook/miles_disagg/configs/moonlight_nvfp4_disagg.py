@@ -139,10 +139,12 @@ class _Miles(MilesConfig):
 
     # ── NVFP4 QAT (native Megatron FP4 training; Blackwell + TE >= 2.7.0.dev0) ──
     # --fp4-format takes the element format 'e2m1'; the recipe (fp4_recipe) already
-    # defaults to 'nvfp4' (NVFP4BlockScaling). --fp4-param-gather keeps params in
-    # fp4 to save memory. NVFP4 group size is fixed at 16.
+    # defaults to 'nvfp4' (NVFP4BlockScaling). NVFP4 group size is fixed at 16.
+    # fp4_param_gather stays False, matching the K2.6 recipe: with it True the
+    # params are TE NVFP4Tensor (Megatron DDP's param-buffer repoint crashes) and
+    # miles' NVFP4 checkpoint export rejects the gather outright.
     fp4_format = "e2m1"
-    fp4_param_gather = True
+    fp4_param_gather = False
 
     # ── Disk-delta publish-only over the Modal Volume bulletin board ──
     update_weight_transfer_mode = "disk"

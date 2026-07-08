@@ -91,7 +91,17 @@ def parallel_init_local_checkpoint(disk_delta_module: str, workers: int = 32) ->
             files = [e for e in os.scandir(base_dir) if e.is_file()]
 
             def _copy(entry: os.DirEntry) -> None:
-                shutil.copy2(entry.path, os.path.join(local_ckpt_dir, entry.name))
+                dest = os.path.join(local_ckpt_dir, entry.name)
+                shutil.copy2(entry.path, dest)
+                # fsync the copy so its pages turn clean now: hundreds of GB of
+                # dirty pages otherwise linger and writeback-stall every read
+                # until reclaimed (measured as 0.2-1 GB/s "cold" reads on disks
+                # that do 5-6 GB/s direct — the reload's iter_wait rides on it).
+                fd = os.open(dest, os.O_RDONLY)
+                try:
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
                 drop_page_cache(entry.path)  # don't evict the local copy we keep resident
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=min(workers, max(1, len(files)))) as ex:
