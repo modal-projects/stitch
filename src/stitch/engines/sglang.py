@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from stitch.protocol import VersionManifest
 
@@ -21,6 +23,20 @@ def _transition_files(manifest: VersionManifest) -> list[str]:
     if not files:
         files = [artifact.path for artifact in manifest.artifacts if artifact.kind == "transition"]
     return files
+
+
+def parse_reload_timing(message: str) -> dict[str, float]:
+    """Lift the engine's optional ``[reload timing] iter_wait=1.2s load=3.4s ...``
+    success-message suffix (emitted by the instrumented modal-projects/sglang
+    fork) into ``{"engine_iter_wait_s": 1.2, ...}``. Empty on engines without
+    the instrumentation, so callers can treat the result as best-effort."""
+    match = re.search(r"\[reload timing\]([^\[\]]*)", message)
+    if match is None:
+        return {}
+    return {
+        f"engine_{key}_s": float(value)
+        for key, value in re.findall(r"(\w+)=([0-9.]+)s", match.group(1))
+    }
 
 
 def compose_extra_key(
@@ -58,13 +74,13 @@ class SGLangDiskDeltaAdapter:
     local_checkpoint_dir: str
     base_checkpoint_dir: str
     backend: str = "disk_delta"
-    apply_deltas: Callable[[str, str, int], None] | None = None
+    apply_deltas: Callable[[str, str, int], Any] | None = None
     init_local_checkpoint: Callable[[str, str], None] | None = None
 
     def __post_init__(self) -> None:
         self.upstream_url = self.upstream_url.rstrip("/")
 
-    def _apply_deltas(self) -> Callable[[str, str, int], None]:
+    def _apply_deltas(self) -> Callable[[str, str, int], Any]:
         if self.apply_deltas is not None:
             return self.apply_deltas
         from slime.utils.disk_delta import apply_deltas
@@ -124,30 +140,50 @@ class SGLangDiskDeltaAdapter:
             resp = await client.post(f"{self.upstream_url}/continue_generation", json={})
             resp.raise_for_status()
 
-    async def apply_manifest(self, manifest: VersionManifest, version_path: str) -> None:
-        import httpx
+    async def stage_manifest(self, manifest: VersionManifest, version_path: str) -> dict[str, Any] | None:
+        """Bring the local checkpoint up to this version host-side (apply_deltas
+        chain-replays from whatever is applied, verifying each base_version).
 
-        # Bring the local checkpoint up to this version host-side (apply_deltas
-        # chain-replays from whatever is applied, verifying each base_version),
-        # then reload the full local checkpoint. version_path is the published
-        # version dir; its parent is the root of weight_v* dirs apply_deltas walks.
+        Safe to run while the engine serves: between reloads nothing reads the
+        local checkpoint (weights live on the GPU), so the sync manager calls
+        this BEFORE closing the commit gate. version_path is the published
+        version dir; its parent is the root of weight_v* dirs apply_deltas walks.
+
+        Returns a timing/phase breakdown for server_info metrics; newer decoders
+        return per-version phase stats from ``apply_deltas``, older ones None.
+        """
         delta_root = str(Path(version_path).parent)
         _t_apply = time.perf_counter()
-        await asyncio.to_thread(
+        stats = await asyncio.to_thread(
             self._apply_deltas(), self.local_checkpoint_dir, delta_root, int(manifest.version)
         )
-        logger.info(
-            "[apply timing] v=%s host_delta_apply=%.2fs", manifest.version, time.perf_counter() - _t_apply
-        )
-        if not _transition_files(manifest):
-            logger.info(
-                "[apply timing] v=%s engine_reload=skipped empty_delta",
-                manifest.version,
-            )
-            return
+        elapsed = time.perf_counter() - _t_apply
+        logger.info("[apply timing] v=%s host_delta_apply=%.2fs", manifest.version, elapsed)
+        detail: dict[str, Any] = {"host_delta_apply_s": round(elapsed, 3)}
+        if stats:
+            detail["versions"] = stats
+        return detail
+
+    async def commit_manifest(
+        self,
+        manifest: VersionManifest,
+        version_path: str,
+        weight_names: list[str] | None = None,
+    ) -> dict[str, Any] | None:
+        """Reload the staged local checkpoint into the engine. The sync
+        manager calls this under the commit gate (engine paused in in_place
+        mode), after :meth:`stage_manifest` has materialized the version.
+
+        ``weight_names`` is the tail's union of touched tensor names; an
+        engine with the reload load plan uses it to reload only the touched
+        modules (O(delta)) and silently full-reloads otherwise. Set
+        ``STITCH_PARTIAL_RELOAD=0`` to withhold the names entirely."""
+        import os
+
+        import httpx
 
         _t_reload = time.perf_counter()
-        payload = {
+        payload: dict[str, Any] = {
             "model_path": self.local_checkpoint_dir,
             "weight_version": str(manifest.version),
             # The sync manager flushes via GET /flush_cache while quiesced.
@@ -156,12 +192,28 @@ class SGLangDiskDeltaAdapter:
             # it must stay disabled here.
             "flush_cache": False,
         }
+        if weight_names and os.environ.get("STITCH_PARTIAL_RELOAD", "1") == "1":
+            payload["weight_names"] = list(weight_names)
         async with httpx.AsyncClient(timeout=None, trust_env=False) as client:
             resp = await client.post(f"{self.upstream_url}/update_weights_from_disk", json=payload)
             resp.raise_for_status()
             data = resp.json()
             if data.get("success") is False:
                 raise RuntimeError(f"SGLang rejected weight update: {data}")
-        logger.info(
-            "[apply timing] v=%s engine_reload=%.2fs", manifest.version, time.perf_counter() - _t_reload
-        )
+        elapsed = time.perf_counter() - _t_reload
+        logger.info("[apply timing] v=%s engine_reload=%.2fs", manifest.version, elapsed)
+        detail: dict[str, Any] = {"engine_reload_s": round(elapsed, 3)}
+        detail.update(parse_reload_timing(str(data.get("message") or "")))
+        return detail
+
+    async def apply_manifest(self, manifest: VersionManifest, version_path: str) -> None:
+        """Combined stage + reload, kept for callers that don't use the staged
+        split (the sync manager prefers stage_manifest/commit_manifest)."""
+        await self.stage_manifest(manifest, version_path)
+        if not _transition_files(manifest):
+            logger.info(
+                "[apply timing] v=%s engine_reload=skipped empty_delta",
+                manifest.version,
+            )
+            return
+        await self.commit_manifest(manifest, version_path)
