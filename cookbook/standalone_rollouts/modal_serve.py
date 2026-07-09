@@ -61,7 +61,7 @@ SLIME_REPO_URL = "https://github.com/modal-projects/slime.git"
 # so the image must carry the fork's slime plus its checksum/compression deps.
 # Pin a SHA, not the branch tip: the clone is a cached image layer (see
 # cookbook/slime_disagg/modal_train.py).
-SLIME_REPO_REF = "ebfe153949b1a69c39e92f947ed5d475166dd724"
+SLIME_REPO_REF = "11bb0fa48aa37d5c54fe297143c6bc1d40f311bf"
 
 image = (
     modal.Image.from_registry(SLIME_IMAGE_TAG)
