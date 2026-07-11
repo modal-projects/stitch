@@ -23,6 +23,7 @@ import modal.experimental
 
 from cookbook.slime_disagg import helpers
 from cookbook.standalone_rollouts import frontdoor as frontdoor_mod
+from cookbook.standalone_rollouts.auth import authorize
 from cookbook.standalone_rollouts.base_checkpoint import (
     is_hf_repo_id,
     resolve_base_checkpoint,
@@ -417,28 +418,20 @@ def _frontdoor_headers(raw: dict[str, str]) -> dict[str, str]:
 
 def _auth_error(headers):
     """Validate the customer auth headers against the provider secret. Returns a
-    JSONResponse to reject, or None to allow."""
+    JSONResponse to reject, or None to allow. Fail-closed when the API key is
+    unset (see :func:`cookbook.standalone_rollouts.auth.authorize`)."""
     from fastapi.responses import JSONResponse
 
-    api_key = os.environ.get("STITCH_SHIM_API_KEY")
-    if api_key and headers.get("authorization") != f"Bearer {api_key}":
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-    provider_model = os.environ.get("STITCH_SHIM_PROVIDER_MODEL")
-    if provider_model and headers.get("provider-model") != provider_model:
-        return JSONResponse(
-            {"error": "Provider-Model header does not match this deployment"},
-            status_code=400,
-        )
-    provider_deployment = os.environ.get("STITCH_SHIM_PROVIDER_DEPLOYMENT")
-    if (
-        provider_deployment
-        and headers.get("provider-deployment") != provider_deployment
-    ):
-        return JSONResponse(
-            {"error": "Provider-Deployment header does not match this deployment"},
-            status_code=400,
-        )
-    return None
+    rejection = authorize(
+        headers,
+        api_key=os.environ.get("STITCH_SHIM_API_KEY"),
+        provider_model=os.environ.get("STITCH_SHIM_PROVIDER_MODEL"),
+        provider_deployment=os.environ.get("STITCH_SHIM_PROVIDER_DEPLOYMENT"),
+    )
+    if rejection is None:
+        return None
+    status, message = rejection
+    return JSONResponse({"error": message}, status_code=status)
 
 
 FRONTDOOR_PORT = 8000
@@ -478,6 +471,15 @@ class FrontDoor:
         import httpx
         import uvicorn
         from fastapi.responses import Response
+
+        # Fail closed: this in-app check is the only auth gate (the Modal server
+        # is unauthenticated=True), so refuse to start open rather than serve a
+        # public endpoint with a missing/mis-named secret key.
+        if not os.environ.get("STITCH_SHIM_API_KEY"):
+            raise RuntimeError(
+                "STITCH_SHIM_API_KEY is not set; the front door is the only auth "
+                f"gate and will not start open. Set it in the {exp.SHIM_SECRET_NAME} secret."
+            )
 
         board = FilesystemBulletinBoard(str(S3_TRANSPORT_MOUNT_PATH), layout="slime")
         gateway: dict[str, str | None] = {"url": None}
