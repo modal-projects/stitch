@@ -37,6 +37,10 @@ from stitch.protocol import RolloutPoolState, RolloutReplicaState
 
 HOT_LOAD_PATH = "/hot_load/v1/models/hot_load"
 MAX_IDENTITY_LEN = 512
+# Path components that resolve outside the identity's own upload dir, plus the
+# transport's own files (the pointer and the ledger), which an identity dir
+# must never shadow or clobber.
+RESERVED_IDENTITIES = {".", "..", "latest", "identities.json"}
 
 
 def is_customer_inference_route(path: str) -> bool:
@@ -61,7 +65,7 @@ def is_valid_identity(identity: str) -> bool:
     non-empty, bounded, single-segment (no ``/``, which would escape the prefix),
     and free of control characters. Bounding it also caps ledger/key growth from
     a hostile client."""
-    if not identity or len(identity) > MAX_IDENTITY_LEN:
+    if not identity or len(identity) > MAX_IDENTITY_LEN or identity in RESERVED_IDENTITIES:
         return False
     return "/" not in identity and not any(ord(c) < 0x20 for c in identity)
 

@@ -23,6 +23,10 @@ class IdentityValidationTest(unittest.TestCase):
         self.assertFalse(is_valid_identity("a\nb"))  # control char
         self.assertFalse(is_valid_identity("x" * 513))
 
+    def test_rejects_traversal_and_reserved_names(self) -> None:
+        for identity in (".", "..", "latest", "identities.json"):
+            self.assertFalse(is_valid_identity(identity), identity)
+
 
 class DeltaMetadataTest(unittest.TestCase):
     def test_pads_versions_and_defaults_delta_encoding(self) -> None:
