@@ -268,6 +268,35 @@ class FrontdoorAppTest(unittest.TestCase):
         self.assertEqual(resp.status_code, 400)
         self.assertEqual(calls["advanced"], [])
 
+    def test_delta_without_previous_identity_is_400(self) -> None:
+        client, calls, _ = self._client()
+        resp = client.post(
+            HOT_LOAD_PATH,
+            json={"identity": "ckpt-100", "incremental_snapshot_metadata": {"compression_format": "zstd"}},
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(calls["advanced"], [])
+
+    def test_second_full_snapshot_is_409(self) -> None:
+        client, calls, _ = self._client()
+        client.post(HOT_LOAD_PATH, json={"identity": "base-a"})
+        resp = client.post(HOT_LOAD_PATH, json={"identity": "base-b"})
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(calls["advanced"], [0])  # pointer untouched by the reject
+
+    def test_delta_with_unknown_parent_is_409(self) -> None:
+        client, calls, _ = self._client()
+        client.post(HOT_LOAD_PATH, json={"identity": "base-ckpt"})
+        resp = client.post(
+            HOT_LOAD_PATH,
+            json={
+                "identity": "ckpt-2",
+                "incremental_snapshot_metadata": {"previous_snapshot_identity": "ckpt-l"},
+            },
+        )
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(calls["normalized"], [])
+
     def test_post_overlong_or_slashed_identity_is_400(self) -> None:
         client, calls, _ = self._client()
         for identity in ("weight_v" + "9" * 100000, "a/b/c"):

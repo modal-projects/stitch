@@ -31,7 +31,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from cookbook.standalone_rollouts.ledger import IdentityLedger
+from cookbook.standalone_rollouts.ledger import IdentityLedger, LedgerError
 from stitch.protocol import RolloutPoolState, RolloutReplicaState
 
 
@@ -179,15 +179,23 @@ def create_frontdoor_app(
                 {"error": "body.incremental_snapshot_metadata must be an object"}, status_code=400
             )
         previous = incremental.get("previous_snapshot_identity") if incremental else None
-        if previous is not None and not isinstance(previous, str):
+        if incremental is not None and (not isinstance(previous, str) or not previous):
+            # A delta without lineage is indistinguishable from a full snapshot
+            # and would be recorded as one; require the parent explicitly.
             return JSONResponse(
-                {"error": "incremental_snapshot_metadata.previous_snapshot_identity must be a string"},
+                {
+                    "error": "incremental_snapshot_metadata.previous_snapshot_identity "
+                    "must be a non-empty string"
+                },
                 status_code=400,
             )
 
         async with advance_lock:
             ledger = IdentityLedger.from_dict(await load_ledger())
-            entry, is_new = ledger.record(identity, previous)
+            try:
+                entry, is_new = ledger.record(identity, previous)
+            except LedgerError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=409)
             if is_new:
                 # A delta (incremental metadata present) needs its index normalized
                 # so the decoder can apply it; a full snapshot (base) is served
