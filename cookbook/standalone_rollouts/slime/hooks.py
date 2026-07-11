@@ -216,12 +216,7 @@ def rollout_request_weight_version_hook(
     # the same auth headers it sends to the hot-load API.
     cfg = ShimConfig.from_env(args)
     headers = dict(request.get("headers") or {})
-    if cfg.api_key:
-        headers["Authorization"] = f"Bearer {cfg.api_key}"
-    if cfg.provider_model:
-        headers["Provider-Model"] = cfg.provider_model
-    if cfg.provider_deployment:
-        headers["Provider-Deployment"] = cfg.provider_deployment
+    headers.update(_auth_headers(cfg))
     request["headers"] = headers
     # Neutral by default. The front-door relabel proxy maps this to
     # Modal-Session-ID before the gateway.
@@ -315,8 +310,10 @@ def _request_json(
     return json.loads(content.decode("utf-8"))
 
 
-def _headers(cfg: ShimConfig) -> dict[str, str]:
-    headers = {"Content-Type": "application/json"}
+def _auth_headers(cfg: ShimConfig) -> dict[str, str]:
+    """The provider auth headers every request carries — the hot-load API and
+    proxied inference alike."""
+    headers: dict[str, str] = {}
     if cfg.api_key:
         headers["Authorization"] = f"Bearer {cfg.api_key}"
     if cfg.provider_model:
@@ -324,6 +321,10 @@ def _headers(cfg: ShimConfig) -> dict[str, str]:
     if cfg.provider_deployment:
         headers["Provider-Deployment"] = cfg.provider_deployment
     return headers
+
+
+def _headers(cfg: ShimConfig) -> dict[str, str]:
+    return {"Content-Type": "application/json", **_auth_headers(cfg)}
 
 
 def _copy_version_to_transport(version_dir: Path, destination: Path) -> None:

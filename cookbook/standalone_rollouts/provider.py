@@ -18,15 +18,13 @@ door (``modal_serve.py``), not here.
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import os
 import uuid
 from collections.abc import Callable
-from pathlib import Path
 
 from cookbook.standalone_rollouts.delta_view import rebuild_delta_view
-from cookbook.standalone_rollouts.ledger import IdentityLedger
+from cookbook.standalone_rollouts.ledger import IdentityLedger, load_ledger_dict
 from stitch.bulletin import FilesystemBulletinBoard
 from stitch.engines.sglang import SGLangDiskDeltaAdapter
 from stitch.servers.sglang import create_app as create_sglang_app
@@ -84,14 +82,9 @@ def _delta_view_refresh(view_dir: str, transport_root: str) -> Callable[[], None
     """Board refresh callback: rebuild the host-local weight_vN view from the
     front door's identity ledger on the transport, so the view tracks
     newly-signalled versions before each sync reads/apply."""
-    ledger_path = Path(transport_root) / "identities.json"
-
     def _refresh() -> None:
-        try:
-            data = json.loads(ledger_path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            data = {}
-        rebuild_delta_view(view_dir, transport_root, IdentityLedger.from_dict(data))
+        ledger = IdentityLedger.from_dict(load_ledger_dict(transport_root))
+        rebuild_delta_view(view_dir, transport_root, ledger)
 
     return _refresh
 

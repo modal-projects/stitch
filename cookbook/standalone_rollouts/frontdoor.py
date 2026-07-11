@@ -31,7 +31,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from cookbook.standalone_rollouts.ledger import IdentityLedger, LedgerError
+from cookbook.standalone_rollouts.ledger import LEDGER_FILENAME, IdentityLedger, LedgerError
 from stitch.protocol import RolloutPoolState, RolloutReplicaState
 
 
@@ -40,7 +40,7 @@ MAX_IDENTITY_LEN = 512
 # Path components that resolve outside the identity's own upload dir, plus the
 # transport's own files (the pointer and the ledger), which an identity dir
 # must never shadow or clobber.
-RESERVED_IDENTITIES = {".", "..", "latest", "identities.json"}
+RESERVED_IDENTITIES = {".", "..", "latest", LEDGER_FILENAME}
 
 
 def is_customer_inference_route(path: str) -> bool:

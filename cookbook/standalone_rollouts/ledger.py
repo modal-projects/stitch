@@ -16,16 +16,32 @@ the base) is recorded faithfully but is not yet replayable (the deferred
 fork-from-version case), so its non-contiguous base surfaces at apply time
 rather than being silently reordered here.
 
-Pure and persistence-free: :meth:`to_dict` / :meth:`from_dict` round-trip the
-state, and the front door persists it to the transport.
+The ledger itself is pure: :meth:`to_dict` / :meth:`from_dict` round-trip the
+state. Persistence is one JSON file on the transport (``LEDGER_FILENAME``,
+written by the front door, read back via :func:`load_ledger_dict`).
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from stitch.protocol import BASE_VERSION
+
+
+LEDGER_FILENAME = "identities.json"
+
+
+def load_ledger_dict(transport_root: str | Path) -> dict[str, Any]:
+    """The persisted ledger dict from the transport, or ``{}`` before the
+    front door's first save."""
+    try:
+        path = Path(transport_root) / LEDGER_FILENAME
+        return json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
 
 
 class LedgerError(ValueError):

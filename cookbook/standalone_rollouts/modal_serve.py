@@ -29,6 +29,7 @@ from cookbook.standalone_rollouts.base_checkpoint import (
     resolve_base_checkpoint,
 )
 from cookbook.standalone_rollouts.delta_view import merge_index_metadata
+from cookbook.standalone_rollouts.ledger import LEDGER_FILENAME, load_ledger_dict
 from stitch.bulletin import FilesystemBulletinBoard
 from stitch.protocol import atomic_write_text
 from stitch.providers.modal import (
@@ -306,16 +307,9 @@ def check(timeout_seconds: int = 20 * MINUTES) -> None:
             raise TimeoutError(f"front-door readiness timed out: {last}")
         time.sleep(10)
 
-    payload = {
-        "model": MODEL_NAME,
-        "messages": [{"role": "user", "content": "Reply with exactly OK."}],
-        "max_tokens": 8,
-        "temperature": 0,
-        "chat_template_kwargs": {"enable_thinking": False},
-    }
     req = urllib.request.Request(
         f"{gateway}/v1/chat/completions",
-        data=json.dumps(payload).encode("utf-8"),
+        data=json.dumps(WARMUP_PAYLOAD).encode("utf-8"),
         headers={"Content-Type": "application/json", **headers},
     )
     with urllib.request.urlopen(req, timeout=180) as resp:
@@ -378,16 +372,9 @@ def smoke(
         print(f"Waiting for provider pool: {last_error}")
         time.sleep(10)
 
-    payload = {
-        "model": MODEL_NAME,
-        "messages": [{"role": "user", "content": "Reply with exactly OK."}],
-        "max_tokens": 8,
-        "temperature": 0,
-        "chat_template_kwargs": {"enable_thinking": False},
-    }
     req = urllib.request.Request(
         f"{gateway}/v1/chat/completions",
-        data=json.dumps(payload).encode("utf-8"),
+        data=json.dumps(WARMUP_PAYLOAD).encode("utf-8"),
         headers={"Content-Type": "application/json", **headers},
     )
     with urllib.request.urlopen(req, timeout=180) as resp:
@@ -491,7 +478,7 @@ class FrontDoor:
 
         board = FilesystemBulletinBoard(str(S3_TRANSPORT_MOUNT_PATH), layout="slime")
         transport_root = Path(str(S3_TRANSPORT_MOUNT_PATH))
-        ledger_path = transport_root / "identities.json"
+        ledger_path = transport_root / LEDGER_FILENAME
         gateway: dict[str, str | None] = {"url": None}
         clients: dict[str, httpx.AsyncClient] = {}
 
@@ -503,13 +490,7 @@ class FrontDoor:
             return client
 
         async def load_ledger() -> dict:
-            def _read() -> dict:
-                try:
-                    return json.loads(ledger_path.read_text(encoding="utf-8"))
-                except FileNotFoundError:
-                    return {}
-
-            return await asyncio.to_thread(_read)
+            return await asyncio.to_thread(load_ledger_dict, transport_root)
 
         async def save_ledger(data: dict) -> None:
             # The front door is the singleton writer, serialized under the
