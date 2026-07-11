@@ -146,7 +146,7 @@ class FrontdoorAppTest(unittest.TestCase):
             advance_to=advance_to,
             list_server_infos=list_server_infos,
             proxy=proxy,
-            authorize=authorize,
+            authorize=authorize or (lambda headers: None),  # explicit allow-all
             wake=wake,
         )
         return TestClient(app), calls, state
@@ -235,6 +235,7 @@ class FrontdoorAppTest(unittest.TestCase):
             advance_to=advance_to,
             list_server_infos=list_server_infos,
             proxy=proxy,
+            authorize=lambda headers: None,
         )
         client = TestClient(app)
         resp = client.post(

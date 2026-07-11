@@ -115,6 +115,7 @@ class SimulatorTest(unittest.IsolatedAsyncioTestCase):
             advance_to=advance_to,
             list_server_infos=list_server_infos,
             proxy=proxy,
+            authorize=lambda headers: None,
             wake=wake,
         )
         client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://fd")

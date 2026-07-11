@@ -132,7 +132,7 @@ def create_frontdoor_app(
     advance_to: Callable[[int], Awaitable[None]],
     list_server_infos: Callable[[], Awaitable[list[dict[str, Any]]]],
     proxy: Callable[..., Awaitable[Any]],
-    authorize: Callable[[Any], Any] | None = None,
+    authorize: Callable[[Any], Any],
     wake: Callable[[int], Awaitable[None]] | None = None,
 ):
     """Build the front-door FastAPI app from injected I/O.
@@ -142,7 +142,9 @@ def create_frontdoor_app(
     metadata block into that version dir's index; ``advance_to(version)`` writes
     the ``latest`` pointer; ``list_server_infos`` enumerates live replicas;
     ``proxy`` forwards inference; ``authorize`` returns a rejection Response or
-    ``None``; ``wake`` is a best-effort post-advance nudge.
+    ``None`` and is required — the app is fail-closed by construction, so a
+    test that wants an open app must say so with an explicit allow-all;
+    ``wake`` is a best-effort post-advance nudge.
 
     The load-record-normalize-save-advance sequence is serialized under
     ``advance_lock`` so the singleton front door never races itself. The ledger
@@ -158,7 +160,7 @@ def create_frontdoor_app(
     advance_lock = asyncio.Lock()
 
     def _auth(request: Request):
-        return authorize(request.headers) if authorize is not None else None
+        return authorize(request.headers)
 
     @app.post(HOT_LOAD_PATH, response_model=None)
     async def post_hot_load(request: Request) -> Response:
