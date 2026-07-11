@@ -34,7 +34,7 @@ import modal
 SGLANG_IMAGE_TAG = "lmsysorg/sglang:v0.5.14"
 SGLANG_FORK_REPO = "https://github.com/modal-projects/sglang.git"
 SGLANG_FORK_BRANCH = "weight-sync-miles"
-SGLANG_FORK_COMMIT = "725ad453732f79034447d43ab9cdd7820524b407"
+SGLANG_FORK_COMMIT = "7091d83058053dda8b17a600cc8fb744893c9afe"
 
 # SGLang runtime tunables carried over from the standalone B200 deployment.
 SERVING_IMAGE_ENV = {
@@ -44,11 +44,13 @@ SERVING_IMAGE_ENV = {
     "SGLANG_DISABLE_CUDNN_CHECK": "1",
     "SGLANG_ENABLE_OVERLAP_PLAN_STREAM": "1",
     "SGLANG_TIMEOUT_KEEP_ALIVE": "300",
-    # Reload record/replay (fork model_loader/load_plan.py): the first reload
-    # records the dispatch plan, later ones replay it. Checksum-verified
-    # byte-identical on GLM-4.5-Air (218s -> ~57s) and Kimi K2.6 (~11%);
-    # opt-in per model class and degrade-safe, so pool-wide enable is safe.
-    "SGLANG_ENABLE_RELOAD_LOAD_PLAN": "1",
+    # Reload record/replay (model_loader/load_plan.py) is DISABLED: the live
+    # e2e showed the first (record) reload hangs in the fused-MoE weight loader
+    # on GLM-4.5-Air, wedging the engine so current_version never advances. The
+    # record path was never exercised by the reload oracle, so it's unvalidated;
+    # keep it off until debugged. Reloads fall back to the plain restore-protocol
+    # path (the one the oracle validated). Re-enable per-model once fixed.
+    "SGLANG_ENABLE_RELOAD_LOAD_PLAN": "0",
 }
 
 
