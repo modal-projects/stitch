@@ -6,7 +6,7 @@ cutlass-dsl prerelease kernels + the tokenspeed MLA attention backend) that
 loads the served checkpoint's *own* quant config — there is no ``--quantization``
 flag baked in, so INT4 (slime/Kimi K2.6) vs NVFP4 (miles) is a property of the
 served checkpoint, not of this image. The per-trainer ``serving.py`` modules are
-thin wrappers that pass their trainer package + repo pin here.
+thin wrappers over this builder.
 
 Two deliberate choices keep the image lean (identical for every trainer):
 
@@ -34,7 +34,7 @@ import modal
 SGLANG_IMAGE_TAG = "lmsysorg/sglang:v0.5.14"
 SGLANG_FORK_REPO = "https://github.com/modal-projects/sglang.git"
 SGLANG_FORK_BRANCH = "weight-sync-miles"
-SGLANG_FORK_COMMIT = "964e6e24c4005a30901d68979b88416fa218ccf9"
+SGLANG_FORK_COMMIT = "725ad453732f79034447d43ab9cdd7820524b407"
 
 # SGLang runtime tunables carried over from the standalone B200 deployment.
 SERVING_IMAGE_ENV = {
@@ -56,7 +56,7 @@ def build_b200_serving_image(
     *,
     hf_cache_path: str,
     experiment: str,
-    delta_volume_name: str = "",
+    delta_volume_name: str,
     clear_sglang_cache_at_end: bool = False,
 ) -> modal.Image:
     """Build the rollout-pool serving image (see module docstring).

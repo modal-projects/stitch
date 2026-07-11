@@ -17,13 +17,6 @@ logger = logging.getLogger(__name__)
 EXTRA_KEY_DELIMITER = ";"
 
 
-def _transition_files(manifest: VersionManifest) -> list[str]:
-    files = list(manifest.transition_files)
-    if not files:
-        files = [artifact.path for artifact in manifest.artifacts if artifact.kind == "transition"]
-    return files
-
-
 def parse_reload_timing(message: str) -> dict[str, float]:
     """Lift the engine's optional ``[reload timing] iter_wait=1.2s load=3.4s ...``
     success-message suffix (emitted by the instrumented modal-projects/sglang
@@ -84,7 +77,6 @@ class SGLangDiskDeltaAdapter:
 
     upstream_url: str
     local_checkpoint_dir: str
-    base_checkpoint_dir: str
     backend: str = "disk_delta"
 
     def __post_init__(self) -> None:
@@ -209,15 +201,3 @@ class SGLangDiskDeltaAdapter:
         detail: dict[str, Any] = {"engine_reload_s": round(elapsed, 3)}
         detail.update(parse_reload_timing(str(data.get("message") or "")))
         return detail
-
-    async def apply_manifest(self, manifest: VersionManifest, version_path: str) -> None:
-        """Combined stage + reload, kept for callers that don't use the staged
-        split (the sync manager prefers stage_manifest/commit_manifest)."""
-        await self.stage_manifest(manifest, version_path)
-        if not _transition_files(manifest):
-            logger.info(
-                "[apply timing] v=%s engine_reload=skipped empty_delta",
-                manifest.version,
-            )
-            return
-        await self.commit_manifest(manifest, version_path)

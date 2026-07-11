@@ -32,7 +32,6 @@ def build_manager(
     upstream_url: str,
     bulletin_root: str,
     local_checkpoint_dir: str,
-    base_checkpoint_dir: str,
     volume_name: str = "",
     run_id: str | None = None,
     commit_mode: CommitMode = "in_place",
@@ -56,7 +55,6 @@ def build_manager(
     engine = SGLangDiskDeltaAdapter(
         upstream_url=upstream_url,
         local_checkpoint_dir=local_checkpoint_dir,
-        base_checkpoint_dir=base_checkpoint_dir,
     )
     return WeightSyncManager(
         board=board,
@@ -85,12 +83,10 @@ def run_sidecar() -> None:
     parser.add_argument(
         "--local-checkpoint-dir",
         default=os.environ.get("STITCH_LOCAL_CHECKPOINT_DIR", "/local-checkpoint"),
-        help="Writable host-local full HF checkpoint patched in place by each delta.",
-    )
-    parser.add_argument(
-        "--base-checkpoint-dir",
-        default=os.environ.get("STITCH_BASE_CHECKPOINT_DIR"),
-        help="Base HF checkpoint the local copy is seeded from (deltas build on it).",
+        help=(
+            "Writable host-local dir the engine materializes the checkpoint into "
+            "via /pull_weights (seeded from the engine's own --model-path)."
+        ),
     )
     parser.add_argument("--run-id", default=os.environ.get("DISAGG_RUN_ID"))
     parser.add_argument(
@@ -121,11 +117,6 @@ def run_sidecar() -> None:
         ),
     )
     args = parser.parse_args()
-    if not args.base_checkpoint_dir:
-        raise SystemExit(
-            "--base-checkpoint-dir/STITCH_BASE_CHECKPOINT_DIR is required: the engine"
-            " serves this base HF checkpoint and seeds its local copy from it."
-        )
 
     logging.basicConfig(level=logging.INFO)
     import uvicorn
@@ -134,7 +125,6 @@ def run_sidecar() -> None:
         upstream_url=args.upstream_url,
         bulletin_root=args.bulletin_root,
         local_checkpoint_dir=args.local_checkpoint_dir,
-        base_checkpoint_dir=args.base_checkpoint_dir,
         volume_name=args.volume_name,
         run_id=args.run_id,
         commit_mode=args.commit_mode,
@@ -150,3 +140,7 @@ def run_sidecar() -> None:
         port=args.port,
         log_level="info",
     )
+
+
+if __name__ == "__main__":  # `python3 -m cookbook.sidecar` on each rollout replica
+    run_sidecar()

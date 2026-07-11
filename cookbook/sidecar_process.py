@@ -21,7 +21,6 @@ def start_sglang_sidecar(
     sglang_port: int,
     bulletin_root: str,
     local_checkpoint_dir: str,
-    base_checkpoint_dir: str,
     volume_name: str,
     commit_mode: str,
     debug_requests: bool = False,
@@ -29,7 +28,7 @@ def start_sglang_sidecar(
     """Launch the weight-sync sidecar as a subprocess.
 
     ``sidecar_module`` is the Python module path (e.g.
-    ``"cookbook.slime_disagg.sidecar"``).
+    ``"cookbook.sidecar"``).
     """
     cmd = [
         "python3",
@@ -45,8 +44,6 @@ def start_sglang_sidecar(
         bulletin_root,
         "--local-checkpoint-dir",
         local_checkpoint_dir,
-        "--base-checkpoint-dir",
-        base_checkpoint_dir,
         "--volume-name",
         volume_name,
         "--commit-mode",
