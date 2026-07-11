@@ -475,7 +475,8 @@ class FrontDoor:
 
         import httpx
         import uvicorn
-        from fastapi.responses import Response
+        from fastapi.responses import Response, StreamingResponse
+        from starlette.background import BackgroundTask
 
         # Fail closed: this in-app check is the only auth gate (the Modal server
         # is unauthenticated=True), so refuse to start open rather than serve a
@@ -548,22 +549,36 @@ class FrontDoor:
             await asyncio.to_thread(wake_targets, targets, version)
 
         async def proxy(request, path: str) -> Response:
-            if gateway["url"] is None:
-                gateway["url"] = provider_gateway_url()
             headers = _frontdoor_headers(dict(request.headers))
             body = await request.body()
-            resp = await _proxy_client().request(
-                request.method,
-                f"{gateway['url']}/{path}",
-                headers=headers,
-                content=body,
-                params=request.query_params,
-            )
-            return Response(
-                content=resp.content,
-                status_code=resp.status_code,
-                media_type=resp.headers.get("content-type") or None,
-            )
+            # Two attempts: a connect failure drops the cached gateway URL (the
+            # pool may have been redeployed under a new one) and re-resolves.
+            for attempt in (1, 2):
+                if gateway["url"] is None:
+                    gateway["url"] = provider_gateway_url()
+                upstream_request = _proxy_client().build_request(
+                    request.method,
+                    f"{gateway['url']}/{path}",
+                    headers=headers,
+                    content=body,
+                    params=request.query_params,
+                )
+                try:
+                    upstream = await _proxy_client().send(upstream_request, stream=True)
+                except httpx.ConnectError:
+                    gateway["url"] = None
+                    if attempt == 2:
+                        raise
+                    continue
+                # Stream the body through so stream:true completions reach the
+                # client token by token; closing the response releases the
+                # upstream connection.
+                return StreamingResponse(
+                    upstream.aiter_raw(),
+                    status_code=upstream.status_code,
+                    media_type=upstream.headers.get("content-type") or None,
+                    background=BackgroundTask(upstream.aclose),
+                )
 
         asgi_app = frontdoor_mod.create_frontdoor_app(
             load_ledger=load_ledger,
