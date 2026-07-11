@@ -156,11 +156,20 @@ def create_frontdoor_app(
         rejected = _auth(request)
         if rejected is not None:
             return rejected
-        payload = await request.json()
+        try:
+            payload = await request.json()
+        except Exception:  # noqa: BLE001 — a malformed/non-JSON body is a 400, never a 500
+            return JSONResponse({"error": "request body must be a JSON object"}, status_code=400)
         if not isinstance(payload, dict) or not payload.get("identity"):
             return JSONResponse({"error": "body.identity is required"}, status_code=400)
         identity = str(payload["identity"])
         request_run_id = payload.get("run_id")
+        # run_id, when present, must be a string: the monotonic guard compares it
+        # against the stored run id, and a non-string (e.g. a JSON number) never
+        # compares equal, silently turning every duplicate signal into a
+        # pool-resetting cross-run move.
+        if request_run_id is not None and not isinstance(request_run_id, str):
+            return JSONResponse({"error": "body.run_id must be a string"}, status_code=400)
         async with advance_lock:
             current_run_id, current_version = await read_current_pointer()
             decision = advance_latest_decision(

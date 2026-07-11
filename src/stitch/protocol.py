@@ -368,12 +368,23 @@ def weight_identity(version: int) -> str:
 
 
 def parse_weight_identity(identity: str) -> int | None:
-    """Inverse of :func:`weight_identity`; None if not ``weight_v<digits>``."""
+    """Inverse of :func:`weight_identity`; None if not ``weight_v<digits>``.
+
+    Only ASCII digits are accepted and an over-long run of them returns None
+    rather than raising: this parses untrusted customer input, so a unicode
+    numeral (passes ``str.isdigit`` but ``int`` rejects) or a digit string past
+    CPython's int-conversion limit must be a clean rejection, not a 500.
+    """
     prefix = "weight_v"
     if not identity.startswith(prefix):
         return None
     digits = identity[len(prefix):]
-    return int(digits) if digits.isdigit() else None
+    if not (digits.isascii() and digits.isdigit()):
+        return None
+    try:
+        return int(digits)
+    except ValueError:
+        return None
 
 
 def format_snapshot_identity(run_id: str | None, version: int) -> str:

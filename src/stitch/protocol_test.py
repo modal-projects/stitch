@@ -141,6 +141,13 @@ class ProtocolTest(unittest.TestCase):
         self.assertIsNone(parse_weight_identity("base"))
         self.assertIsNone(parse_weight_identity("weight_vxyz"))
 
+    def test_parse_weight_identity_rejects_pathological_input_without_raising(self) -> None:
+        # Untrusted customer input: a unicode numeral passes str.isdigit but int
+        # rejects it, and a digit run past CPython's int-conversion limit raises
+        # in int(). Both must return None (-> a clean 400), never propagate.
+        self.assertIsNone(parse_weight_identity("weight_v²"))  # superscript 2
+        self.assertIsNone(parse_weight_identity("weight_v" + "9" * 100000))
+
     def test_evaluate_version_policy(self) -> None:
         self.assertIsNone(evaluate_version_policy(5, WeightVersionPolicy()))
         self.assertIsNone(evaluate_version_policy(5, WeightVersionPolicy(exact_version=5)))

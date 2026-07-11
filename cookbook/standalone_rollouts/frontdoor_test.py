@@ -150,6 +150,32 @@ class FrontdoorAppTest(unittest.TestCase):
         client, _ = self._client()
         self.assertEqual(client.post(HOT_LOAD_PATH, json={}).status_code, 400)
 
+    def test_post_malformed_body_is_400_not_500(self) -> None:
+        client, calls = self._client(run_id="run-a", version=5)
+        resp = client.post(
+            HOT_LOAD_PATH,
+            content=b"not json",
+            headers={"content-type": "application/json"},
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(calls["advanced"], [])
+
+    def test_post_non_string_run_id_is_400_not_a_reset(self) -> None:
+        # A JSON-number run_id must not slip past the string compare in the
+        # monotonic guard (7 != "7") and turn a duplicate into a cross-run reset.
+        client, calls = self._client(run_id="run-a", version=5)
+        resp = client.post(HOT_LOAD_PATH, json={"identity": "weight_v000006", "run_id": 7})
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(calls["advanced"], [])
+
+    def test_post_pathological_identity_is_400_not_500(self) -> None:
+        client, calls = self._client(run_id="run-a", version=5)
+        for identity in ("weight_v²", "weight_v" + "9" * 100000):
+            resp = client.post(HOT_LOAD_PATH, json={"identity": identity, "run_id": "run-a"})
+            self.assertEqual(resp.status_code, 400)
+            self.assertEqual(resp.json()["error"]["type"], "InvalidIdentity")
+        self.assertEqual(calls["advanced"], [])
+
     def test_get_reports_pool_readiness(self) -> None:
         client, _ = self._client(run_id="run-a", version=5)
         body = client.get(HOT_LOAD_PATH).json()
