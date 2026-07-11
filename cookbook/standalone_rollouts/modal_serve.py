@@ -10,6 +10,11 @@ front door derives readiness by enumerating the live containers.
 Run commands from the repo root, for example:
 
     uv run --extra modal modal deploy -m cookbook.standalone_rollouts.modal_serve
+
+TODO(slime phase): the sidecar spine now syncs via the engine's /pull_weights
+(no host-side apply), but this recipe still pins a pre-/pull_weights slime
+image (SLIME_IMAGE_TAG below). Migrate the pin to a slime build carrying the
+engine-side receiver before redeploying this recipe.
 """
 
 import asyncio
