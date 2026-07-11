@@ -1,21 +1,26 @@
 """Front-door hot-load adapter for the standalone rollout provider.
 
-The front door is the single public entry and the single writer of the
-bulletin board's monotonic ``latest`` pointer. It implements the customer's
-hot-load API as a thin projection of the canonical log-as-truth design:
+The front door is the single public entry and the single writer of both the
+bulletin board's monotonic ``latest`` pointer and the identity ledger. It
+implements the customer's hot-load API as an abstraction layer over the
+log-as-truth pool, so the customer's contract (opaque checkpoint identities,
+lineage via ``previous_snapshot_identity``, delta formats in the POST body)
+never leaks the pool's integer-versioned internals:
 
-- ``POST /hot_load/...`` advances ``latest`` to the signalled checkpoint
-  (monotonic CAS — a rewind is rejected for now; rolling the fleet back from a
-  recovery anchor is the future story), then best-effort wakes the pool. The
-  elastic rollout pool reconciles to ``latest`` on its own.
-- ``GET /hot_load/...`` reports pool readiness by enumerating the *live*
-  containers and querying each ``/server_info`` — no self-reported replica
-  state, so a scaled-down container can't haunt the readiness fraction.
-- Everything else is proxied to the rollout gateway.
+- ``POST /hot_load/...`` maps the signalled opaque ``identity`` to a monotonic
+  stitch version via the :class:`~cookbook.standalone_rollouts.ledger.IdentityLedger`
+  (idempotent on re-signal), normalizes the customer's POST metadata into the
+  version dir's index so the disk-delta decoder can apply it, advances ``latest``,
+  and best-effort wakes the pool.
+- ``GET /hot_load/...`` reports readiness by enumerating the *live* containers and
+  querying each ``/server_info``, translating each replica's integer version back
+  to the customer's identity string so their equality match works.
+- Inference (``v1/*``, ``generate``) is proxied to the rollout gateway; every
+  other route is rejected (allowlist).
 
-All I/O (reading/writing ``latest``, enumerating replicas, proxying, auth) is
-injected so the adapter logic is testable without Modal; ``modal_serve.py``
-supplies the real implementations.
+All I/O (ledger load/save, index normalization, pointer write, replica
+enumeration, proxy, auth) is injected so the adapter is testable without Modal;
+``modal_serve.py`` supplies the real implementations.
 
 No ``from __future__ import annotations`` here: the route handlers'
 ``request: Request`` annotation must evaluate eagerly against the factory-local
@@ -26,17 +31,12 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from stitch.protocol import (
-    PointerRewind,
-    RolloutPoolState,
-    RolloutReplicaState,
-    decide_pointer_move,
-    format_snapshot_identity,
-    parse_weight_identity,
-)
+from cookbook.standalone_rollouts.ledger import IdentityLedger
+from stitch.protocol import RolloutPoolState, RolloutReplicaState
 
 
 HOT_LOAD_PATH = "/hot_load/v1/models/hot_load"
+MAX_IDENTITY_LEN = 512
 
 
 def is_customer_inference_route(path: str) -> bool:
@@ -55,72 +55,55 @@ def is_customer_inference_route(path: str) -> bool:
     return route == "generate" or route == "v1" or route.startswith("v1/")
 
 
-def advance_latest_decision(
-    current_run_id: str | None,
-    current_version: int,
-    identity: str,
-    request_run_id: str | None,
-) -> dict[str, Any]:
-    """Decide whether a hot-load signal should advance the ``latest`` pointer.
-
-    Run-id partitioning makes this idempotent across runs. A signal from a
-    *different* run (``request_run_id != current_run_id``) is a fresh chain whose
-    version space restarts at 1, so it is accepted and resets the version space
-    (``"reset": True``) — accepting v1 after a finished run reached v5 is the
-    intended begin-a-new-run path, not a rewind. Within the same run (and the
-    run-less customer layout where both are None) the monotonic CAS still applies.
-
-    Returns ``{"run_id": str|None, "version": int, "reset": bool}`` to accept, or
-    ``{"error": {...}}`` to reject (``InvalidIdentity`` / ``WeightRewindRejected``).
-    The accept/reset/rewind call is :func:`stitch.protocol.decide_pointer_move`,
-    the same rule the bulletin-board publish path advances through; this wrapper
-    only parses the wire identity and shapes the error dict. An explicit claim is
-    just a signal at ``weight_v000000`` with a fresh ``run_id`` (a cross-run move,
-    so ``reset=True``).
-    """
-    version = parse_weight_identity(identity)
-    if version is None:
-        return {
-            "error": {
-                "type": "InvalidIdentity",
-                "message": f"identity {identity!r} is not weight_v<NNNNNN>",
-            }
-        }
-    try:
-        move = decide_pointer_move(
-            current_run_id, current_version, run_id=request_run_id, version=version
-        )
-    except PointerRewind as rewind:
-        return {
-            "error": {
-                "type": "WeightRewindRejected",
-                "message": str(rewind),
-                "current_version": rewind.current_version,
-                "requested_version": rewind.requested_version,
-            }
-        }
-    return {"run_id": move.run_id, "version": move.version, "reset": move.reset}
+def is_valid_identity(identity: str) -> bool:
+    """A customer checkpoint identity is opaque, but it becomes an S3 path
+    component (``<prefix>/<identity>/``) and a ledger key, so it must be
+    non-empty, bounded, single-segment (no ``/``, which would escape the prefix),
+    and free of control characters. Bounding it also caps ledger/key growth from
+    a hostile client."""
+    if not identity or len(identity) > MAX_IDENTITY_LEN:
+        return False
+    return "/" not in identity and not any(ord(c) < 0x20 for c in identity)
 
 
-def pool_state_from_server_infos(infos: list[dict[str, Any]]) -> RolloutPoolState:
+def delta_index_metadata(
+    version: int, base_version: int, incremental: dict[str, Any]
+) -> dict[str, str]:
+    """The slime disk-delta ``metadata`` block the decoder requires, derived from
+    the customer's POST. ``version``/``base_version`` are the ledger-assigned
+    integers as zero-padded 6-digit strings (the decoder compares ``base_version``
+    to the applied-version marker by string equality). ``delta_encoding`` is not
+    in the customer's API — spec §3 pins XOR — so it defaults to ``xor``;
+    ``compression_format``/``checksum_format`` come from the POST body (spec §2a),
+    defaulting to the spec's stated ``zstd``/``adler32`` when omitted."""
+    return {
+        "version": f"{int(version):06d}",
+        "base_version": f"{int(base_version):06d}",
+        "delta_encoding": str(incremental.get("delta_encoding", "xor")),
+        "compression_format": str(incremental.get("compression_format", "zstd")),
+        "checksum_format": str(incremental.get("checksum_format", "adler32")),
+    }
+
+
+def pool_state_from_server_infos(
+    infos: list[dict[str, Any]], ledger: IdentityLedger
+) -> RolloutPoolState:
     """Build a pool-readiness report from live ``/server_info`` responses.
 
     A replica is ready when it is reachable and idle (not mid-sync, no sticky
-    sync error). The trainer separately matches ``current_snapshot_identity``
-    against its target, so an idle replica still on an old version is observable
-    but correctly not counted toward the target.
+    sync error). Each replica reports an integer ``current_version``; the ledger
+    translates it back to the customer's opaque identity so their readiness match
+    (``current_snapshot_identity == <signalled identity>``) works. An idle replica
+    on an old version is observable but correctly not counted toward the target.
     """
     replicas: list[RolloutReplicaState] = []
     for info in infos:
         current_version = info.get("current_version")
-        current_run_id = info.get("current_run_id")
         sync_state = info.get("sync_state")
         last_error = info.get("last_sync_error")
         ready = sync_state == "IDLE" and not last_error
-        # The snapshot identity carries the run, so a replica still serving a
-        # finished run's same-numbered version isn't counted ready for a new run.
         identity = (
-            format_snapshot_identity(current_run_id, current_version)
+            ledger.identity_for(current_version)
             if isinstance(current_version, int) and current_version >= 0
             else None
         )
@@ -139,8 +122,10 @@ def pool_state_from_server_infos(infos: list[dict[str, Any]]) -> RolloutPoolStat
 
 def create_frontdoor_app(
     *,
-    read_current_pointer: Callable[[], Awaitable[tuple[str | None, int]]],
-    advance_to: Callable[[str | None, int], Awaitable[None]],
+    load_ledger: Callable[[], Awaitable[dict[str, Any]]],
+    save_ledger: Callable[[dict[str, Any]], Awaitable[None]],
+    normalize_index: Callable[[str, dict[str, str]], Awaitable[None]],
+    advance_to: Callable[[int], Awaitable[None]],
     list_server_infos: Callable[[], Awaitable[list[dict[str, Any]]]],
     proxy: Callable[..., Awaitable[Any]],
     authorize: Callable[[Any], Any] | None = None,
@@ -148,15 +133,19 @@ def create_frontdoor_app(
 ):
     """Build the front-door FastAPI app from injected I/O.
 
-    ``read_current_pointer`` returns the active ``(run_id, version)``;
-    ``advance_to(run_id, version)`` atomically writes the single self-identifying
-    ``latest`` pointer. ``list_server_infos`` enumerates live replicas; ``proxy``
-    forwards non-hot-load requests; ``authorize`` returns a rejection Response or
+    ``load_ledger``/``save_ledger`` read/write the identity↔version ledger on the
+    transport; ``normalize_index(identity, metadata)`` writes the disk-delta
+    metadata block into that version dir's index; ``advance_to(version)`` writes
+    the ``latest`` pointer; ``list_server_infos`` enumerates live replicas;
+    ``proxy`` forwards inference; ``authorize`` returns a rejection Response or
     ``None``; ``wake`` is a best-effort post-advance nudge.
 
-    The read-decide-advance sequence is serialized so the singleton front door
-    never races itself into a transient rewind (two POSTs both reading the same
-    current version and advancing out of order).
+    The load-record-normalize-save-advance sequence is serialized under
+    ``advance_lock`` so the singleton front door never races itself. The ledger
+    is loaded fresh from the transport inside the lock (not cached across POSTs),
+    so a partial failure leaves the transport ledger authoritative and a retry
+    converges: normalize is idempotent, save is the commit point, and the pointer
+    is re-advanced to the head even on an idempotent re-signal.
     """
     from fastapi import FastAPI, Request
     from fastapi.responses import JSONResponse, Response
@@ -179,34 +168,63 @@ def create_frontdoor_app(
         if not isinstance(payload, dict) or not payload.get("identity"):
             return JSONResponse({"error": "body.identity is required"}, status_code=400)
         identity = str(payload["identity"])
-        request_run_id = payload.get("run_id")
-        # run_id, when present, must be a string: the monotonic guard compares it
-        # against the stored run id, and a non-string (e.g. a JSON number) never
-        # compares equal, silently turning every duplicate signal into a
-        # pool-resetting cross-run move.
-        if request_run_id is not None and not isinstance(request_run_id, str):
-            return JSONResponse({"error": "body.run_id must be a string"}, status_code=400)
-        async with advance_lock:
-            current_run_id, current_version = await read_current_pointer()
-            decision = advance_latest_decision(
-                current_run_id, current_version, identity, request_run_id
+        if not is_valid_identity(identity):
+            return JSONResponse(
+                {"error": "body.identity must be a non-empty, single-segment string <= 512 chars"},
+                status_code=400,
             )
-            if "error" in decision:
-                status = 400 if decision["error"]["type"] == "InvalidIdentity" else 409
-                return JSONResponse(decision, status_code=status)
-            await advance_to(decision["run_id"], decision["version"])
-        snapshot_identity = format_snapshot_identity(decision["run_id"], decision["version"])
-        if wake is not None:
+        incremental = payload.get("incremental_snapshot_metadata")
+        if incremental is not None and not isinstance(incremental, dict):
+            return JSONResponse(
+                {"error": "body.incremental_snapshot_metadata must be an object"}, status_code=400
+            )
+        previous = incremental.get("previous_snapshot_identity") if incremental else None
+        if previous is not None and not isinstance(previous, str):
+            return JSONResponse(
+                {"error": "incremental_snapshot_metadata.previous_snapshot_identity must be a string"},
+                status_code=400,
+            )
+
+        async with advance_lock:
+            ledger = IdentityLedger.from_dict(await load_ledger())
+            entry, is_new = ledger.record(identity, previous)
+            if is_new:
+                # A delta (incremental metadata present) needs its index normalized
+                # so the decoder can apply it; a full snapshot (base) is served
+                # from the booted base checkpoint and needs no delta metadata.
+                # Normalize before saving/advancing, so a missing upload leaves the
+                # transport ledger and pointer untouched (fail fast, self-clean).
+                if incremental is not None:
+                    try:
+                        await normalize_index(
+                            identity,
+                            delta_index_metadata(
+                                entry.version, ledger.base_version_for(identity), incremental
+                            ),
+                        )
+                    except FileNotFoundError:
+                        return JSONResponse(
+                            {"error": f"checkpoint {identity!r} not found on the transport; upload before signalling"},
+                            status_code=409,
+                        )
+                await save_ledger(ledger.to_dict())
+            # Advance (idempotently) whenever this identity is the chain head, so a
+            # retry after a save-succeeded/advance-failed POST still moves latest.
+            if entry.version == ledger.head_version:
+                await advance_to(entry.version)
+
+        if is_new and wake is not None:
             try:
-                await wake(decision["version"])
+                await wake(entry.version)
             except Exception:  # noqa: BLE001 — wake is a latency optimization only
                 pass
         return JSONResponse(
             {
                 "accepted": True,
                 "identity": identity,
-                "current_snapshot_identity": snapshot_identity,
-                "run_id": decision["run_id"],
+                "current_snapshot_identity": identity,
+                "version": entry.version,
+                "already_current": not is_new,
             }
         )
 
@@ -215,8 +233,9 @@ def create_frontdoor_app(
         rejected = _auth(request)
         if rejected is not None:
             return rejected
+        ledger = IdentityLedger.from_dict(await load_ledger())
         infos = await list_server_infos()
-        return JSONResponse(pool_state_from_server_infos(infos).to_dict())
+        return JSONResponse(pool_state_from_server_infos(infos, ledger).to_dict())
 
     @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
     async def catch_all(path: str, request: Request) -> Response:

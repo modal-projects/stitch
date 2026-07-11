@@ -63,6 +63,14 @@ class IdentityLedger:
             }
         }
 
+    @property
+    def head_version(self) -> int | None:
+        """The highest minted version (the chain head), or None when empty. The
+        front door re-advances the pointer to the head even on an idempotent
+        re-signal, so a POST whose save landed but whose pointer write failed
+        converges on retry."""
+        return max(self._by_version) if self._by_version else None
+
     def version_for(self, identity: str) -> int | None:
         entry = self._by_identity.get(identity)
         return entry.version if entry is not None else None

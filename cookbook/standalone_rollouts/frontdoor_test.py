@@ -4,214 +4,281 @@ import unittest
 
 from cookbook.standalone_rollouts.frontdoor import (
     HOT_LOAD_PATH,
-    advance_latest_decision,
-    create_frontdoor_app,
+    delta_index_metadata,
+    is_customer_inference_route,
+    is_valid_identity,
     pool_state_from_server_infos,
 )
+from cookbook.standalone_rollouts.ledger import IdentityLedger
 
 
-class AdvanceDecisionTest(unittest.TestCase):
-    def test_accepts_strictly_newer_same_run(self) -> None:
+class IdentityValidationTest(unittest.TestCase):
+    def test_opaque_identities_are_accepted(self) -> None:
+        for identity in ("weight_v000001", "ckpt-100", "step_500", "2026-07-11T00:00:00Z", "wéight"):
+            self.assertTrue(is_valid_identity(identity), identity)
+
+    def test_rejects_empty_slashed_control_and_overlong(self) -> None:
+        self.assertFalse(is_valid_identity(""))
+        self.assertFalse(is_valid_identity("a/b"))  # would escape the prefix
+        self.assertFalse(is_valid_identity("a\nb"))  # control char
+        self.assertFalse(is_valid_identity("x" * 513))
+
+
+class DeltaMetadataTest(unittest.TestCase):
+    def test_pads_versions_and_defaults_delta_encoding(self) -> None:
+        meta = delta_index_metadata(
+            2, 1, {"compression_format": "zstd", "checksum_format": "adler32"}
+        )
         self.assertEqual(
-            advance_latest_decision("run-a", 4, "weight_v000005", "run-a"),
-            {"run_id": "run-a", "version": 5, "reset": False},
+            meta,
+            {
+                "version": "000002",
+                "base_version": "000001",
+                "delta_encoding": "xor",  # not in the customer API; spec §3 default
+                "compression_format": "zstd",
+                "checksum_format": "adler32",
+            },
         )
 
-    def test_rejects_rewind_same_run(self) -> None:
-        for identity in ("weight_v000004", "weight_v000003"):
-            decision = advance_latest_decision("run-a", 4, identity, "run-a")
-            self.assertEqual(decision["error"]["type"], "WeightRewindRejected")
-            self.assertEqual(decision["error"]["current_version"], 4)
-
-    def test_new_run_resets_even_if_version_lower(self) -> None:
-        # A new run restarts at v1; accepting it after the prior run reached v5 is
-        # the begin-a-new-run path, not a rewind — the idempotency fix.
-        self.assertEqual(
-            advance_latest_decision("run-a", 5, "weight_v000001", "run-b"),
-            {"run_id": "run-b", "version": 1, "reset": True},
+    def test_passes_through_customer_formats(self) -> None:
+        meta = delta_index_metadata(
+            5, 4, {"compression_format": "zstd", "checksum_format": "xxh3-128", "delta_encoding": "overwrite"}
         )
-
-    def test_runless_layout_stays_monotonic(self) -> None:
-        ok = advance_latest_decision(None, 4, "weight_v000005", None)
-        self.assertEqual(ok, {"run_id": None, "version": 5, "reset": False})
-        rewind = advance_latest_decision(None, 5, "weight_v000005", None)
-        self.assertEqual(rewind["error"]["type"], "WeightRewindRejected")
-
-    def test_claim_is_a_base_version_signal_for_a_fresh_run(self) -> None:
-        # An explicit claim is just weight_v000000 with a fresh run id: a
-        # cross-run move, so it resets the pool to base before any delta.
-        self.assertEqual(
-            advance_latest_decision("run-a", 5, "weight_v000000", "run-b"),
-            {"run_id": "run-b", "version": 0, "reset": True},
-        )
-
-    def test_rejects_unparseable_identity(self) -> None:
-        self.assertEqual(
-            advance_latest_decision(None, 0, "base", None)["error"]["type"], "InvalidIdentity"
-        )
+        self.assertEqual(meta["checksum_format"], "xxh3-128")
+        self.assertEqual(meta["delta_encoding"], "overwrite")
 
 
 class PoolStateTest(unittest.TestCase):
+    def _ledger(self) -> IdentityLedger:
+        ledger = IdentityLedger()
+        ledger.record("base-ckpt", previous=None)  # v0
+        ledger.record("ckpt-100", previous="base-ckpt")  # v1
+        return ledger
+
+    def test_translates_version_to_customer_identity(self) -> None:
+        state = pool_state_from_server_infos(
+            [{"current_version": 1, "sync_state": "IDLE", "last_sync_error": None, "replica_id": "a"}],
+            self._ledger(),
+        )
+        self.assertTrue(state.replicas[0].readiness)
+        self.assertEqual(state.replicas[0].current_snapshot_identity, "ckpt-100")
+        self.assertEqual(state.ready_count(target_snapshot_identity="ckpt-100"), 1)
+
     def test_ready_only_when_idle_and_no_error(self) -> None:
         state = pool_state_from_server_infos(
             [
-                {"run_id": "a", "current_run_id": "run-x", "current_version": 5, "sync_state": "IDLE", "last_sync_error": None},
-                {"run_id": "b", "current_run_id": "run-x", "current_version": 4, "sync_state": "PREFETCHING", "last_sync_error": None},
-                {"run_id": "c", "current_run_id": "run-x", "current_version": 5, "sync_state": "ERROR", "last_sync_error": "boom"},
-            ]
+                {"current_version": 1, "sync_state": "IDLE", "last_sync_error": None, "replica_id": "a"},
+                {"current_version": 0, "sync_state": "PREFETCHING", "last_sync_error": None, "replica_id": "b"},
+                {"current_version": 1, "sync_state": "ERROR", "last_sync_error": "boom", "replica_id": "c"},
+            ],
+            self._ledger(),
         )
         by_id = {r.replica_id: r for r in state.replicas}
         self.assertTrue(by_id["a"].readiness)
-        self.assertEqual(by_id["a"].current_snapshot_identity, "run-x/weight_v000005")
         self.assertFalse(by_id["b"].readiness)
         self.assertEqual(by_id["b"].readiness_reason, "PREFETCHING")
         self.assertFalse(by_id["c"].readiness)
         self.assertEqual(by_id["c"].readiness_reason, "boom")
-        self.assertEqual(state.ready_count(target_snapshot_identity="run-x/weight_v000005"), 1)
 
-    def test_identity_carries_run_id(self) -> None:
-        # A replica on run-b advertises a run-scoped identity, so it is not
-        # miscounted ready for a different run's same-numbered version.
+    def test_unreachable_replica_reason(self) -> None:
         state = pool_state_from_server_infos(
-            [{"run_id": "a", "current_run_id": "run-b", "current_version": 1, "sync_state": "IDLE"}]
+            [{"sync_state": None, "last_sync_error": "unreachable"}], self._ledger()
         )
-        self.assertEqual(state.replicas[0].current_snapshot_identity, "run-b/weight_v000001")
-        self.assertEqual(state.ready_count(target_snapshot_identity="run-b/weight_v000001"), 1)
-        self.assertEqual(state.ready_count(target_snapshot_identity="run-a/weight_v000001"), 0)
+        self.assertFalse(state.replicas[0].readiness)
+        self.assertEqual(state.replicas[0].readiness_reason, "unreachable")
+        self.assertIsNone(state.replicas[0].current_snapshot_identity)
+
+
+class RouteAllowlistTest(unittest.TestCase):
+    def test_inference_routes_allowed(self) -> None:
+        for path in ("generate", "v1/completions", "v1/chat/completions", "v1/models"):
+            self.assertTrue(is_customer_inference_route(path), path)
+
+    def test_control_routes_blocked(self) -> None:
+        for path in ("rpc_sync_from_bulletin_board", "server_info", "update_weights_from_ipc", "start_profile"):
+            self.assertFalse(is_customer_inference_route(path), path)
 
 
 class FrontdoorAppTest(unittest.TestCase):
-    def _client(self, *, run_id="run-a", version=5, authorize=None):
-        from fastapi.responses import JSONResponse
+    def _client(self, *, ledger: dict | None = None, authorize=None):
         from fastapi.testclient import TestClient
 
-        state = {"run_id": run_id, "version": version}
-        calls: dict[str, list] = {"advanced": [], "woke": [], "proxied": []}
+        from cookbook.standalone_rollouts.frontdoor import create_frontdoor_app
 
-        async def read_current_pointer():
-            return (state["run_id"], state["version"])
+        state: dict = {"ledger": dict(ledger or {}), "version": None}
+        calls: dict[str, list] = {"advanced": [], "woke": [], "normalized": [], "proxied": [], "saved": []}
 
-        async def advance_to(rid, v: int) -> None:
-            calls["advanced"].append((rid, v))
-            state["run_id"], state["version"] = rid, v
+        async def load_ledger():
+            return state["ledger"]
+
+        async def save_ledger(data):
+            state["ledger"] = data
+            calls["saved"].append(data)
+
+        async def normalize_index(identity, metadata):
+            calls["normalized"].append((identity, metadata))
+
+        async def advance_to(version):
+            state["version"] = version
+            calls["advanced"].append(version)
 
         async def list_server_infos():
-            return [
-                {
-                    "run_id": "a",
-                    "current_run_id": state["run_id"],
-                    "current_version": state["version"],
-                    "sync_state": "IDLE",
-                }
-            ]
+            v = state["version"] if state["version"] is not None else 0
+            return [{"current_version": v, "sync_state": "IDLE", "last_sync_error": None, "replica_id": "a"}]
 
-        async def wake(v: int) -> None:
-            calls["woke"].append(v)
+        async def wake(version):
+            calls["woke"].append(version)
+
+        from fastapi.responses import JSONResponse
 
         async def proxy(request, path):
             calls["proxied"].append(path)
             return JSONResponse({"proxied": path})
 
         app = create_frontdoor_app(
-            read_current_pointer=read_current_pointer,
+            load_ledger=load_ledger,
+            save_ledger=save_ledger,
+            normalize_index=normalize_index,
             advance_to=advance_to,
             list_server_infos=list_server_infos,
             proxy=proxy,
             authorize=authorize,
             wake=wake,
         )
-        return TestClient(app), calls
+        return TestClient(app), calls, state
 
-    def test_post_advances_on_newer_identity_and_wakes(self) -> None:
-        client, calls = self._client(run_id="run-a", version=4)
-        resp = client.post(HOT_LOAD_PATH, json={"identity": "weight_v000005", "run_id": "run-a"})
+    def test_full_snapshot_signal_mints_v0_without_normalizing(self) -> None:
+        client, calls, _ = self._client()
+        resp = client.post(HOT_LOAD_PATH, json={"identity": "base-ckpt"})
         self.assertEqual(resp.status_code, 200)
-        self.assertTrue(resp.json()["accepted"])
-        self.assertEqual(resp.json()["current_snapshot_identity"], "run-a/weight_v000005")
-        self.assertEqual(calls["advanced"], [("run-a", 5)])
-        self.assertEqual(calls["woke"], [5])
+        body = resp.json()
+        self.assertEqual(body["version"], 0)
+        self.assertEqual(body["current_snapshot_identity"], "base-ckpt")
+        self.assertFalse(body["already_current"])
+        self.assertEqual(calls["advanced"], [0])
+        self.assertEqual(calls["normalized"], [])  # a base is not a delta
 
-    def test_post_new_run_accepted_as_reset(self) -> None:
-        client, calls = self._client(run_id="run-a", version=5)
-        resp = client.post(HOT_LOAD_PATH, json={"identity": "weight_v000001", "run_id": "run-b"})
+    def test_delta_signal_mints_next_version_and_normalizes_index(self) -> None:
+        client, calls, _ = self._client()
+        client.post(HOT_LOAD_PATH, json={"identity": "base-ckpt"})
+        resp = client.post(
+            HOT_LOAD_PATH,
+            json={
+                "identity": "ckpt-100",
+                "incremental_snapshot_metadata": {
+                    "previous_snapshot_identity": "base-ckpt",
+                    "compression_format": "zstd",
+                    "checksum_format": "adler32",
+                },
+            },
+        )
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(calls["advanced"], [("run-b", 1)])
-        self.assertEqual(resp.json()["current_snapshot_identity"], "run-b/weight_v000001")
+        self.assertEqual(resp.json()["version"], 1)
+        self.assertEqual(calls["advanced"], [0, 1])
+        self.assertEqual(calls["woke"], [0, 1])
+        self.assertEqual(len(calls["normalized"]), 1)
+        ident, meta = calls["normalized"][0]
+        self.assertEqual(ident, "ckpt-100")
+        self.assertEqual(meta["version"], "000001")
+        self.assertEqual(meta["base_version"], "000000")
 
-    def test_post_rejects_rewind_without_advancing(self) -> None:
-        client, calls = self._client(run_id="run-a", version=5)
-        resp = client.post(HOT_LOAD_PATH, json={"identity": "weight_v000005", "run_id": "run-a"})
+    def test_resignal_is_idempotent_no_remint_no_normalize(self) -> None:
+        client, calls, _ = self._client()
+        client.post(HOT_LOAD_PATH, json={"identity": "base-ckpt"})
+        first = client.post(HOT_LOAD_PATH, json={"identity": "ckpt-100", "incremental_snapshot_metadata": {"previous_snapshot_identity": "base-ckpt", "compression_format": "zstd", "checksum_format": "adler32"}})
+        again = client.post(HOT_LOAD_PATH, json={"identity": "ckpt-100", "incremental_snapshot_metadata": {"previous_snapshot_identity": "base-ckpt", "compression_format": "zstd", "checksum_format": "adler32"}})
+        self.assertEqual(first.json()["version"], 1)
+        self.assertEqual(again.json()["version"], 1)
+        self.assertTrue(again.json()["already_current"])
+        # Only one normalize / one save for the mint; the retry re-advances the
+        # head (idempotent) but does not re-mint or re-normalize.
+        self.assertEqual(len(calls["normalized"]), 1)
+        self.assertEqual(calls["advanced"], [0, 1, 1])
+
+    def test_signal_before_upload_is_409_and_leaves_state_clean(self) -> None:
+        from fastapi.testclient import TestClient
+
+        from cookbook.standalone_rollouts.frontdoor import create_frontdoor_app
+
+        state: dict = {"ledger": {}, "version": None}
+        calls: dict[str, list] = {"advanced": [], "saved": []}
+
+        async def load_ledger():
+            return state["ledger"]
+
+        async def save_ledger(data):
+            state["ledger"] = data
+            calls["saved"].append(data)
+
+        async def normalize_index(identity, metadata):
+            raise FileNotFoundError(identity)  # upload has not landed yet
+
+        async def advance_to(version):
+            calls["advanced"].append(version)
+
+        async def list_server_infos():
+            return []
+
+        async def proxy(request, path):
+            from fastapi.responses import JSONResponse
+
+            return JSONResponse({})
+
+        app = create_frontdoor_app(
+            load_ledger=load_ledger,
+            save_ledger=save_ledger,
+            normalize_index=normalize_index,
+            advance_to=advance_to,
+            list_server_infos=list_server_infos,
+            proxy=proxy,
+        )
+        client = TestClient(app)
+        resp = client.post(
+            HOT_LOAD_PATH,
+            json={"identity": "ckpt-100", "incremental_snapshot_metadata": {"previous_snapshot_identity": "base", "compression_format": "zstd", "checksum_format": "adler32"}},
+        )
         self.assertEqual(resp.status_code, 409)
-        self.assertEqual(resp.json()["error"]["type"], "WeightRewindRejected")
+        # No pointer move, no ledger commit -> a retry after upload converges.
         self.assertEqual(calls["advanced"], [])
-        self.assertEqual(calls["woke"], [])
+        self.assertEqual(calls["saved"], [])
+        self.assertEqual(state["ledger"], {})
+
+    def test_opaque_non_weight_v_identity_is_accepted(self) -> None:
+        client, _, _ = self._client()
+        resp = client.post(HOT_LOAD_PATH, json={"identity": "ckpt-step-500"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["current_snapshot_identity"], "ckpt-step-500")
+
+    def test_get_reports_readiness_in_customer_identity(self) -> None:
+        client, _, _ = self._client()
+        client.post(HOT_LOAD_PATH, json={"identity": "base-ckpt"})
+        client.post(HOT_LOAD_PATH, json={"identity": "ckpt-100", "incremental_snapshot_metadata": {"previous_snapshot_identity": "base-ckpt", "compression_format": "zstd", "checksum_format": "adler32"}})
+        body = client.get(HOT_LOAD_PATH).json()
+        self.assertEqual(len(body["replicas"]), 1)
+        self.assertEqual(body["replicas"][0]["current_snapshot_identity"], "ckpt-100")
+        self.assertTrue(body["replicas"][0]["readiness"])
 
     def test_post_requires_identity(self) -> None:
-        client, _ = self._client()
+        client, _, _ = self._client()
         self.assertEqual(client.post(HOT_LOAD_PATH, json={}).status_code, 400)
 
     def test_post_malformed_body_is_400_not_500(self) -> None:
-        client, calls = self._client(run_id="run-a", version=5)
-        resp = client.post(
-            HOT_LOAD_PATH,
-            content=b"not json",
-            headers={"content-type": "application/json"},
-        )
+        client, calls, _ = self._client()
+        resp = client.post(HOT_LOAD_PATH, content=b"not json", headers={"content-type": "application/json"})
         self.assertEqual(resp.status_code, 400)
         self.assertEqual(calls["advanced"], [])
 
-    def test_post_non_string_run_id_is_400_not_a_reset(self) -> None:
-        # A JSON-number run_id must not slip past the string compare in the
-        # monotonic guard (7 != "7") and turn a duplicate into a cross-run reset.
-        client, calls = self._client(run_id="run-a", version=5)
-        resp = client.post(HOT_LOAD_PATH, json={"identity": "weight_v000006", "run_id": 7})
-        self.assertEqual(resp.status_code, 400)
+    def test_post_overlong_or_slashed_identity_is_400(self) -> None:
+        client, calls, _ = self._client()
+        for identity in ("weight_v" + "9" * 100000, "a/b/c"):
+            self.assertEqual(client.post(HOT_LOAD_PATH, json={"identity": identity}).status_code, 400)
         self.assertEqual(calls["advanced"], [])
 
-    def test_post_pathological_identity_is_400_not_500(self) -> None:
-        client, calls = self._client(run_id="run-a", version=5)
-        for identity in ("weight_v²", "weight_v" + "9" * 100000):
-            resp = client.post(HOT_LOAD_PATH, json={"identity": identity, "run_id": "run-a"})
-            self.assertEqual(resp.status_code, 400)
-            self.assertEqual(resp.json()["error"]["type"], "InvalidIdentity")
-        self.assertEqual(calls["advanced"], [])
-
-    def test_get_reports_pool_readiness(self) -> None:
-        client, _ = self._client(run_id="run-a", version=5)
-        body = client.get(HOT_LOAD_PATH).json()
-        self.assertEqual(len(body["replicas"]), 1)
-        self.assertEqual(body["replicas"][0]["current_snapshot_identity"], "run-a/weight_v000005")
-        self.assertTrue(body["replicas"][0]["readiness"])
-
-    def test_catch_all_proxies(self) -> None:
-        client, calls = self._client()
-        resp = client.post("/v1/chat/completions", json={"model": "m"})
-        self.assertEqual(resp.json(), {"proxied": "v1/chat/completions"})
+    def test_catch_all_proxies_inference_and_404s_internal(self) -> None:
+        client, calls, _ = self._client()
+        self.assertEqual(client.post("/v1/chat/completions", json={}).status_code, 200)
+        self.assertEqual(client.post("/rpc_sync_from_bulletin_board", json={}).status_code, 404)
         self.assertEqual(calls["proxied"], ["v1/chat/completions"])
-
-    def test_proxy_allows_inference_routes(self) -> None:
-        client, calls = self._client()
-        for path in ("/v1/completions", "/v1/chat/completions", "/v1/models", "/generate"):
-            self.assertEqual(client.post(path, json={}).status_code, 200)
-        self.assertEqual(
-            calls["proxied"], ["v1/completions", "v1/chat/completions", "v1/models", "generate"]
-        )
-
-    def test_proxy_blocks_internal_routes_with_404(self) -> None:
-        # Reachable through the front door before the allowlist: sidecar control
-        # routes and SGLang engine routes. None must be proxied.
-        client, calls = self._client()
-        for path in (
-            "/rpc_sync_from_bulletin_board",
-            "/server_info",
-            "/get_weight_version",
-            "/update_weights_from_disk",
-            "/update_weights_from_ipc",
-            "/start_profile",
-            "/flush_cache",
-        ):
-            self.assertEqual(client.post(path, json={}).status_code, 404)
-        self.assertEqual(calls["proxied"], [])
 
     def test_auth_rejection_blocks_every_route(self) -> None:
         from fastapi.responses import JSONResponse
@@ -219,11 +286,8 @@ class FrontdoorAppTest(unittest.TestCase):
         def deny(_headers):
             return JSONResponse({"error": "unauthorized"}, status_code=401)
 
-        client, calls = self._client(authorize=deny)
-        self.assertEqual(
-            client.post(HOT_LOAD_PATH, json={"identity": "weight_v000009", "run_id": "run-a"}).status_code,
-            401,
-        )
+        client, calls, _ = self._client(authorize=deny)
+        self.assertEqual(client.post(HOT_LOAD_PATH, json={"identity": "x"}).status_code, 401)
         self.assertEqual(client.get(HOT_LOAD_PATH).status_code, 401)
         self.assertEqual(client.post("/v1/chat/completions", json={}).status_code, 401)
         self.assertEqual(calls["advanced"], [])

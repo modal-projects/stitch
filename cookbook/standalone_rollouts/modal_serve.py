@@ -29,6 +29,7 @@ from cookbook.standalone_rollouts.base_checkpoint import (
     resolve_base_checkpoint,
 )
 from stitch.bulletin import FilesystemBulletinBoard
+from stitch.protocol import plain_write_text
 from stitch.providers.modal import (
     discover_flash_targets,
     resolve_flash_gateway_url,
@@ -481,7 +482,11 @@ class FrontDoor:
                 f"gate and will not start open. Set it in the {exp.SHIM_SECRET_NAME} secret."
             )
 
+        import json
+
         board = FilesystemBulletinBoard(str(S3_TRANSPORT_MOUNT_PATH), layout="slime")
+        transport_root = Path(str(S3_TRANSPORT_MOUNT_PATH))
+        ledger_path = transport_root / "identities.json"
         gateway: dict[str, str | None] = {"url": None}
         clients: dict[str, httpx.AsyncClient] = {}
 
@@ -492,17 +497,40 @@ class FrontDoor:
                 clients["client"] = client
             return client
 
-        async def read_current_pointer() -> tuple[str | None, int]:
-            return board.read_latest()
+        async def load_ledger() -> dict:
+            def _read() -> dict:
+                try:
+                    return json.loads(ledger_path.read_text(encoding="utf-8"))
+                except FileNotFoundError:
+                    return {}
 
-        async def advance_to(run_id: str | None, version: int) -> None:
-            # Singleton writer: a single small write is one atomic S3 PutObject,
-            # so no rename dance is needed. The pointer is self-identifying
-            # (`<run_id>/weight_vN`), so a new run is a forward move (not a rewind)
-            # and there is no separate run pointer to flip. The monotonic/reset
-            # decision already ran in advance_latest_decision, so this writes the
-            # decided move through the same board the pool reconciles against.
-            board.write_latest(run_id, version)
+            return await asyncio.to_thread(_read)
+
+        async def save_ledger(data: dict) -> None:
+            # Rename-free write on the S3 mount (see plain_write_text); the front
+            # door is the singleton writer, serialized under the app's advance lock.
+            await asyncio.to_thread(
+                plain_write_text, ledger_path, json.dumps(data, sort_keys=True) + "\n"
+            )
+
+        async def normalize_index(identity: str, metadata: dict) -> None:
+            # Merge the disk-delta metadata block into the customer's uploaded
+            # index so the decoder can apply it, without asking the customer to
+            # produce a slime-shaped index. Raises FileNotFoundError if the upload
+            # has not landed (the front door turns that into a 409).
+            index_path = transport_root / identity / "model.safetensors.index.json"
+
+            def _rewrite() -> None:
+                index = json.loads(index_path.read_text(encoding="utf-8"))
+                index.setdefault("metadata", {}).update(metadata)
+                plain_write_text(index_path, json.dumps(index))
+
+            await asyncio.to_thread(_rewrite)
+
+        async def advance_to(version: int) -> None:
+            # Run-less pointer: write the bare weight_vN identity the pool pulls.
+            # One plain PutObject-style overwrite (see plain_write_text).
+            board.write_latest(None, version)
 
         async def list_server_infos() -> list[dict]:
             targets = await asyncio.to_thread(
@@ -545,7 +573,9 @@ class FrontDoor:
             )
 
         asgi_app = frontdoor_mod.create_frontdoor_app(
-            read_current_pointer=read_current_pointer,
+            load_ledger=load_ledger,
+            save_ledger=save_ledger,
+            normalize_index=normalize_index,
             advance_to=advance_to,
             list_server_infos=list_server_infos,
             proxy=proxy,
