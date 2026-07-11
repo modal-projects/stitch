@@ -37,7 +37,6 @@ def build_manager(
     upstream_url: str,
     transport_root: str,
     local_checkpoint_dir: str,
-    base_checkpoint_dir: str,
     commit_mode: CommitMode = "in_place",
     run_id: str | None = None,
     debug_requests: bool = False,
@@ -49,7 +48,6 @@ def build_manager(
     engine = SGLangDiskDeltaAdapter(
         upstream_url=upstream_url,
         local_checkpoint_dir=local_checkpoint_dir,
-        base_checkpoint_dir=base_checkpoint_dir,
     )
     return WeightSyncManager(
         board=board,
@@ -86,12 +84,10 @@ def main() -> None:
     parser.add_argument(
         "--local-checkpoint-dir",
         default=os.environ.get("STITCH_LOCAL_CHECKPOINT_DIR", "/local-checkpoint"),
-        help="Writable host-local full HF checkpoint patched in place by each delta.",
-    )
-    parser.add_argument(
-        "--base-checkpoint-dir",
-        default=os.environ.get("STITCH_BASE_CHECKPOINT_DIR"),
-        help="Base HF checkpoint the local copy is seeded from (deltas build on it).",
+        help=(
+            "Writable host-local dir the engine materializes the checkpoint into "
+            "via /pull_weights (seeded from the engine's own --model-path)."
+        ),
     )
     parser.add_argument(
         "--commit-mode",
@@ -113,11 +109,6 @@ def main() -> None:
     args = parser.parse_args()
     if not args.transport_root:
         raise SystemExit("--transport-root/STITCH_SHIM_TRANSPORT_ROOT is required")
-    if not args.base_checkpoint_dir:
-        raise SystemExit(
-            "--base-checkpoint-dir/STITCH_BASE_CHECKPOINT_DIR is required: deltas are"
-            " applied host-side on top of a copy of this base HF checkpoint."
-        )
 
     logging.basicConfig(level=logging.INFO)
     import uvicorn
@@ -126,7 +117,6 @@ def main() -> None:
         upstream_url=args.upstream_url,
         transport_root=args.transport_root,
         local_checkpoint_dir=args.local_checkpoint_dir,
-        base_checkpoint_dir=args.base_checkpoint_dir,
         commit_mode=args.commit_mode,
         run_id=args.run_id,
         debug_requests=args.debug_requests,

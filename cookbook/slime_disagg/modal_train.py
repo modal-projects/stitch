@@ -113,8 +113,8 @@ image = (
     # on PYTHONPATH, which also makes both packages importable from
     # subprocesses (the sidecar, Ray workers). The whole cookbook package is
     # mounted (not just the per-trainer subdir) so the trainer and the
-    # `python3 -m cookbook.slime_disagg.sidecar` subprocess can import the shared
-    # cookbook spine (helpers/hooks/sidecar) the thin adapters delegate to.
+    # `python3 -m cookbook.sidecar` subprocess can import the shared cookbook
+    # spine (helpers/hooks/sidecar).
     .add_local_python_source("stitch")
     .add_local_dir(
         Path(__file__).parent.parent,
@@ -188,10 +188,10 @@ SGLANG_SERVER_ARGS = {
     "--cuda-graph-max-bs": str(ROLLOUT_CONCURRENCY),
     "--max-running-requests": str(ROLLOUT_CONCURRENCY),
     "--trust-remote-code": "",
-    # The disk-delta branch applies deltas host-side and reloads via the ordinary
-    # update_weights_from_disk path, so the old engine-side delta server args
-    # (--update-weight-delta-chunk-bytes/--update-weight-delta-read-workers) no
-    # longer exist and must not be passed.
+    # Engine-side /pull_weights reads published versions off the Modal Volume;
+    # the hook reloads it first (object stores lack cross-host read-after-write
+    # consistency). Reads DELTA_VOLUME_NAME from the serving image env.
+    "--custom-pull-weights-pre-read-hook": "stitch.providers.modal.pull_weights_pre_read_hook",
     **exp.SGLANG_SERVER_ARGS,
 }
 
@@ -251,17 +251,14 @@ class Server:
             request_timeout=120.0,
             max_attempts_per_request=3,
         )
-        # Deltas are applied host-side onto a copy of the base checkpoint; the
-        # base resolves to the same HF cache snapshot the SGLang server loaded.
-        from huggingface_hub import snapshot_download
-
-        base_checkpoint_dir = snapshot_download(MODEL_NAME, local_files_only=True)
+        # The engine materializes each delta version into LOCAL_CHECKPOINT_PATH
+        # itself via /pull_weights (seeded from its own --model-path); the
+        # sidecar only drives the sync.
         self.sidecar = helpers.start_sglang_sidecar(
             sidecar_port=SIDECAR_PORT,
             sglang_port=SGLANG_PORT,
             bulletin_root=exp.DELTA_BULLETIN_ROOT,
             local_checkpoint_dir=LOCAL_CHECKPOINT_PATH,
-            base_checkpoint_dir=base_checkpoint_dir,
             volume_name=exp.DELTA_VOLUME_NAME,
             commit_mode=exp.SIDECAR_COMMIT_MODE,
             debug_requests=getattr(exp, "SIDECAR_DEBUG_REQUESTS", False),

@@ -61,7 +61,6 @@ class BuildManagerTest(unittest.TestCase):
                 upstream_url="http://127.0.0.1:30000/",
                 transport_root=tmp,
                 local_checkpoint_dir="/local",
-                base_checkpoint_dir="/base",
             )
 
             self.assertIsInstance(manager, WeightSyncManager)
@@ -69,7 +68,6 @@ class BuildManagerTest(unittest.TestCase):
             self.assertEqual(str(manager.board.root), tmp)
             self.assertIsInstance(manager.engine, SGLangDiskDeltaAdapter)
             self.assertEqual(manager.engine.local_checkpoint_dir, "/local")
-            self.assertEqual(manager.engine.base_checkpoint_dir, "/base")
             # The provider serves the customer; in_place is the perf default.
             self.assertEqual(manager.commit_mode, "in_place")
 
