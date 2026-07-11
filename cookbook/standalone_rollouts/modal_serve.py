@@ -553,11 +553,19 @@ class FrontDoor:
                     continue
                 # Stream the body through so stream:true completions reach the
                 # client token by token; closing the response releases the
-                # upstream connection.
+                # upstream connection. aiter_raw() forwards the bytes as-is
+                # (possibly compressed), so the upstream headers — notably
+                # Content-Encoding — must travel with them; only the framing
+                # headers are dropped (the re-streamed response re-frames).
+                response_headers = {
+                    k: v
+                    for k, v in upstream.headers.items()
+                    if k.lower() not in {"content-length", "transfer-encoding", "connection"}
+                }
                 return StreamingResponse(
                     upstream.aiter_raw(),
                     status_code=upstream.status_code,
-                    media_type=upstream.headers.get("content-type") or None,
+                    headers=response_headers,
                     background=BackgroundTask(upstream.aclose),
                 )
 
