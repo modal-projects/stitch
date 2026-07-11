@@ -38,6 +38,16 @@ def parse_reload_timing(message: str) -> dict[str, float]:
     }
 
 
+def _response_payload(resp: Any) -> dict[str, Any]:
+    """The engine's JSON body when there is one, else the raw text under
+    ``message`` — error responses must never lose the engine's explanation."""
+    try:
+        data = resp.json()
+    except ValueError:
+        return {"message": resp.text}
+    return data if isinstance(data, dict) else {"message": data}
+
+
 def compose_extra_key(
     version: int, user_extra_key: str | None = None, run_id: str | None = None
 ) -> str:
@@ -141,10 +151,14 @@ class SGLangDiskDeltaAdapter:
                     "target_version": int(manifest.version),
                 },
             )
-            resp.raise_for_status()
-            data = resp.json()
-            if data.get("success") is False:
-                raise RuntimeError(f"SGLang rejected weight pull: {data}")
+            # A failed pull comes back as HTTP 400 with the engine's traceback
+            # in the JSON body — read it before checking status or the actual
+            # error is lost behind a bare status code.
+            data = _response_payload(resp)
+            if resp.status_code != 200 or data.get("success") is False:
+                raise RuntimeError(
+                    f"SGLang rejected weight pull (HTTP {resp.status_code}): {data.get('message', data)}"
+                )
         elapsed = time.perf_counter() - _t_apply
         logger.info("[apply timing] v=%s engine_pull=%.2fs", manifest.version, elapsed)
         return {"engine_pull_s": round(elapsed, 3)}
@@ -183,10 +197,13 @@ class SGLangDiskDeltaAdapter:
             payload["weight_names"] = list(weight_names)
         async with httpx.AsyncClient(timeout=None, trust_env=False) as client:
             resp = await client.post(f"{self.upstream_url}/update_weights_from_disk", json=payload)
-            resp.raise_for_status()
-            data = resp.json()
-            if data.get("success") is False:
-                raise RuntimeError(f"SGLang rejected weight update: {data}")
+            # Failures come back as HTTP 400 with the engine's error in the
+            # JSON body — read it before checking status.
+            data = _response_payload(resp)
+            if resp.status_code != 200 or data.get("success") is False:
+                raise RuntimeError(
+                    f"SGLang rejected weight update (HTTP {resp.status_code}): {data.get('message', data)}"
+                )
         elapsed = time.perf_counter() - _t_reload
         logger.info("[apply timing] v=%s engine_reload=%.2fs", manifest.version, elapsed)
         detail: dict[str, Any] = {"engine_reload_s": round(elapsed, 3)}
