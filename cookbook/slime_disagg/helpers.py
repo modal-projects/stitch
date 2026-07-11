@@ -33,7 +33,7 @@ from cookbook.trainer_helpers import (  # noqa: F401
 )
 
 
-SIDECAR_MODULE = "cookbook.slime_disagg.sidecar"  # `python3 -m` entry on each rollout replica
+SIDECAR_MODULE = "cookbook.sidecar"  # `python3 -m` entry on each rollout replica
 MODEL_SCRIPT_ATTR = "slime_model_script"  # config attr naming the sourced MODEL_ARGS script
 WAKE_ON_DEMAND = False  # warm-floor rollout pool (min_containers > 0)
 

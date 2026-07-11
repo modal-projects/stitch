@@ -18,7 +18,7 @@ def build_int4_b200_serving_image(
     *,
     hf_cache_path: str,
     experiment: str,
-    delta_volume_name: str = "",
+    delta_volume_name: str,
 ) -> modal.Image:
     return build_b200_serving_image(
         hf_cache_path=hf_cache_path,

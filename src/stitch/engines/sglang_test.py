@@ -31,12 +31,11 @@ class _RecordingPost:
 
 
 class SGLangDiskDeltaAdapterTest(unittest.TestCase):
-    def test_apply_manifest_pulls_engine_side_then_plain_reload(self) -> None:
+    def test_stage_then_commit_pulls_engine_side_then_plain_reload(self) -> None:
         async def run() -> None:
             adapter = SGLangDiskDeltaAdapter(
                 upstream_url="http://up/",
                 local_checkpoint_dir="/local",
-                base_checkpoint_dir="/base",
             )
 
             manifest = VersionManifest(
@@ -48,7 +47,8 @@ class SGLangDiskDeltaAdapterTest(unittest.TestCase):
             )
             with mock.patch("httpx.AsyncClient", _RecordingPost):
                 _RecordingPost.posts = []
-                await adapter.apply_manifest(manifest, "/bulletin/versions/weight_v000005")
+                await adapter.stage_manifest(manifest, "/bulletin/versions/weight_v000005")
+                await adapter.commit_manifest(manifest, "/bulletin/versions/weight_v000005")
 
             # The engine materializes the local checkpoint itself: one
             # /pull_weights against the version dir's parent (the root of
@@ -74,39 +74,11 @@ class SGLangDiskDeltaAdapterTest(unittest.TestCase):
 
         asyncio.run(run())
 
-    def test_apply_manifest_skips_engine_reload_for_empty_delta(self) -> None:
-        async def run() -> None:
-            adapter = SGLangDiskDeltaAdapter(
-                upstream_url="http://up/",
-                local_checkpoint_dir="/local",
-                base_checkpoint_dir="/base",
-            )
-
-            manifest = VersionManifest(
-                version=5,
-                base_version=4,
-                backend="disk_delta",
-                load_format="auto",
-                transition_files=[],
-            )
-            with mock.patch("httpx.AsyncClient", _RecordingPost):
-                _RecordingPost.posts = []
-                await adapter.apply_manifest(manifest, "/bulletin/versions/weight_v000005")
-
-            # The pull still advances the local checkpoint; the reload is skipped.
-            self.assertEqual(
-                [url for url, _ in _RecordingPost.posts],
-                ["http://up/pull_weights"],
-            )
-
-        asyncio.run(run())
-
     def test_pull_rejection_raises(self) -> None:
         async def run() -> None:
             adapter = SGLangDiskDeltaAdapter(
                 upstream_url="http://up",
                 local_checkpoint_dir="/local",
-                base_checkpoint_dir="/base",
             )
             manifest = VersionManifest(
                 version=5, base_version=4, backend="disk_delta", load_format="auto"
@@ -127,7 +99,6 @@ class SGLangDiskDeltaAdapterTest(unittest.TestCase):
             adapter = SGLangDiskDeltaAdapter(
                 upstream_url="http://up",
                 local_checkpoint_dir="/local",
-                base_checkpoint_dir="/base",
             )
             manifest = VersionManifest(
                 version=5, base_version=4, backend="disk_delta", load_format="auto"

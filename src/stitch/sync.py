@@ -243,7 +243,7 @@ class WeightSyncManager(RolloutAdmissionGate):
         if prepare is not None:
             await prepare()
         # Converge to the board's current (run_id, latest): _sync_once follows a
-        # run switch (re-materialize + reset to v0) and replays the chain.
+        # run switch (reset to v0) and replays the chain.
         await self.sync_to()
 
     async def server_info(self) -> dict[str, Any]:
@@ -316,16 +316,16 @@ class WeightSyncManager(RolloutAdmissionGate):
             await asyncio.sleep(1.0)
 
     async def _switch_run(self, new_run_id: str | None) -> None:
-        """Rebase onto a new run's chain: re-materialize base and reset to v0.
+        """Rebase onto a new run's chain: reset to v0 so the next pull reseeds.
 
         A new run forks at base (slime sets ``base_version=000000`` for v1 of every
         run), so switching chains means discarding the current weights and replaying
-        the new chain. The re-materialize runs through the commit gate (pause →
-        reset → resume) exactly like a version commit, so no in-flight request
-        decodes across the weight wipe.
+        the new chain. The reset runs through the commit gate (pause → reset →
+        resume) exactly like a version commit, so no in-flight request decodes
+        across the weight wipe; the engine reseeds from base on the next pull.
         """
         logger.info(
-            "run change %r -> %r: re-materializing base, resetting to v0",
+            "run change %r -> %r: resetting to v0",
             self.current_run_id,
             new_run_id,
         )
@@ -410,15 +410,16 @@ class WeightSyncManager(RolloutAdmissionGate):
         if tail_weights is not None:
             metrics["tail_weights"] = len(tail_weights)
 
-        # Compose the tail and reload once: the adapter replays every delta from
-        # the applied version up to `latest` host-side, then does a single engine
-        # reload — not one reload per intermediate version.
+        # Compose the tail and reload once: staging brings the local checkpoint
+        # from the applied version up to `latest` in one step, then a single
+        # engine reload — not one reload per intermediate version.
         self.sync_state = SyncState.PREPARING
 
-        # An adapter that offers the staged split gets the host-side patch done
-        # BEFORE the commit gate: between reloads nothing reads the local
-        # checkpoint (weights live on the GPU), so staging can run while the
-        # engine still serves and the pause covers only the engine reload.
+        # An adapter that offers the staged split does the staging (an
+        # engine-side /pull_weights for SGLangDiskDeltaAdapter) BEFORE the commit
+        # gate: between reloads nothing reads the local checkpoint (weights live
+        # on the GPU), so staging can run while the engine still serves and the
+        # pause covers only the engine reload.
         stage = getattr(self.engine, "stage_manifest", None)
         commit = getattr(self.engine, "commit_manifest", None)
         staged = stage is not None and commit is not None

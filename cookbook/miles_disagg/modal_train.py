@@ -80,7 +80,7 @@ MEGATRON_PATH = "/root/Megatron-LM"
 # not the branch tip (cached image layer); push the ref to modal-projects/miles
 # before deploying.
 MILES_REPO_URL = "https://github.com/modal-projects/miles.git"
-MILES_REPO_REF = "b44be6208db68261c56f772e0a61bd012ebaf371"
+MILES_REPO_REF = "bdaf8d04bbc26981ff4bc95b8cfe679c3cd29013"
 
 TORCH_DIST_CONVERT_WRAPPER = "/root/convert_hf_to_torch_dist_modal.py"
 
@@ -141,9 +141,8 @@ if getattr(exp, "USE_MODAL_TORCH_DIST_WRAPPER", False):
 # /root on PYTHONPATH, so both packages import from subprocesses (the sidecar, Ray
 # workers). MUST come after any .run_commands() above (Modal forbids run_commands
 # after a non-copy local mount). The whole cookbook package is mounted (not just
-# the per-trainer subdir) so the trainer and the `python3 -m
-# cookbook.miles_disagg.sidecar` subprocess can import the shared cookbook spine
-# (helpers/hooks/sidecar) the thin adapters delegate to.
+# the per-trainer subdir) so the trainer and the `python3 -m cookbook.sidecar`
+# subprocess can import the shared cookbook spine (helpers/hooks/sidecar).
 image = image.add_local_python_source("stitch").add_local_dir(
     Path(__file__).parent.parent,
     remote_path="/root/cookbook",
@@ -293,14 +292,14 @@ class Server:
             request_timeout=120.0,
             max_attempts_per_request=3,
         )
-        # The served base is a prepared directory (MODEL_NAME is its absolute
-        # path); deltas are applied host-side onto a copy of it.
+        # The engine serves MODEL_NAME (a prepared dir) as --model-path and
+        # materializes each delta version into LOCAL_CHECKPOINT_PATH itself via
+        # /pull_weights; the sidecar only drives the sync.
         self.sidecar = helpers.start_sglang_sidecar(
             sidecar_port=SIDECAR_PORT,
             sglang_port=SGLANG_PORT,
             bulletin_root=exp.DELTA_BULLETIN_ROOT,
             local_checkpoint_dir=LOCAL_CHECKPOINT_PATH,
-            base_checkpoint_dir=MODEL_NAME,
             volume_name=exp.DELTA_VOLUME_NAME,
             commit_mode=exp.SIDECAR_COMMIT_MODE,
             debug_requests=getattr(exp, "SIDECAR_DEBUG_REQUESTS", False),
