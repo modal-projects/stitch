@@ -189,6 +189,30 @@ class FrontdoorAppTest(unittest.TestCase):
         self.assertEqual(resp.json(), {"proxied": "v1/chat/completions"})
         self.assertEqual(calls["proxied"], ["v1/chat/completions"])
 
+    def test_proxy_allows_inference_routes(self) -> None:
+        client, calls = self._client()
+        for path in ("/v1/completions", "/v1/chat/completions", "/v1/models", "/generate"):
+            self.assertEqual(client.post(path, json={}).status_code, 200)
+        self.assertEqual(
+            calls["proxied"], ["v1/completions", "v1/chat/completions", "v1/models", "generate"]
+        )
+
+    def test_proxy_blocks_internal_routes_with_404(self) -> None:
+        # Reachable through the front door before the allowlist: sidecar control
+        # routes and SGLang engine routes. None must be proxied.
+        client, calls = self._client()
+        for path in (
+            "/rpc_sync_from_bulletin_board",
+            "/server_info",
+            "/get_weight_version",
+            "/update_weights_from_disk",
+            "/update_weights_from_ipc",
+            "/start_profile",
+            "/flush_cache",
+        ):
+            self.assertEqual(client.post(path, json={}).status_code, 404)
+        self.assertEqual(calls["proxied"], [])
+
     def test_auth_rejection_blocks_every_route(self) -> None:
         from fastapi.responses import JSONResponse
 

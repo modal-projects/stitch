@@ -39,6 +39,22 @@ from stitch.protocol import (
 HOT_LOAD_PATH = "/hot_load/v1/models/hot_load"
 
 
+def is_customer_inference_route(path: str) -> bool:
+    """Whether a proxied path is a customer-facing inference route.
+
+    The proxy is an allowlist, not a denylist: only OpenAI-compatible ``v1/*``
+    routes and the SGLang-native ``generate`` route reach the rollout pool.
+    Everything else a public client could name — the per-container sidecar's own
+    control routes (``rpc_sync_from_bulletin_board``, ``server_info``,
+    ``get_weight_version``) and the SGLang engine routes behind it
+    (``update_weights_*``, ``start_profile``, …) — is not reachable through the
+    front door, so a new engine/sidecar route can never become customer-exposed
+    by omission from a denylist.
+    """
+    route = path.strip("/")
+    return route == "generate" or route == "v1" or route.startswith("v1/")
+
+
 def advance_latest_decision(
     current_run_id: str | None,
     current_version: int,
@@ -207,6 +223,8 @@ def create_frontdoor_app(
         rejected = _auth(request)
         if rejected is not None:
             return rejected
+        if not is_customer_inference_route(path):
+            return JSONResponse({"error": f"no such route: /{path.strip('/')}"}, status_code=404)
         return await proxy(request, path)
 
     return app
