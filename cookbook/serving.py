@@ -10,14 +10,14 @@ thin wrappers that pass their trainer package + repo pin here.
 
 Two deliberate choices keep the image lean (identical for every trainer):
 
-  * **SGLang comes from the modal-projects/sglang fork** pinned below — the same
-    build the standalone 4xB200 Kimi deployment uses (proven for NVFP4; the INT4
-    MLA-MoE path is the one un-de-risked axis — verify on a warm container).
-  * **The trainer package is cloned ``--no-deps`` for one module.** The sidecar
-    only imports ``<trainer>.utils.disk_delta`` (stdlib + numpy + zstandard;
-    xxhash/blake3 lazy), so Megatron is intentionally absent — the pool never
-    trains. Pin the SAME ref the trainer image uses so the host-side delta
-    decoder matches the trainer's delta encoder.
+  * **The runtime SGLang is the modal-projects/sglang pin below**, checked out
+    over an ``lmsysorg/sglang`` base that supplies only the environment
+    (kernels, CUDA deps). The pin carries /pull_weights + the hardened
+    local_checkpoint receiver and the quantized-reload restore protocol.
+  * **No trainer package is installed.** The delta decode/apply lives in the
+    engine behind ``/pull_weights``, so the pool imports neither slime nor
+    miles and is trainer-agnostic — the checksum/zstd deps are the engine-side
+    receiver's, not a trainer decoder's.
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ import modal
 SGLANG_IMAGE_TAG = "lmsysorg/sglang:v0.5.14"
 SGLANG_FORK_REPO = "https://github.com/modal-projects/sglang.git"
 SGLANG_FORK_BRANCH = "weight-sync-miles"
-SGLANG_FORK_COMMIT = "c3cd6404680fbf584a6385ee1f411b6d8db43f8a"
+SGLANG_FORK_COMMIT = "964e6e24c4005a30901d68979b88416fa218ccf9"
 
 # SGLang runtime tunables carried over from the standalone B200 deployment.
 SERVING_IMAGE_ENV = {
