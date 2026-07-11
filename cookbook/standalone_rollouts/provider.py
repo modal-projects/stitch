@@ -18,10 +18,15 @@ door (``modal_serve.py``), not here.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import uuid
+from collections.abc import Callable
+from pathlib import Path
 
+from cookbook.standalone_rollouts.delta_view import rebuild_delta_view
+from cookbook.standalone_rollouts.ledger import IdentityLedger
 from stitch.bulletin import FilesystemBulletinBoard
 from stitch.engines.sglang import SGLangDiskDeltaAdapter
 from stitch.servers.sglang import create_app as create_sglang_app
@@ -41,11 +46,26 @@ def build_manager(
     commit_mode: CommitMode = "in_place",
     run_id: str | None = None,
     debug_requests: bool = False,
+    delta_view_dir: str | None = None,
 ) -> WeightSyncManager:
-    # The transport root is the object-store mount holding the flat
-    # weight_v{N}/ version dirs and the raw `latest` pointer (slime/customer
-    # layout). Deltas are read straight from the mount during apply.
-    board = FilesystemBulletinBoard(transport_root, layout="slime")
+    # The transport root is the object-store mount holding the version dirs and
+    # the raw `latest` pointer. Deltas are read straight from the mount.
+    #
+    # The customer uploads to opaque-identity dirs (`<transport>/<identity>/`),
+    # not weight_vN, so when delta_view_dir is set the board is rooted at a
+    # host-local weight_vN symlink view of the transport (rebuilt from the
+    # front-door ledger on every refresh), letting the unmodified decoder walk
+    # weight_vN while the bytes still come from the identity dirs on the mount.
+    # Without it (the internal slime harness / tests, which write weight_vN dirs
+    # directly) the board reads the transport as-is.
+    if delta_view_dir:
+        board = FilesystemBulletinBoard(
+            delta_view_dir,
+            layout="slime",
+            refresh=_delta_view_refresh(delta_view_dir, transport_root),
+        )
+    else:
+        board = FilesystemBulletinBoard(transport_root, layout="slime")
     engine = SGLangDiskDeltaAdapter(
         upstream_url=upstream_url,
         local_checkpoint_dir=local_checkpoint_dir,
@@ -58,6 +78,22 @@ def build_manager(
         commit_mode=commit_mode,
         debug_requests=debug_requests,
     )
+
+
+def _delta_view_refresh(view_dir: str, transport_root: str) -> Callable[[], None]:
+    """Board refresh callback: rebuild the host-local weight_vN view from the
+    front door's identity ledger on the transport, so the view tracks
+    newly-signalled versions before each sync reads/apply."""
+    ledger_path = Path(transport_root) / "identities.json"
+
+    def _refresh() -> None:
+        try:
+            data = json.loads(ledger_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            data = {}
+        rebuild_delta_view(view_dir, transport_root, IdentityLedger.from_dict(data))
+
+    return _refresh
 
 
 def create_app(manager: WeightSyncManager, *, upstream_url: str, poll_interval: float = 5.0):
@@ -104,6 +140,13 @@ def main() -> None:
         default=float(os.environ.get("STITCH_SHIM_POLL_INTERVAL", "5.0")),
         help="Seconds between background reconciles against the `latest` pointer.",
     )
+    parser.add_argument(
+        "--delta-view-dir",
+        default=os.environ.get("STITCH_DELTA_VIEW_DIR"),
+        help="Host-local dir for the weight_vN symlink view of the transport's "
+        "opaque-identity dirs. Set for the customer layout; omit when version "
+        "dirs are already named weight_vN.",
+    )
     parser.add_argument("--run-id", default=os.environ.get("MODAL_TASK_ID") or uuid.uuid4().hex)
     parser.add_argument(
         "--debug-requests",
@@ -130,6 +173,7 @@ def main() -> None:
         commit_mode=args.commit_mode,
         run_id=args.run_id,
         debug_requests=args.debug_requests,
+        delta_view_dir=args.delta_view_dir,
     )
     uvicorn.run(
         create_app(manager, upstream_url=args.upstream_url, poll_interval=args.poll_interval),

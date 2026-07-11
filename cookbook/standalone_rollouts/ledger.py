@@ -80,6 +80,11 @@ class IdentityLedger:
         identity string and for resolving a version's on-disk upload dir."""
         return self._by_version.get(int(version))
 
+    def items_by_version(self) -> list[tuple[int, str]]:
+        """``(version, identity)`` pairs in version order, for building the
+        sidecar's ``weight_vN`` -> identity-dir symlink view."""
+        return sorted(self._by_version.items())
+
     def base_version_for(self, identity: str) -> int:
         """The version a checkpoint's delta builds on: its parent's version, or
         ``BASE_VERSION`` when it is a full snapshot or the parent is unknown."""

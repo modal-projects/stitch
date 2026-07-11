@@ -51,6 +51,9 @@ SGLANG_PORT = 8001
 MINUTES = 60
 SERVER_STARTUP_TIMEOUT = 35 * MINUTES
 LOCAL_CHECKPOINT_PATH = exp.LOCAL_CHECKPOINT_PATH
+# Host-local dir holding the weight_vN symlink view of the transport's
+# opaque-identity dirs (rebuilt from the front-door ledger before each sync).
+DELTA_VIEW_PATH = "/local-delta-view"
 S3_TRANSPORT_BUCKET_NAME = os.environ.get(
     "STITCH_SHIM_S3_BUCKET_NAME", exp.S3_TRANSPORT_BUCKET_NAME
 )
@@ -624,6 +627,10 @@ def _start_provider_sidecar(*, base_checkpoint_dir: str) -> subprocess.Popen:
         base_checkpoint_dir,
         "--commit-mode",
         exp.COMMIT_MODE,
+        # Customer uploads to opaque-identity dirs; resolve weight_vN through a
+        # host-local symlink view into the mount (see provider.build_manager).
+        "--delta-view-dir",
+        DELTA_VIEW_PATH,
     ]
     print("Starting provider sidecar:", " ".join(cmd))
     return subprocess.Popen(cmd, start_new_session=True)
