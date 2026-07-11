@@ -191,10 +191,8 @@ class Trainer:
         # No run_id / claim: the customer contract has no run concept, and the
         # front door's identity ledger orders signals monotonically. slime
         # publishes to a flat local dir and announce_and_wait copies each
-        # weight_v{N}/ to <transport>/weight_v{N}/. NOTE: a fresh launch reuses
-        # the same identities, so re-running against a non-empty transport prefix
-        # requires a clean prefix (multi-run reset is deferred, matching the
-        # deferred fork-from-base story).
+        # weight_v{N}/ to <transport>/weight_v{N}/.
+        _require_clean_transport(Path(str(provider_app.S3_TRANSPORT_MOUNT_PATH)))
         helpers.prepare_slime_config(cfg, tempfile.mkdtemp())
         cmd = helpers.build_train_cmd(cfg, SLIME_ROOT)
 
@@ -203,6 +201,22 @@ class Trainer:
         )
         print(f"Command: {cmd}")
         subprocess.run(["bash", "-lc", cmd], check=True)
+
+
+def _require_clean_transport(transport_root: Path) -> None:
+    """A fresh launch reuses the same weight_v{N} identities, so signalling into
+    a transport that already holds a ledger or pointer would make replicas still
+    serving the previous run's same-numbered weights count as ready — silently
+    generating rollouts from stale weights. Multi-run reset is deferred; until
+    then a dirty prefix is a launch error, not silent reuse."""
+    leftovers = [
+        name for name in ("identities.json", "latest") if (transport_root / name).exists()
+    ]
+    if leftovers:
+        raise RuntimeError(
+            f"transport prefix {transport_root} already holds {leftovers} from a previous "
+            "run; launch against a fresh STITCH_SHIM_S3_KEY_PREFIX or clear the old run first"
+        )
 
 
 @app.function(
