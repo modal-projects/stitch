@@ -200,6 +200,22 @@ def create_frontdoor_app(
                 entry, is_new = ledger.record(identity, previous)
             except LedgerError as exc:
                 return JSONResponse({"error": str(exc)}, status_code=409)
+            if entry.version != ledger.head_version:
+                # Re-signalling an older identity is a rewind request the pool
+                # cannot serve (versions only move forward); reject it loudly
+                # rather than answering accepted:true for weights that will
+                # never be reported ready.
+                return JSONResponse(
+                    {
+                        "error": {
+                            "type": "WeightRewindRejected",
+                            "message": f"{identity!r} is older than the served head",
+                            "current_version": ledger.head_version,
+                            "requested_version": entry.version,
+                        }
+                    },
+                    status_code=409,
+                )
             if is_new:
                 # A delta (incremental metadata present) needs its index normalized
                 # so the decoder can apply it; a full snapshot (base) is served
@@ -220,10 +236,10 @@ def create_frontdoor_app(
                             status_code=409,
                         )
                 await save_ledger(ledger.to_dict())
-            # Advance (idempotently) whenever this identity is the chain head, so a
-            # retry after a save-succeeded/advance-failed POST still moves latest.
-            if entry.version == ledger.head_version:
-                await advance_to(entry.version)
+            # This identity is the chain head (rewinds were rejected above).
+            # Advance idempotently, so a retry after a save-succeeded/
+            # advance-failed POST still moves latest.
+            await advance_to(entry.version)
 
         if is_new and wake is not None:
             try:

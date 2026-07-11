@@ -301,6 +301,15 @@ class FrontdoorAppTest(unittest.TestCase):
         self.assertEqual(resp.status_code, 409)
         self.assertEqual(calls["normalized"], [])
 
+    def test_resignalling_an_older_identity_is_a_409_rewind(self) -> None:
+        client, calls, _ = self._client()
+        client.post(HOT_LOAD_PATH, json={"identity": "base-ckpt"})
+        client.post(HOT_LOAD_PATH, json={"identity": "ckpt-100", "incremental_snapshot_metadata": {"previous_snapshot_identity": "base-ckpt", "compression_format": "zstd", "checksum_format": "adler32"}})
+        resp = client.post(HOT_LOAD_PATH, json={"identity": "base-ckpt"})
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(resp.json()["error"]["type"], "WeightRewindRejected")
+        self.assertEqual(calls["advanced"], [0, 1])  # pointer stays at head
+
     def test_post_overlong_or_slashed_identity_is_400(self) -> None:
         client, calls, _ = self._client()
         for identity in ("weight_v" + "9" * 100000, "a/b/c"):
