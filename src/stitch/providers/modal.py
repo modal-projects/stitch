@@ -21,6 +21,22 @@ def volume_reloader(volume_name: str) -> Callable[[], None]:
     return lambda: reload_volume(volume_name)
 
 
+def pull_weights_pre_read_hook(source_dir: str, target_version: int) -> None:
+    """Engine-side ``--custom-pull-weights-pre-read-hook`` target.
+
+    Object-store-backed volumes lack cross-host read-after-write consistency:
+    the publisher's version dirs only appear here after an explicit reload.
+    The engine imports this by dotted path inside its scheduler process, so
+    the volume name travels via the ``DELTA_VOLUME_NAME`` env var (already set
+    on the serving container for the sidecar's bulletin refresh).
+    """
+    import os
+
+    volume_name = os.environ.get("DELTA_VOLUME_NAME", "")
+    if volume_name:
+        reload_volume(volume_name)
+
+
 def discover_flash_targets(app_name: str, cls_name: str) -> list[str]:
     import modal
     import modal.experimental

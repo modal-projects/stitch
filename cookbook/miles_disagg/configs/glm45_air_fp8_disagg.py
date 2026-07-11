@@ -20,9 +20,9 @@ DISABLE_HF_TRANSFER = True
 
 SIDECAR_COMMIT_MODE = "quiesce"
 SIDECAR_DEBUG_REQUESTS = True
-SGLANG_RUNTIME_PATCHES = [
-    "/root/cookbook/miles_disagg/patches/sglang-fp8-reload-attrs.patch",
-]
+# No SGLang runtime patch: the pinned weight-sync-miles engine's restore
+# protocol makes compressed-tensors fp8 reloads reproduce the initial load
+# (superseding the old sglang-fp8-reload-attrs.patch).
 # R3 routing-replay needs the dropless Megatron dispatch fix at startup.
 MEGATRON_RUNTIME_PATCHES = [
     "/root/cookbook/miles_disagg/patches/megatron-r3-dispatch.patch",
@@ -105,12 +105,11 @@ class _Miles(MilesConfig):
     async_mode = True
     update_weights_interval = 1
 
-    update_weight_transfer_mode = "disk"
-    update_weight_disk_delta = True
+    update_weight_transfer_mode = "disk-delta"
     update_weight_delta_encoding = "xor"
     update_weight_delta_checksum = "xxh3-128"
     update_weight_disk_dir = DELTA_BULLETIN_ROOT
-    custom_delta_pre_push_path = "cookbook.miles_disagg.hooks.commit_and_wake"
+    custom_update_weight_post_write_path = "cookbook.miles_disagg.hooks.commit_and_wake"
 
     prompt_data = f"{DATA_PATH}/dapo-math-17k/dapo-math-17k.jsonl"
     input_key = "prompt"

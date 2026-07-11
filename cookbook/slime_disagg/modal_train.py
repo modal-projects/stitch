@@ -139,19 +139,17 @@ if slime_local := os.environ.get("SLIME_LOCAL_DIR"):
 # Blackwell SGLang build that serves native-INT4 Kimi K2.6, which the slime
 # trainer image does not provide. An experiment opts in by defining
 # build_serving_image(...); otherwise the pool reuses the trainer image (the
-# Qwen/Moonlight bf16 and Moonlight-INT4 experiments do). Either way the pool
-# pins the trainer's exact slime ref, so the sidecar's disk_delta decoder matches
-# the trainer's delta encoder.
+# Qwen/Moonlight bf16 and Moonlight-INT4 experiments do). The pool installs no
+# trainer package — the delta decode/apply lives in the engine behind
+# /pull_weights.
 def _select_server_image() -> modal.Image:
     builder = getattr(exp, "build_serving_image", None)
     if builder is None:
         return image
     return builder(
-        trainer_repo_url=SLIME_REPO_URL,
-        trainer_repo_ref=SLIME_REPO_REF,
-        trainer_root=SLIME_ROOT,
         hf_cache_path=str(HF_CACHE_PATH),
         experiment=EXPERIMENT,
+        delta_volume_name=exp.DELTA_VOLUME_NAME,
     )
 
 

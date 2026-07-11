@@ -70,12 +70,13 @@ MILES_ROOT = "/root/miles"
 # only in this source tree; miles' own launcher puts it on PYTHONPATH, and so
 # must we (we run train_async.py directly rather than via execute_train).
 MEGATRON_PATH = "/root/Megatron-LM"
-# Fork commit with the disaggregated-rollout features (opaque HTTP endpoint,
-# publish-only disk-delta, request hook) plus the NVFP4 and GLM-Air FP8 fixes
-# this cookbook needs. Pin to an exact commit, not the branch tip (cached image
-# layer); push the ref to modal-projects/miles before deploying.
+# disagg-publish = current miles main + #1261 (NVFP4) + the disaggregated-
+# rollout layer (opaque HTTP endpoint, publish-only disk-delta, request hook)
+# + the GLM-Air FP8 publisher, rebased for upstreaming. Pin to an exact commit,
+# not the branch tip (cached image layer); push the ref to modal-projects/miles
+# before deploying.
 MILES_REPO_URL = "https://github.com/modal-projects/miles.git"
-MILES_REPO_REF = "852fb9a5cfb3c4630691b643ed354a9703ff3722"
+MILES_REPO_REF = "b44be6208db68261c56f772e0a61bd012ebaf371"
 
 TORCH_DIST_CONVERT_WRAPPER = "/root/convert_hf_to_torch_dist_modal.py"
 
@@ -109,8 +110,9 @@ image = (
         "fastapi",  # stitch sidecar (rollout pool reuses this image only if no serving image)
         "httpx",
         "uvicorn",
-        # miles applies disk deltas host-side via miles.utils.disk_delta; ensure
-        # its codec deps are present even when miles is reinstalled --no-deps.
+        # the trainer-side delta ENCODER (miles delta.py) needs the codec deps
+        # even when miles is reinstalled --no-deps; the decode/apply lives in
+        # the engine behind /pull_weights.
         "zstandard",
         "xxhash",
         "blake3",
@@ -156,18 +158,16 @@ if miles_local := os.environ.get("MILES_LOCAL_DIR"):
 
 
 def _select_server_image() -> modal.Image:
-    """The rollout pool needs a Blackwell SGLang build that serves NVFP4; an
-    experiment opts in via build_serving_image(...). Either way the pool pins the
-    trainer's exact miles ref so the sidecar's disk_delta matches the encoder."""
+    """The rollout pool needs the pinned weight-sync SGLang build; an experiment
+    opts in via build_serving_image(...). The pool installs no trainer package —
+    the delta decode/apply lives in the engine behind /pull_weights."""
     builder = getattr(exp, "build_serving_image", None)
     if builder is None:
         return image
     return builder(
-        trainer_repo_url=MILES_REPO_URL,
-        trainer_repo_ref=MILES_REPO_REF,
-        trainer_root=MILES_ROOT,
         hf_cache_path=str(HF_CACHE_PATH),
         experiment=EXPERIMENT,
+        delta_volume_name=exp.DELTA_VOLUME_NAME,
     )
 
 
@@ -214,6 +214,10 @@ SGLANG_SERVER_ARGS = {
     "--cuda-graph-max-bs": str(ROLLOUT_CONCURRENCY),
     "--max-running-requests": str(ROLLOUT_CONCURRENCY),
     "--trust-remote-code": "",
+    # Engine-side /pull_weights reads published versions off the Modal Volume;
+    # the hook reloads it first (object stores lack cross-host read-after-write
+    # consistency). Reads DELTA_VOLUME_NAME from the serving image env.
+    "--custom-pull-weights-pre-read-hook": "stitch.providers.modal.pull_weights_pre_read_hook",
     # NVFP4 is driven by the served checkpoint's own quant config — no
     # --quantization flag. MLA/cache/routing extras come from the experiment.
     **exp.SGLANG_SERVER_ARGS,

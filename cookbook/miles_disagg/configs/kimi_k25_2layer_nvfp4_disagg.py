@@ -130,12 +130,11 @@ class _Miles(MilesConfig):
     num_layers_at_start_in_bf16 = 1
     num_layers_at_end_in_bf16 = 0
 
-    update_weight_transfer_mode = "disk"
-    update_weight_disk_delta = True
+    update_weight_transfer_mode = "disk-delta"
     update_weight_delta_encoding = "xor"
     update_weight_delta_checksum = "xxh3-128"
     update_weight_disk_dir = DELTA_BULLETIN_ROOT
-    custom_delta_pre_push_path = "cookbook.miles_disagg.hooks.commit_and_wake"
+    custom_update_weight_post_write_path = "cookbook.miles_disagg.hooks.commit_and_wake"
 
     prompt_data = f"{DATA_PATH}/dapo-math-17k/dapo-math-17k.jsonl"
     input_key = "prompt"
