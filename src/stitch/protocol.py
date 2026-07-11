@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import time
@@ -575,24 +576,32 @@ def atomic_write_json(path: str | Path, payload: dict[str, Any]) -> None:
     os.replace(tmp, path)
 
 
-def plain_write_text(path: str | Path, text: str) -> None:
-    """Overwrite ``path`` in place, without a tmp file + atomic rename.
+def atomic_write_text(path: str | Path, text: str) -> None:
+    """Write ``text`` so a concurrent reader sees the old or the new content,
+    never a truncated file.
 
-    The JSON pointer (stitch layout) uses :func:`atomic_write_json`, but the
-    slime-layout ``latest`` pointer lives on the S3 CloudBucketMount, where
-    ``os.replace`` raises ENOSYS (mountpoint-s3 has no rename — the same
-    constraint that made the trainer upload path copy instead of rename, commit
-    8745872). A probe against the real mount confirmed both that ``os.replace``
-    raises ENOSYS and that opening an existing key ``"w"`` overwrites it in place
-    as one PutObject, atomic at the object level — so no unlink-first dance is
-    needed (a reader always sees the old or new pointer, never absent). No fsync:
-    the pointer is single-writer (the singleton front door under its advance
-    lock) and re-derivable, and mountpoint-s3 flushes on close.
+    On a normal filesystem: tmp file + fsync + ``os.replace``. On the S3
+    CloudBucketMount ``os.replace`` raises ENOSYS (mountpoint-s3 has no rename —
+    the same constraint that made the trainer upload path copy instead of
+    rename, commit 8745872), so fall back to an in-place ``open("w")``
+    overwrite, which a probe against the real mount confirmed is one PutObject,
+    atomic at the object level.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
-        f.write(text)
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        with tmp.open("w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except OSError as exc:
+        if exc.errno != errno.ENOSYS:
+            raise
+        tmp.unlink(missing_ok=True)
+        with path.open("w", encoding="utf-8") as f:
+            f.write(text)
 
 
 def _optional_int(value: Any) -> int | None:

@@ -17,7 +17,7 @@ fork-from-version case), so its non-contiguous base surfaces at apply time
 rather than being silently reordered here.
 
 Pure and persistence-free: :meth:`to_dict` / :meth:`from_dict` round-trip the
-state, and the front door writes it to the transport with a rename-free write.
+state, and the front door persists it to the transport.
 """
 
 from __future__ import annotations

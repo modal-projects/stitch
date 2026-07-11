@@ -29,7 +29,7 @@ from cookbook.standalone_rollouts.base_checkpoint import (
     resolve_base_checkpoint,
 )
 from stitch.bulletin import FilesystemBulletinBoard
-from stitch.protocol import plain_write_text
+from stitch.protocol import atomic_write_text
 from stitch.providers.modal import (
     discover_flash_targets,
     resolve_flash_gateway_url,
@@ -510,10 +510,10 @@ class FrontDoor:
             return await asyncio.to_thread(_read)
 
         async def save_ledger(data: dict) -> None:
-            # Rename-free write on the S3 mount (see plain_write_text); the front
-            # door is the singleton writer, serialized under the app's advance lock.
+            # The front door is the singleton writer, serialized under the
+            # app's advance lock.
             await asyncio.to_thread(
-                plain_write_text, ledger_path, json.dumps(data, sort_keys=True) + "\n"
+                atomic_write_text, ledger_path, json.dumps(data, sort_keys=True) + "\n"
             )
 
         async def normalize_index(identity: str, metadata: dict) -> None:
@@ -526,13 +526,12 @@ class FrontDoor:
             def _rewrite() -> None:
                 index = json.loads(index_path.read_text(encoding="utf-8"))
                 index.setdefault("metadata", {}).update(metadata)
-                plain_write_text(index_path, json.dumps(index))
+                atomic_write_text(index_path, json.dumps(index))
 
             await asyncio.to_thread(_rewrite)
 
         async def advance_to(version: int) -> None:
             # Run-less pointer: write the bare weight_vN identity the pool pulls.
-            # One plain PutObject-style overwrite (see plain_write_text).
             board.write_latest(None, version)
 
         async def list_server_infos() -> list[dict]:

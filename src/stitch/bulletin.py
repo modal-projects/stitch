@@ -15,7 +15,7 @@ from stitch.protocol import (
     decide_pointer_move,
     format_snapshot_identity,
     parse_snapshot_identity,
-    plain_write_text,
+    atomic_write_text,
     read_latest,
     version_dir,
     weight_identity,
@@ -106,7 +106,7 @@ class FilesystemBulletinBoard:
         :meth:`claim`, which enforce the monotonic-within-run rule; this raw
         write is for callers that have already made the move decision."""
         if self.layout == "slime":
-            plain_write_text(self.root / "latest", format_snapshot_identity(run_id, version))
+            atomic_write_text(self.root / "latest", format_snapshot_identity(run_id, version))
         else:
             write_latest(self.root, version)
 
