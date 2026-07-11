@@ -11,7 +11,6 @@ import importlib
 import os
 import subprocess
 import tempfile
-import uuid
 from pathlib import Path
 
 import modal
@@ -186,23 +185,16 @@ class Trainer:
 
         cfg.rollout_endpoint_url = provider_url
         cfg.api_shim_base_url = provider_url
-        # Fresh run id per launch, carried on update_weight_disk_dir — a *known*
-        # slime arg, so it reaches the publish hook running in the Ray training
-        # actor. (A per-launch env var doesn't: Ray workers start in @modal.enter()
-        # before train() runs, so they don't inherit this env; and an unknown
-        # --api-shim-run-id arg is dropped by slime's parser.) slime writes this
-        # run's chain to <local>/<run_id>/weight_v{N}/, and announce_and_wait
-        # derives the run id from that dir to scope the S3 transport + pointer.
-        run_id = uuid.uuid4().hex[:12]
-        cfg.update_weight_disk_dir = f"{cfg.update_weight_disk_dir}/{run_id}"
         cfg.custom_config_path = _custom_config(
             cfg, rollout_num_engines=getattr(run, "ROLLOUT_NUM_ENGINES", 1)
         )
-        # Claim the pool for this fresh run before any delta: reset `latest` to
-        # base via the front door so replicas reconcile to base up front instead
-        # of inferring the reset from the first publish (mirrors the bulletin
-        # path's explicit-claim model).
-        hooks.announce_claim(cfg, run_id=run_id)
+        # No run_id / claim: the customer contract has no run concept, and the
+        # front door's identity ledger orders signals monotonically. slime
+        # publishes to a flat local dir and announce_and_wait copies each
+        # weight_v{N}/ to <transport>/weight_v{N}/. NOTE: a fresh launch reuses
+        # the same identities, so re-running against a non-empty transport prefix
+        # requires a clean prefix (multi-run reset is deferred, matching the
+        # deferred fork-from-base story).
         helpers.prepare_slime_config(cfg, tempfile.mkdtemp())
         cmd = helpers.build_train_cmd(cfg, SLIME_ROOT)
 
