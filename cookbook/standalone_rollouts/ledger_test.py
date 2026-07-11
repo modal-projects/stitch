@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from cookbook.standalone_rollouts.ledger import IdentityLedger, LedgerEntry
+from cookbook.standalone_rollouts.ledger import IdentityLedger, LedgerEntry, LedgerError
 
 
 class RecordTest(unittest.TestCase):
@@ -52,6 +52,26 @@ class RecordTest(unittest.TestCase):
         entry, _ = ledger.record("ckpt-orphan", previous="never-seen")
         self.assertEqual(entry.version, 1)
         self.assertEqual(ledger.base_version_for("ckpt-orphan"), 0)
+
+    def test_second_full_snapshot_is_rejected_not_a_v0_takeover(self) -> None:
+        # v0 is single-occupancy: silently repointing it would strand pollers
+        # waiting on the first base and rewire the sidecar's weight_v000000 link.
+        ledger = IdentityLedger()
+        ledger.record("base-a", previous=None)
+        with self.assertRaises(LedgerError):
+            ledger.record("base-b", previous=None)
+        # The first base re-signals idempotently.
+        entry, is_new = ledger.record("base-a", previous=None)
+        self.assertEqual((entry.version, is_new), (0, False))
+
+    def test_unknown_parent_on_nonempty_ledger_is_rejected(self) -> None:
+        # A typo'd parent must not be coerced to base_version=0 — the delta
+        # would be applied against the wrong weights and serve garbage.
+        ledger = IdentityLedger()
+        ledger.record("ckpt-base", previous=None)
+        ledger.record("ckpt-1", previous="ckpt-base")
+        with self.assertRaises(LedgerError):
+            ledger.record("ckpt-2", previous="ckpt-l")  # typo of "ckpt-1"
 
 
 class LookupTest(unittest.TestCase):

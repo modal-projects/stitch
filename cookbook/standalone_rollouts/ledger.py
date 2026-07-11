@@ -28,6 +28,12 @@ from typing import Any
 from stitch.protocol import BASE_VERSION
 
 
+class LedgerError(ValueError):
+    """A signal whose lineage cannot be recorded safely: a second full snapshot
+    (the base slot is single-occupancy) or a delta naming an unknown parent.
+    The front door reports it to the customer as a 409."""
+
+
 @dataclass(frozen=True)
 class LedgerEntry:
     """One signalled checkpoint: the version minted for it and its parent
@@ -87,7 +93,8 @@ class IdentityLedger:
 
     def base_version_for(self, identity: str) -> int:
         """The version a checkpoint's delta builds on: its parent's version, or
-        ``BASE_VERSION`` when it is a full snapshot or the parent is unknown."""
+        ``BASE_VERSION`` for a full snapshot / the first delta's unsignalled
+        (booted) parent — the one case :meth:`record` admits an unknown parent."""
         entry = self._by_identity[identity]
         if entry.previous is None:
             return BASE_VERSION
@@ -101,6 +108,13 @@ class IdentityLedger:
         returned unchanged and ``is_new`` is False, so a retried signal never
         moves the pointer. A new identity is minted the next monotonic version
         (``BASE_VERSION`` for the first ever, else max+1) and records ``previous``.
+
+        Raises :class:`LedgerError` on lineage that cannot be recorded safely:
+        a second full snapshot (it would take over the base's version 0), or a
+        delta naming a parent this ledger has never seen — unless the ledger is
+        empty, the one case where the parent is legitimately the booted,
+        never-signalled base. Rejecting is what keeps a typo'd parent from being
+        silently applied against the wrong base weights.
         """
         existing = self._by_identity.get(identity)
         if existing is not None:
@@ -108,9 +122,19 @@ class IdentityLedger:
         if previous is None:
             # A full snapshot is the base (version 0), whether the customer
             # pre-uploaded and signalled it or the pool booted it from
-            # BASE_CHECKPOINT.
+            # BASE_CHECKPOINT. The base slot is single-occupancy.
+            claimed = self._by_version.get(BASE_VERSION)
+            if claimed is not None:
+                raise LedgerError(
+                    f"base already signalled as {claimed!r}; cannot record a second full snapshot"
+                )
             version = BASE_VERSION
         else:
+            if previous not in self._by_identity and self._by_identity:
+                raise LedgerError(
+                    f"previous_snapshot_identity {previous!r} was never signalled; "
+                    "signal the parent checkpoint first"
+                )
             # A delta always mints a real version >= 1; v0 is reserved for the
             # base, so a delta signalled before any base (its parent booted, not
             # signalled) still becomes v1, not a phantom base that never applies.
