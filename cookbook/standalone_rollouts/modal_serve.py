@@ -28,6 +28,7 @@ from cookbook.standalone_rollouts.base_checkpoint import (
     is_hf_repo_id,
     resolve_base_checkpoint,
 )
+from cookbook.standalone_rollouts.delta_view import merge_index_metadata
 from stitch.bulletin import FilesystemBulletinBoard
 from stitch.protocol import atomic_write_text
 from stitch.providers.modal import (
@@ -517,18 +518,8 @@ class FrontDoor:
             )
 
         async def normalize_index(identity: str, metadata: dict) -> None:
-            # Merge the disk-delta metadata block into the customer's uploaded
-            # index so the decoder can apply it, without asking the customer to
-            # produce a slime-shaped index. Raises FileNotFoundError if the upload
-            # has not landed (the front door turns that into a 409).
             index_path = transport_root / identity / "model.safetensors.index.json"
-
-            def _rewrite() -> None:
-                index = json.loads(index_path.read_text(encoding="utf-8"))
-                index.setdefault("metadata", {}).update(metadata)
-                atomic_write_text(index_path, json.dumps(index))
-
-            await asyncio.to_thread(_rewrite)
+            await asyncio.to_thread(merge_index_metadata, index_path, metadata)
 
         async def advance_to(version: int) -> None:
             # Run-less pointer: write the bare weight_vN identity the pool pulls.

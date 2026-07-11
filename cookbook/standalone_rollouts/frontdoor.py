@@ -235,6 +235,10 @@ def create_frontdoor_app(
                             {"error": f"checkpoint {identity!r} not found on the transport; upload before signalling"},
                             status_code=409,
                         )
+                    except ValueError as exc:
+                        # A malformed uploaded index (truncated write, wrong
+                        # file) is the customer's to fix: 4xx, never a 500.
+                        return JSONResponse({"error": str(exc)}, status_code=400)
                 await save_ledger(ledger.to_dict())
             # This identity is the chain head (rewinds were rejected above).
             # Advance idempotently, so a retry after a save-succeeded/

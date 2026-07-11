@@ -23,6 +23,7 @@ from pathlib import Path
 
 import httpx
 
+from cookbook.standalone_rollouts.delta_view import merge_index_metadata
 from cookbook.standalone_rollouts.frontdoor import HOT_LOAD_PATH, create_frontdoor_app
 from cookbook.standalone_rollouts.provider import _delta_view_refresh
 from stitch.bulletin import FilesystemBulletinBoard
@@ -90,10 +91,8 @@ class SimulatorTest(unittest.IsolatedAsyncioTestCase):
             (transport / "identities.json").write_text(json.dumps(data), encoding="utf-8")
 
         async def normalize_index(identity, metadata):
-            p = transport / identity / "model.safetensors.index.json"
-            index = json.loads(p.read_text(encoding="utf-8"))  # FileNotFoundError -> 409
-            index.setdefault("metadata", {}).update(metadata)
-            p.write_text(json.dumps(index), encoding="utf-8")
+            # The real merge (FileNotFoundError -> 409, malformed -> 400).
+            merge_index_metadata(transport / identity / "model.safetensors.index.json", metadata)
 
         async def advance_to(version):
             (transport / "latest").write_text(weight_identity(version), encoding="utf-8")
@@ -197,6 +196,31 @@ class SimulatorTest(unittest.IsolatedAsyncioTestCase):
                 for mgr in managers:
                     await mgr.sync_to()
                     self.assertEqual(mgr.current_version, 0)
+
+    async def test_malformed_uploaded_index_is_400_not_500(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            transport, _, _, client = await self._stack(tmp)
+            async with client:
+                _upload_plain_hf_checkpoint(transport, "base-ckpt")
+                await client.post(HOT_LOAD_PATH, json={"identity": "base-ckpt"})
+                # A truncated/interrupted upload left an unparseable index.
+                d = transport / "ckpt-100"
+                d.mkdir()
+                (d / "model.safetensors.index.json").write_text('{"metadata": {', encoding="utf-8")
+                r = await client.post(
+                    HOT_LOAD_PATH,
+                    json={
+                        "identity": "ckpt-100",
+                        "incremental_snapshot_metadata": {
+                            "previous_snapshot_identity": "base-ckpt",
+                        },
+                    },
+                )
+                self.assertEqual(r.status_code, 400)
+                # The failed signal left no ledger entry, so a fixed re-upload
+                # and re-signal converges.
+                ledger = json.loads((transport / "identities.json").read_text())
+                self.assertNotIn("ckpt-100", ledger["entries"])
 
 
 if __name__ == "__main__":

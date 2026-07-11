@@ -16,14 +16,34 @@ refresh (i.e. before every sync), so newly-signalled versions appear.
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
 from cookbook.standalone_rollouts.ledger import IdentityLedger
-from stitch.protocol import weight_identity
+from stitch.protocol import atomic_write_text, weight_identity
 
 
 LATEST_FILE = "latest"
+
+
+def merge_index_metadata(index_path: Path, metadata: dict[str, str]) -> None:
+    """Merge the disk-delta ``metadata`` block into a customer's uploaded HF
+    index in place, so the decoder can apply the delta without the customer
+    producing a slime-shaped index.
+
+    Raises ``FileNotFoundError`` when the upload has not landed and
+    ``ValueError`` when the uploaded index is not a JSON object; the front door
+    maps both to customer-actionable 4xx responses, never a 500.
+    """
+    try:
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"uploaded {index_path.name} is not valid JSON: {exc}") from exc
+    if not isinstance(index, dict):
+        raise ValueError(f"uploaded {index_path.name} must be a JSON object")
+    index.setdefault("metadata", {}).update(metadata)
+    atomic_write_text(index_path, json.dumps(index))
 
 
 def _ensure_symlink(link: Path, target: Path) -> None:
