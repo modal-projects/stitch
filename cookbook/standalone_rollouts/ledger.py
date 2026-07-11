@@ -105,7 +105,17 @@ class IdentityLedger:
         existing = self._by_identity.get(identity)
         if existing is not None:
             return existing, False
-        version = BASE_VERSION if not self._by_version else max(self._by_version) + 1
+        if previous is None:
+            # A full snapshot is the base (version 0), whether the customer
+            # pre-uploaded and signalled it or the pool booted it from
+            # BASE_CHECKPOINT.
+            version = BASE_VERSION
+        else:
+            # A delta always mints a real version >= 1; v0 is reserved for the
+            # base, so a delta signalled before any base (its parent booted, not
+            # signalled) still becomes v1, not a phantom base that never applies.
+            deltas = [v for v in self._by_version if v > BASE_VERSION]
+            version = (max(deltas) + 1) if deltas else BASE_VERSION + 1
         entry = LedgerEntry(version=version, previous=previous)
         self._by_identity[identity] = entry
         self._by_version[version] = identity

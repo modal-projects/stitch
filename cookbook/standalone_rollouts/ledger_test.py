@@ -44,10 +44,13 @@ class RecordTest(unittest.TestCase):
         self.assertEqual(resume.version, 3)
         self.assertEqual(ledger.base_version_for("ckpt-resume"), 0)
 
-    def test_unknown_parent_falls_back_to_base_version(self) -> None:
+    def test_delta_before_any_base_mints_v1_not_v0(self) -> None:
+        # A delta whose parent was never signalled (the base booted from
+        # BASE_CHECKPOINT) still mints v1 and treats its base as v0, so it is
+        # applied as a delta rather than mistaken for the base and skipped.
         ledger = IdentityLedger()
         entry, _ = ledger.record("ckpt-orphan", previous="never-seen")
-        self.assertEqual(entry.version, 0)
+        self.assertEqual(entry.version, 1)
         self.assertEqual(ledger.base_version_for("ckpt-orphan"), 0)
 
 
