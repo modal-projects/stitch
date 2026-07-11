@@ -23,6 +23,10 @@ import modal.experimental
 
 from cookbook.slime_disagg import helpers
 from cookbook.standalone_rollouts import frontdoor as frontdoor_mod
+from cookbook.standalone_rollouts.base_checkpoint import (
+    is_hf_repo_id,
+    resolve_base_checkpoint,
+)
 from stitch.bulletin import FilesystemBulletinBoard
 from stitch.providers.modal import (
     discover_flash_targets,
@@ -36,6 +40,9 @@ exp = importlib.import_module(f"cookbook.standalone_rollouts.configs.{PROVIDER_C
 
 APP_NAME = exp.APP_NAME
 MODEL_NAME = exp.MODEL_NAME
+# Required: the checkpoint the engine boots from and every delta seeds onto.
+# HF repo id (resolved from the prewarmed cache) or an absolute S3/prep dir.
+BASE_CHECKPOINT = exp.BASE_CHECKPOINT
 ROLLOUT_CONCURRENCY = exp.ROLLOUT_CONCURRENCY
 SIDECAR_PORT = 8000
 SGLANG_PORT = 8001
@@ -191,8 +198,18 @@ class Server:
 
     @modal.enter()
     def startup(self) -> None:
+        from huggingface_hub import snapshot_download
+
+        # Boot the engine from, and seed every delta onto, the one base
+        # checkpoint the config names. The engine's initial served weights are
+        # the customer's base (not a stock stand-in); the sidecar patches a copy
+        # of the same dir per delta and reloads. --served-model-name stays
+        # MODEL_NAME, so the wire label is unchanged whatever the load path is.
+        base_checkpoint_dir = resolve_base_checkpoint(
+            BASE_CHECKPOINT, snapshot_download=snapshot_download
+        )
         self.endpoint = SGLangEndpoint(
-            model_path=MODEL_NAME,
+            model_path=base_checkpoint_dir,
             worker_port=SGLANG_PORT,
             tp=exp.ROLLOUT_NUM_GPUS_PER_ENGINE,
             extra_server_args=SGLANG_SERVER_ARGS,
@@ -207,11 +224,6 @@ class Server:
             request_timeout=120.0,
             max_attempts_per_request=3,
         )
-        # Deltas are applied host-side onto a copy of the base checkpoint; the
-        # base resolves to the same HF cache snapshot the SGLang server loaded.
-        from huggingface_hub import snapshot_download
-
-        base_checkpoint_dir = snapshot_download(MODEL_NAME, local_files_only=True)
         self.sidecar = _start_provider_sidecar(base_checkpoint_dir=base_checkpoint_dir)
         helpers.wait_http(
             f"http://127.0.0.1:{SIDECAR_PORT}/health",
@@ -239,7 +251,11 @@ class Server:
 def download_model() -> None:
     from huggingface_hub import snapshot_download
 
-    snapshot_download(repo_id=MODEL_NAME)
+    # Prewarm the base into the HF cache volume so the serving path resolves it
+    # with local_files_only=True. A path-based base (S3 mount / prep volume) is
+    # provisioned out of band, so there is nothing to download.
+    if is_hf_repo_id(BASE_CHECKPOINT):
+        snapshot_download(repo_id=BASE_CHECKPOINT)
     hf_cache_volume.commit()
 
 

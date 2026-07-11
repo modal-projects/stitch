@@ -12,6 +12,12 @@ from pathlib import Path
 
 APP_NAME = "stitch-moonlight-api-shim"
 MODEL_NAME = "moonshotai/Moonlight-16B-A3B-Instruct"
+# The checkpoint the pool boots from and seeds every delta onto. An HF repo id
+# resolves from the prewarmed hub cache; an absolute path is an S3-mounted or
+# prep-volume base the customer pre-uploaded. Here it is the public base model;
+# a customer running a finetune of the same arch/quant points this at their own
+# base dir instead. MODEL_NAME stays the served-model label clients send.
+BASE_CHECKPOINT = MODEL_NAME
 
 HF_SECRET_NAME = "huggingface-secret"
 SHIM_SECRET_NAME = "stitch-api-shim-provider"
