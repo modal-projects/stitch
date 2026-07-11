@@ -62,9 +62,13 @@ SERVER_STARTUP_TIMEOUT = 35 * MINUTES
 LOCAL_CHECKPOINT_PATH = "/local-checkpoint"
 
 # radixark/miles bakes Megatron-LM (miles-main: native --fp4-format NVFP4
-# BlockScaling) + TransformerEngine. NVFP4 QAT requires TE >= 2.7.0.dev0 and
-# Blackwell; verify the image's TE on a warm B200 during bring-up.
-MILES_IMAGE_TAG = "radixark/miles:latest"
+# BlockScaling) + TransformerEngine + sglang built from the sglang-miles branch.
+# NVFP4 QAT requires TE >= 2.7.0.dev0 and Blackwell; verify the image's TE on a
+# warm B200 during bring-up. Pin the DATED tag, never `latest`: Modal caches
+# from_registry images per tag string and does not re-pull a moved mutable tag,
+# so `latest` silently serves whatever was first pulled (a stale `latest` here
+# shipped a pre-June baked sglang against today's miles main).
+MILES_IMAGE_TAG = "radixark/miles:dev-202607090055"
 MILES_ROOT = "/root/miles"
 # megatron.core is pip-installed in the base image, but megatron.training lives
 # only in this source tree; miles' own launcher puts it on PYTHONPATH, and so
