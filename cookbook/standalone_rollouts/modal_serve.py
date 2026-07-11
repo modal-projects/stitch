@@ -511,17 +511,17 @@ class FrontDoor:
             targets = await asyncio.to_thread(
                 discover_flash_targets, APP_NAME, Server.__name__
             )
-            infos: list[dict] = []
+
+            async def _info(client: httpx.AsyncClient, target: str) -> dict:
+                try:
+                    return (await client.get(f"{target}/server_info")).json()
+                except Exception:  # noqa: BLE001 — unreachable replica reported as not-ready
+                    return {"sync_state": None, "last_sync_error": "unreachable"}
+
+            # Concurrently: polled on the readiness path, so k unreachable
+            # replicas must cost one timeout, not k stacked timeouts.
             async with httpx.AsyncClient(timeout=10.0, trust_env=False) as client:
-                for target in targets:
-                    try:
-                        resp = await client.get(f"{target}/server_info")
-                        infos.append(resp.json())
-                    except Exception:  # noqa: BLE001 — unreachable replica reported as not-ready
-                        infos.append(
-                            {"sync_state": None, "last_sync_error": "unreachable"}
-                        )
-            return infos
+                return list(await asyncio.gather(*(_info(client, t) for t in targets)))
 
         async def wake(version: int) -> None:
             targets = await asyncio.to_thread(
