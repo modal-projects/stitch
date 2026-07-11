@@ -26,12 +26,15 @@ from pathlib import Path
 
 import modal
 
-# Pinned Blackwell SGLang fork. Only the python sources are checked out over the
-# prebuilt base image's kernels.
-SGLANG_IMAGE_TAG = "lmsysorg/sglang:v0.5.12"
+# Pinned SGLang: the base image supplies the environment (kernels, CUDA deps);
+# the actual runtime sglang code is the pin's python tree checked out over it.
+# weight-sync-miles = sglang-miles + the restore protocol (reload == init for
+# quantized weights), /pull_weights + hardened local_checkpoint receiver, and
+# load-plan record/replay. Oracle-validated on GLM-4.5-Air-FP8 + Kimi-K2.6-NVFP4.
+SGLANG_IMAGE_TAG = "lmsysorg/sglang:v0.5.14"
 SGLANG_FORK_REPO = "https://github.com/modal-projects/sglang.git"
-SGLANG_FORK_BRANCH = "weight-sync-upstream"
-SGLANG_FORK_COMMIT = "7fd4288bc0c61549c45a9fe92134437ac3bbb03a"
+SGLANG_FORK_BRANCH = "weight-sync-miles"
+SGLANG_FORK_COMMIT = "c3cd6404680fbf584a6385ee1f411b6d8db43f8a"
 
 # SGLang runtime tunables carried over from the standalone B200 deployment.
 SERVING_IMAGE_ENV = {
@@ -51,34 +54,26 @@ SERVING_IMAGE_ENV = {
 
 def build_b200_serving_image(
     *,
-    trainer_repo_url: str,
-    trainer_repo_ref: str,
-    trainer_root: str,
     hf_cache_path: str,
     experiment: str,
-    shallow_clone: bool = True,
+    delta_volume_name: str = "",
     clear_sglang_cache_at_end: bool = False,
 ) -> modal.Image:
     """Build the rollout-pool serving image (see module docstring).
 
-    ``trainer_repo_url`` / ``trainer_repo_ref`` / ``trainer_root`` pin the
-    ``--no-deps`` trainer checkout (so the pool's ``disk_delta`` matches the
-    trainer's encoder). The whole ``cookbook`` package is mounted at
-    ``/root/cookbook``, so the sidecar subprocess can import both
-    ``cookbook.<name>.sidecar`` and the shared ``cookbook.sidecar`` spine it
-    delegates to. Mounting the package (not just the per-trainer subdir) is
-    required because the sidecar is launched as ``python3 -m
-    cookbook.<name>.sidecar`` and is never imported at deploy time, so Modal's
-    import-time automounting never sees the shared module.
+    No trainer package is installed: the delta apply lives in the engine
+    behind ``/pull_weights``, so the pool is trainer-agnostic. The whole
+    ``cookbook`` package is mounted at ``/root/cookbook``, so the sidecar
+    subprocess can import both ``cookbook.<name>.sidecar`` and the shared
+    ``cookbook.sidecar`` spine it delegates to. Mounting the package (not just
+    the per-trainer subdir) is required because the sidecar is launched as
+    ``python3 -m cookbook.<name>.sidecar`` and is never imported at deploy
+    time, so Modal's import-time automounting never sees the shared module.
 
-    ``shallow_clone`` does a ``--depth 1`` clone+fetch (fine when the ref is a
-    branch tip or recent commit). ``clear_sglang_cache_at_end`` removes
-    ``/root/.cache/sglang`` as the final filesystem step, required when
-    ``modal_train`` mounts a kernel-cache volume there (a volume can't mount over
-    a non-empty path).
+    ``clear_sglang_cache_at_end`` removes ``/root/.cache/sglang`` as the final
+    filesystem step, required when ``modal_train`` mounts a kernel-cache volume
+    there (a volume can't mount over a non-empty path).
     """
-    depth = "--depth 1 " if shallow_clone else ""
-    fetch_depth = "--depth 1 " if shallow_clone else ""
     image = (
         modal.Image.from_registry(SGLANG_IMAGE_TAG)
         .run_commands(
@@ -86,37 +81,20 @@ def build_b200_serving_image(
             f" && git fetch modal-fork {SGLANG_FORK_BRANCH}"
             f" && git checkout {SGLANG_FORK_COMMIT} -- python/",
         )
-        # Pre-release CUDA wheels (cutlass-dsl / sglang-kernel / flash-attn-4) —
-        # keep the deployment's known-good pip resolution.
-        .run_commands(
-            "pip install nvidia-cutlass-dsl==4.5.1 sglang-kernel==0.4.3 'flash-attn-4>=4.0.0b10'"
-        )
-        # flash-attn-4 checks for the deprecated MmaFP8Op but cutlass-dsl 4.5.1 now
-        # generates MmaF8F6F4Op instead. Patch the isinstance check to handle both.
-        .run_commands(
-            "sed -i 's/isinstance(op, tcgen05.mma.MmaFP8Op)/isinstance(op, (tcgen05.mma.MmaFP8Op, tcgen05.mma.MmaF8F6F4Op))/' "
-            "/usr/local/lib/python3.12/dist-packages/flash_attn/cute/blackwell_helpers.py"
-        )
         # The base image bakes in an HF cache; remove it so it cannot shadow the
         # cache volume mounted at the same path.
         .run_commands(f"rm -rf {hf_cache_path}")
-        # trainer pkg --no-deps gives the sidecar `<trainer>.utils.disk_delta`
-        # (host-side delta apply). Megatron is NOT installed — the pool never
-        # trains. Pin the SAME ref the trainer image uses so encoder == decoder.
-        .run_commands(
-            f"git clone {depth}{trainer_repo_url} {trainer_root}"
-            f" && cd {trainer_root}"
-            f" && git fetch {fetch_depth}origin {trainer_repo_ref}"
-            f" && git checkout FETCH_HEAD"
-            f" && python3 -m pip install --no-deps -e {trainer_root}"
-        )
+        # No trainer package: the delta apply lives in the engine
+        # (/pull_weights + weight_sync/local_checkpoint), so the pool imports
+        # neither slime nor miles. The checksum/zstd deps below are the
+        # ENGINE-side receiver's.
         .pip_install(
             "autoinference-utils==0.2.0",  # SGLang server lifecycle for the rollout pool
             "fastapi",  # stitch sidecar
             "httpx",  # stitch sidecar
             "uvicorn",  # stitch sidecar
-            # disk_delta host-side apply: zstd decompress + xxhash (xxh3-128
-            # default) / blake3 checksums. trainer pkg is installed --no-deps.
+            # engine-side local_checkpoint receiver: zstd decompress + xxhash
+            # (xxh3-128 default) / blake3 checksums.
             "zstandard",
             "xxhash",
             "blake3",
@@ -130,7 +108,17 @@ def build_b200_serving_image(
         # autotuner cache on first boot).
         image = image.run_commands("rm -rf /root/.cache/sglang")
     return (
-        image.env({"EXPERIMENT_CONFIG": experiment, **SERVING_IMAGE_ENV})
+        image.env(
+            {
+                "EXPERIMENT_CONFIG": experiment,
+                # Read by the engine's /pull_weights pre-read hook
+                # (stitch.providers.modal.pull_weights_pre_read_hook) and the
+                # sidecar's bulletin refresh: the Volume must be reloaded before
+                # published versions become visible on this host.
+                "DELTA_VOLUME_NAME": delta_volume_name,
+                **SERVING_IMAGE_ENV,
+            }
+        )
         # Mounted at container start (not copied into the image) so code edits to
         # stitch / the sidecar never rebuild the image. Modal puts /root on
         # PYTHONPATH for subprocesses (the sidecar). The whole cookbook package is

@@ -6,7 +6,6 @@ import asyncio
 import logging
 import re
 import time
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -56,65 +55,44 @@ def compose_extra_key(
 
 @dataclass
 class SGLangDiskDeltaAdapter:
-    """Applies disk-delta weight versions to one local SGLang server.
+    """Syncs disk-delta weight versions into one local SGLang server via the
+    engine's ``/pull_weights`` endpoint.
 
-    The delta is applied *host-side*: slime's ``disk_delta`` patches a local
-    full HF checkpoint in place (chain-replayed from the base, per-tensor
-    checksum-verified, with a base-version precondition), and the engine then
-    reloads that checkpoint through the ordinary ``update_weights_from_disk``
-    path. The engine carries no delta receiver, so no ``load_format`` / ``files``
-    delta payload is sent — that is all the new disk-delta slime branch needs.
+    The delta apply lives in the ENGINE (sglang ``weight_sync/local_checkpoint``):
+    ``stage_manifest`` POSTs ``/pull_weights``, which materializes the host-local
+    checkpoint — seeded from the engine's own ``model_path``, chain-replayed with
+    per-tensor checksum verification, and self-recovering (a torn or corrupt
+    local state is reseeded from base and replayed, never re-patched). Multi-
+    version catch-up is native: one pull chains every delta up to the target.
+    ``commit_manifest`` then reloads the materialized checkpoint through the
+    ordinary ``update_weights_from_disk`` path.
 
-    ``apply_deltas`` / ``init_local_checkpoint`` are injectable so the adapter is
-    testable without slime/numpy installed; by default they bind lazily to
-    ``slime.utils.disk_delta``.
+    The sidecar holds no host-side decoder — no trainer package (slime/miles)
+    import at all. Cross-host object-store visibility is the engine's concern
+    too (``--custom-pull-weights-pre-read-hook`` on the server).
     """
 
     upstream_url: str
     local_checkpoint_dir: str
     base_checkpoint_dir: str
     backend: str = "disk_delta"
-    apply_deltas: Callable[[str, str, int], Any] | None = None
-    init_local_checkpoint: Callable[[str, str], None] | None = None
 
     def __post_init__(self) -> None:
         self.upstream_url = self.upstream_url.rstrip("/")
 
-    def _apply_deltas(self) -> Callable[[str, str, int], Any]:
-        if self.apply_deltas is not None:
-            return self.apply_deltas
-        from slime.utils.disk_delta import apply_deltas
-
-        return apply_deltas
-
-    def _init_local_checkpoint(self) -> Callable[[str, str], None]:
-        if self.init_local_checkpoint is not None:
-            return self.init_local_checkpoint
-        from slime.utils.disk_delta import init_local_checkpoint
-
-        return init_local_checkpoint
-
-    async def prepare(self) -> None:
-        """Materialize the host-local full checkpoint from the base once
-        (idempotent) so later deltas apply on top of it in place. Run at startup;
-        blocking copy, so it is offloaded to a thread."""
-        await asyncio.to_thread(
-            self._init_local_checkpoint(), self.local_checkpoint_dir, self.base_checkpoint_dir
-        )
-
     async def reset(self) -> None:
-        """Discard the local checkpoint and re-materialize the base from scratch.
+        """Discard the local checkpoint so the next pull reseeds from scratch.
 
-        Used on a run switch: the new run's chain forks at base, so the locally
-        patched checkpoint must be thrown away before replaying the new chain. The
-        sync manager invokes this under the commit gate (engine paused), so no
-        request decodes across the wipe; ``prepare`` then rebuilds a complete base
-        (a partial wipe from a crash is re-seeded by ``init_local_checkpoint``).
+        Used on a run switch: the new run's chain forks at base, and version
+        numbers restart, so the engine-side pull cannot be allowed to chain the
+        new run's deltas onto the old run's bytes. Wiping the directory makes
+        the next ``/pull_weights`` take the fresh-host path (full seed from the
+        engine's base, then the new chain). The sync manager invokes this under
+        the commit gate (engine paused), so no reload races the wipe.
         """
         import shutil
 
         await asyncio.to_thread(shutil.rmtree, self.local_checkpoint_dir, ignore_errors=True)
-        await self.prepare()
 
     async def flush_cache(self) -> None:
         import httpx
@@ -141,28 +119,35 @@ class SGLangDiskDeltaAdapter:
             resp.raise_for_status()
 
     async def stage_manifest(self, manifest: VersionManifest, version_path: str) -> dict[str, Any] | None:
-        """Bring the local checkpoint up to this version host-side (apply_deltas
-        chain-replays from whatever is applied, verifying each base_version).
+        """Bring the local checkpoint up to this version via the engine's
+        ``/pull_weights`` (chain-replayed from whatever is applied, per-tensor
+        checksum-verified, reseed-on-corruption).
 
-        Safe to run while the engine serves: between reloads nothing reads the
-        local checkpoint (weights live on the GPU), so the sync manager calls
-        this BEFORE closing the commit gate. version_path is the published
-        version dir; its parent is the root of weight_v* dirs apply_deltas walks.
-
-        Returns a timing/phase breakdown for server_info metrics; newer decoders
-        return per-version phase stats from ``apply_deltas``, older ones None.
+        Safe to run while the engine serves: the pull is disk-only (weights live
+        on the GPU), so the sync manager calls this BEFORE closing the commit
+        gate. version_path is the published version dir; its parent is the root
+        of weight_v* dirs the pull walks.
         """
+        import httpx
+
         delta_root = str(Path(version_path).parent)
         _t_apply = time.perf_counter()
-        stats = await asyncio.to_thread(
-            self._apply_deltas(), self.local_checkpoint_dir, delta_root, int(manifest.version)
-        )
+        async with httpx.AsyncClient(timeout=None, trust_env=False) as client:
+            resp = await client.post(
+                f"{self.upstream_url}/pull_weights",
+                json={
+                    "local_checkpoint_dir": self.local_checkpoint_dir,
+                    "source_dir": delta_root,
+                    "target_version": int(manifest.version),
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if data.get("success") is False:
+                raise RuntimeError(f"SGLang rejected weight pull: {data}")
         elapsed = time.perf_counter() - _t_apply
-        logger.info("[apply timing] v=%s host_delta_apply=%.2fs", manifest.version, elapsed)
-        detail: dict[str, Any] = {"host_delta_apply_s": round(elapsed, 3)}
-        if stats:
-            detail["versions"] = stats
-        return detail
+        logger.info("[apply timing] v=%s engine_pull=%.2fs", manifest.version, elapsed)
+        return {"engine_pull_s": round(elapsed, 3)}
 
     async def commit_manifest(
         self,
@@ -175,9 +160,11 @@ class SGLangDiskDeltaAdapter:
         mode), after :meth:`stage_manifest` has materialized the version.
 
         ``weight_names`` is the tail's union of touched tensor names; an
-        engine with the reload load plan uses it to reload only the touched
-        modules (O(delta)) and silently full-reloads otherwise. Set
-        ``STITCH_PARTIAL_RELOAD=0`` to withhold the names entirely."""
+        engine with the partial-reload load plan uses it to reload only the
+        touched modules (O(delta)) and silently full-reloads otherwise. The
+        pinned engine has no partial reload (full reloads re-derive quantized
+        kernel state correctly; partial needs a per-module restore design), so
+        the names are withheld unless ``STITCH_PARTIAL_RELOAD=1`` opts in."""
         import os
 
         import httpx
@@ -192,7 +179,7 @@ class SGLangDiskDeltaAdapter:
             # it must stay disabled here.
             "flush_cache": False,
         }
-        if weight_names and os.environ.get("STITCH_PARTIAL_RELOAD", "1") == "1":
+        if weight_names and os.environ.get("STITCH_PARTIAL_RELOAD", "0") == "1":
             payload["weight_names"] = list(weight_names)
         async with httpx.AsyncClient(timeout=None, trust_env=False) as client:
             resp = await client.post(f"{self.upstream_url}/update_weights_from_disk", json=payload)

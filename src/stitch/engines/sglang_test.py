@@ -9,10 +9,9 @@ from stitch.protocol import VersionManifest
 
 
 class _RecordingPost:
-    """Stand-in for httpx.AsyncClient that records the reload POST."""
+    """Stand-in for httpx.AsyncClient that records every POST."""
 
-    last_url: str | None = None
-    last_json: dict | None = None
+    posts: list[tuple[str, dict | None]] = []
     response_json: dict = {"success": True}
 
     def __init__(self, *args, **kwargs) -> None:
@@ -27,25 +26,19 @@ class _RecordingPost:
     async def post(self, url, json=None):
         import httpx
 
-        type(self).last_url = url
-        type(self).last_json = json
+        type(self).posts.append((url, json))
         return httpx.Response(200, json=type(self).response_json, request=httpx.Request("POST", url))
 
 
 class SGLangDiskDeltaAdapterTest(unittest.TestCase):
-    def test_apply_manifest_applies_host_side_then_plain_reload(self) -> None:
+    def test_apply_manifest_pulls_engine_side_then_plain_reload(self) -> None:
         async def run() -> None:
-            calls: dict[str, list] = {"apply": [], "init": []}
-
             adapter = SGLangDiskDeltaAdapter(
                 upstream_url="http://up/",
                 local_checkpoint_dir="/local",
                 base_checkpoint_dir="/base",
-                apply_deltas=lambda local, root, version: calls["apply"].append((local, root, version)),
-                init_local_checkpoint=lambda local, base: calls["init"].append((local, base)),
             )
 
-            await adapter.prepare()
             manifest = VersionManifest(
                 version=5,
                 base_version=4,
@@ -54,33 +47,39 @@ class SGLangDiskDeltaAdapterTest(unittest.TestCase):
                 transition_files=["model-00000-of-00001.safetensors"],
             )
             with mock.patch("httpx.AsyncClient", _RecordingPost):
-                _RecordingPost.last_json = None
+                _RecordingPost.posts = []
                 await adapter.apply_manifest(manifest, "/bulletin/versions/weight_v000005")
 
-            # Base materialized once; delta chain applied against the version
-            # dir's parent (the root of weight_v* dirs) up to version 5.
-            self.assertEqual(calls["init"], [("/local", "/base")])
-            self.assertEqual(calls["apply"], [("/local", "/bulletin/versions", 5)])
-            # Engine reload is the plain disk path: local checkpoint, no
-            # load_format / files delta payload.
-            self.assertEqual(_RecordingPost.last_url, "http://up/update_weights_from_disk")
+            # The engine materializes the local checkpoint itself: one
+            # /pull_weights against the version dir's parent (the root of
+            # weight_v* dirs), then the plain disk reload — no load_format /
+            # files delta payload.
             self.assertEqual(
-                _RecordingPost.last_json,
-                {"model_path": "/local", "weight_version": "5", "flush_cache": False},
+                _RecordingPost.posts,
+                [
+                    (
+                        "http://up/pull_weights",
+                        {
+                            "local_checkpoint_dir": "/local",
+                            "source_dir": "/bulletin/versions",
+                            "target_version": 5,
+                        },
+                    ),
+                    (
+                        "http://up/update_weights_from_disk",
+                        {"model_path": "/local", "weight_version": "5", "flush_cache": False},
+                    ),
+                ],
             )
 
         asyncio.run(run())
 
     def test_apply_manifest_skips_engine_reload_for_empty_delta(self) -> None:
         async def run() -> None:
-            calls: dict[str, list] = {"apply": [], "init": []}
-
             adapter = SGLangDiskDeltaAdapter(
                 upstream_url="http://up/",
                 local_checkpoint_dir="/local",
                 base_checkpoint_dir="/base",
-                apply_deltas=lambda local, root, version: calls["apply"].append((local, root, version)),
-                init_local_checkpoint=lambda local, base: calls["init"].append((local, base)),
             )
 
             manifest = VersionManifest(
@@ -91,35 +90,54 @@ class SGLangDiskDeltaAdapterTest(unittest.TestCase):
                 transition_files=[],
             )
             with mock.patch("httpx.AsyncClient", _RecordingPost):
-                _RecordingPost.last_json = None
+                _RecordingPost.posts = []
                 await adapter.apply_manifest(manifest, "/bulletin/versions/weight_v000005")
 
-            self.assertEqual(calls["apply"], [("/local", "/bulletin/versions", 5)])
-            self.assertIsNone(_RecordingPost.last_json)
+            # The pull still advances the local checkpoint; the reload is skipped.
+            self.assertEqual(
+                [url for url, _ in _RecordingPost.posts],
+                ["http://up/pull_weights"],
+            )
+
+        asyncio.run(run())
+
+    def test_pull_rejection_raises(self) -> None:
+        async def run() -> None:
+            adapter = SGLangDiskDeltaAdapter(
+                upstream_url="http://up",
+                local_checkpoint_dir="/local",
+                base_checkpoint_dir="/base",
+            )
+            manifest = VersionManifest(
+                version=5, base_version=4, backend="disk_delta", load_format="auto"
+            )
+            with mock.patch("httpx.AsyncClient", _RecordingPost):
+                _RecordingPost.posts = []
+                _RecordingPost.response_json = {"success": False, "message": "checksum mismatch"}
+                try:
+                    with self.assertRaisesRegex(RuntimeError, "rejected weight pull"):
+                        await adapter.stage_manifest(manifest, "/bulletin/versions/weight_v000005")
+                finally:
+                    _RecordingPost.response_json = {"success": True}
 
         asyncio.run(run())
 
     def test_staged_split_reports_metrics(self) -> None:
         async def run() -> None:
-            apply_stats = [{"version": "000005", "apply_s": 1.2}]
-
             adapter = SGLangDiskDeltaAdapter(
                 upstream_url="http://up",
                 local_checkpoint_dir="/local",
                 base_checkpoint_dir="/base",
-                apply_deltas=lambda local, root, version: apply_stats,
-                init_local_checkpoint=lambda local, base: None,
             )
             manifest = VersionManifest(
                 version=5, base_version=4, backend="disk_delta", load_format="auto"
             )
 
-            stage_detail = await adapter.stage_manifest(manifest, "/bulletin/versions/weight_v000005")
-            self.assertIn("host_delta_apply_s", stage_detail)
-            # A decoder that returns per-version phase stats gets them surfaced.
-            self.assertEqual(stage_detail["versions"], apply_stats)
-
             with mock.patch("httpx.AsyncClient", _RecordingPost):
+                _RecordingPost.posts = []
+                stage_detail = await adapter.stage_manifest(manifest, "/bulletin/versions/weight_v000005")
+                self.assertIn("engine_pull_s", stage_detail)
+
                 _RecordingPost.response_json = {
                     "success": True,
                     "message": "Succeeded. [reload timing] iter_wait=1.50s load=4.20s postprocess=0.30s total=6.00s",
