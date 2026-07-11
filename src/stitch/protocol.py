@@ -575,15 +575,24 @@ def atomic_write_json(path: str | Path, payload: dict[str, Any]) -> None:
     os.replace(tmp, path)
 
 
-def atomic_write_text(path: str | Path, text: str) -> None:
+def plain_write_text(path: str | Path, text: str) -> None:
+    """Overwrite ``path`` in place, without a tmp file + atomic rename.
+
+    The JSON pointer (stitch layout) uses :func:`atomic_write_json`, but the
+    slime-layout ``latest`` pointer lives on the S3 CloudBucketMount, where
+    ``os.replace`` raises ENOSYS (mountpoint-s3 has no rename — the same
+    constraint that made the trainer upload path copy instead of rename, commit
+    8745872). A probe against the real mount confirmed both that ``os.replace``
+    raises ENOSYS and that opening an existing key ``"w"`` overwrites it in place
+    as one PutObject, atomic at the object level — so no unlink-first dance is
+    needed (a reader always sees the old or new pointer, never absent). No fsync:
+    the pointer is single-writer (the singleton front door under its advance
+    lock) and re-derivable, and mountpoint-s3 flushes on close.
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    with tmp.open("w", encoding="utf-8") as f:
+    with path.open("w", encoding="utf-8") as f:
         f.write(text)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
 
 
 def _optional_int(value: Any) -> int | None:

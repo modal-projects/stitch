@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import errno
 import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from stitch.bulletin import FilesystemBulletinBoard
 from stitch.protocol import (
@@ -87,6 +89,22 @@ class SlimeLayoutBulletinTest(unittest.TestCase):
             board.write_latest(None, 7)
             self.assertEqual((root / "latest").read_text(encoding="utf-8"), "weight_v000007")
             self.assertEqual(board.read_latest(), (None, 7))
+
+    def test_slime_pointer_write_never_renames(self) -> None:
+        # The front door writes `latest` on the S3 CloudBucketMount, where
+        # os.replace raises ENOSYS. The slime-layout write must not rename, must
+        # tolerate repeated overwrites, and must not strand a latest.tmp.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            board = FilesystemBulletinBoard(root, layout="slime")
+            with mock.patch(
+                "stitch.protocol.os.replace",
+                side_effect=OSError(errno.ENOSYS, "rename not supported"),
+            ):
+                board.write_latest("run-a", 5)
+                board.write_latest("run-a", 6)  # overwrite an existing pointer
+            self.assertEqual(board.read_latest(), ("run-a", 6))
+            self.assertFalse((root / "latest.tmp").exists())
 
     def test_legacy_bare_pointer_parses_runless(self) -> None:
         # A pre-run-id deployment left `latest` = "000005"; it must parse as a
