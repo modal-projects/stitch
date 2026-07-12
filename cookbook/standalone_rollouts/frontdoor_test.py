@@ -275,19 +275,20 @@ class FrontdoorAppTest(unittest.TestCase):
         self.assertEqual(resp.status_code, 400)
         self.assertEqual(calls["advanced"], [])
 
-    def test_second_full_snapshot_is_409(self) -> None:
-        client, calls, _ = self._client()
-        client.post(HOT_LOAD_PATH, json={"identity": "base-a"})
-        resp = client.post(HOT_LOAD_PATH, json={"identity": "base-b"})
-        self.assertEqual(resp.status_code, 409)
-        self.assertEqual(calls["advanced"], [0])  # pointer untouched by the reject
-
-    def test_delta_with_unknown_parent_is_409(self) -> None:
+    def test_ledger_conflicts_map_to_409(self) -> None:
+        # Second base, unknown parent, and fork from a non-head checkpoint are
+        # all LedgerError -> 409; none of them touch the pointer or normalize.
         client, calls, _ = self._client()
         client.post(HOT_LOAD_PATH, json={"identity": "base-ckpt"})
-        resp = client.post(HOT_LOAD_PATH, json=_delta("ckpt-2", "ckpt-l"))
-        self.assertEqual(resp.status_code, 409)
-        self.assertEqual(calls["normalized"], [])
+        client.post(HOT_LOAD_PATH, json=_delta("ckpt-1", "base-ckpt"))
+        for body in (
+            {"identity": "base-b"},  # the base slot is single-occupancy
+            _delta("ckpt-2", "ckpt-l"),  # typo'd, never-signalled parent
+            _delta("ckpt-fork", "base-ckpt"),  # fork: parent is not the head
+        ):
+            self.assertEqual(client.post(HOT_LOAD_PATH, json=body).status_code, 409, body)
+        self.assertEqual(calls["advanced"], [0, 1])  # pointer stays at head
+        self.assertEqual(len(calls["normalized"]), 1)  # only ckpt-1's derive
 
     def test_expected_base_pin_rejects_other_anchors(self) -> None:
         client, calls, _ = self._client(expected_base_identity="base")
@@ -295,29 +296,12 @@ class FrontdoorAppTest(unittest.TestCase):
         self.assertEqual(client.post(HOT_LOAD_PATH, json={"identity": "their-base"}).status_code, 409)
         # A first delta whose unknown parent is not the base is a typo, not
         # the booted checkpoint.
-        r = client.post(
-            HOT_LOAD_PATH,
-            json=_delta("ckpt-1", "bsae"),
-        )
-        self.assertEqual(r.status_code, 409)
+        self.assertEqual(client.post(HOT_LOAD_PATH, json=_delta("ckpt-1", "bsae")).status_code, 409)
         self.assertEqual(calls["advanced"], [])
         # The pinned identities pass: the base itself, and a first delta on it.
         self.assertEqual(client.post(HOT_LOAD_PATH, json={"identity": "base"}).status_code, 200)
-        r = client.post(
-            HOT_LOAD_PATH,
-            json=_delta("ckpt-1", "base"),
-        )
+        r = client.post(HOT_LOAD_PATH, json=_delta("ckpt-1", "base"))
         self.assertEqual(r.json()["version"], 1)
-
-    def test_delta_forking_an_older_checkpoint_is_409(self) -> None:
-        # One accepted fork would wedge every replica behind the non-contiguous
-        # version forever; reject it and leave the head serveable.
-        client, calls, _ = self._client()
-        client.post(HOT_LOAD_PATH, json={"identity": "base-ckpt"})
-        client.post(HOT_LOAD_PATH, json=_delta("ckpt-1", "base-ckpt"))
-        resp = client.post(HOT_LOAD_PATH, json=_delta("ckpt-fork", "base-ckpt"))
-        self.assertEqual(resp.status_code, 409)
-        self.assertEqual(calls["advanced"], [0, 1])  # pointer stays at head
 
     def test_resignalling_an_older_identity_is_a_409_rewind(self) -> None:
         client, calls, _ = self._client()
