@@ -46,6 +46,7 @@ class FakeEngine:
         self.events: list[str] = []
         self.apply_gate: asyncio.Event | None = None
         self.apply_started: asyncio.Event = asyncio.Event()
+        self.fail_next_apply = False
 
     async def flush_cache(self) -> None:
         self.flushes += 1
@@ -55,6 +56,9 @@ class FakeEngine:
         self.apply_started.set()
         if self.apply_gate is not None:
             await self.apply_gate.wait()
+        if self.fail_next_apply:
+            self.fail_next_apply = False
+            raise RuntimeError("injected apply failure")
         self.applies.append((manifest.version, version_path))
         self.events.append("apply")
 
@@ -152,6 +156,74 @@ class SyncManagerTest(unittest.TestCase):
                 self.assertEqual(manager.sync_state, SyncState.IDLE)
                 self.assertIsNone(manager.queued_target_version)
                 self.assertEqual([version for version, _ in engine.applies], [1, 2])
+
+        asyncio.run(run())
+
+    def test_run_switch_drains_rolling_requests_in_in_place_mode(self) -> None:
+        # A rolling request may span same-chain delta commits, but never a base
+        # swap: the switch waits for ALL in-flight requests, not just exact pins.
+        async def run() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                board = FilesystemBulletinBoard(root, layout="slime")
+                _write_slime_version(root / "run-a", 1, 0)
+                board.write_latest("run-a", 1)
+                engine = FakeEngine()
+                manager = WeightSyncManager(board=board, engine=engine, commit_mode="in_place")
+                await manager.startup_sync()
+
+                entered = asyncio.Event()
+                release = asyncio.Event()
+
+                async def rolling() -> None:
+                    async with manager.request_context(WeightVersionPolicy()):
+                        entered.set()
+                        await release.wait()
+
+                request = asyncio.create_task(rolling())
+                await entered.wait()
+
+                board.write_latest("run-b", 0)
+                switch = asyncio.create_task(manager.sync_to())
+                await _settle()
+                # Blocked on the rolling request; the old chain is still live.
+                self.assertEqual(manager.current_run_id, "run-a")
+                self.assertNotIn("reset", engine.events)
+
+                release.set()
+                await request
+                await switch
+                self.assertEqual(manager.current_run_id, "run-b")
+                self.assertIn("reset", engine.events)
+
+        asyncio.run(run())
+
+    def test_run_switch_resets_after_failed_pass_even_at_v0(self) -> None:
+        # Staging is host-side and pre-gate, so a failed pass can leave the
+        # local checkpoint dirty while the served version is still 0. A switch
+        # in that state must re-materialize; only a pristine cold-start switch
+        # (no version applied, no failed pass) skips the reset.
+        async def run() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                board = FilesystemBulletinBoard(root, layout="slime")
+                board.write_latest("run-a", 0)
+                engine = FakeEngine()
+                manager = WeightSyncManager(board=board, engine=engine, commit_mode="in_place")
+                await manager.startup_sync()
+                self.assertNotIn("reset", engine.events)  # pristine switch
+
+                _write_slime_version(root / "run-a", 1, 0)
+                board.write_latest("run-a", 1)
+                engine.fail_next_apply = True
+                await manager.sync_to()
+                self.assertEqual(manager.sync_state, SyncState.ERROR)
+                self.assertEqual(manager.current_version, 0)
+
+                board.write_latest("run-b", 0)
+                await manager.sync_to()
+                self.assertEqual(manager.current_run_id, "run-b")
+                self.assertIn("reset", engine.events)
 
         asyncio.run(run())
 

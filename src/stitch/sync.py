@@ -163,6 +163,7 @@ class RolloutAdmissionGate:
         on_applied: Callable[[], None],
         pause: Callable[[], Awaitable[None]] | None = None,
         resume: Callable[[], Awaitable[None]] | None = None,
+        drain_all: bool = False,
     ) -> None:
         """Drive one commit through the gate: wait for the commit point and
         close the admission gate, apply the new weights, advance the served
@@ -173,8 +174,13 @@ class RolloutAdmissionGate:
         the new namespace. On failure the gate (and pause) are unwound and the
         served version is left unchanged — ``on_applied`` runs only after a
         successful apply.
+
+        ``drain_all`` waits for every in-flight request regardless of commit
+        mode, for transitions no request may span (a run switch replaces the
+        base rather than extending the chain a rolling request admitted on).
         """
-        await self._begin_commit(self._commit_ready)
+        ready = (lambda: self._active_requests == 0) if drain_all else self._commit_ready
+        await self._begin_commit(ready)
         try:
             if self.commit_mode == "in_place" and pause is not None:
                 await pause()
@@ -328,9 +334,13 @@ class WeightSyncManager(RolloutAdmissionGate):
 
         A new run forks at base (slime sets ``base_version=000000`` for v1 of every
         run), so switching chains means discarding the current weights and replaying
-        the new chain. The re-materialize runs through the commit gate (pause →
-        reset → resume) exactly like a version commit, so no in-flight request
-        decodes across the weight wipe.
+        the new chain. Unlike a same-chain delta commit this drains ALL in-flight
+        requests in both commit modes — a rolling request may span chain
+        extensions, never a base swap. Reset runs whenever this process may have
+        touched the checkpoint (any applied version, or a failed pass whose
+        host-side staging landed without a commit); only the pristine cold-start
+        switch skips it, so container boot does not pay a redundant
+        re-materialize + reload.
         """
         logger.info(
             "run change %r -> %r: re-materializing base, resetting to v0",
@@ -338,10 +348,10 @@ class WeightSyncManager(RolloutAdmissionGate):
             new_run_id,
         )
         reset = getattr(self.engine, "reset", None)
-        was_patched = self.current_version > 0
+        maybe_dirty = self.current_version > 0 or self.last_sync_error is not None
 
         async def _apply() -> None:
-            if reset is not None and was_patched:
+            if reset is not None and maybe_dirty:
                 await reset()
 
         def _applied() -> None:
@@ -355,6 +365,7 @@ class WeightSyncManager(RolloutAdmissionGate):
             on_applied=_applied,
             pause=self.engine.pause_generation,
             resume=self.engine.continue_generation,
+            drain_all=True,
         )
 
     async def _sync_once(self) -> bool:
