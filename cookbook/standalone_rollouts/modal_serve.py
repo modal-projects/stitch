@@ -329,7 +329,8 @@ def print_secret_template() -> None:
                 f"modal secret create {exp.SHIM_SECRET_NAME} \\",
                 "  STITCH_SHIM_API_KEY=... \\",
                 "  STITCH_SHIM_PROVIDER_MODEL=moonlight \\",
-                "  STITCH_SHIM_PROVIDER_DEPLOYMENT=rollout-prod",
+                "  STITCH_SHIM_PROVIDER_DEPLOYMENT=rollout-prod \\",
+                "  STITCH_SHIM_BASE_SNAPSHOT_IDENTITY=base",
             ]
         )
     )
@@ -578,6 +579,9 @@ class FrontDoor:
             proxy=proxy,
             authorize=_auth_error,
             wake=wake,
+            # Same var the trainer uses for its first delta's parent, so one
+            # secret pins both sides; unset disables the pin.
+            expected_base_identity=os.environ.get("STITCH_SHIM_BASE_SNAPSHOT_IDENTITY"),
         )
         config = uvicorn.Config(
             asgi_app, host="0.0.0.0", port=FRONTDOOR_PORT, log_level="info"

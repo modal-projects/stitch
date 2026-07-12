@@ -104,7 +104,7 @@ class RouteAllowlistTest(unittest.TestCase):
 
 
 class FrontdoorAppTest(unittest.TestCase):
-    def _client(self, *, ledger: dict | None = None, authorize=None):
+    def _client(self, *, ledger: dict | None = None, authorize=None, expected_base_identity=None):
         from fastapi.testclient import TestClient
 
         from cookbook.standalone_rollouts.frontdoor import create_frontdoor_app
@@ -148,6 +148,7 @@ class FrontdoorAppTest(unittest.TestCase):
             proxy=proxy,
             authorize=authorize or (lambda headers: None),  # explicit allow-all
             wake=wake,
+            expected_base_identity=expected_base_identity,
         )
         return TestClient(app), calls, state
 
@@ -301,6 +302,26 @@ class FrontdoorAppTest(unittest.TestCase):
         )
         self.assertEqual(resp.status_code, 409)
         self.assertEqual(calls["normalized"], [])
+
+    def test_expected_base_pin_rejects_other_anchors(self) -> None:
+        client, calls, _ = self._client(expected_base_identity="base")
+        # A full snapshot that is not the deployment base cannot be served.
+        self.assertEqual(client.post(HOT_LOAD_PATH, json={"identity": "their-base"}).status_code, 409)
+        # A first delta whose unknown parent is not the base is a typo, not
+        # the booted checkpoint.
+        r = client.post(
+            HOT_LOAD_PATH,
+            json={"identity": "ckpt-1", "incremental_snapshot_metadata": {"previous_snapshot_identity": "bsae"}},
+        )
+        self.assertEqual(r.status_code, 409)
+        self.assertEqual(calls["advanced"], [])
+        # The pinned identities pass: the base itself, and a first delta on it.
+        self.assertEqual(client.post(HOT_LOAD_PATH, json={"identity": "base"}).status_code, 200)
+        r = client.post(
+            HOT_LOAD_PATH,
+            json={"identity": "ckpt-1", "incremental_snapshot_metadata": {"previous_snapshot_identity": "base"}},
+        )
+        self.assertEqual(r.json()["version"], 1)
 
     def test_delta_forking_an_older_checkpoint_is_409(self) -> None:
         # One accepted fork would wedge every replica behind the non-contiguous

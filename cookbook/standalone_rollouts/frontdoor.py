@@ -134,6 +134,7 @@ def create_frontdoor_app(
     proxy: Callable[..., Awaitable[Any]],
     authorize: Callable[[Any], Any],
     wake: Callable[[int], Awaitable[None]] | None = None,
+    expected_base_identity: str | None = None,
 ):
     """Build the front-door FastAPI app from injected I/O.
 
@@ -145,6 +146,12 @@ def create_frontdoor_app(
     ``None`` and is required — the app is fail-closed by construction, so a
     test that wants an open app must say so with an explicit allow-all;
     ``wake`` is a best-effort post-advance nudge.
+
+    ``expected_base_identity``, when set, pins the one identity allowed to
+    anchor a chain: a full snapshot must name it (the pool serves the booted
+    base, never a customer upload, so any other full snapshot would be silently
+    substituted), and a first delta's unknown parent must be it (anything else
+    is a typo'd or never-signalled checkpoint, not the booted base).
 
     The load-record-normalize-save-advance sequence is serialized under
     ``advance_lock`` so the singleton front door never races itself. The ledger
@@ -198,6 +205,23 @@ def create_frontdoor_app(
 
         async with advance_lock:
             ledger = IdentityLedger.from_dict(await load_ledger())
+            if expected_base_identity is not None:
+                if incremental is None and identity != expected_base_identity:
+                    return JSONResponse(
+                        {
+                            "error": f"this deployment serves base {expected_base_identity!r}; "
+                            f"full snapshot {identity!r} cannot be activated"
+                        },
+                        status_code=409,
+                    )
+                if incremental is not None and previous != expected_base_identity and ledger.version_for(previous) is None:
+                    return JSONResponse(
+                        {
+                            "error": f"previous_snapshot_identity {previous!r} is neither a "
+                            f"signalled checkpoint nor the deployment base {expected_base_identity!r}"
+                        },
+                        status_code=409,
+                    )
             try:
                 entry, is_new = ledger.record(identity, previous)
             except LedgerError as exc:
