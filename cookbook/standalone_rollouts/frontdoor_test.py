@@ -107,6 +107,21 @@ class RouteAllowlistTest(unittest.TestCase):
         for path in ("rpc_sync_from_bulletin_board", "server_info", "update_weights_from_ipc", "start_profile"):
             self.assertFalse(is_customer_inference_route(path), path)
 
+    def test_dot_segment_traversal_blocked(self) -> None:
+        # A raw startswith("v1/") would admit these; the proxy's HTTP client
+        # collapses the dot-segments and reaches a control route. The ASGI
+        # server decodes %2e/%2f before we see the path, so the decoded forms
+        # must be rejected too.
+        for path in (
+            "v1/../update_weights_from_disk",
+            "v1/../server_info",
+            "v1/../../rpc_sync_from_bulletin_board",
+            "v1/%2e%2e/server_info",
+            "v1/..%2fupdate_weights_from_disk",
+            "v1/./../server_info",
+        ):
+            self.assertFalse(is_customer_inference_route(path), path)
+
 
 class FrontdoorAppTest(unittest.TestCase):
     def _client(self, *, ledger: dict | None = None, authorize=None, expected_base_identity=None):

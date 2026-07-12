@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import threading
 from pathlib import Path
 
 from cookbook.standalone_rollouts.ledger import IdentityLedger
@@ -30,6 +31,14 @@ from stitch.protocol import atomic_write_text, weight_identity
 LATEST_FILE = "latest"
 HF_INDEX_FILE = "model.safetensors.index.json"
 DERIVED_INDEX_FILE = "stitch.index.json"
+
+# rebuild_delta_view runs off the event loop (asyncio.to_thread) from several
+# callers at once — the reconcile loop, a wake-triggered sync, and sync_to's
+# post-reached re-check. They all write the same weight_vN dirs, so serialize
+# the whole rebuild: without it two builders share one tmp path and one can
+# rename a half-built dir into place, which is never repaired (an existing dir
+# is otherwise left alone). Held only across cheap symlink I/O.
+_rebuild_lock = threading.Lock()
 
 
 def merge_index_metadata(index_path: Path, metadata: dict[str, str]) -> None:
@@ -48,6 +57,11 @@ def merge_index_metadata(index_path: Path, metadata: dict[str, str]) -> None:
         raise ValueError(f"uploaded {index_path.name} is not valid JSON: {exc}") from exc
     if not isinstance(index, dict):
         raise ValueError(f"uploaded {index_path.name} must be a JSON object")
+    if not isinstance(index.get("metadata", {}), dict):
+        # A non-object "metadata" (null/list/str/number) would make the merge
+        # below raise AttributeError and escape as a 500; it is malformed
+        # customer input, so it is a 4xx like the rest of a bad index.
+        raise ValueError(f"uploaded {index_path.name} 'metadata' must be a JSON object")
     index.setdefault("metadata", {}).update(metadata)
     atomic_write_text(index_path.with_name(DERIVED_INDEX_FILE), json.dumps(index))
 
@@ -60,10 +74,25 @@ def _ensure_symlink(link: Path, target: Path) -> None:
     link.symlink_to(target)
 
 
+def _expected_link_names(identity_dir: Path) -> set[str] | None:
+    """The symlink names a complete view dir for ``identity_dir`` would hold, or
+    ``None`` when nothing is uploaded yet (ENOENT). The customer's derived index
+    is presented under the HF name, so both the raw HF index and the derived file
+    collapse to the single ``HF_INDEX_FILE`` name; the derived file is never a
+    link itself."""
+    try:
+        entries = list(identity_dir.iterdir())
+    except FileNotFoundError:
+        return None
+    return {f.name for f in entries if f.name != DERIVED_INDEX_FILE}
+
+
 def _build_version_dir(vdir: Path, identity_dir: Path) -> None:
     """Materialize one weight_vN view dir: a symlink per uploaded file, with the
     derived index presented under the HF name the decoder reads. Built into a
-    tmp dir renamed into place, so a crash never leaves a half-built dir.
+    tmp dir swapped into place, so a crash never leaves a half-built dir. The
+    caller holds ``_rebuild_lock``, so the fixed tmp path and the rmtree/rename
+    swap are safe against a concurrent builder.
 
     A missing ``identity_dir`` is not an error: a signalled base may have no
     upload at all (the pool serves the booted checkpoint), and mountpoint-s3
@@ -85,22 +114,36 @@ def _build_version_dir(vdir: Path, identity_dir: Path) -> None:
             (tmp / HF_INDEX_FILE).symlink_to(derived)
         else:
             (tmp / f.name).symlink_to(f)
+    # Replace any existing dir (a re-build to pick up a late-arriving file);
+    # safe under the lock, which guarantees no concurrent reader is mid-build.
+    shutil.rmtree(vdir, ignore_errors=True)
     tmp.rename(vdir)
 
 
 def rebuild_delta_view(view_root: str | Path, transport_root: str | Path, ledger: IdentityLedger) -> None:
     """(Re)build the host-local weight_vN view under ``view_root`` from ``ledger``.
 
-    Idempotent, and O(newly signalled versions) per call: an existing version
-    dir is left alone. Links ``latest`` to the transport pointer.
+    A version dir is rebuilt when it is missing or when the upload has grown a
+    file the built view lacks — a checkpoint signalled while its shards were
+    still uploading would otherwise be frozen at its incomplete first listing and
+    never decode. A complete dir is left alone, so steady state is O(versions)
+    cheap stat/list calls (the scale here is a handful of versions per run).
+    Links ``latest`` to the transport pointer. Serialized under ``_rebuild_lock``.
     """
     view = Path(view_root)
     transport = Path(transport_root)
-    view.mkdir(parents=True, exist_ok=True)
-    _ensure_symlink(view / LATEST_FILE, transport / LATEST_FILE)
-    for version, identity in ledger.items_by_version():
-        vdir = view / weight_identity(version)
-        if vdir.is_symlink():
-            vdir.unlink()  # an earlier layout linked the identity dir whole
-        if not vdir.exists():
-            _build_version_dir(vdir, transport / identity)
+    with _rebuild_lock:
+        view.mkdir(parents=True, exist_ok=True)
+        _ensure_symlink(view / LATEST_FILE, transport / LATEST_FILE)
+        for version, identity in ledger.items_by_version():
+            vdir = view / weight_identity(version)
+            if vdir.is_symlink():
+                vdir.unlink()  # an earlier layout linked the identity dir whole
+            expected = _expected_link_names(transport / identity)
+            if expected is None:
+                # Nothing uploaded yet (e.g. a base the pool serves from boot);
+                # there is nothing to materialize, retried on a later refresh.
+                continue
+            have = {c.name for c in vdir.iterdir()} if vdir.exists() else set()
+            if not vdir.exists() or not expected <= have:
+                _build_version_dir(vdir, transport / identity)

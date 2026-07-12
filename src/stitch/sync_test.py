@@ -198,6 +198,59 @@ class SyncManagerTest(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_run_switch_blocks_new_admissions_while_draining(self) -> None:
+        # The drain must close the door to NEW requests first, then wait:
+        # otherwise continuously overlapping traffic keeps active_requests above
+        # 0 and the switch (and the whole sync loop) stalls, and a request
+        # admitted mid-swap decodes on the swapped-in base while stamped with the
+        # old run/version. A non-strict request — which an ordinary in_place
+        # commit lets cross freely — must be held for the duration of a switch.
+        async def run() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                board = FilesystemBulletinBoard(root, layout="slime")
+                _write_slime_version(root / "run-a", 1, 0)
+                board.write_latest("run-a", 1)
+                engine = FakeEngine()
+                manager = WeightSyncManager(board=board, engine=engine, commit_mode="in_place")
+                await manager.startup_sync()
+
+                entered_a = asyncio.Event()
+                release_a = asyncio.Event()
+
+                async def rolling_a() -> None:
+                    async with manager.request_context(WeightVersionPolicy()):
+                        entered_a.set()
+                        await release_a.wait()
+
+                req_a = asyncio.create_task(rolling_a())
+                await entered_a.wait()
+
+                board.write_latest("run-b", 0)
+                switch = asyncio.create_task(manager.sync_to())
+                await _settle()  # switch is now draining with the gate closed
+
+                entered_b = asyncio.Event()
+
+                async def rolling_b() -> None:
+                    async with manager.request_context(WeightVersionPolicy()):
+                        entered_b.set()
+
+                req_b = asyncio.create_task(rolling_b())
+                await _settle()
+                # B cannot be admitted while the switch drains/swaps.
+                self.assertFalse(entered_b.is_set())
+                self.assertEqual(manager.current_run_id, "run-a")
+
+                release_a.set()
+                await req_a
+                await switch
+                await req_b  # unblocks once the switch reopens the gate
+                self.assertTrue(entered_b.is_set())
+                self.assertEqual(manager.current_run_id, "run-b")
+
+        asyncio.run(run())
+
     def test_run_switch_resets_after_failed_pass_even_at_v0(self) -> None:
         # Staging is host-side and pre-gate, so a failed pass can leave the
         # local checkpoint dirty while the served version is still 0. A switch

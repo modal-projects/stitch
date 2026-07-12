@@ -74,6 +74,19 @@ class RecordTest(unittest.TestCase):
         with self.assertRaises(LedgerError):
             ledger.record("ckpt-2", previous="ckpt-l")  # typo of "ckpt-1"
 
+    def test_self_parent_first_delta_is_rejected(self) -> None:
+        # A self-parent slips past the unknown-parent check on an empty ledger
+        # and would mint base_version == version, an index no replica can ever
+        # apply — a permanently wedged pool. Reject it, empty ledger or not.
+        ledger = IdentityLedger()
+        with self.assertRaises(LedgerError):
+            ledger.record("ckpt-1", previous="ckpt-1")
+        # And after a base is signalled.
+        ledger2 = IdentityLedger()
+        ledger2.record("ckpt-base", previous=None)
+        with self.assertRaises(LedgerError):
+            ledger2.record("ckpt-2", previous="ckpt-2")
+
 
 class LookupTest(unittest.TestCase):
     def test_version_and_identity_round_trip(self) -> None:

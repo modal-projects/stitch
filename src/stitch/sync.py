@@ -70,6 +70,11 @@ class RolloutAdmissionGate:
         self._active_cond = asyncio.Condition()
         self._active_requests = 0
         self._committing = False
+        # A drain-all commit (a run switch: the base is replaced, not extended)
+        # closes the door to *every* new request before it waits to drain, so no
+        # request is admitted while draining or mid-swap. Distinct from
+        # ``_committing``, whose in_place gate lets non-strict traffic cross.
+        self._draining_all = False
         # Exact-version pins in flight, summed across versions, so a commit can
         # wait for strict traffic to drain. Tracked on the gate (not per
         # subclass) so the bulletin-board manager and the hot-load shim share
@@ -85,6 +90,13 @@ class RolloutAdmissionGate:
         return {str(version): count for version, count in sorted(self._exact_inflight.items()) if count}
 
     def _admission_gated(self, policy: WeightVersionPolicy) -> bool:
+        if self._draining_all:
+            # A run switch is underway: block everything, both while draining
+            # (else continuous rollout traffic never lets active_requests reach
+            # 0 and the switch — and the whole sync loop — stalls) and during
+            # the swap (else a request admitted here decodes on the swapped-in
+            # base while stamped with the old run/version).
+            return True
         if not self._committing:
             return False
         if self.commit_mode == "in_place":
@@ -144,16 +156,27 @@ class RolloutAdmissionGate:
                 self._on_release(policy)
                 self._active_cond.notify_all()
 
-    async def _begin_commit(self, ready: Callable[[], bool]) -> None:
-        """Wait for the quiesce predicate, then close the admission gate under
-        the same lock acquisition (so no request slips in between)."""
+    async def _begin_commit(self, ready: Callable[[], bool], *, drain_all: bool = False) -> None:
+        """Close the admission gate and wait for the commit predicate.
+
+        For an ordinary commit the wait comes first, then the gate closes under
+        the same lock acquisition (so no request slips in between). For a
+        drain-all commit the order is reversed: close the door to new admissions
+        *first*, then wait for in-flight requests to drain — otherwise
+        continuously overlapping traffic keeps ``active_requests`` above 0 and
+        the switch never begins.
+        """
         async with self._active_cond:
+            if drain_all:
+                self._draining_all = True
+                self._active_cond.notify_all()
             await self._active_cond.wait_for(ready)
             self._committing = True
 
     async def _end_commit(self) -> None:
         async with self._active_cond:
             self._committing = False
+            self._draining_all = False
             self._active_cond.notify_all()
 
     async def commit_version(
@@ -180,7 +203,7 @@ class RolloutAdmissionGate:
         base rather than extending the chain a rolling request admitted on).
         """
         ready = (lambda: self._active_requests == 0) if drain_all else self._commit_ready
-        await self._begin_commit(ready)
+        await self._begin_commit(ready, drain_all=drain_all)
         try:
             if self.commit_mode == "in_place" and pause is not None:
                 await pause()
@@ -309,9 +332,18 @@ class WeightSyncManager(RolloutAdmissionGate):
                     queued = self.queued_target_version or 0
                     if queued > latest:
                         # The board is the authority; a hint it never reaches
-                        # (stale or foreign) must not pin us QUEUED forever.
-                        # Anything published later converges via the reconcile.
+                        # (stale or foreign) must not pin us QUEUED forever. But
+                        # a publish-then-wake can land after this pass's refresh
+                        # started, so the hint may be a *real* version this
+                        # refresh just missed. Clamp the hint to what the board
+                        # shows, but force one more pass: the next _sync_once
+                        # refreshes again and either sees the published version
+                        # or confirms there is nothing, so a genuinely stale hint
+                        # costs one extra pass instead of a dropped wake (the
+                        # reconcile backstop is disabled in the primary
+                        # deployment, so we cannot rely on it to self-heal).
                         self.queued_target_version = queued = latest
+                        reached = False
                     if run_id != self.current_run_id or max(latest, queued) > self.current_version:
                         reached = False
             except Exception as exc:  # noqa: BLE001

@@ -93,6 +93,40 @@ class RebuildDeltaViewTest(unittest.TestCase):
             self.assertTrue((view / "weight_v000001").is_dir())
             self.assertTrue((view / "weight_v000000").is_dir())
 
+    def test_rebuild_picks_up_late_arriving_upload_file(self) -> None:
+        # A checkpoint signalled while its shards were still uploading would
+        # otherwise be frozen at its incomplete first listing forever; a later
+        # rebuild must materialize the file that arrived after the first build.
+        with tempfile.TemporaryDirectory() as tmp:
+            transport = self._transport(tmp)
+            view = Path(tmp) / "view"
+            ledger = IdentityLedger()
+            ledger.record("base-ckpt", previous=None)
+            ledger.record("ckpt-100", previous="base-ckpt")
+            rebuild_delta_view(view, transport, ledger)
+            self.assertFalse((view / "weight_v000001" / "model-00002-of-00002.safetensors").exists())
+
+            # A second shard lands after the first build.
+            (transport / "ckpt-100" / "model-00002-of-00002.safetensors").write_bytes(b"shard2")
+            rebuild_delta_view(view, transport, ledger)
+            self.assertEqual(
+                (view / "weight_v000001" / "model-00002-of-00002.safetensors").read_bytes(),
+                b"shard2",
+            )
+
+
+class MergeIndexMetadataTest(unittest.TestCase):
+    def test_non_object_metadata_raises_valueerror_not_attributeerror(self) -> None:
+        # A non-object "metadata" must surface as a customer-actionable 4xx
+        # (ValueError), never an AttributeError that escapes as a 500.
+        with tempfile.TemporaryDirectory() as tmp:
+            for bad in ("null-meta", "list-meta", "str-meta", "num-meta"):
+                index_path = Path(tmp) / f"{bad}.index.json"
+                value = {"null-meta": None, "list-meta": [], "str-meta": "x", "num-meta": 3}[bad]
+                index_path.write_text(json.dumps({"metadata": value, "weight_map": {}}))
+                with self.assertRaises(ValueError):
+                    merge_index_metadata(index_path, {"version": "000001"})
+
 
 if __name__ == "__main__":
     unittest.main()

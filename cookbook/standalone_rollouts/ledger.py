@@ -152,6 +152,16 @@ class IdentityLedger:
                 )
             version = BASE_VERSION
         else:
+            if previous == identity:
+                # A self-parent slips past the unknown-parent check on an empty
+                # ledger and would mint base_version == version, an index no
+                # replica can ever apply (the applied-version marker can't equal
+                # a version before that version applies) — a permanently wedged
+                # pool. It is never legitimate lineage.
+                raise LedgerError(
+                    f"previous_snapshot_identity {previous!r} cannot equal the "
+                    "checkpoint's own identity"
+                )
             parent = self._by_identity.get(previous)
             if parent is None and self._by_identity:
                 raise LedgerError(

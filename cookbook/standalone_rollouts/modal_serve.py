@@ -437,7 +437,6 @@ class FrontDoor:
         import httpx
         import uvicorn
         from fastapi.responses import Response, StreamingResponse
-        from starlette.background import BackgroundTask
 
         # Fail closed: this in-app check is the only auth gate (the Modal server
         # is unauthenticated=True), so refuse to start open rather than serve a
@@ -446,6 +445,20 @@ class FrontDoor:
             raise RuntimeError(
                 "STITCH_SHIM_API_KEY is not set; the front door is the only auth "
                 f"gate and will not start open. Set it in the {exp.SHIM_SECRET_NAME} secret."
+            )
+
+        # An empty or malformed pin is a misconfiguration, not "unset": passed
+        # through it would 409 every signal (no identity can match ""), silently
+        # bricking hot-load. Normalize "" to None (pin disabled) and fail fast on
+        # a set-but-invalid value rather than serve an unsignallable deployment.
+        base_snapshot_identity = os.environ.get("STITCH_SHIM_BASE_SNAPSHOT_IDENTITY") or None
+        if base_snapshot_identity is not None and not frontdoor_mod.is_valid_identity(
+            base_snapshot_identity
+        ):
+            raise RuntimeError(
+                f"STITCH_SHIM_BASE_SNAPSHOT_IDENTITY={base_snapshot_identity!r} is not a valid "
+                "identity (non-empty, single-segment, <= 512 chars, no control chars); "
+                "unset it to disable the base pin."
             )
 
         import json
@@ -536,11 +549,24 @@ class FrontDoor:
                     for k, v in upstream.headers.items()
                     if k.lower() not in {"content-length", "transfer-encoding", "connection"}
                 }
+
+                async def _body(resp=upstream):
+                    # aclose in a finally, not a BackgroundTask: if the upstream
+                    # errors mid-stream (a rollout replica preempted or scaled
+                    # down while generating), the iterator raises and Starlette
+                    # never runs the background task — leaking a checked-out
+                    # connection from the shared, timeout=None client until the
+                    # pool is exhausted and every request blocks on acquire.
+                    try:
+                        async for chunk in resp.aiter_raw():
+                            yield chunk
+                    finally:
+                        await resp.aclose()
+
                 return StreamingResponse(
-                    upstream.aiter_raw(),
+                    _body(),
                     status_code=upstream.status_code,
                     headers=response_headers,
-                    background=BackgroundTask(upstream.aclose),
                 )
 
         asgi_app = frontdoor_mod.create_frontdoor_app(
@@ -553,8 +579,8 @@ class FrontDoor:
             authorize=_auth_error,
             wake=wake,
             # Same var the trainer uses for its first delta's parent, so one
-            # secret pins both sides; unset disables the pin.
-            expected_base_identity=os.environ.get("STITCH_SHIM_BASE_SNAPSHOT_IDENTITY"),
+            # secret pins both sides; unset (or empty) disables the pin.
+            expected_base_identity=base_snapshot_identity,
         )
         config = uvicorn.Config(
             asgi_app, host="0.0.0.0", port=FRONTDOOR_PORT, log_level="info"

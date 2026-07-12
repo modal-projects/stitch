@@ -37,7 +37,23 @@ def is_customer_inference_route(path: str) -> bool:
     """Allowlist, not denylist: only OpenAI-compatible ``v1/*`` and SGLang's
     ``generate`` reach the pool. Sidecar control routes and engine routes are
     unreachable through the front door, and a newly added one can never become
-    customer-exposed by omission."""
+    customer-exposed by omission.
+
+    The allowlist runs on the captured path *before* it is handed to the proxy's
+    HTTP client, which normalizes dot-segments. A raw ``startswith("v1/")`` would
+    admit ``v1/../update_weights_from_disk`` (or its percent-encoded
+    ``v1/..%2fupdate_weights_from_disk`` form, which the ASGI server has already
+    decoded to ``..`` and ``/`` by the time we see it), and httpx would collapse
+    the ``..`` on the way out — reaching the very control routes this allowlist
+    exists to block. So reject any dot-segment, and any still-encoded dot/slash
+    escape, before the prefix check.
+    """
+    lowered = path.lower()
+    if any(esc in lowered for esc in ("%2e", "%2f", "%5c")):
+        return False
+    segments = path.strip("/").split("/")
+    if any(seg in (".", "..") for seg in segments):
+        return False
     route = path.strip("/")
     return route == "generate" or route == "v1" or route.startswith("v1/")
 
