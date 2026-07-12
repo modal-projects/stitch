@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+import time
 import unittest
 from unittest import mock
 
 from stitch.bulletin import FilesystemBulletinBoard
+from stitch.protocol import SyncState
 from stitch.sync import WeightSyncManager
 
 
@@ -26,6 +28,79 @@ class FakeEngine:
 
     async def continue_generation(self) -> None:
         self.events.append("continue")
+
+
+class ReconcileLoopTest(unittest.TestCase):
+    def test_successful_reconcile_recovers_startup_refresh_failure(self) -> None:
+        from fastapi.testclient import TestClient
+
+        from stitch.servers.sglang import create_app
+
+        with tempfile.TemporaryDirectory() as tmp:
+            attempts = 0
+
+            def refresh() -> None:
+                nonlocal attempts
+                attempts += 1
+                if attempts == 1:
+                    raise RuntimeError("startup mount hiccup")
+
+            board = FilesystemBulletinBoard(tmp, refresh=refresh)
+            manager = WeightSyncManager(board=board, engine=FakeEngine())
+            app = create_app(
+                manager,
+                upstream_url="http://127.0.0.1:9",
+                background_sync_interval=0.01,
+            )
+            with TestClient(app) as client:
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline and manager.sync_state is not SyncState.IDLE:
+                    time.sleep(0.01)
+
+                info = client.get("/server_info").json()
+                self.assertGreaterEqual(attempts, 2)
+                self.assertEqual(info["sync_state"], "IDLE")
+                self.assertIsNone(info["last_sync_error"])
+
+    def test_refresh_failure_marks_unready_and_success_recovers(self) -> None:
+        from fastapi.testclient import TestClient
+
+        from stitch.servers.sglang import create_app
+
+        with tempfile.TemporaryDirectory() as tmp:
+            failing = {"value": False}
+
+            def refresh() -> None:
+                if failing["value"]:
+                    raise RuntimeError("mount hiccup")
+
+            board = FilesystemBulletinBoard(tmp, refresh=refresh)
+            manager = WeightSyncManager(board=board, engine=FakeEngine())
+            app = create_app(
+                manager,
+                upstream_url="http://127.0.0.1:9",
+                background_sync_interval=0.01,
+            )
+            with TestClient(app) as client:
+                failing["value"] = True
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline and manager.last_refresh_error is None:
+                    time.sleep(0.01)
+
+                info = client.get("/server_info").json()
+                self.assertIn("mount hiccup", info["last_sync_error"])
+
+                failing["value"] = False
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline and (
+                    manager.last_refresh_error is not None
+                    or manager.sync_state is not SyncState.IDLE
+                ):
+                    time.sleep(0.01)
+
+                info = client.get("/server_info").json()
+                self.assertIsNone(info["last_sync_error"])
+                self.assertEqual(info["sync_state"], "IDLE")
 
 
 class SidecarProxyTest(unittest.TestCase):

@@ -253,8 +253,10 @@ class WeightSyncManager(RolloutAdmissionGate):
         self.current_version = 0
         self.latest_seen_version = 0
         self.queued_target_version: int | None = None
+        self._wake_generation = 0
         self.sync_state = SyncState.IDLE
         self.last_sync_error: str | None = None
+        self.last_refresh_error: str | None = None
         # Per-stage wall-clock breakdown of the most recent sync pass (seconds),
         # exposed via server_info()["metrics"] so a scraper can attribute sync
         # latency to board refresh / host apply / drain / pause / reload without
@@ -273,6 +275,7 @@ class WeightSyncManager(RolloutAdmissionGate):
         await self.sync_to()
 
     async def server_info(self) -> dict[str, Any]:
+        effective_error = self.last_sync_error or self.last_refresh_error
         return {
             "run_id": self.run_id,
             "backend": self.engine.backend,
@@ -282,7 +285,8 @@ class WeightSyncManager(RolloutAdmissionGate):
             "latest_seen_version": self.latest_seen_version,
             "queued_target_version": self.queued_target_version,
             "sync_state": self.sync_state.value,
-            "last_sync_error": self.last_sync_error,
+            "last_sync_error": effective_error,
+            "last_refresh_error": self.last_refresh_error,
             "sync_task_active": self._sync_task is not None and not self._sync_task.done(),
             "active_requests": self._active_requests,
             "inflight_exact_versions": self.inflight_exact_versions,
@@ -293,6 +297,10 @@ class WeightSyncManager(RolloutAdmissionGate):
         if error["error"]["type"] == "WeightVersionNotReady":
             self.queue_sync(error["error"]["target_version"])
 
+    def set_background_refresh_error(self, error: str | None) -> None:
+        """Record health of the sidecar's periodic board refresh loop."""
+        self.last_refresh_error = error
+
     def queue_sync(self, target_version: int | None = None) -> None:
         run_id, latest = self.board.read_latest()
         self.latest_seen_version = max(self.latest_seen_version, latest)
@@ -301,10 +309,12 @@ class WeightSyncManager(RolloutAdmissionGate):
         # its version number is lower than what we serve); within a run it's work
         # only when the target exceeds what we've applied.
         needs_switch = run_id != self.current_run_id
-        if not needs_switch and max(latest, hint) <= self.current_version:
+        recovering = self.sync_state is SyncState.ERROR
+        if not recovering and not needs_switch and max(latest, hint) <= self.current_version:
             return
+        self._wake_generation += 1
         self.queued_target_version = max(latest, hint, self.queued_target_version or 0)
-        if self.sync_state is SyncState.IDLE:
+        if self.sync_state in (SyncState.IDLE, SyncState.ERROR):
             self.sync_state = SyncState.QUEUED
         if self._sync_task is None or self._sync_task.done():
             self._sync_task = asyncio.get_running_loop().create_task(self.sync_to())
@@ -314,9 +324,11 @@ class WeightSyncManager(RolloutAdmissionGate):
         # authoritative target is always the board's current (run_id, latest), so
         # we converge to it — and follow a run switch — regardless of the hint.
         if target_version is not None:
+            self._wake_generation += 1
             self.queued_target_version = max(int(target_version), self.queued_target_version or 0)
 
         while True:
+            pass_generation = self._wake_generation
             try:
                 reached = await self._sync_once()
                 if reached:
@@ -327,8 +339,12 @@ class WeightSyncManager(RolloutAdmissionGate):
                     run_id, latest = self.board.read_latest()
                     self.latest_seen_version = max(self.latest_seen_version, latest)
                     queued = self.queued_target_version or 0
-                    if run_id != self.current_run_id or max(latest, queued) > self.current_version:
+                    if run_id != self.current_run_id or latest > self.current_version:
                         reached = False
+                    elif self._wake_generation != pass_generation:
+                        reached = False
+                    elif queued > latest:
+                        self.queued_target_version = None
             except Exception as exc:  # noqa: BLE001
                 self.last_sync_error = str(exc)
                 self.sync_state = SyncState.ERROR
@@ -337,6 +353,7 @@ class WeightSyncManager(RolloutAdmissionGate):
 
             if reached:
                 self.queued_target_version = None
+                self.last_sync_error = None
                 self.sync_state = SyncState.IDLE
                 return
             await asyncio.sleep(1.0)
@@ -369,7 +386,6 @@ class WeightSyncManager(RolloutAdmissionGate):
             self.current_run_id = new_run_id
             self.current_version = 0
             self.latest_seen_version = 0
-            self.last_sync_error = None
 
         await self.commit_version(
             apply=_apply,
@@ -405,7 +421,6 @@ class WeightSyncManager(RolloutAdmissionGate):
             return True
 
         self.sync_state = SyncState.PREFETCHING
-        self.last_sync_error = None
 
         # Verify the whole tail is a contiguous chain before touching the
         # engine, so a broken chain fails before any pause/apply. apply_deltas

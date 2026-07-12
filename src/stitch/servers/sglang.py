@@ -89,8 +89,15 @@ def create_app(
             try:
                 await board.refresh()
                 queue_sync()
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                set_error = getattr(manager, "set_background_refresh_error", None)
+                if set_error is not None:
+                    set_error(str(exc))
                 logger.warning("background reconcile failed", exc_info=True)
+            else:
+                set_error = getattr(manager, "set_background_refresh_error", None)
+                if set_error is not None:
+                    set_error(None)
 
     reconcile: dict[str, Any] = {}
 

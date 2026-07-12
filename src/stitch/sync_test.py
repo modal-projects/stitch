@@ -5,6 +5,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from stitch.bulletin import FilesystemBulletinBoard
 from stitch.protocol import SyncState, VersionManifest, WeightVersionPolicy
@@ -102,6 +103,75 @@ class StagedEngine(FakeEngine):
 
 
 class SyncManagerTest(unittest.TestCase):
+    def test_stale_wake_hint_does_not_pin_manager_queued(self) -> None:
+        async def run() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                manager = WeightSyncManager(
+                    board=FilesystemBulletinBoard(tmp), engine=FakeEngine()
+                )
+
+                await manager.sync_to(99)
+
+                self.assertEqual(manager.current_version, 0)
+                self.assertEqual(manager.sync_state, SyncState.IDLE)
+                self.assertIsNone(manager.queued_target_version)
+
+        asyncio.run(run())
+
+    def test_wake_during_stale_recheck_forces_another_pass(self) -> None:
+        class RacingBoard:
+            def __init__(self) -> None:
+                self.latest = 0
+                self.refresh_started = asyncio.Event()
+                self.release_refresh = asyncio.Event()
+                self._first_refresh = True
+                self._stale_read = False
+
+            async def refresh(self) -> None:
+                if self._first_refresh:
+                    self._first_refresh = False
+                    self.refresh_started.set()
+                    await self.release_refresh.wait()
+                    self._stale_read = True
+
+            def read_latest(self) -> tuple[None, int]:
+                if self._stale_read:
+                    self._stale_read = False
+                    self.latest = 1
+                    return (None, 0)
+                return (None, self.latest)
+
+        async def run() -> None:
+            board = RacingBoard()
+            manager = WeightSyncManager(board=board, engine=FakeEngine())
+            passes = 0
+
+            async def sync_once() -> bool:
+                nonlocal passes
+                passes += 1
+                if passes > 1:
+                    manager.current_version = board.latest
+                return True
+
+            async def no_delay(_seconds: float) -> None:
+                return None
+
+            manager._sync_once = sync_once  # type: ignore[method-assign]
+            task = asyncio.create_task(manager.sync_to())
+            manager._sync_task = task
+            await board.refresh_started.wait()
+
+            manager.queue_sync(1)
+            board.release_refresh.set()
+            with mock.patch("stitch.sync.asyncio.sleep", new=no_delay):
+                await task
+
+            self.assertEqual(passes, 2)
+            self.assertEqual(manager.current_version, 1)
+            self.assertEqual(manager.sync_state, SyncState.IDLE)
+
+        asyncio.run(run())
+
     def test_cancelled_run_switch_drain_reopens_admission(self) -> None:
         async def run() -> None:
             with tempfile.TemporaryDirectory() as tmp:
