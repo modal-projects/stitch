@@ -113,6 +113,22 @@ class SyncManagerTest(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_stale_high_wake_hint_is_discarded_and_manager_goes_idle(self) -> None:
+        async def run() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                board = FilesystemBulletinBoard(tmp)
+                manager = WeightSyncManager(board=board, engine=FakeEngine())
+
+                # A hint above anything the board will ever publish (a stale or
+                # foreign wake) must not keep the manager QUEUED forever.
+                await manager.sync_to(target_version=99)
+
+                self.assertEqual(manager.sync_state, SyncState.IDLE)
+                self.assertIsNone(manager.queued_target_version)
+                self.assertEqual(manager.current_version, 0)
+
+        asyncio.run(run())
+
     def test_sync_keeps_queued_work_that_arrives_during_commit(self) -> None:
         async def run() -> None:
             with tempfile.TemporaryDirectory() as tmp:
