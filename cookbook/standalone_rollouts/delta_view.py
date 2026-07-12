@@ -93,4 +93,9 @@ def rebuild_delta_view(view_root: str | Path, transport_root: str | Path, ledger
         if vdir.is_symlink():
             vdir.unlink()  # an earlier layout linked the identity dir whole
         if not vdir.exists():
-            _build_version_dir(vdir, transport / identity)
+            identity_dir = transport / identity
+            # A signalled base may have no upload at all (the pool serves the
+            # booted checkpoint); a rebuild must not fail on it. Anything that
+            # uploads later is built on a subsequent refresh.
+            if identity_dir.is_dir():
+                _build_version_dir(vdir, identity_dir)

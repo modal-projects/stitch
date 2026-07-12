@@ -61,6 +61,21 @@ class RebuildDeltaViewTest(unittest.TestCase):
             )
             self.assertEqual(base_index["metadata"], {"total_size": 5})
 
+    def test_never_uploaded_base_identity_does_not_break_rebuild(self) -> None:
+        # The booted-base flow signals a base identity with no upload behind it;
+        # the rebuild must still materialize every real version dir.
+        with tempfile.TemporaryDirectory() as tmp:
+            transport = self._transport(tmp)
+            ledger = IdentityLedger()
+            ledger.record("never-uploaded-base", previous=None)  # no dir exists
+            ledger.record("ckpt-100", previous="never-uploaded-base")
+            view = Path(tmp) / "view"
+
+            rebuild_delta_view(view, transport, ledger)
+
+            self.assertFalse((view / "weight_v000000").exists())
+            self.assertTrue((view / "weight_v000001").is_dir())
+
     def test_rebuild_is_idempotent_and_picks_up_new_versions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             transport = self._transport(tmp)
