@@ -147,10 +147,14 @@ class SimulatorTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(r.status_code, 200)
                 self.assertEqual(r.json()["version"], 1)
 
-                # The front door normalized the plain index in place: it now carries
-                # the slime metadata block the decoder needs (this is the F2 fix).
-                normalized = json.loads(
+                # The front door derived the decoder's index next to the upload;
+                # the customer's own index is byte-identical to what they wrote.
+                raw = json.loads(
                     (transport / "ckpt-100" / "model.safetensors.index.json").read_text()
+                )["metadata"]
+                self.assertEqual(raw, {"total_size": 123})
+                normalized = json.loads(
+                    (transport / "ckpt-100" / "stitch.index.json").read_text()
                 )["metadata"]
                 self.assertEqual(normalized["version"], "000001")
                 self.assertEqual(normalized["base_version"], "000000")
