@@ -22,11 +22,12 @@ class SnapshotIdentityTest(unittest.TestCase):
         self.assertEqual(format_snapshot_identity(None, 5), "weight_v000005")
         self.assertEqual(parse_snapshot_identity("run-a/weight_v000005"), ("run-a", 5))
 
-    def test_parse_tolerates_bare_legacy_and_garbage(self) -> None:
+    def test_parse_tolerates_bare_legacy_and_rejects_corruption(self) -> None:
         self.assertEqual(parse_snapshot_identity("weight_v000005"), (None, 5))  # bare
         self.assertEqual(parse_snapshot_identity("000005"), (None, 5))  # legacy flat pointer
-        self.assertEqual(parse_snapshot_identity(""), (None, 0))  # missing -> not-ready
-        self.assertEqual(parse_snapshot_identity("garbage"), (None, 0))  # unparseable -> not-ready
+        for text in ("", "garbage", "run-a/not-a-version"):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                parse_snapshot_identity(text)
 
 
 class SlimeLayoutBulletinTest(unittest.TestCase):
@@ -73,6 +74,14 @@ class SlimeLayoutBulletinTest(unittest.TestCase):
     def test_read_latest_absent_is_none_zero(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             self.assertEqual(FilesystemBulletinBoard(Path(tmp), layout="slime").read_latest(), (None, 0))
+
+    def test_read_latest_rejects_corrupt_existing_pointer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "latest").write_text("garbage", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "unparseable snapshot pointer"):
+                FilesystemBulletinBoard(root, layout="slime").read_latest()
 
     def test_write_latest_run_id_round_trips(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

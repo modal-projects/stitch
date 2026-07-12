@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -57,6 +58,18 @@ class DecidePointerMoveTest(unittest.TestCase):
 
 
 class ProtocolTest(unittest.TestCase):
+    def test_read_latest_distinguishes_missing_from_corrupt_pointer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.assertEqual(read_latest(root), 0)
+
+            latest = root / "latest.json"
+            for payload in ({}, {"version": "3"}, {"version": True}, {"version": -1}, []):
+                with self.subTest(payload=payload):
+                    latest.write_text(json.dumps(payload), encoding="utf-8")
+                    with self.assertRaisesRegex(ValueError, "invalid latest pointer"):
+                        read_latest(root)
+
     def test_manifest_round_trips_extended_and_legacy_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -95,8 +108,6 @@ class ProtocolTest(unittest.TestCase):
             self.assertEqual(loaded.checksum_format, "xxh3-128")
 
     def test_manifest_from_slime_index(self) -> None:
-        import json
-
         with tempfile.TemporaryDirectory() as tmp:
             version_dir = Path(tmp) / "weight_v000007"
             version_dir.mkdir(parents=True)

@@ -91,8 +91,9 @@ class FilesystemBulletinBoard:
         """The active snapshot pointer as ``(run_id, version)``.
 
         slime: parse ``<run_id>/weight_v{N}`` (or a bare/legacy pointer) from the
-        ``latest`` file; missing/empty/unparseable -> ``(None, 0)``. stitch: the
-        JSON pointer is run-less, so ``(None, <version>)``.
+        ``latest`` file; a missing pointer means ``(None, 0)``, while corrupt
+        content raises. stitch: the JSON pointer is run-less, so
+        ``(None, <version>)``.
         """
         if self.layout == "slime":
             path = self.root / "latest"

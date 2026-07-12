@@ -392,12 +392,10 @@ def parse_snapshot_identity(text: str) -> tuple[str | None, int]:
 
     ``<run_id>/weight_v<NNNNNN>`` -> ``(run_id, version)``; a bare
     ``weight_v<NNNNNN>`` -> ``(None, version)``; a legacy raw ``<NNNNNN>`` ->
-    ``(None, version)``; empty / unparseable -> ``(None, 0)`` (treated as
-    no-valid-pointer, i.e. not-ready rather than a misparse).
+    ``(None, version)``. Empty or unparseable content is corrupt control state;
+    callers handle a missing pointer before invoking this parser.
     """
     text = (text or "").strip()
-    if not text:
-        return (None, 0)
     run_id: str | None = None
     tail = text
     if "/" in text:
@@ -407,7 +405,7 @@ def parse_snapshot_identity(text: str) -> tuple[str | None, int]:
     if version is None:
         version = int(tail) if tail.isdigit() else None
     if version is None:
-        return (None, 0)
+        raise ValueError(f"unparseable snapshot pointer: {text!r}")
     return (run_id, version)
 
 
@@ -491,7 +489,13 @@ def read_latest(root: str | Path) -> int:
         return 0
     with path.open("r", encoding="utf-8") as f:
         data = json.load(f)
-    return int(data.get("version", 0))
+    if (
+        not isinstance(data, dict)
+        or type(data.get("version")) is not int
+        or data["version"] < 0
+    ):
+        raise ValueError(f"invalid latest pointer at {path}: expected a non-negative integer version")
+    return data["version"]
 
 
 def write_latest(root: str | Path, version: int) -> None:
