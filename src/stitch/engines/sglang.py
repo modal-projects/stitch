@@ -103,18 +103,18 @@ class SGLangDiskDeltaAdapter:
         )
 
     async def reset(self) -> None:
-        """Discard the local checkpoint and re-materialize the base from scratch.
+        """Re-materialize the base checkpoint and reload it into the engine.
 
         Used on a run switch: the new run's chain forks at base, so the locally
-        patched checkpoint must be thrown away before replaying the new chain. The
-        sync manager invokes this under the commit gate (engine paused), so no
-        request decodes across the wipe; ``prepare`` then rebuilds a complete base
-        (a partial wipe from a crash is re-seeded by ``init_local_checkpoint``).
+        patched checkpoint must be discarded before replaying the new chain. The
+        reload makes the manager's post-reset v0 identity true on the GPU, not just
+        on the host filesystem.
         """
         import shutil
 
         await asyncio.to_thread(shutil.rmtree, self.local_checkpoint_dir, ignore_errors=True)
         await self.prepare()
+        await self._reload_from_disk(weight_version="0")
 
     async def flush_cache(self) -> None:
         import httpx
@@ -178,14 +178,26 @@ class SGLangDiskDeltaAdapter:
         engine with the reload load plan uses it to reload only the touched
         modules (O(delta)) and silently full-reloads otherwise. Set
         ``STITCH_PARTIAL_RELOAD=0`` to withhold the names entirely."""
+        _t_reload = time.perf_counter()
+        data = await self._reload_from_disk(
+            weight_version=str(manifest.version), weight_names=weight_names
+        )
+        elapsed = time.perf_counter() - _t_reload
+        logger.info("[apply timing] v=%s engine_reload=%.2fs", manifest.version, elapsed)
+        detail: dict[str, Any] = {"engine_reload_s": round(elapsed, 3)}
+        detail.update(parse_reload_timing(str(data.get("message") or "")))
+        return detail
+
+    async def _reload_from_disk(
+        self, *, weight_version: str, weight_names: list[str] | None = None
+    ) -> dict[str, Any]:
         import os
 
         import httpx
 
-        _t_reload = time.perf_counter()
         payload: dict[str, Any] = {
             "model_path": self.local_checkpoint_dir,
-            "weight_version": str(manifest.version),
+            "weight_version": weight_version,
             # The sync manager flushes via GET /flush_cache while quiesced.
             # The engine-side post-apply flush hard-asserts on failure
             # (killing the scheduler process) if any request slipped in, so
@@ -200,11 +212,7 @@ class SGLangDiskDeltaAdapter:
             data = resp.json()
             if data.get("success") is False:
                 raise RuntimeError(f"SGLang rejected weight update: {data}")
-        elapsed = time.perf_counter() - _t_reload
-        logger.info("[apply timing] v=%s engine_reload=%.2fs", manifest.version, elapsed)
-        detail: dict[str, Any] = {"engine_reload_s": round(elapsed, 3)}
-        detail.update(parse_reload_timing(str(data.get("message") or "")))
-        return detail
+        return data
 
     async def apply_manifest(self, manifest: VersionManifest, version_path: str) -> None:
         """Combined stage + reload, kept for callers that don't use the staged

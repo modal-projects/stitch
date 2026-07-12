@@ -70,6 +70,7 @@ class RolloutAdmissionGate:
         self._active_cond = asyncio.Condition()
         self._active_requests = 0
         self._committing = False
+        self._block_all_admissions = False
         # Exact-version pins in flight, summed across versions, so a commit can
         # wait for strict traffic to drain. Tracked on the gate (not per
         # subclass) so the bulletin-board manager and the hot-load shim share
@@ -85,6 +86,8 @@ class RolloutAdmissionGate:
         return {str(version): count for version, count in sorted(self._exact_inflight.items()) if count}
 
     def _admission_gated(self, policy: WeightVersionPolicy) -> bool:
+        if self._block_all_admissions:
+            return True
         if not self._committing:
             return False
         if self.commit_mode == "in_place":
@@ -144,16 +147,33 @@ class RolloutAdmissionGate:
                 self._on_release(policy)
                 self._active_cond.notify_all()
 
-    async def _begin_commit(self, ready: Callable[[], bool]) -> None:
+    async def _begin_commit(
+        self, ready: Callable[[], bool], *, block_all_admissions: bool = False
+    ) -> None:
         """Wait for the quiesce predicate, then close the admission gate under
-        the same lock acquisition (so no request slips in between)."""
-        async with self._active_cond:
-            await self._active_cond.wait_for(ready)
-            self._committing = True
+        the same lock acquisition (so no request slips in between).
 
-    async def _end_commit(self) -> None:
+        A base switch sets ``block_all_admissions`` before waiting for active
+        requests to drain. That barrier is distinct from the ordinary in-place
+        commit gate, which intentionally permits non-strict rolling requests.
+        """
+        async with self._active_cond:
+            if block_all_admissions:
+                self._block_all_admissions = True
+            try:
+                await self._active_cond.wait_for(ready)
+                self._committing = True
+            except BaseException:
+                if block_all_admissions:
+                    self._block_all_admissions = False
+                    self._active_cond.notify_all()
+                raise
+
+    async def _end_commit(self, *, block_all_admissions: bool = False) -> None:
         async with self._active_cond:
             self._committing = False
+            if block_all_admissions:
+                self._block_all_admissions = False
             self._active_cond.notify_all()
 
     async def commit_version(
@@ -163,6 +183,7 @@ class RolloutAdmissionGate:
         on_applied: Callable[[], None],
         pause: Callable[[], Awaitable[None]] | None = None,
         resume: Callable[[], Awaitable[None]] | None = None,
+        drain_all: bool = False,
     ) -> None:
         """Drive one commit through the gate: wait for the commit point and
         close the admission gate, apply the new weights, advance the served
@@ -173,8 +194,13 @@ class RolloutAdmissionGate:
         the new namespace. On failure the gate (and pause) are unwound and the
         served version is left unchanged — ``on_applied`` runs only after a
         successful apply.
+
+        ``drain_all`` closes admission for every policy before waiting for all
+        active requests to finish, then holds that barrier through the commit.
+        It is used for run switches, where no request may span the base swap.
         """
-        await self._begin_commit(self._commit_ready)
+        ready = (lambda: self._active_requests == 0) if drain_all else self._commit_ready
+        await self._begin_commit(ready, block_all_admissions=drain_all)
         try:
             if self.commit_mode == "in_place" and pause is not None:
                 await pause()
@@ -188,7 +214,7 @@ class RolloutAdmissionGate:
                 await apply()
                 on_applied()
         finally:
-            await self._end_commit()
+            await self._end_commit(block_all_admissions=drain_all)
 
 
 class WeightSyncManager(RolloutAdmissionGate):
@@ -320,9 +346,10 @@ class WeightSyncManager(RolloutAdmissionGate):
 
         A new run forks at base (slime sets ``base_version=000000`` for v1 of every
         run), so switching chains means discarding the current weights and replaying
-        the new chain. The re-materialize runs through the commit gate (pause →
-        reset → resume) exactly like a version commit, so no in-flight request
-        decodes across the weight wipe.
+        the new chain. The switch blocks all new admissions before draining every
+        in-flight request, then holds that barrier through pause, reset, and resume.
+        Reset also runs after a failed pass that may have dirtied host-side staging,
+        even if the served version never advanced from v0.
         """
         logger.info(
             "run change %r -> %r: re-materializing base, resetting to v0",
@@ -330,10 +357,12 @@ class WeightSyncManager(RolloutAdmissionGate):
             new_run_id,
         )
         reset = getattr(self.engine, "reset", None)
-        was_patched = self.current_version > 0
+        maybe_dirty = self.current_version > 0 or self.last_sync_error is not None
 
         async def _apply() -> None:
-            if reset is not None and was_patched:
+            if maybe_dirty and reset is None:
+                raise RuntimeError("engine adapter cannot reset a dirty checkpoint on run switch")
+            if maybe_dirty:
                 await reset()
 
         def _applied() -> None:
@@ -347,6 +376,7 @@ class WeightSyncManager(RolloutAdmissionGate):
             on_applied=_applied,
             pause=self.engine.pause_generation,
             resume=self.engine.continue_generation,
+            drain_all=True,
         )
 
     async def _sync_once(self) -> bool:

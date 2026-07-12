@@ -46,6 +46,9 @@ class FakeEngine:
         self.events: list[str] = []
         self.apply_gate: asyncio.Event | None = None
         self.apply_started: asyncio.Event = asyncio.Event()
+        self.fail_next_apply = False
+        self.reset_gate: asyncio.Event | None = None
+        self.reset_started = asyncio.Event()
 
     async def flush_cache(self) -> None:
         self.flushes += 1
@@ -55,10 +58,16 @@ class FakeEngine:
         self.apply_started.set()
         if self.apply_gate is not None:
             await self.apply_gate.wait()
+        if self.fail_next_apply:
+            self.fail_next_apply = False
+            raise RuntimeError("injected apply failure")
         self.applies.append((manifest.version, version_path))
         self.events.append("apply")
 
     async def reset(self) -> None:
+        self.reset_started.set()
+        if self.reset_gate is not None:
+            await self.reset_gate.wait()
         self.events.append("reset")
 
     async def pause_generation(self) -> None:
@@ -93,6 +102,44 @@ class StagedEngine(FakeEngine):
 
 
 class SyncManagerTest(unittest.TestCase):
+    def test_cancelled_run_switch_drain_reopens_admission(self) -> None:
+        async def run() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                manager = WeightSyncManager(
+                    board=FilesystemBulletinBoard(tmp),
+                    engine=FakeEngine(),
+                    commit_mode="in_place",
+                )
+                existing = manager.request_context()
+                await existing.__aenter__()
+
+                async def apply() -> None:
+                    raise AssertionError("commit must still be draining")
+
+                commit = asyncio.create_task(
+                    manager.commit_version(
+                        apply=apply,
+                        on_applied=lambda: None,
+                        drain_all=True,
+                    )
+                )
+                await _settle()
+
+                new_context = manager.request_context()
+                newcomer = asyncio.create_task(new_context.__aenter__())
+                await _settle()
+                self.assertFalse(newcomer.done())
+
+                commit.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await commit
+                self.assertEqual(await asyncio.wait_for(newcomer, 0.1), 0)
+
+                await new_context.__aexit__(None, None, None)
+                await existing.__aexit__(None, None, None)
+
+        asyncio.run(run())
+
     def test_startup_sync_composes_tail_into_one_apply(self) -> None:
         async def run() -> None:
             with tempfile.TemporaryDirectory() as tmp:
@@ -169,6 +216,110 @@ class SyncManagerTest(unittest.TestCase):
                 i = engine.events.index("reset")
                 self.assertEqual(engine.events[i - 1], "pause")
                 self.assertEqual(engine.events[i + 1], "continue")
+
+        asyncio.run(run())
+
+    def test_run_switch_blocks_existing_and_new_rolling_requests(self) -> None:
+        async def run() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                board = FilesystemBulletinBoard(root, layout="slime")
+                _write_slime_version(root / "run-a", 1, 0)
+                board.write_latest("run-a", 1)
+                engine = FakeEngine()
+                manager = WeightSyncManager(board=board, engine=engine, commit_mode="in_place")
+                await manager.startup_sync()
+
+                release_existing = asyncio.Event()
+                existing_entered = asyncio.Event()
+
+                async def existing_request() -> None:
+                    async with manager.request_context():
+                        existing_entered.set()
+                        await release_existing.wait()
+
+                existing = asyncio.create_task(existing_request())
+                await existing_entered.wait()
+
+                engine.reset_gate = asyncio.Event()
+                board.write_latest("run-b", 0)
+                switch = asyncio.create_task(manager.sync_to())
+                await _settle()
+                self.assertFalse(engine.reset_started.is_set())
+
+                new_entered = asyncio.Event()
+                new_versions: list[int] = []
+
+                async def new_request() -> None:
+                    async with manager.request_context() as version:
+                        new_versions.append(version)
+                        new_entered.set()
+
+                newcomer = asyncio.create_task(new_request())
+                await _settle()
+                self.assertFalse(new_entered.is_set())
+
+                release_existing.set()
+                await existing
+                await engine.reset_started.wait()
+                self.assertFalse(new_entered.is_set())
+
+                engine.reset_gate.set()
+                await switch
+                await newcomer
+                self.assertEqual(manager.current_run_id, "run-b")
+                self.assertEqual(new_versions, [0])
+
+        asyncio.run(run())
+
+    def test_run_switch_resets_after_failed_pass_at_v0(self) -> None:
+        async def run() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                board = FilesystemBulletinBoard(root, layout="slime")
+                board.write_latest("run-a", 0)
+                engine = FakeEngine()
+                manager = WeightSyncManager(board=board, engine=engine, commit_mode="in_place")
+                await manager.startup_sync()
+                self.assertFalse(engine.reset_started.is_set())
+
+                _write_slime_version(root / "run-a", 1, 0)
+                board.write_latest("run-a", 1)
+                engine.fail_next_apply = True
+                await manager.sync_to()
+                self.assertEqual(manager.sync_state, SyncState.ERROR)
+                self.assertEqual(manager.current_version, 0)
+
+                board.write_latest("run-b", 0)
+                await manager.sync_to()
+                self.assertTrue(engine.reset_started.is_set())
+                self.assertEqual(manager.current_run_id, "run-b")
+
+        asyncio.run(run())
+
+    def test_dirty_run_switch_without_reset_fails_closed(self) -> None:
+        class NoResetEngine(FakeEngine):
+            reset = None  # type: ignore[assignment]
+
+        async def run() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                board = FilesystemBulletinBoard(root, layout="slime")
+                board.write_latest("run-b", 0)
+                manager = WeightSyncManager(
+                    board=board,
+                    engine=NoResetEngine(),
+                    commit_mode="in_place",
+                )
+                manager.current_run_id = "run-a"
+                manager.current_version = 1
+
+                await manager.sync_to()
+
+                self.assertEqual(manager.current_run_id, "run-a")
+                self.assertEqual(manager.current_version, 1)
+                self.assertEqual(manager.sync_state, SyncState.ERROR)
+                self.assertIn("cannot reset", manager.last_sync_error or "")
 
         asyncio.run(run())
 

@@ -99,6 +99,33 @@ class SGLangDiskDeltaAdapterTest(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_reset_rematerializes_base_and_reloads_engine(self) -> None:
+        async def run() -> None:
+            calls: list[tuple[str, str]] = []
+            adapter = SGLangDiskDeltaAdapter(
+                upstream_url="http://up",
+                local_checkpoint_dir="/nonexistent-local",
+                base_checkpoint_dir="/base",
+                init_local_checkpoint=lambda local, base: calls.append((local, base)),
+            )
+
+            with mock.patch("httpx.AsyncClient", _RecordingPost):
+                _RecordingPost.last_json = None
+                await adapter.reset()
+
+            self.assertEqual(calls, [("/nonexistent-local", "/base")])
+            self.assertEqual(_RecordingPost.last_url, "http://up/update_weights_from_disk")
+            self.assertEqual(
+                _RecordingPost.last_json,
+                {
+                    "model_path": "/nonexistent-local",
+                    "weight_version": "0",
+                    "flush_cache": False,
+                },
+            )
+
+        asyncio.run(run())
+
     def test_staged_split_reports_metrics(self) -> None:
         async def run() -> None:
             apply_stats = [{"version": "000005", "apply_s": 1.2}]
