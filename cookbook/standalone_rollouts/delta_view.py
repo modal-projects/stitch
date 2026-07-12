@@ -63,12 +63,22 @@ def _ensure_symlink(link: Path, target: Path) -> None:
 def _build_version_dir(vdir: Path, identity_dir: Path) -> None:
     """Materialize one weight_vN view dir: a symlink per uploaded file, with the
     derived index presented under the HF name the decoder reads. Built into a
-    tmp dir renamed into place, so a crash never leaves a half-built dir."""
+    tmp dir renamed into place, so a crash never leaves a half-built dir.
+
+    A missing ``identity_dir`` is not an error: a signalled base may have no
+    upload at all (the pool serves the booted checkpoint), and mountpoint-s3
+    answers existence probes for bare prefixes inconsistently — so the listing
+    itself is the authority, and ENOENT means "nothing uploaded yet"."""
     tmp = vdir.with_name(vdir.name + ".tmp")
     shutil.rmtree(tmp, ignore_errors=True)
     tmp.mkdir(parents=True)
     derived = identity_dir / DERIVED_INDEX_FILE
-    for f in identity_dir.iterdir():
+    try:
+        entries = list(identity_dir.iterdir())
+    except FileNotFoundError:
+        tmp.rmdir()
+        return
+    for f in entries:
         if f.name == DERIVED_INDEX_FILE:
             continue
         if f.name == HF_INDEX_FILE and derived.exists():
@@ -93,9 +103,4 @@ def rebuild_delta_view(view_root: str | Path, transport_root: str | Path, ledger
         if vdir.is_symlink():
             vdir.unlink()  # an earlier layout linked the identity dir whole
         if not vdir.exists():
-            identity_dir = transport / identity
-            # A signalled base may have no upload at all (the pool serves the
-            # booted checkpoint); a rebuild must not fail on it. Anything that
-            # uploads later is built on a subsequent refresh.
-            if identity_dir.is_dir():
-                _build_version_dir(vdir, identity_dir)
+            _build_version_dir(vdir, transport / identity)
