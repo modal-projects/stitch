@@ -62,9 +62,17 @@ class LedgerEntry:
 class IdentityLedger:
     def __init__(self, entries: dict[str, LedgerEntry] | None = None) -> None:
         self._by_identity: dict[str, LedgerEntry] = dict(entries or {})
-        self._by_version: dict[int, str] = {
-            entry.version: identity for identity, entry in self._by_identity.items()
-        }
+        self._by_version: dict[int, str] = {}
+        for identity, entry in self._by_identity.items():
+            other = self._by_version.get(entry.version)
+            if other is not None:
+                # A persisted ledger that violates the one-identity-per-version
+                # invariant must fail loudly, not silently collapse the reverse
+                # map onto whichever entry deserialized last.
+                raise LedgerError(
+                    f"ledger maps both {other!r} and {identity!r} to version {entry.version}"
+                )
+            self._by_version[entry.version] = identity
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "IdentityLedger":

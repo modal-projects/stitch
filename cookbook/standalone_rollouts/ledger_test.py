@@ -104,6 +104,18 @@ class SerializationTest(unittest.TestCase):
         entry, _ = ledger.record("ckpt-base", previous=None)
         self.assertEqual(entry.version, 0)
 
+    def test_duplicate_versions_in_persisted_ledger_are_rejected(self) -> None:
+        # A corrupt identities.json must not silently collapse the reverse map.
+        with self.assertRaises(LedgerError):
+            IdentityLedger.from_dict(
+                {
+                    "entries": {
+                        "identity-a": {"version": 1, "previous": "base"},
+                        "identity-b": {"version": 1, "previous": "base"},
+                    }
+                }
+            )
+
     def test_entries_expose_previous(self) -> None:
         ledger = IdentityLedger({"a": LedgerEntry(version=0, previous=None)})
         self.assertEqual(ledger.to_dict()["entries"]["a"], {"version": 0, "previous": None})
