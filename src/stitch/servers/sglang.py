@@ -84,13 +84,21 @@ def create_app(
         queue_sync = getattr(manager, "queue_sync", None)
         if board is None or queue_sync is None:
             return
+        failure_tag = "background reconcile failed: "
         while True:
             await asyncio.sleep(interval)
             try:
                 await board.refresh()
                 queue_sync()
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                # A replica that cannot follow the board must not report ready;
+                # sticky until a reconcile pass succeeds again.
+                if hasattr(manager, "last_sync_error"):
+                    manager.last_sync_error = f"{failure_tag}{exc}"
                 logger.warning("background reconcile failed", exc_info=True)
+            else:
+                if str(getattr(manager, "last_sync_error", "") or "").startswith(failure_tag):
+                    manager.last_sync_error = None
 
     reconcile: dict[str, Any] = {}
 

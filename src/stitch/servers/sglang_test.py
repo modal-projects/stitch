@@ -28,6 +28,44 @@ class FakeEngine:
         self.events.append("continue")
 
 
+class ReconcileLoopTest(unittest.TestCase):
+    def test_refresh_failure_marks_replica_unready_until_recovery(self) -> None:
+        # A replica whose board refresh keeps failing cannot follow the log; it
+        # must surface that in last_sync_error (unready), not just a warning log.
+        import time
+
+        from fastapi.testclient import TestClient
+
+        from stitch.servers.sglang import create_app
+
+        with tempfile.TemporaryDirectory() as tmp:
+            broken = {"on": True}
+
+            def refresh() -> None:
+                if broken["on"]:
+                    raise RuntimeError("mount hiccup")
+
+            board = FilesystemBulletinBoard(tmp, layout="slime", refresh=refresh)
+            manager = WeightSyncManager(board=board, engine=FakeEngine())
+            app = create_app(
+                manager, upstream_url="http://127.0.0.1:9", background_sync_interval=0.01
+            )
+            with TestClient(app) as client:
+                deadline = time.time() + 5
+                while time.time() < deadline and not str(
+                    manager.last_sync_error or ""
+                ).startswith("background reconcile failed"):
+                    time.sleep(0.02)
+                info = client.get("/server_info").json()
+                self.assertIn("background reconcile failed", info["last_sync_error"] or "")
+
+                broken["on"] = False  # recovery clears the sticky error
+                deadline = time.time() + 5
+                while time.time() < deadline and manager.last_sync_error:
+                    time.sleep(0.02)
+                self.assertIsNone(manager.last_sync_error)
+
+
 class SidecarProxyTest(unittest.TestCase):
     def _client(self, tmp: str):
         from fastapi.testclient import TestClient
