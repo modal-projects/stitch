@@ -9,7 +9,6 @@ Code legibility is highly valued, both for humans and future agents. Throughout 
 Grounding:
 - Reproduce a defect (temp Modal probe or failing test) before fixing it. Never commit a fix whose premise is only code-reading or a subagent audit claim. Grounding first tends to produce *simpler* fixes.
 - Label every finding by confidence: confirmed-by-probe / code-read inference / hypothesis. Subagent audit output is a lead to verify, not a fact.
-- Follow the customer contract exactly; do not staple in assumptions beyond it or force changes onto customer-side code.
 
 Modal:
 - Preflight before any Modal work: confirm auth (`modal profile current`) and the target environment; pass `-e <env>` explicitly on every modal command, monitors included.
