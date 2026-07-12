@@ -22,11 +22,15 @@ class SnapshotIdentityTest(unittest.TestCase):
         self.assertEqual(format_snapshot_identity(None, 5), "weight_v000005")
         self.assertEqual(parse_snapshot_identity("run-a/weight_v000005"), ("run-a", 5))
 
-    def test_parse_tolerates_bare_legacy_and_garbage(self) -> None:
+    def test_parse_tolerates_bare_and_legacy_but_rejects_garbage(self) -> None:
         self.assertEqual(parse_snapshot_identity("weight_v000005"), (None, 5))  # bare
         self.assertEqual(parse_snapshot_identity("000005"), (None, 5))  # legacy flat pointer
-        self.assertEqual(parse_snapshot_identity(""), (None, 0))  # missing -> not-ready
-        self.assertEqual(parse_snapshot_identity("garbage"), (None, 0))  # unparseable -> not-ready
+        # Corrupt pointer content is an error (replica unready), never a
+        # silent base; a *missing* pointer is handled by read_latest.
+        with self.assertRaises(ValueError):
+            parse_snapshot_identity("")
+        with self.assertRaises(ValueError):
+            parse_snapshot_identity("definitely-not-a-pointer")
 
 
 class SlimeLayoutBulletinTest(unittest.TestCase):

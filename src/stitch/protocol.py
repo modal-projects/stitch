@@ -403,12 +403,14 @@ def parse_snapshot_identity(text: str) -> tuple[str | None, int]:
 
     ``<run_id>/weight_v<NNNNNN>`` -> ``(run_id, version)``; a bare
     ``weight_v<NNNNNN>`` -> ``(None, version)``; a legacy raw ``<NNNNNN>`` ->
-    ``(None, version)``; empty / unparseable -> ``(None, 0)`` (treated as
-    no-valid-pointer, i.e. not-ready rather than a misparse).
+    ``(None, version)``.
+
+    Raises ``ValueError`` on empty or unparseable text: a pointer that exists
+    but cannot be read is corrupt control state, and must surface as an error
+    (replica unready), never be mistaken for the base — a *missing* pointer is
+    the caller's pre-first-publish case, not this function's.
     """
     text = (text or "").strip()
-    if not text:
-        return (None, 0)
     run_id: str | None = None
     tail = text
     if "/" in text:
@@ -418,7 +420,7 @@ def parse_snapshot_identity(text: str) -> tuple[str | None, int]:
     if version is None:
         version = int(tail) if tail.isdigit() else None
     if version is None:
-        return (None, 0)
+        raise ValueError(f"unparseable snapshot pointer: {text!r}")
     return (run_id, version)
 
 
