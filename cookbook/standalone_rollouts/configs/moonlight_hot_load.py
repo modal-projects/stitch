@@ -12,6 +12,9 @@ from pathlib import Path
 
 APP_NAME = "stitch-moonlight-api-shim"
 MODEL_NAME = "moonshotai/Moonlight-16B-A3B-Instruct"
+# SGLang boots from, and the sidecar applies deltas onto, this exact checkpoint.
+# It may also be an absolute directory on a mounted volume or bucket.
+BASE_CHECKPOINT = MODEL_NAME
 
 HF_SECRET_NAME = "huggingface-secret"
 SHIM_SECRET_NAME = "stitch-api-shim-provider"

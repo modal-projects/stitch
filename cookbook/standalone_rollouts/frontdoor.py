@@ -37,6 +37,11 @@ from stitch.protocol import (
 
 
 HOT_LOAD_PATH = "/hot_load/v1/models/hot_load"
+INFERENCE_PATHS = (
+    "/generate",
+    "/v1/chat/completions",
+    "/v1/completions",
+)
 
 
 def advance_latest_decision(
@@ -111,11 +116,15 @@ def pool_state_from_server_infos(infos: list[dict[str, Any]]) -> RolloutPoolStat
         replicas.append(
             RolloutReplicaState(
                 readiness=ready,
-                current_version=current_version if isinstance(current_version, int) else None,
+                current_version=current_version
+                if isinstance(current_version, int)
+                else None,
                 current_snapshot_identity=identity,
                 replica_id=info.get("run_id") or info.get("replica_id"),
                 sync_state=sync_state,
-                readiness_reason=None if ready else (last_error or sync_state or "unreachable"),
+                readiness_reason=None
+                if ready
+                else (last_error or sync_state or "unreachable"),
             )
         )
     return RolloutPoolState(replicas=replicas)
@@ -127,7 +136,7 @@ def create_frontdoor_app(
     advance_to: Callable[[str | None, int], Awaitable[None]],
     list_server_infos: Callable[[], Awaitable[list[dict[str, Any]]]],
     proxy: Callable[..., Awaitable[Any]],
-    authorize: Callable[[Any], Any] | None = None,
+    authorize: Callable[[Any], Any],
     wake: Callable[[int], Awaitable[None]] | None = None,
 ):
     """Build the front-door FastAPI app from injected I/O.
@@ -149,7 +158,7 @@ def create_frontdoor_app(
     advance_lock = asyncio.Lock()
 
     def _auth(request: Request):
-        return authorize(request.headers) if authorize is not None else None
+        return authorize(request.headers)
 
     @app.post(HOT_LOAD_PATH, response_model=None)
     async def post_hot_load(request: Request) -> Response:
@@ -170,7 +179,9 @@ def create_frontdoor_app(
                 status = 400 if decision["error"]["type"] == "InvalidIdentity" else 409
                 return JSONResponse(decision, status_code=status)
             await advance_to(decision["run_id"], decision["version"])
-        snapshot_identity = format_snapshot_identity(decision["run_id"], decision["version"])
+        snapshot_identity = format_snapshot_identity(
+            decision["run_id"], decision["version"]
+        )
         if wake is not None:
             try:
                 await wake(decision["version"])
@@ -193,11 +204,13 @@ def create_frontdoor_app(
         infos = await list_server_infos()
         return JSONResponse(pool_state_from_server_infos(infos).to_dict())
 
-    @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
-    async def catch_all(path: str, request: Request) -> Response:
+    async def proxy_inference(request: Request) -> Response:
         rejected = _auth(request)
         if rejected is not None:
             return rejected
-        return await proxy(request, path)
+        return await proxy(request, request.url.path.lstrip("/"))
+
+    for path in INFERENCE_PATHS:
+        app.add_api_route(path, proxy_inference, methods=["POST"], response_model=None)
 
     return app

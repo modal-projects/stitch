@@ -22,6 +22,8 @@ import modal
 import modal.experimental
 
 from cookbook.slime_disagg import helpers
+from cookbook.standalone_rollouts import auth as auth_mod
+from cookbook.standalone_rollouts import base_checkpoint
 from cookbook.standalone_rollouts import frontdoor as frontdoor_mod
 from stitch.bulletin import FilesystemBulletinBoard
 from stitch.providers.modal import (
@@ -36,6 +38,7 @@ exp = importlib.import_module(f"cookbook.standalone_rollouts.configs.{PROVIDER_C
 
 APP_NAME = exp.APP_NAME
 MODEL_NAME = exp.MODEL_NAME
+BASE_CHECKPOINT = exp.BASE_CHECKPOINT
 ROLLOUT_CONCURRENCY = exp.ROLLOUT_CONCURRENCY
 SIDECAR_PORT = 8000
 SGLANG_PORT = 8001
@@ -191,8 +194,13 @@ class Server:
 
     @modal.enter()
     def startup(self) -> None:
+        from huggingface_hub import snapshot_download
+
+        base_checkpoint_dir = base_checkpoint.resolve_base_checkpoint(
+            BASE_CHECKPOINT, snapshot_download=snapshot_download
+        )
         self.endpoint = SGLangEndpoint(
-            model_path=MODEL_NAME,
+            model_path=base_checkpoint_dir,
             worker_port=SGLANG_PORT,
             tp=exp.ROLLOUT_NUM_GPUS_PER_ENGINE,
             extra_server_args=SGLANG_SERVER_ARGS,
@@ -207,11 +215,6 @@ class Server:
             request_timeout=120.0,
             max_attempts_per_request=3,
         )
-        # Deltas are applied host-side onto a copy of the base checkpoint; the
-        # base resolves to the same HF cache snapshot the SGLang server loaded.
-        from huggingface_hub import snapshot_download
-
-        base_checkpoint_dir = snapshot_download(MODEL_NAME, local_files_only=True)
         self.sidecar = _start_provider_sidecar(base_checkpoint_dir=base_checkpoint_dir)
         helpers.wait_http(
             f"http://127.0.0.1:{SIDECAR_PORT}/health",
@@ -239,7 +242,8 @@ class Server:
 def download_model() -> None:
     from huggingface_hub import snapshot_download
 
-    snapshot_download(repo_id=MODEL_NAME)
+    if base_checkpoint.is_hf_repo_id(BASE_CHECKPOINT):
+        snapshot_download(repo_id=BASE_CHECKPOINT)
     hf_cache_volume.commit()
 
 
@@ -404,24 +408,15 @@ def _auth_error(headers):
     JSONResponse to reject, or None to allow."""
     from fastapi.responses import JSONResponse
 
-    api_key = os.environ.get("STITCH_SHIM_API_KEY")
-    if api_key and headers.get("authorization") != f"Bearer {api_key}":
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-    provider_model = os.environ.get("STITCH_SHIM_PROVIDER_MODEL")
-    if provider_model and headers.get("provider-model") != provider_model:
-        return JSONResponse(
-            {"error": "Provider-Model header does not match this deployment"},
-            status_code=400,
-        )
-    provider_deployment = os.environ.get("STITCH_SHIM_PROVIDER_DEPLOYMENT")
-    if (
-        provider_deployment
-        and headers.get("provider-deployment") != provider_deployment
-    ):
-        return JSONResponse(
-            {"error": "Provider-Deployment header does not match this deployment"},
-            status_code=400,
-        )
+    rejection = auth_mod.authorize(
+        headers,
+        api_key=os.environ.get("STITCH_SHIM_API_KEY"),
+        provider_model=os.environ.get("STITCH_SHIM_PROVIDER_MODEL"),
+        provider_deployment=os.environ.get("STITCH_SHIM_PROVIDER_DEPLOYMENT"),
+    )
+    if rejection is not None:
+        status, message = rejection
+        return JSONResponse({"error": message}, status_code=status)
     return None
 
 
@@ -462,6 +457,9 @@ class FrontDoor:
         import httpx
         import uvicorn
         from fastapi.responses import Response
+
+        if not os.environ.get("STITCH_SHIM_API_KEY"):
+            raise RuntimeError("STITCH_SHIM_API_KEY is required")
 
         board = FilesystemBulletinBoard(str(S3_TRANSPORT_MOUNT_PATH), layout="slime")
         gateway: dict[str, str | None] = {"url": None}
