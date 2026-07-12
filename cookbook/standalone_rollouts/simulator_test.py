@@ -1,16 +1,15 @@
 """In-process end-to-end simulator for the standalone rollouts abstraction layer.
 
-Wires the REAL front door (ledger + normalization) to N real WeightSyncManagers
-(delta-view boards + fake engines) over a tmpdir "transport", with no Modal and
-no GPU. It grounds the contract the ledger/normalization/symlink-view commits
-built: a customer who uploads a plain HF index (metadata = {"total_size": ...})
-and signals an opaque identity — the exact shape that bricked the pool per
-battle-plan F2 — now converges, because the front door normalizes the index on
-POST and the sidecar resolves the identity dir through the weight_vN view.
+Wires the REAL front door (ledger + index derivation) to N real
+WeightSyncManagers (delta-view boards + fake engines) over a tmpdir
+"transport", with no Modal and no GPU: a customer who uploads a plain HF index
+and signals an opaque identity converges, because the front door derives the
+decoder index on POST and the sidecar resolves the identity dir through the
+weight_vN view.
 
 The fake engine records applied versions without decoding real delta bytes (the
-codec is the pinned slime fork's concern); everything else — opaque identity ->
-version, index normalization, pointer advance, view rebuild, manifest parse,
+codec is the pinned slime fork's concern); everything else — identity ->
+version, index derivation, pointer advance, view rebuild, manifest parse,
 apply gate, readiness translation — is the real code path.
 """
 
@@ -49,9 +48,13 @@ class _FakeEngine:
     async def continue_generation(self) -> None: ...
 
 
+def _delta(identity: str, previous: str) -> dict:
+    return {"identity": identity, "incremental_snapshot_metadata": {"previous_snapshot_identity": previous}}
+
+
 def _upload_plain_hf_checkpoint(transport: Path, identity: str) -> None:
     """A vanilla HF checkpoint dir: a weight_map and a bare total_size metadata,
-    with NO slime version/base_version/delta_encoding block (F2's failing shape)."""
+    with NO slime version/base_version/delta_encoding block."""
     d = transport / identity
     d.mkdir(parents=True)
     (d / "model.safetensors.index.json").write_text(
@@ -131,19 +134,9 @@ class SimulatorTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(r.status_code, 200)
                 self.assertEqual(r.json()["version"], 0)
 
-                # Delta: a PLAIN HF index (F2's brick shape) + opaque identity.
+                # Delta: a plain HF index + opaque identity.
                 _upload_plain_hf_checkpoint(transport, "ckpt-100")
-                r = await client.post(
-                    HOT_LOAD_PATH,
-                    json={
-                        "identity": "ckpt-100",
-                        "incremental_snapshot_metadata": {
-                            "previous_snapshot_identity": "base-ckpt",
-                            "compression_format": "zstd",
-                            "checksum_format": "adler32",
-                        },
-                    },
-                )
+                r = await client.post(HOT_LOAD_PATH, json=_delta("ckpt-100", "base-ckpt"))
                 self.assertEqual(r.status_code, 200)
                 self.assertEqual(r.json()["version"], 1)
 
@@ -183,17 +176,7 @@ class SimulatorTest(unittest.IsolatedAsyncioTestCase):
                 _upload_plain_hf_checkpoint(transport, "base-ckpt")
                 await client.post(HOT_LOAD_PATH, json={"identity": "base-ckpt"})
                 # Signal a delta whose dir has NOT been uploaded yet.
-                r = await client.post(
-                    HOT_LOAD_PATH,
-                    json={
-                        "identity": "ckpt-100",
-                        "incremental_snapshot_metadata": {
-                            "previous_snapshot_identity": "base-ckpt",
-                            "compression_format": "zstd",
-                            "checksum_format": "adler32",
-                        },
-                    },
-                )
+                r = await client.post(HOT_LOAD_PATH, json=_delta("ckpt-100", "base-ckpt"))
                 self.assertEqual(r.status_code, 409)
                 # Pointer never advanced past the base; ledger has no ckpt-100.
                 ledger = json.loads((transport / "identities.json").read_text())
@@ -209,24 +192,20 @@ class SimulatorTest(unittest.IsolatedAsyncioTestCase):
                 _upload_plain_hf_checkpoint(transport, "base-ckpt")
                 await client.post(HOT_LOAD_PATH, json={"identity": "base-ckpt"})
                 _upload_plain_hf_checkpoint(transport, "ckpt-100")
-                delta = lambda ident, prev: {
-                    "identity": ident,
-                    "incremental_snapshot_metadata": {"previous_snapshot_identity": prev},
-                }
-                await client.post(HOT_LOAD_PATH, json=delta("ckpt-100", "base-ckpt"))
+                await client.post(HOT_LOAD_PATH, json=_delta("ckpt-100", "base-ckpt"))
                 for mgr in managers:
                     await mgr.sync_to()
                     self.assertEqual(mgr.current_version, 1)
 
                 # A fork off the base is refused; nothing enters the log.
                 _upload_plain_hf_checkpoint(transport, "ckpt-fork")
-                r = await client.post(HOT_LOAD_PATH, json=delta("ckpt-fork", "base-ckpt"))
+                r = await client.post(HOT_LOAD_PATH, json=_delta("ckpt-fork", "base-ckpt"))
                 self.assertEqual(r.status_code, 409)
 
                 # The chain head still extends and the pool still converges —
                 # an accepted fork would have wedged replicas at v1 forever.
                 _upload_plain_hf_checkpoint(transport, "ckpt-200")
-                r = await client.post(HOT_LOAD_PATH, json=delta("ckpt-200", "ckpt-100"))
+                r = await client.post(HOT_LOAD_PATH, json=_delta("ckpt-200", "ckpt-100"))
                 self.assertEqual(r.json()["version"], 2)
                 for mgr in managers:
                     await mgr.sync_to()
@@ -243,15 +222,7 @@ class SimulatorTest(unittest.IsolatedAsyncioTestCase):
                 d = transport / "ckpt-100"
                 d.mkdir()
                 (d / "model.safetensors.index.json").write_text('{"metadata": {', encoding="utf-8")
-                r = await client.post(
-                    HOT_LOAD_PATH,
-                    json={
-                        "identity": "ckpt-100",
-                        "incremental_snapshot_metadata": {
-                            "previous_snapshot_identity": "base-ckpt",
-                        },
-                    },
-                )
+                r = await client.post(HOT_LOAD_PATH, json=_delta("ckpt-100", "base-ckpt"))
                 self.assertEqual(r.status_code, 400)
                 # The failed signal left no ledger entry, so a fixed re-upload
                 # and re-signal converges.

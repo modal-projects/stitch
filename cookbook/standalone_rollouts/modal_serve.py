@@ -279,41 +279,8 @@ def check(timeout_seconds: int = 20 * MINUTES) -> None:
 
         uv run --extra modal modal run -m cookbook.standalone_rollouts.modal_serve::check
     """
-    import json
-    import time
-    import urllib.request
-
     gateway = modal.Server.from_name(APP_NAME, "FrontDoor").get_url().rstrip("/")
-    headers = _shim_headers()
-    deadline = time.time() + timeout_seconds
-    last = ""
-    while True:
-        try:
-            req = urllib.request.Request(
-                f"{gateway}/hot_load/v1/models/hot_load", headers=headers
-            )
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                pool = json.load(resp)
-            ready = [r for r in pool.get("replicas", []) if r.get("readiness")]
-            print(
-                f"pool: {len(pool.get('replicas', []))} replicas, {len(ready)} ready :: {pool}"
-            )
-            if len(ready) >= exp.ROLLOUT_MIN_CONTAINERS:
-                break
-            last = f"only {len(ready)} ready"
-        except Exception as exc:  # noqa: BLE001
-            last = f"{type(exc).__name__}: {exc}"
-        if time.time() > deadline:
-            raise TimeoutError(f"front-door readiness timed out: {last}")
-        time.sleep(10)
-
-    req = urllib.request.Request(
-        f"{gateway}/v1/chat/completions",
-        data=json.dumps(WARMUP_PAYLOAD).encode("utf-8"),
-        headers={"Content-Type": "application/json", **headers},
-    )
-    with urllib.request.urlopen(req, timeout=180) as resp:
-        print("completion:", json.dumps(json.load(resp))[:1200])
+    _smoke_frontdoor(gateway, _shim_headers(), timeout_seconds)
 
 
 @app.local_entrypoint()
@@ -343,19 +310,24 @@ def smoke(
     provider_model: str = "",
     provider_deployment: str = "",
 ) -> None:
-    """Check the deployed gateway can report pool state and serve a completion."""
-    import json
-    import time
-    import urllib.request
-
-    gateway = frontdoor_url()
-    deadline = time.time() + timeout_seconds
+    """Check the deployed gateway can report pool readiness and serve a completion."""
     headers = _shim_headers(
         api_key=api_key,
         provider_model=provider_model,
         provider_deployment=provider_deployment,
     )
-    last_error = ""
+    _smoke_frontdoor(frontdoor_url(), headers, timeout_seconds)
+
+
+def _smoke_frontdoor(gateway: str, headers: dict[str, str], timeout_seconds: int) -> None:
+    """Poll readiness until ROLLOUT_MIN_CONTAINERS replicas report ready, then
+    serve one completion through the front door."""
+    import json
+    import time
+    import urllib.request
+
+    deadline = time.time() + timeout_seconds
+    last = ""
     while True:
         try:
             req = urllib.request.Request(
@@ -363,14 +335,15 @@ def smoke(
             )
             with urllib.request.urlopen(req, timeout=30) as resp:
                 pool = json.load(resp)
-            if len(pool.get("replicas", [])) >= exp.ROLLOUT_MIN_CONTAINERS:
+            ready = [r for r in pool.get("replicas", []) if r.get("readiness")]
+            print(f"pool: {len(pool.get('replicas', []))} replicas, {len(ready)} ready")
+            if len(ready) >= exp.ROLLOUT_MIN_CONTAINERS:
                 break
-            last_error = f"expected {exp.ROLLOUT_MIN_CONTAINERS} replicas, got {pool}"
+            last = f"only {len(ready)} of {exp.ROLLOUT_MIN_CONTAINERS} ready"
         except Exception as exc:  # noqa: BLE001
-            last_error = f"{type(exc).__name__}: {exc}"
+            last = f"{type(exc).__name__}: {exc}"
         if time.time() > deadline:
-            raise TimeoutError(f"Provider smoke failed: {last_error}")
-        print(f"Waiting for provider pool: {last_error}")
+            raise TimeoutError(f"front-door readiness timed out: {last}")
         time.sleep(10)
 
     req = urllib.request.Request(
@@ -379,7 +352,7 @@ def smoke(
         headers={"Content-Type": "application/json", **headers},
     )
     with urllib.request.urlopen(req, timeout=180) as resp:
-        print(json.dumps(json.load(resp), indent=2)[:2000])
+        print("completion:", json.dumps(json.load(resp))[:1200])
 
 
 def provider_gateway_url() -> str:

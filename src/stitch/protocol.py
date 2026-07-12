@@ -582,12 +582,9 @@ def atomic_write_text(path: str | Path, text: str) -> None:
     """Write ``text`` so a concurrent reader sees the old or the new content,
     never a truncated file.
 
-    On a normal filesystem: tmp file + fsync + ``os.replace``. On the S3
-    CloudBucketMount ``os.replace`` raises ENOSYS (mountpoint-s3 has no rename —
-    the same constraint that made the trainer upload path copy instead of
-    rename, commit 8745872), so fall back to an in-place ``open("w")``
-    overwrite, which a probe against the real mount confirmed is one PutObject,
-    atomic at the object level.
+    On a normal filesystem: tmp file + fsync + ``os.replace``. mountpoint-s3
+    has no rename (``os.replace`` raises ENOSYS), so fall back to an in-place
+    ``open("w")`` overwrite there — one PutObject, atomic at the object level.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

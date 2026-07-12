@@ -308,12 +308,9 @@ class WeightSyncManager(RolloutAdmissionGate):
                     self.latest_seen_version = max(self.latest_seen_version, latest)
                     queued = self.queued_target_version or 0
                     if queued > latest:
-                        # A wake hint is only a prompt to look at the board; the
-                        # durable head is the authority. A hint the head never
-                        # reaches (stale, or from a previous incarnation) must
-                        # not pin the manager in QUEUED forever — anything
-                        # published after this pass converges via the periodic
-                        # reconcile.
+                        # The board is the authority; a hint it never reaches
+                        # (stale or foreign) must not pin us QUEUED forever.
+                        # Anything published later converges via the reconcile.
                         self.queued_target_version = queued = latest
                     if run_id != self.current_run_id or max(latest, queued) > self.current_version:
                         reached = False

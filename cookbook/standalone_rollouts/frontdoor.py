@@ -1,26 +1,16 @@
 """Front-door hot-load adapter for the standalone rollout provider.
 
-The front door is the single public entry and the single writer of both the
-bulletin board's monotonic ``latest`` pointer and the identity ledger. It
-implements the customer's hot-load API as an abstraction layer over the
-log-as-truth pool, so the customer's contract (opaque checkpoint identities,
-lineage via ``previous_snapshot_identity``, delta formats in the POST body)
-never leaks the pool's integer-versioned internals:
+The single public entry and the single writer of the ``latest`` pointer and the
+identity ledger. It implements the customer's hot-load API over the
+integer-versioned pool: ``POST /hot_load`` maps the opaque ``identity`` to a
+minted version (idempotent on re-signal), derives the decoder index from the
+POST metadata, advances ``latest``, and best-effort wakes the pool;
+``GET /hot_load`` reports readiness by querying live replicas, translating each
+integer version back to the customer's identity; inference (``v1/*``,
+``generate``) is proxied and every other route 404s (allowlist).
 
-- ``POST /hot_load/...`` maps the signalled opaque ``identity`` to a monotonic
-  stitch version via the :class:`~cookbook.standalone_rollouts.ledger.IdentityLedger`
-  (idempotent on re-signal), normalizes the customer's POST metadata into the
-  version dir's index so the disk-delta decoder can apply it, advances ``latest``,
-  and best-effort wakes the pool.
-- ``GET /hot_load/...`` reports readiness by enumerating the *live* containers and
-  querying each ``/server_info``, translating each replica's integer version back
-  to the customer's identity string so their equality match works.
-- Inference (``v1/*``, ``generate``) is proxied to the rollout gateway; every
-  other route is rejected (allowlist).
-
-All I/O (ledger load/save, index normalization, pointer write, replica
-enumeration, proxy, auth) is injected so the adapter is testable without Modal;
-``modal_serve.py`` supplies the real implementations.
+All I/O is injected so the adapter is testable without Modal; ``modal_serve.py``
+supplies the real implementations.
 
 No ``from __future__ import annotations`` here: the route handlers'
 ``request: Request`` annotation must evaluate eagerly against the factory-local
@@ -44,17 +34,10 @@ RESERVED_IDENTITIES = {".", "..", "latest", LEDGER_FILENAME}
 
 
 def is_customer_inference_route(path: str) -> bool:
-    """Whether a proxied path is a customer-facing inference route.
-
-    The proxy is an allowlist, not a denylist: only OpenAI-compatible ``v1/*``
-    routes and the SGLang-native ``generate`` route reach the rollout pool.
-    Everything else a public client could name — the per-container sidecar's own
-    control routes (``rpc_sync_from_bulletin_board``, ``server_info``,
-    ``get_weight_version``) and the SGLang engine routes behind it
-    (``update_weights_*``, ``start_profile``, …) — is not reachable through the
-    front door, so a new engine/sidecar route can never become customer-exposed
-    by omission from a denylist.
-    """
+    """Allowlist, not denylist: only OpenAI-compatible ``v1/*`` and SGLang's
+    ``generate`` reach the pool. Sidecar control routes and engine routes are
+    unreachable through the front door, and a newly added one can never become
+    customer-exposed by omission."""
     route = path.strip("/")
     return route == "generate" or route == "v1" or route.startswith("v1/")
 
@@ -76,10 +59,9 @@ def delta_index_metadata(
     """The slime disk-delta ``metadata`` block the decoder requires, derived from
     the customer's POST. ``version``/``base_version`` are the ledger-assigned
     integers as zero-padded 6-digit strings (the decoder compares ``base_version``
-    to the applied-version marker by string equality). ``delta_encoding`` is not
-    in the customer's API — spec §3 pins XOR — so it defaults to ``xor``;
-    ``compression_format``/``checksum_format`` come from the POST body (spec §2a),
-    defaulting to the spec's stated ``zstd``/``adler32`` when omitted."""
+    to the applied-version marker by string equality). The customer's API has no
+    ``delta_encoding`` field (their contract fixes XOR) and states ``zstd``/
+    ``adler32`` as the format defaults when the POST omits them."""
     return {
         "version": f"{int(version):06d}",
         "base_version": f"{int(base_version):06d}",
@@ -138,27 +120,19 @@ def create_frontdoor_app(
 ):
     """Build the front-door FastAPI app from injected I/O.
 
-    ``load_ledger``/``save_ledger`` read/write the identity↔version ledger on the
-    transport; ``normalize_index(identity, metadata)`` writes the disk-delta
-    metadata block into that version dir's index; ``advance_to(version)`` writes
-    the ``latest`` pointer; ``list_server_infos`` enumerates live replicas;
-    ``proxy`` forwards inference; ``authorize`` returns a rejection Response or
-    ``None`` and is required — the app is fail-closed by construction, so a
-    test that wants an open app must say so with an explicit allow-all;
-    ``wake`` is a best-effort post-advance nudge.
-
+    ``authorize`` (a rejection Response, or ``None`` to allow) is required — the
+    app is fail-closed by construction; a test that wants an open app says so
+    with an explicit allow-all. ``wake`` is a best-effort post-advance nudge.
     ``expected_base_identity``, when set, pins the one identity allowed to
     anchor a chain: a full snapshot must name it (the pool serves the booted
-    base, never a customer upload, so any other full snapshot would be silently
-    substituted), and a first delta's unknown parent must be it (anything else
-    is a typo'd or never-signalled checkpoint, not the booted base).
+    base, never a customer upload), and so must a first delta's unknown parent
+    (anything else is a typo, not the booted base).
 
     The load-record-normalize-save-advance sequence is serialized under
-    ``advance_lock`` so the singleton front door never races itself. The ledger
-    is loaded fresh from the transport inside the lock (not cached across POSTs),
-    so a partial failure leaves the transport ledger authoritative and a retry
-    converges: normalize is idempotent, save is the commit point, and the pointer
-    is re-advanced to the head even on an idempotent re-signal.
+    ``advance_lock``, and the ledger is loaded fresh from the transport inside
+    the lock, so a partial failure leaves the transport authoritative and a
+    retry converges: normalize is idempotent, save is the commit point, and the
+    pointer is re-advanced to the head even on an idempotent re-signal.
     """
     from fastapi import FastAPI, Request
     from fastapi.responses import JSONResponse, Response
@@ -169,6 +143,9 @@ def create_frontdoor_app(
     def _auth(request: Request):
         return authorize(request.headers)
 
+    def _error(status: int, message) -> Any:
+        return JSONResponse({"error": message}, status_code=status)
+
     @app.post(HOT_LOAD_PATH, response_model=None)
     async def post_hot_load(request: Request) -> Response:
         rejected = _auth(request)
@@ -177,77 +154,58 @@ def create_frontdoor_app(
         try:
             payload = await request.json()
         except Exception:  # noqa: BLE001 — a malformed/non-JSON body is a 400, never a 500
-            return JSONResponse({"error": "request body must be a JSON object"}, status_code=400)
+            return _error(400, "request body must be a JSON object")
         if not isinstance(payload, dict) or not payload.get("identity"):
-            return JSONResponse({"error": "body.identity is required"}, status_code=400)
+            return _error(400, "body.identity is required")
         identity = str(payload["identity"])
         if not is_valid_identity(identity):
-            return JSONResponse(
-                {"error": "body.identity must be a non-empty, single-segment string <= 512 chars"},
-                status_code=400,
-            )
+            return _error(400, "body.identity must be a non-empty, single-segment string <= 512 chars")
         incremental = payload.get("incremental_snapshot_metadata")
         if incremental is not None and not isinstance(incremental, dict):
-            return JSONResponse(
-                {"error": "body.incremental_snapshot_metadata must be an object"}, status_code=400
-            )
+            return _error(400, "body.incremental_snapshot_metadata must be an object")
         previous = incremental.get("previous_snapshot_identity") if incremental else None
         if incremental is not None and (not isinstance(previous, str) or not previous):
-            # A delta without lineage is indistinguishable from a full snapshot
-            # and would be recorded as one; require the parent explicitly.
-            return JSONResponse(
-                {
-                    "error": "incremental_snapshot_metadata.previous_snapshot_identity "
-                    "must be a non-empty string"
-                },
-                status_code=400,
+            # A lineage-less delta would be recorded as a full snapshot.
+            return _error(
+                400,
+                "incremental_snapshot_metadata.previous_snapshot_identity must be a non-empty string",
             )
 
         async with advance_lock:
             ledger = IdentityLedger.from_dict(await load_ledger())
             if expected_base_identity is not None:
                 if incremental is None and identity != expected_base_identity:
-                    return JSONResponse(
-                        {
-                            "error": f"this deployment serves base {expected_base_identity!r}; "
-                            f"full snapshot {identity!r} cannot be activated"
-                        },
-                        status_code=409,
+                    return _error(
+                        409,
+                        f"this deployment serves base {expected_base_identity!r}; "
+                        f"full snapshot {identity!r} cannot be activated",
                     )
                 if incremental is not None and previous != expected_base_identity and ledger.version_for(previous) is None:
-                    return JSONResponse(
-                        {
-                            "error": f"previous_snapshot_identity {previous!r} is neither a "
-                            f"signalled checkpoint nor the deployment base {expected_base_identity!r}"
-                        },
-                        status_code=409,
+                    return _error(
+                        409,
+                        f"previous_snapshot_identity {previous!r} is neither a signalled "
+                        f"checkpoint nor the deployment base {expected_base_identity!r}",
                     )
             try:
                 entry, is_new = ledger.record(identity, previous)
             except LedgerError as exc:
-                return JSONResponse({"error": str(exc)}, status_code=409)
+                return _error(409, str(exc))
             if entry.version != ledger.head_version:
-                # Re-signalling an older identity is a rewind request the pool
-                # cannot serve (versions only move forward); reject it loudly
-                # rather than answering accepted:true for weights that will
-                # never be reported ready.
-                return JSONResponse(
+                # A rewind the pool cannot serve; reject loudly rather than
+                # answering accepted:true for weights that never become ready.
+                return _error(
+                    409,
                     {
-                        "error": {
-                            "type": "WeightRewindRejected",
-                            "message": f"{identity!r} is older than the served head",
-                            "current_version": ledger.head_version,
-                            "requested_version": entry.version,
-                        }
+                        "type": "WeightRewindRejected",
+                        "message": f"{identity!r} is older than the served head",
+                        "current_version": ledger.head_version,
+                        "requested_version": entry.version,
                     },
-                    status_code=409,
                 )
             if is_new:
-                # A delta (incremental metadata present) needs its index normalized
-                # so the decoder can apply it; a full snapshot (base) is served
-                # from the booted base checkpoint and needs no delta metadata.
-                # Normalize before saving/advancing, so a missing upload leaves the
-                # transport ledger and pointer untouched (fail fast, self-clean).
+                # Only a delta needs a derived decoder index (a full snapshot is
+                # the booted base). Derive before save/advance, so a missing or
+                # malformed upload leaves ledger and pointer untouched.
                 if incremental is not None:
                     try:
                         await normalize_index(
@@ -257,14 +215,14 @@ def create_frontdoor_app(
                             ),
                         )
                     except FileNotFoundError:
-                        return JSONResponse(
-                            {"error": f"checkpoint {identity!r} not found on the transport; upload before signalling"},
-                            status_code=409,
+                        return _error(
+                            409,
+                            f"checkpoint {identity!r} not found on the transport; upload before signalling",
                         )
                     except ValueError as exc:
-                        # A malformed uploaded index (truncated write, wrong
-                        # file) is the customer's to fix: 4xx, never a 500.
-                        return JSONResponse({"error": str(exc)}, status_code=400)
+                        # A malformed uploaded index is the customer's to fix:
+                        # 4xx, never a 500.
+                        return _error(400, str(exc))
                 await save_ledger(ledger.to_dict())
             # This identity is the chain head (rewinds were rejected above).
             # Advance idempotently, so a retry after a save-succeeded/
@@ -301,7 +259,7 @@ def create_frontdoor_app(
         if rejected is not None:
             return rejected
         if not is_customer_inference_route(path):
-            return JSONResponse({"error": f"no such route: /{path.strip('/')}"}, status_code=404)
+            return _error(404, f"no such route: /{path.strip('/')}")
         return await proxy(request, path)
 
     return app

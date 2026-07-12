@@ -12,6 +12,11 @@ from cookbook.standalone_rollouts.frontdoor import (
 from cookbook.standalone_rollouts.ledger import IdentityLedger
 
 
+def _delta(identity: str, previous: str) -> dict:
+    """Minimal delta-signal body: lineage is the only required field."""
+    return {"identity": identity, "incremental_snapshot_metadata": {"previous_snapshot_identity": previous}}
+
+
 class IdentityValidationTest(unittest.TestCase):
     def test_opaque_identities_are_accepted(self) -> None:
         for identity in ("weight_v000001", "ckpt-100", "step_500", "2026-07-11T00:00:00Z", "wéight"):
@@ -38,7 +43,7 @@ class DeltaMetadataTest(unittest.TestCase):
             {
                 "version": "000002",
                 "base_version": "000001",
-                "delta_encoding": "xor",  # not in the customer API; spec §3 default
+                "delta_encoding": "xor",  # not in the customer API; contract-fixed default
                 "compression_format": "zstd",
                 "checksum_format": "adler32",
             },
@@ -166,17 +171,7 @@ class FrontdoorAppTest(unittest.TestCase):
     def test_delta_signal_mints_next_version_and_normalizes_index(self) -> None:
         client, calls, _ = self._client()
         client.post(HOT_LOAD_PATH, json={"identity": "base-ckpt"})
-        resp = client.post(
-            HOT_LOAD_PATH,
-            json={
-                "identity": "ckpt-100",
-                "incremental_snapshot_metadata": {
-                    "previous_snapshot_identity": "base-ckpt",
-                    "compression_format": "zstd",
-                    "checksum_format": "adler32",
-                },
-            },
-        )
+        resp = client.post(HOT_LOAD_PATH, json=_delta("ckpt-100", "base-ckpt"))
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json()["version"], 1)
         self.assertEqual(calls["advanced"], [0, 1])
@@ -190,8 +185,8 @@ class FrontdoorAppTest(unittest.TestCase):
     def test_resignal_is_idempotent_no_remint_no_normalize(self) -> None:
         client, calls, _ = self._client()
         client.post(HOT_LOAD_PATH, json={"identity": "base-ckpt"})
-        first = client.post(HOT_LOAD_PATH, json={"identity": "ckpt-100", "incremental_snapshot_metadata": {"previous_snapshot_identity": "base-ckpt", "compression_format": "zstd", "checksum_format": "adler32"}})
-        again = client.post(HOT_LOAD_PATH, json={"identity": "ckpt-100", "incremental_snapshot_metadata": {"previous_snapshot_identity": "base-ckpt", "compression_format": "zstd", "checksum_format": "adler32"}})
+        first = client.post(HOT_LOAD_PATH, json=_delta("ckpt-100", "base-ckpt"))
+        again = client.post(HOT_LOAD_PATH, json=_delta("ckpt-100", "base-ckpt"))
         self.assertEqual(first.json()["version"], 1)
         self.assertEqual(again.json()["version"], 1)
         self.assertTrue(again.json()["already_current"])
@@ -239,10 +234,7 @@ class FrontdoorAppTest(unittest.TestCase):
             authorize=lambda headers: None,
         )
         client = TestClient(app)
-        resp = client.post(
-            HOT_LOAD_PATH,
-            json={"identity": "ckpt-100", "incremental_snapshot_metadata": {"previous_snapshot_identity": "base", "compression_format": "zstd", "checksum_format": "adler32"}},
-        )
+        resp = client.post(HOT_LOAD_PATH, json=_delta("ckpt-100", "base"))
         self.assertEqual(resp.status_code, 409)
         # No pointer move, no ledger commit -> a retry after upload converges.
         self.assertEqual(calls["advanced"], [])
@@ -258,7 +250,7 @@ class FrontdoorAppTest(unittest.TestCase):
     def test_get_reports_readiness_in_customer_identity(self) -> None:
         client, _, _ = self._client()
         client.post(HOT_LOAD_PATH, json={"identity": "base-ckpt"})
-        client.post(HOT_LOAD_PATH, json={"identity": "ckpt-100", "incremental_snapshot_metadata": {"previous_snapshot_identity": "base-ckpt", "compression_format": "zstd", "checksum_format": "adler32"}})
+        client.post(HOT_LOAD_PATH, json=_delta("ckpt-100", "base-ckpt"))
         body = client.get(HOT_LOAD_PATH).json()
         self.assertEqual(len(body["replicas"]), 1)
         self.assertEqual(body["replicas"][0]["current_snapshot_identity"], "ckpt-100")
@@ -293,13 +285,7 @@ class FrontdoorAppTest(unittest.TestCase):
     def test_delta_with_unknown_parent_is_409(self) -> None:
         client, calls, _ = self._client()
         client.post(HOT_LOAD_PATH, json={"identity": "base-ckpt"})
-        resp = client.post(
-            HOT_LOAD_PATH,
-            json={
-                "identity": "ckpt-2",
-                "incremental_snapshot_metadata": {"previous_snapshot_identity": "ckpt-l"},
-            },
-        )
+        resp = client.post(HOT_LOAD_PATH, json=_delta("ckpt-2", "ckpt-l"))
         self.assertEqual(resp.status_code, 409)
         self.assertEqual(calls["normalized"], [])
 
@@ -311,7 +297,7 @@ class FrontdoorAppTest(unittest.TestCase):
         # the booted checkpoint.
         r = client.post(
             HOT_LOAD_PATH,
-            json={"identity": "ckpt-1", "incremental_snapshot_metadata": {"previous_snapshot_identity": "bsae"}},
+            json=_delta("ckpt-1", "bsae"),
         )
         self.assertEqual(r.status_code, 409)
         self.assertEqual(calls["advanced"], [])
@@ -319,7 +305,7 @@ class FrontdoorAppTest(unittest.TestCase):
         self.assertEqual(client.post(HOT_LOAD_PATH, json={"identity": "base"}).status_code, 200)
         r = client.post(
             HOT_LOAD_PATH,
-            json={"identity": "ckpt-1", "incremental_snapshot_metadata": {"previous_snapshot_identity": "base"}},
+            json=_delta("ckpt-1", "base"),
         )
         self.assertEqual(r.json()["version"], 1)
 
@@ -328,15 +314,15 @@ class FrontdoorAppTest(unittest.TestCase):
         # version forever; reject it and leave the head serveable.
         client, calls, _ = self._client()
         client.post(HOT_LOAD_PATH, json={"identity": "base-ckpt"})
-        client.post(HOT_LOAD_PATH, json={"identity": "ckpt-1", "incremental_snapshot_metadata": {"previous_snapshot_identity": "base-ckpt"}})
-        resp = client.post(HOT_LOAD_PATH, json={"identity": "ckpt-fork", "incremental_snapshot_metadata": {"previous_snapshot_identity": "base-ckpt"}})
+        client.post(HOT_LOAD_PATH, json=_delta("ckpt-1", "base-ckpt"))
+        resp = client.post(HOT_LOAD_PATH, json=_delta("ckpt-fork", "base-ckpt"))
         self.assertEqual(resp.status_code, 409)
         self.assertEqual(calls["advanced"], [0, 1])  # pointer stays at head
 
     def test_resignalling_an_older_identity_is_a_409_rewind(self) -> None:
         client, calls, _ = self._client()
         client.post(HOT_LOAD_PATH, json={"identity": "base-ckpt"})
-        client.post(HOT_LOAD_PATH, json={"identity": "ckpt-100", "incremental_snapshot_metadata": {"previous_snapshot_identity": "base-ckpt", "compression_format": "zstd", "checksum_format": "adler32"}})
+        client.post(HOT_LOAD_PATH, json=_delta("ckpt-100", "base-ckpt"))
         resp = client.post(HOT_LOAD_PATH, json={"identity": "base-ckpt"})
         self.assertEqual(resp.status_code, 409)
         self.assertEqual(resp.json()["error"]["type"], "WeightRewindRejected")
