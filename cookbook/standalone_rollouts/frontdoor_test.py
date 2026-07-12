@@ -302,6 +302,16 @@ class FrontdoorAppTest(unittest.TestCase):
         self.assertEqual(resp.status_code, 409)
         self.assertEqual(calls["normalized"], [])
 
+    def test_delta_forking_an_older_checkpoint_is_409(self) -> None:
+        # One accepted fork would wedge every replica behind the non-contiguous
+        # version forever; reject it and leave the head serveable.
+        client, calls, _ = self._client()
+        client.post(HOT_LOAD_PATH, json={"identity": "base-ckpt"})
+        client.post(HOT_LOAD_PATH, json={"identity": "ckpt-1", "incremental_snapshot_metadata": {"previous_snapshot_identity": "base-ckpt"}})
+        resp = client.post(HOT_LOAD_PATH, json={"identity": "ckpt-fork", "incremental_snapshot_metadata": {"previous_snapshot_identity": "base-ckpt"}})
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(calls["advanced"], [0, 1])  # pointer stays at head
+
     def test_resignalling_an_older_identity_is_a_409_rewind(self) -> None:
         client, calls, _ = self._client()
         client.post(HOT_LOAD_PATH, json={"identity": "base-ckpt"})

@@ -32,17 +32,18 @@ class RecordTest(unittest.TestCase):
         # No phantom version was minted for the duplicate.
         self.assertIsNone(ledger.identity_for(2))
 
-    def test_resume_against_base_records_true_non_contiguous_lineage(self) -> None:
-        # A delta whose parent is the original base while the chain is at v2:
-        # version is still monotonic (v3), but base_version records the real
-        # parent (0), so the non-contiguity is visible to the apply path.
+    def test_fork_from_non_head_parent_is_rejected(self) -> None:
+        # A minted non-contiguous version would permanently block the linear
+        # replay of everything after it, so a fork is refused at signal time.
         ledger = IdentityLedger()
         ledger.record("ckpt-base", previous=None)
         ledger.record("ckpt-100", previous="ckpt-base")
         ledger.record("ckpt-200", previous="ckpt-100")
-        resume, _ = ledger.record("ckpt-resume", previous="ckpt-base")
-        self.assertEqual(resume.version, 3)
-        self.assertEqual(ledger.base_version_for("ckpt-resume"), 0)
+        with self.assertRaises(LedgerError):
+            ledger.record("ckpt-resume", previous="ckpt-base")
+        # The head is untouched and still extendable.
+        entry, _ = ledger.record("ckpt-300", previous="ckpt-200")
+        self.assertEqual(entry.version, 3)
 
     def test_delta_before_any_base_mints_v1_not_v0(self) -> None:
         # A delta whose parent was never signalled (the base booted from

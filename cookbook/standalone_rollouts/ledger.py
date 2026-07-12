@@ -9,12 +9,11 @@ so a version dir's index can carry ``base_version``.
 
 Because versions only ever increase, two identities never collide on a number
 and ``run_id`` is unnecessary. Re-signalling a known identity returns its
-existing version (idempotent — a retried POST is not a rewind). A delta whose
-parent is the immediately-preceding identity forms the contiguous chain the
-apply path replays; a delta against an older ancestor (training resume against
-the base) is recorded faithfully but is not yet replayable (the deferred
-fork-from-version case), so its non-contiguous base surfaces at apply time
-rather than being silently reordered here.
+existing version (idempotent — a retried POST is not a rewind). Every delta
+must extend the chain head: the apply path replays a contiguous chain, so a
+delta against an older ancestor (a fork/resume) is rejected at signal time —
+once minted, a non-contiguous version would sit in the log forever and block
+every replica from serving anything published after it.
 
 The ledger itself is pure: :meth:`to_dict` / :meth:`from_dict` round-trip the
 state. Persistence is one JSON file on the transport (``LEDGER_FILENAME``,
@@ -45,9 +44,9 @@ def load_ledger_dict(transport_root: str | Path) -> dict[str, Any]:
 
 
 class LedgerError(ValueError):
-    """A signal whose lineage cannot be recorded safely: a second full snapshot
-    (the base slot is single-occupancy) or a delta naming an unknown parent.
-    The front door reports it to the customer as a 409."""
+    """A signal whose lineage cannot be recorded (second full snapshot, unknown
+    parent, or fork from a non-head checkpoint) or a persisted ledger that
+    violates an invariant. The front door reports it as a 409."""
 
 
 @dataclass(frozen=True)
@@ -133,20 +132,19 @@ class IdentityLedger:
         moves the pointer. A new identity is minted the next monotonic version
         (``BASE_VERSION`` for the first ever, else max+1) and records ``previous``.
 
-        Raises :class:`LedgerError` on lineage that cannot be recorded safely:
-        a second full snapshot (it would take over the base's version 0), or a
-        delta naming a parent this ledger has never seen — unless the ledger is
-        empty, the one case where the parent is legitimately the booted,
-        never-signalled base. Rejecting is what keeps a typo'd parent from being
-        silently applied against the wrong base weights.
+        Raises :class:`LedgerError` on lineage the pool could not serve: a
+        second full snapshot (the base slot is single-occupancy), a parent this
+        ledger has never seen (typo'd or lost signals would otherwise be applied
+        against the wrong base weights), or a known parent that is not the chain
+        head (fork/resume — unsupported, and a non-contiguous version would
+        permanently block the replay of everything after it). The one sanctioned
+        unknown parent is a first delta on an empty ledger, whose base booted
+        from BASE_CHECKPOINT and was never signalled.
         """
         existing = self._by_identity.get(identity)
         if existing is not None:
             return existing, False
         if previous is None:
-            # A full snapshot is the base (version 0), whether the customer
-            # pre-uploaded and signalled it or the pool booted it from
-            # BASE_CHECKPOINT. The base slot is single-occupancy.
             claimed = self._by_version.get(BASE_VERSION)
             if claimed is not None:
                 raise LedgerError(
@@ -154,10 +152,16 @@ class IdentityLedger:
                 )
             version = BASE_VERSION
         else:
-            if previous not in self._by_identity and self._by_identity:
+            parent = self._by_identity.get(previous)
+            if parent is None and self._by_identity:
                 raise LedgerError(
                     f"previous_snapshot_identity {previous!r} was never signalled; "
                     "signal the parent checkpoint first"
+                )
+            if parent is not None and parent.version != max(self._by_version):
+                raise LedgerError(
+                    f"previous_snapshot_identity {previous!r} is not the latest checkpoint; "
+                    "forking from an older checkpoint is not supported"
                 )
             # A delta always mints a real version >= 1; v0 is reserved for the
             # base, so a delta signalled before any base (its parent booted, not

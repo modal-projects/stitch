@@ -198,6 +198,37 @@ class SimulatorTest(unittest.IsolatedAsyncioTestCase):
                     await mgr.sync_to()
                     self.assertEqual(mgr.current_version, 0)
 
+    async def test_fork_signal_is_409_and_pool_keeps_converging(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            transport, managers, _, client = await self._stack(tmp, n_replicas=1)
+            async with client:
+                _upload_plain_hf_checkpoint(transport, "base-ckpt")
+                await client.post(HOT_LOAD_PATH, json={"identity": "base-ckpt"})
+                _upload_plain_hf_checkpoint(transport, "ckpt-100")
+                delta = lambda ident, prev: {
+                    "identity": ident,
+                    "incremental_snapshot_metadata": {"previous_snapshot_identity": prev},
+                }
+                await client.post(HOT_LOAD_PATH, json=delta("ckpt-100", "base-ckpt"))
+                for mgr in managers:
+                    await mgr.sync_to()
+                    self.assertEqual(mgr.current_version, 1)
+
+                # A fork off the base is refused; nothing enters the log.
+                _upload_plain_hf_checkpoint(transport, "ckpt-fork")
+                r = await client.post(HOT_LOAD_PATH, json=delta("ckpt-fork", "base-ckpt"))
+                self.assertEqual(r.status_code, 409)
+
+                # The chain head still extends and the pool still converges —
+                # an accepted fork would have wedged replicas at v1 forever.
+                _upload_plain_hf_checkpoint(transport, "ckpt-200")
+                r = await client.post(HOT_LOAD_PATH, json=delta("ckpt-200", "ckpt-100"))
+                self.assertEqual(r.json()["version"], 2)
+                for mgr in managers:
+                    await mgr.sync_to()
+                    self.assertEqual(mgr.current_version, 2)
+                    self.assertIsNone(mgr.last_sync_error)
+
     async def test_malformed_uploaded_index_is_400_not_500(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             transport, _, _, client = await self._stack(tmp)
