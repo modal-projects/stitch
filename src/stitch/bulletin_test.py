@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import errno
 import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from stitch.bulletin import FilesystemBulletinBoard
 from stitch.protocol import (
@@ -87,6 +89,35 @@ class SlimeLayoutBulletinTest(unittest.TestCase):
             board.write_latest(None, 7)
             self.assertEqual((root / "latest").read_text(encoding="utf-8"), "weight_v000007")
             self.assertEqual(board.read_latest(), (None, 7))
+
+    def test_write_latest_falls_back_when_backend_cannot_rename(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            board = FilesystemBulletinBoard(root, layout="slime")
+
+            with mock.patch(
+                "stitch.protocol.os.replace",
+                side_effect=OSError(errno.ENOSYS, "rename"),
+            ):
+                board.write_latest("run-a", 7)
+
+            self.assertEqual((root / "latest").read_text(encoding="utf-8"), "run-a/weight_v000007")
+            self.assertFalse((root / "latest.tmp").exists())
+
+    def test_write_latest_does_not_hide_other_rename_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            board = FilesystemBulletinBoard(root, layout="slime")
+            board.write_latest("run-a", 6)
+
+            with mock.patch(
+                "stitch.protocol.os.replace",
+                side_effect=OSError(errno.EACCES, "rename"),
+            ):
+                with self.assertRaisesRegex(OSError, "rename"):
+                    board.write_latest("run-a", 7)
+
+            self.assertEqual((root / "latest").read_text(), "run-a/weight_v000006")
 
     def test_legacy_bare_pointer_parses_runless(self) -> None:
         # A pre-run-id deployment left `latest` = "000005"; it must parse as a

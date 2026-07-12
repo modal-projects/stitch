@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import time
@@ -565,14 +566,27 @@ def atomic_write_json(path: str | Path, payload: dict[str, Any]) -> None:
 
 
 def atomic_write_text(path: str | Path, text: str) -> None:
+    """Write text atomically on local filesystems and Mountpoint-backed S3.
+
+    Local filesystems use a flushed temporary file and atomic rename. Mountpoint
+    does not implement rename, but closing an in-place write publishes one S3
+    object atomically, so ``ENOSYS`` falls back to that backend-specific path.
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
-    with tmp.open("w", encoding="utf-8") as f:
-        f.write(text)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
+    try:
+        with tmp.open("w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except OSError as exc:
+        if exc.errno != errno.ENOSYS:
+            raise
+        tmp.unlink(missing_ok=True)
+        with path.open("w", encoding="utf-8") as f:
+            f.write(text)
 
 
 def _optional_int(value: Any) -> int | None:
