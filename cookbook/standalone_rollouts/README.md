@@ -80,8 +80,10 @@ but useful when Modal's S3 Mountpoint cannot auto-detect the bucket region.
 Create the secret:
 
 ```bash
-uv run --extra modal modal secret create stitch-api-shim-provider \
+ENVIRONMENT=...
+uv run --extra modal modal secret create -e "$ENVIRONMENT" stitch-api-shim-provider \
   STITCH_SHIM_API_KEY=... \
+  STITCH_SHIM_BASE_SNAPSHOT_IDENTITY=... \
   STITCH_SHIM_PROVIDER_MODEL=moonlight \
   STITCH_SHIM_PROVIDER_DEPLOYMENT=rollout-prod
 ```
@@ -94,19 +96,23 @@ Deploy:
 ```bash
 alias m="uv run --extra modal modal"
 
-m run -m cookbook.standalone_rollouts.modal_serve::download_model
-m deploy -m cookbook.standalone_rollouts.modal_serve
-m run -m cookbook.standalone_rollouts.modal_serve::print_url
+m run -e "$ENVIRONMENT" -m cookbook.standalone_rollouts.modal_serve::download_model
+m deploy -e "$ENVIRONMENT" --strategy recreate -m cookbook.standalone_rollouts.modal_serve::app
+m run -e "$ENVIRONMENT" -m cookbook.standalone_rollouts.modal_serve::print_url
 # Authenticated smoke from inside Modal (reads the provider secret; the API key
 # never leaves Modal): polls GET /hot_load readiness + a base completion.
-m run -m cookbook.standalone_rollouts.modal_serve::check
+m run -e "$ENVIRONMENT" -m cookbook.standalone_rollouts.modal_serve::check
 ```
+
+`--strategy recreate` is required: the front door is the sole ledger writer,
+and a rolling deploy can overlap old and new revisions.
 
 The default app is `stitch-moonlight-api-shim`. To create a separate deployment,
 add a config under `configs/` and deploy with:
 
 ```bash
-PROVIDER_CONFIG=my_provider_config m deploy -m cookbook.standalone_rollouts.modal_serve
+PROVIDER_CONFIG=my_provider_config m deploy -e "$ENVIRONMENT" --strategy recreate \
+  -m cookbook.standalone_rollouts.modal_serve::app
 ```
 
 ## External Trainer Contract
@@ -180,10 +186,10 @@ Then redeploy the same Modal app with the trainer functions included and launch
 the trainer:
 
 ```bash
-m run -m cookbook.standalone_rollouts.modal_serve::download_model
-m run -m cookbook.standalone_rollouts.slime.modal_train::prepare_dataset
-m deploy -m cookbook.standalone_rollouts.slime.modal_train
-m run -m cookbook.standalone_rollouts.slime.modal_train::launch_train
+m run -e "$ENVIRONMENT" -m cookbook.standalone_rollouts.modal_serve::download_model
+m run -e "$ENVIRONMENT" -m cookbook.standalone_rollouts.slime.modal_train::prepare_dataset
+m deploy -e "$ENVIRONMENT" --strategy recreate -m cookbook.standalone_rollouts.slime.modal_train::app
+m run -e "$ENVIRONMENT" -m cookbook.standalone_rollouts.slime.modal_train::launch_train
 ```
 
 The trainer (`slime/configs/moonlight_slime_trainer.py`) runs **async-first**

@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
+
+from stitch.protocol import atomic_write_text
 
 
 LEDGER_FILENAME = "identities.json"
@@ -267,6 +271,27 @@ class IdentityLedger:
             "base_identity": self.base_identity,
             "deltas": deltas,
         }
+
+
+def load_ledger_data(transport_root: str | Path) -> object | None:
+    """Read persisted JSON directly, or return ``None`` when it is absent."""
+    path = Path(transport_root) / LEDGER_FILENAME
+    try:
+        contents = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    try:
+        return json.loads(contents)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise LedgerCorruption(f"invalid {LEDGER_FILENAME}: {exc}") from exc
+
+
+def save_ledger_data(transport_root: str | Path, data: dict[str, Any]) -> None:
+    """Persist ledger JSON through the Mountpoint-safe control-file writer."""
+    contents = json.dumps(
+        data, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    atomic_write_text(Path(transport_root) / LEDGER_FILENAME, contents + "\n")
 
 
 def _require_exact_keys(data: object, expected: set[str], label: str) -> None:

@@ -83,6 +83,16 @@ class SlimeLayoutBulletinTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "unparseable snapshot pointer"):
                 FilesystemBulletinBoard(root, layout="slime").read_latest()
 
+    def test_read_latest_opens_pointer_without_a_separate_exists_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "latest").write_text("weight_v000007", encoding="utf-8")
+            with mock.patch.object(Path, "exists", return_value=False):
+                self.assertEqual(
+                    FilesystemBulletinBoard(root, layout="slime").read_latest(),
+                    (None, 7),
+                )
+
     def test_write_latest_run_id_round_trips(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

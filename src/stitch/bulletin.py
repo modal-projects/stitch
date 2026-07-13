@@ -97,9 +97,11 @@ class FilesystemBulletinBoard:
         """
         if self.layout == "slime":
             path = self.root / "latest"
-            if not path.exists():
+            try:
+                contents = path.read_text(encoding="utf-8")
+            except FileNotFoundError:
                 return (None, 0)
-            return parse_snapshot_identity(path.read_text(encoding="utf-8"))
+            return parse_snapshot_identity(contents)
         return (None, read_latest(self.root))
 
     def write_latest(self, run_id: str | None, version: int) -> None:

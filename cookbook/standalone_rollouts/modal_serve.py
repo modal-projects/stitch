@@ -9,7 +9,12 @@ front door derives readiness by enumerating the live containers.
 
 Run commands from the repo root, for example:
 
-    uv run --extra modal modal deploy -m cookbook.standalone_rollouts.modal_serve
+    uv run --extra modal modal deploy -e <env> --strategy recreate \
+      -m cookbook.standalone_rollouts.modal_serve::app
+
+``--strategy recreate`` is a correctness requirement. The front door is the
+sole ledger writer; rolling deployment would overlap old and new revisions,
+which cannot be fenced by Mountpoint because it provides no conditional writes.
 """
 
 import asyncio
@@ -24,7 +29,10 @@ import modal.experimental
 from cookbook.slime_disagg import helpers
 from cookbook.standalone_rollouts import auth as auth_mod
 from cookbook.standalone_rollouts import base_checkpoint
-from cookbook.standalone_rollouts import frontdoor as frontdoor_mod
+from cookbook.standalone_rollouts import delta_view
+from cookbook.standalone_rollouts import ledger as ledger_mod
+from cookbook.standalone_rollouts import opaque_frontdoor as frontdoor_mod
+from cookbook.standalone_rollouts import opaque_protocol
 from stitch.bulletin import FilesystemBulletinBoard
 from stitch.providers.modal import (
     discover_flash_targets,
@@ -45,6 +53,7 @@ SGLANG_PORT = 8001
 MINUTES = 60
 SERVER_STARTUP_TIMEOUT = 35 * MINUTES
 LOCAL_CHECKPOINT_PATH = exp.LOCAL_CHECKPOINT_PATH
+LOCAL_DELTA_VIEW_PATH = exp.LOCAL_DELTA_VIEW_PATH
 S3_TRANSPORT_BUCKET_NAME = os.environ.get(
     "STITCH_SHIM_S3_BUCKET_NAME", exp.S3_TRANSPORT_BUCKET_NAME
 )
@@ -102,6 +111,7 @@ image = (
             "STITCH_SHIM_MODAL_CLS_NAME": "Server",
             "STITCH_SHIM_TRANSPORT_ROOT": str(S3_TRANSPORT_MOUNT_PATH),
             "STITCH_LOCAL_CHECKPOINT_DIR": LOCAL_CHECKPOINT_PATH,
+            "STITCH_LOCAL_DELTA_VIEW_DIR": LOCAL_DELTA_VIEW_PATH,
         }
     )
     .add_local_python_source("stitch")
@@ -147,6 +157,10 @@ s3_transport_mount = modal.CloudBucketMount(
     read_only=False,
 )
 app = modal.App(APP_NAME)
+# Utility runs must not hydrate the deployment App: `modal run` honors
+# min_containers for every object in its ephemeral App, including uninvoked
+# Servers. Keeping helpers separate prevents a second ledger writer/GPU pool.
+utility_app = modal.App(f"{APP_NAME}-utilities")
 
 SGLANG_SERVER_ARGS = {
     "--served-model-name": MODEL_NAME,
@@ -196,6 +210,7 @@ class Server:
     def startup(self) -> None:
         from huggingface_hub import snapshot_download
 
+        base_snapshot_identity = _required_base_snapshot_identity()
         base_checkpoint_dir = base_checkpoint.resolve_base_checkpoint(
             BASE_CHECKPOINT, snapshot_download=snapshot_download
         )
@@ -215,7 +230,10 @@ class Server:
             request_timeout=120.0,
             max_attempts_per_request=3,
         )
-        self.sidecar = _start_provider_sidecar(base_checkpoint_dir=base_checkpoint_dir)
+        self.sidecar = _start_provider_sidecar(
+            base_checkpoint_dir=base_checkpoint_dir,
+            base_snapshot_identity=base_snapshot_identity,
+        )
         helpers.wait_http(
             f"http://127.0.0.1:{SIDECAR_PORT}/health",
             self.sidecar,
@@ -232,7 +250,7 @@ class Server:
             self.endpoint.stop()
 
 
-@app.function(
+@utility_app.function(
     image=image,
     volumes={str(exp.HF_CACHE_PATH): hf_cache_volume},
     timeout=2 * 60 * MINUTES,
@@ -247,7 +265,7 @@ def download_model() -> None:
     hf_cache_volume.commit()
 
 
-@app.function(
+@utility_app.function(
     image=image,
     secrets=[modal.Secret.from_name(exp.SHIM_SECRET_NAME)],
     timeout=35 * MINUTES,
@@ -258,7 +276,8 @@ def check(timeout_seconds: int = 20 * MINUTES) -> None:
     API key never leaves Modal), polls GET /hot_load readiness through the front
     door, then serves a base completion through it. Run with:
 
-        uv run --extra modal modal run -m cookbook.standalone_rollouts.modal_serve::check
+        uv run --extra modal modal run -e <env> \
+          -m cookbook.standalone_rollouts.modal_serve::check
     """
     import json
     import time
@@ -304,18 +323,19 @@ def check(timeout_seconds: int = 20 * MINUTES) -> None:
         print("completion:", json.dumps(json.load(resp))[:1200])
 
 
-@app.local_entrypoint()
+@utility_app.local_entrypoint()
 def print_url() -> None:
     print(frontdoor_url())
 
 
-@app.local_entrypoint()
+@utility_app.local_entrypoint()
 def print_secret_template() -> None:
     print(
         "\n".join(
             [
-                f"modal secret create {exp.SHIM_SECRET_NAME} \\",
+                f"modal secret create -e <env> {exp.SHIM_SECRET_NAME} \\",
                 "  STITCH_SHIM_API_KEY=... \\",
+                "  STITCH_SHIM_BASE_SNAPSHOT_IDENTITY=... \\",
                 "  STITCH_SHIM_PROVIDER_MODEL=moonlight \\",
                 "  STITCH_SHIM_PROVIDER_DEPLOYMENT=rollout-prod",
             ]
@@ -323,7 +343,7 @@ def print_secret_template() -> None:
     )
 
 
-@app.local_entrypoint()
+@utility_app.local_entrypoint()
 def smoke(
     timeout_seconds: int = 30 * MINUTES,
     api_key: str = "",
@@ -420,6 +440,17 @@ def _auth_error(headers):
     return None
 
 
+def _required_base_snapshot_identity() -> str:
+    identity = os.environ.get("STITCH_SHIM_BASE_SNAPSHOT_IDENTITY")
+    if not ledger_mod.is_valid_identity(identity):
+        raise RuntimeError(
+            "STITCH_SHIM_BASE_SNAPSHOT_IDENTITY must be one non-empty "
+            "filesystem-safe string"
+        )
+    assert isinstance(identity, str)
+    return identity
+
+
 FRONTDOOR_PORT = 8000
 
 
@@ -428,7 +459,9 @@ FRONTDOOR_PORT = 8000
     volumes={str(S3_TRANSPORT_MOUNT_PATH): s3_transport_mount},
     secrets=[modal.Secret.from_name(exp.SHIM_SECRET_NAME)],
     min_containers=1,
-    max_containers=1,  # singleton: exactly one writer of the `latest` pointer
+    # Correct only with the required recreate deployment strategy: max=1 is
+    # per revision and does not prevent old/new overlap during a rolling deploy.
+    max_containers=1,
     nonpreemptible=True,  # keep the sole writer up; a preemption blips the API
     scaledown_window=2,
     region=exp.REGION,  # co-locate the front door with the rollout pool (us)
@@ -461,7 +494,19 @@ class FrontDoor:
         if not os.environ.get("STITCH_SHIM_API_KEY"):
             raise RuntimeError("STITCH_SHIM_API_KEY is required")
 
+        base_snapshot_identity = _required_base_snapshot_identity()
         board = FilesystemBulletinBoard(str(S3_TRANSPORT_MOUNT_PATH), layout="slime")
+        recovery = opaque_protocol.recover_frontdoor_state(
+            persisted_ledger=ledger_mod.load_ledger_data(S3_TRANSPORT_MOUNT_PATH),
+            expected_base_identity=base_snapshot_identity,
+            pointer=board.read_latest(),
+        )
+        if recovery.save_ledger:
+            ledger_mod.save_ledger_data(
+                S3_TRANSPORT_MOUNT_PATH, recovery.ledger.to_dict()
+            )
+        if recovery.pointer_to_write is not None:
+            board.write_latest(None, recovery.pointer_to_write)
         gateway: dict[str, str | None] = {"url": None}
         clients: dict[str, httpx.AsyncClient] = {}
 
@@ -472,17 +517,21 @@ class FrontDoor:
                 clients["client"] = client
             return client
 
-        async def read_current_pointer() -> tuple[str | None, int]:
-            return board.read_latest()
+        async def save_ledger(data: dict) -> None:
+            await asyncio.to_thread(
+                ledger_mod.save_ledger_data, S3_TRANSPORT_MOUNT_PATH, data
+            )
 
-        async def advance_to(run_id: str | None, version: int) -> None:
-            # Singleton writer: a single small write is one atomic S3 PutObject,
-            # so no rename dance is needed. The pointer is self-identifying
-            # (`<run_id>/weight_vN`), so a new run is a forward move (not a rewind)
-            # and there is no separate run pointer to flip. The monotonic/reset
-            # decision already ran in advance_latest_decision, so this writes the
-            # decided move through the same board the pool reconciles against.
-            board.write_latest(run_id, version)
+        async def derive(entry, *, committed: bool) -> None:
+            await asyncio.to_thread(
+                delta_view.derive_delta_index,
+                S3_TRANSPORT_MOUNT_PATH,
+                entry,
+                committed=committed,
+            )
+
+        async def advance_to(version: int) -> None:
+            await asyncio.to_thread(board.write_latest, None, version)
 
         async def list_server_infos() -> list[dict]:
             targets = await asyncio.to_thread(
@@ -524,8 +573,10 @@ class FrontDoor:
                 media_type=resp.headers.get("content-type") or None,
             )
 
-        asgi_app = frontdoor_mod.create_frontdoor_app(
-            read_current_pointer=read_current_pointer,
+        asgi_app = frontdoor_mod.create_opaque_frontdoor_app(
+            ledger=recovery.ledger,
+            save_ledger=save_ledger,
+            derive_delta=derive,
             advance_to=advance_to,
             list_server_infos=list_server_infos,
             proxy=proxy,
@@ -552,10 +603,12 @@ class FrontDoor:
 def frontdoor_url() -> str:
     """Advertised provider URL: external clients hit the front door, which owns
     `latest` and relabels affinity pre-gateway."""
-    return FrontDoor.get_url().rstrip("/")
+    return modal.Server.from_name(APP_NAME, FrontDoor.__name__).get_url().rstrip("/")
 
 
-def _start_provider_sidecar(*, base_checkpoint_dir: str) -> subprocess.Popen:
+def _start_provider_sidecar(
+    *, base_checkpoint_dir: str, base_snapshot_identity: str
+) -> subprocess.Popen:
     cmd = [
         "python3",
         "-m",
@@ -570,8 +623,12 @@ def _start_provider_sidecar(*, base_checkpoint_dir: str) -> subprocess.Popen:
         str(S3_TRANSPORT_MOUNT_PATH),
         "--local-checkpoint-dir",
         LOCAL_CHECKPOINT_PATH,
+        "--local-view-dir",
+        LOCAL_DELTA_VIEW_PATH,
         "--base-checkpoint-dir",
         base_checkpoint_dir,
+        "--base-snapshot-identity",
+        base_snapshot_identity,
         "--commit-mode",
         exp.COMMIT_MODE,
     ]

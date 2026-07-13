@@ -118,6 +118,7 @@ train_volumes = {
 reloadable_train_volumes = (hf_cache_volume, data_volume, checkpoints_volume)
 
 app = provider_app.app
+utility_app = provider_app.utility_app
 
 
 @app.cls(
@@ -213,7 +214,7 @@ class Trainer:
         subprocess.run(["bash", "-lc", cmd], check=True)
 
 
-@app.function(
+@utility_app.function(
     image=trainer_image,
     volumes={str(DATA_PATH): data_volume},
     timeout=2 * 60 * MINUTES,
@@ -226,7 +227,7 @@ def prepare_dataset() -> None:
     data_volume.commit()
 
 
-@app.local_entrypoint()
+@utility_app.local_entrypoint()
 def launch_train(experiment: str = TRAINER_CONFIG) -> None:
     from modal.exception import NotFoundError
 
@@ -239,17 +240,18 @@ def launch_train(experiment: str = TRAINER_CONFIG) -> None:
     except NotFoundError:
         raise SystemExit(
             f"App {APP_NAME!r} is not deployed. Run:\n"
-            f"  uv run --extra modal modal deploy -m cookbook.standalone_rollouts.slime.modal_train"
+            "  uv run --extra modal modal deploy -e <env> --strategy recreate "
+            "-m cookbook.standalone_rollouts.slime.modal_train::app"
         )
     print(f"Spawned train({experiment!r}) on {APP_NAME}: {call.object_id}")
 
 
-@app.local_entrypoint()
+@utility_app.local_entrypoint()
 def print_trainer_secret_template() -> None:
     print(
         "\n".join(
             [
-                f"modal secret create {exp.SHIM_SECRET_NAME} \\",
+                f"modal secret create -e <env> {exp.SHIM_SECRET_NAME} \\",
                 "  STITCH_SHIM_API_KEY=... \\",
                 "  STITCH_SHIM_PROVIDER_MODEL=moonlight \\",
                 "  STITCH_SHIM_PROVIDER_DEPLOYMENT=rollout-prod \\",

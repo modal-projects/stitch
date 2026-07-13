@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import unittest
+import tempfile
+from pathlib import Path
 
 from cookbook.standalone_rollouts.ledger import (
     DeltaFormats,
@@ -9,6 +11,8 @@ from cookbook.standalone_rollouts.ledger import (
     LedgerCorruption,
     LedgerRewind,
     is_valid_identity,
+    load_ledger_data,
+    save_ledger_data,
 )
 
 
@@ -199,6 +203,21 @@ class SerializationTest(unittest.TestCase):
             with self.subTest(data=data):
                 with self.assertRaises(LedgerCorruption):
                     IdentityLedger.from_dict(data, expected_base_identity="base")
+
+
+class PersistenceTest(unittest.TestCase):
+    def test_missing_round_trip_and_malformed_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.assertIsNone(load_ledger_data(root))
+
+            data = IdentityLedger.new("base").to_dict()
+            save_ledger_data(root, data)
+            self.assertEqual(load_ledger_data(root), data)
+
+            (root / "identities.json").write_text("{", encoding="utf-8")
+            with self.assertRaises(LedgerCorruption):
+                load_ledger_data(root)
 
 
 if __name__ == "__main__":

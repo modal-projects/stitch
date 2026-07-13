@@ -24,6 +24,7 @@ HF_CACHE_PATH = Path("/root/.cache/huggingface")
 # Ephemeral host-local full HF checkpoint the sidecar patches in place per delta
 # (seeded from the base; rebuilt on a cold container).
 LOCAL_CHECKPOINT_PATH = "/local-checkpoint"
+LOCAL_DELTA_VIEW_PATH = "/stitch-delta-view"
 # in_place pauses/applies/continues without flushing; stale-version KV is isolated
 # by the sidecar's extra_key stamping and drains as its in-flight requests finish.
 COMMIT_MODE = "in_place"
