@@ -24,6 +24,18 @@ class Engine(Protocol):
         """Reload the staged checkpoint into the serving weights — the gate covers only this."""
         ...
 
+    async def flush(self) -> None:
+        """Evict cached state (KV / radix tree). Called before commit in quiesce mode."""
+        ...
+
+    async def pause(self) -> None:
+        """Pause the scheduler in place (in_place commit); in-flight requests stay resident."""
+        ...
+
+    async def resume(self) -> None:
+        """Resume the scheduler after a pause."""
+        ...
+
     async def reset(self) -> None:
         """Reseed the local checkpoint to the engine's boot base."""
         ...
