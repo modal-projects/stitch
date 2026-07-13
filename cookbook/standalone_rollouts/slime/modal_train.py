@@ -11,7 +11,6 @@ import importlib
 import os
 import subprocess
 import tempfile
-import uuid
 from pathlib import Path
 
 import modal
@@ -95,6 +94,22 @@ trainer_image = (
     )
 )
 
+control_image = (
+    modal.Image.debian_slim()
+    .env(
+        {
+            "STITCH_SHIM_TRANSPORT_ROOT": str(provider_app.S3_TRANSPORT_MOUNT_PATH),
+            "STITCH_SHIM_API_BASE_URL": "http://preflight.invalid",
+        }
+    )
+    .add_local_python_source("stitch")
+    .add_local_dir(
+        Path(__file__).parents[2],
+        remote_path="/root/cookbook",
+        ignore=["**/__pycache__"],
+    )
+)
+
 # Dev iteration: SLIME_LOCAL_DIR overlays a local slime checkout onto the image's
 # cloned fork (installed editable at /root/slime), so fork edits take effect on
 # container start with no image rebuild. Unset by default.
@@ -119,6 +134,7 @@ reloadable_train_volumes = (hf_cache_volume, data_volume, checkpoints_volume)
 
 app = provider_app.app
 utility_app = provider_app.utility_app
+preflight_app = modal.App(f"{APP_NAME}-preflight")
 
 
 @app.cls(
@@ -187,23 +203,12 @@ class Trainer:
 
         cfg.rollout_endpoint_url = provider_url
         cfg.api_shim_base_url = provider_url
-        # Fresh run id per launch, carried on update_weight_disk_dir — a *known*
-        # slime arg, so it reaches the publish hook running in the Ray training
-        # actor. (A per-launch env var doesn't: Ray workers start in @modal.enter()
-        # before train() runs, so they don't inherit this env; and an unknown
-        # --api-shim-run-id arg is dropped by slime's parser.) slime writes this
-        # run's chain to <local>/<run_id>/weight_v{N}/, and announce_and_wait
-        # derives the run id from that dir to scope the S3 transport + pointer.
-        run_id = uuid.uuid4().hex[:12]
-        cfg.update_weight_disk_dir = f"{cfg.update_weight_disk_dir}/{run_id}"
+        # One deployed prefix is one append-only chain. Starting an independent
+        # run on reused control/upload state is a correctness error, not a reset.
+        hooks.assert_clean_transport(hooks.ShimConfig.from_env(cfg))
         cfg.custom_config_path = _custom_config(
             cfg, rollout_num_engines=getattr(run, "ROLLOUT_NUM_ENGINES", 1)
         )
-        # Claim the pool for this fresh run before any delta: reset `latest` to
-        # base via the front door so replicas reconcile to base up front instead
-        # of inferring the reset from the first publish (mirrors the bulletin
-        # path's explicit-claim model).
-        hooks.announce_claim(cfg, run_id=run_id)
         helpers.prepare_slime_config(cfg, tempfile.mkdtemp())
         cmd = helpers.build_train_cmd(cfg, SLIME_ROOT)
 
@@ -227,13 +232,32 @@ def prepare_dataset() -> None:
     data_volume.commit()
 
 
-@utility_app.local_entrypoint()
+@preflight_app.function(
+    image=control_image,
+    volumes={
+        str(provider_app.S3_TRANSPORT_MOUNT_PATH): provider_app.s3_transport_mount
+    },
+    secrets=[modal.Secret.from_name(exp.SHIM_SECRET_NAME)],
+    timeout=5 * MINUTES,
+    include_source=False,
+)
+def check_transport_clean() -> None:
+    try:
+        hooks.assert_clean_transport(hooks.ShimConfig.from_env())
+    except Exception as exc:
+        print(f"VERDICT=FAIL clean_transport=0 error={type(exc).__name__}:{exc}")
+        raise
+    print("VERDICT=PASS clean_transport=1")
+
+
+@preflight_app.local_entrypoint()
 def launch_train(experiment: str = TRAINER_CONFIG) -> None:
     from modal.exception import NotFoundError
 
     run = importlib.import_module(
         f"cookbook.standalone_rollouts.slime.configs.{experiment}"
     )
+    check_transport_clean.remote()
     trainer = modal.Cls.from_name(APP_NAME, Trainer.__name__)()
     try:
         call = trainer.train.spawn(experiment, run.slime.to_payload())
@@ -246,7 +270,7 @@ def launch_train(experiment: str = TRAINER_CONFIG) -> None:
     print(f"Spawned train({experiment!r}) on {APP_NAME}: {call.object_id}")
 
 
-@utility_app.local_entrypoint()
+@preflight_app.local_entrypoint()
 def print_trainer_secret_template() -> None:
     print(
         "\n".join(
@@ -255,7 +279,7 @@ def print_trainer_secret_template() -> None:
                 "  STITCH_SHIM_API_KEY=... \\",
                 "  STITCH_SHIM_PROVIDER_MODEL=moonlight \\",
                 "  STITCH_SHIM_PROVIDER_DEPLOYMENT=rollout-prod \\",
-                "  STITCH_SHIM_BASE_SNAPSHOT_IDENTITY=base",
+                "  STITCH_SHIM_BASE_SNAPSHOT_IDENTITY=...",
             ]
         )
     )
