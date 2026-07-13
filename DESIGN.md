@@ -6,7 +6,7 @@ stitch is a **general library for disaggregated, versioned rollout** in RL post-
 
 An RL framework (miles, slime) that disaggregates rollout exposes exactly three plug points — and nothing else:
 
-- `custom_update_weight_post_write_path` — publish hook, called after each weight update (full *or* delta)
+- `custom_update_weight_post_write_path` (miles) / `custom_delta_pre_push_path` (slime) — publish hook, called after each weight update (full *or* delta)
 - `custom_rollout_request_hook_path` — request hook, called before each generation request
 - `rollout_endpoint_url` — when set, the framework runs no local engines (`rollout_num_gpus=0`) and sends generation here
 
@@ -26,9 +26,9 @@ stitch is separate from the *framework* (miles and slime present the identical s
 
 The generality test both ways:
 - **Different store / engine / pool?** add a new instance behind the abstraction — a core file, or a third-party package subclassing the base. Zero core-logic edits.
-- **Different deployment** (k8s, another image, another provider, another model)? it's an **example**. Core never changes.
+- **Different deployment** (k8s, another image, another provider, another model)? it's a **cookbook recipe**. Core never changes.
 
-stitch is a **library, not a baked service** — every concrete deployment (including the Modal pool app) is an example.
+stitch is a **library, not a baked service** — every concrete deployment (including the Modal pool app) is a cookbook recipe.
 
 ## Domain model
 
@@ -46,39 +46,43 @@ Each port is a plain base class; an instance subclasses it and overrides its met
 
 ```
 src/stitch/                     # THE LIBRARY — general: abstractions + logic + instances
-  contract.py                   # Store/Engine/Pool abstractions; VersionRef,
-                                #   VersionManifest{kind,base,files,diff,compression,checksum},
-                                #   VersionConstraint, SyncState; pointer rules
+  versions.py                   # domain vocabulary: VersionRef, VersionManifest
+                                #   {kind, base_version, files, delta_encoding, compression,
+                                #   checksum}, VersionConstraint, ReplicaState/PoolState,
+                                #   SyncState; the pure pointer rules (decide_pointer_move)
   sync.py                       # Reconciler (reconcile replica → latest) + AdmissionGate
   service.py                    # create_app (versioned proxy) + serve(store, engine, ...) + readiness()
-  publish.py                    # publish_version() + publish_from_hf_layout() + stamp_request()
-  stores/modal_volume.py        # ModalVolumeStore        — a Store instance
-  engines/sglang.py             # SGLangEngine            — an Engine instance
-  pools/modal_flash.py          # ModalFlashPool (client) — a Pool instance
-cookbook/<experiment>/          # a recipe owning the WHOLE experiment (customizable, provider-specific):
-                                #   the Modal app (image + Server cls running serve()+engine + Flash +
-                                #   Trainer cls + entrypoints), model prep, run config, the ~2-line
-                                #   framework hook shim, and any consumer facade (e.g. cognition /hot_load)
-  _shared/                      # OPTIONAL shared Modal-app factory — keeps recipes DRY,
-                                #   lives in the cookbook layer, NOT general core
+  publish.py                    # publish_version() + claim_run() + constrain_request()
+  stores/base.py  + modal_volume.py   # Store           + ModalVolumeStore
+  engines/base.py + sglang.py         # Engine          + SGLangEngine
+  pools/base.py   + modal_flash.py    # Pool            + ModalFlashPool (client)
+cookbook/                       # NON-core: recipes (deployments), layered
+  common/                       #   framework-agnostic, shared by every recipe:
+                                #     config.py (ModalConfig + mount paths), serving_image.py,
+                                #     server.py (register_server), sidecar.py (serve entrypoint),
+                                #     hooks.py (publish/claim/request logic), launch.py, ray_cluster.py,
+                                #     process.py, smoke.py
+  miles/                        #   framework subdir: trainer_image.py (+ pins), config.py
+                                #     (MilesConfig), app.py, prep.py, configs/<experiment>.py
+  slime/                        #   symmetric (SlimeConfig; app.py; configs/<experiment>.py)
 tools/profiling/                # dev-only diagnostics (never imported by src/)
 tests/                          # unit tests + the in-memory core harness (was local_disagg)
 ```
 
-Only three files in the library are Modal/sglang-specific (the instances), each isolated behind its abstraction. Everything provider- or experiment-specific — including the deployable Modal pool app — is an example.
+Only the three instance files in the library are Modal/sglang-specific, each isolated behind its port. Everything provider- or experiment-specific lives in `cookbook/`.
 
 ## Full vs delta — one mechanism, a manifest field
 
 `kind = full` (anchor) or `delta`. `stage(target)` = walk back to the nearest anchor ≤ target, seed from it, replay deltas forward.
-- **full-sync** = every version an anchor (slime `update_weight_from_disk.py`)
-- **delta-sync** = one base anchor + deltas (slime `update_weight_from_disk_delta.py`, miles)
+- **full-sync** = every version an anchor
+- **delta-sync** = one base anchor + deltas (miles, slime)
 - **periodic-full** = anchors every K (bounds joiner catch-up, enables GC)
 
 No codec component: encode lives in the framework, decode inside the engine; stitch carries the format as manifest data (`delta_encoding`/`compression`/`checksum`) so the two agree.
 
-## Framework integration — agnostic helper + example shim
+## Framework integration — agnostic helpers, config-referenced
 
-Both miles and slime write the same HF-safetensors + delta-metadata layout, so the substantive bridge is framework-agnostic and lives in core: **`publish_from_hf_layout()`** (parse standard layout → `VersionManifest` → publish + wake) and **`stamp_request()`**. The only framework-specific residue is the ~2-line hook shim that conforms to a framework's hook signature — it lives in the **example** (pinned with that framework's version). Core never imports a framework's evolving output format; a framework either conforms to the layout or its example translates.
+Both miles and slime write the same HF-safetensors + delta-metadata layout, so the bridge is framework-agnostic: `publish_version()` (parse the standard HF index → `VersionManifest` → publish + wake), `claim_run()`, and `constrain_request()` in `publish.py`. The publish/claim/request **logic** is shared once in `cookbook/common/hooks.py`; a framework's run config simply points its dotted hook paths at `cookbook.common.hooks.*` (no per-framework re-export shim). The only framework-specific residue is which config key names the publish hook (`custom_update_weight_post_write_path` vs `custom_delta_pre_push_path`).
 
 ## Correctness invariants (contracts, not emergent behavior)
 
@@ -89,36 +93,35 @@ Both miles and slime write the same HF-safetensors + delta-metadata layout, so t
 
 ## Naming conventions
 
-- Abstractions are single nouns (`Store`, `Engine`, `Pool`); instances are `<Concrete><Port>` (`ModalVolumeStore`, `SGLangEngine`, `ModalFlashPool`); functions are `verb_noun`.
-- `Pool` (matches the existing "rollout pool" vocabulary).
-- manifest `compression`/`checksum` map to Cognition's `compression_format`/`checksum_format`.
+- Ports are single nouns (`Store`, `Engine`, `Pool`); instances are `<Concrete><Port>` (`ModalVolumeStore`, `SGLangEngine`, `ModalFlashPool`); functions are `verb_noun`.
+- One internal name per concept, translated to external wire spellings only at the boundary: `delta_encoding`/`compression`/`checksum` (manifest) map to Cognition's `compression_format`/`checksum_format`; the manifest reads the wire key `diff` but the field is `delta_encoding`.
+- `base_url` (the engine's HTTP base), `materialize` (ensure a version is locally readable) — named for what they are, not proxy/handle metaphors.
 
-## What moves where (from today's tree)
+## What moved (old tree → this structure)
 
-| Today | New home |
+| Old | New home |
 |---|---|
-| `protocol.py` | `contract.py` (+ the abstractions) |
+| `protocol.py` | `versions.py` (types + pointer rules) + `{stores,engines,pools}/base.py` (the ports) |
 | `sync.py` (`WeightSyncManager`, `RolloutAdmissionGate`) | `sync.py` (`Reconciler`, `AdmissionGate`) |
 | `bulletin.py` + Volume half of `providers/modal.py` | `stores/modal_volume.py` (`ModalVolumeStore`) |
 | `servers/sglang.py` | `service.py` (engine-agnostic; stamp behind `Engine`) |
-| `engines/sglang.py` | `engines/sglang.py` (`SGLangEngine`) |
+| `engines/sglang.py` (adapter) | `engines/sglang.py` (`SGLangEngine`) |
 | Flash *client* half of `providers/modal.py` | `pools/modal_flash.py` (`ModalFlashPool`) |
-| `cookbook/bulletin_hooks.py` | `publish.py` (`publish_from_hf_layout`, `stamp_request`) |
-| `cookbook/sidecar.py` | `service.py` (`serve`) |
-| `cookbook/{miles,slime}_disagg`, `standalone_rollouts`, `{ray_cluster,sidecar_process,serving,trainer_helpers}.py`, the Modal `Server`/`Trainer` skeletons | `cookbook/<experiment>/` (+ optional `_shared` helper) |
-| `src/stitch/trainers/slime.py` (dead `publish_delta_version`) | deleted; live hook → an example shim |
+| `cookbook/bulletin_hooks.py` | `publish.py` helpers + `cookbook/common/hooks.py` (shared logic) |
+| `cookbook/sidecar.py` | `service.py` (`serve`) + `cookbook/common/sidecar.py` (entrypoint) |
+| `cookbook/{ray_cluster,sidecar_process,serving,trainer_helpers}.py` | `cookbook/common/{ray_cluster,process,serving_image,launch}.py` + `server.py`/`smoke.py` |
+| `cookbook/{miles,slime}_disagg/` (copy-forked apps + configs) | `cookbook/{miles,slime}/` (shared Server; per-framework Trainer + pins + configs) |
+| `src/stitch/trainers/slime.py` (dead) | deleted |
 | `cookbook/local_disagg` | `tests/` (in-memory core harness) |
 | `profiling/` | `tools/profiling/` |
-| `VersionManifest.from_slime_index`, `layout="slime"` | `from_hf_index`, `layout="hf_delta"` |
+| `VersionManifest.from_slime_index` | `from_hf_index` |
 
 ## Rewrite plan (branch `stitch-v2`) — extract & de-leak, not reinvent
 
-Core logic is already proven (today's `local_disagg`). This is relocation + naming the abstractions + fixing the inward-dependency leaks.
-
-- **Phase 0 — skeleton.** Lay out the tree; move `profiling/` → `tools/profiling/`; create `tests/` + `cookbook/`; wire `pyproject`. No logic.
-- **Phase 1 — core, provable in-memory.** `contract.py` (abstractions + types + rules), `sync.py`, `service.py`, `publish.py` — all provider/engine/framework-agnostic — with the in-memory harness (port of `local_disagg`) as the gate. **Gate: core passes with fakes before any instance exists.**
-- **Phase 2 — instances.** `stores/modal_volume`, `engines/sglang`, `pools/modal_flash` — port the proven code onto the abstractions and kill the leaks (proxy engine-agnostic via `Engine.stamp`; `publish` agnostic; Volume durability inside the store; Pool is client-only).
-- **Phase 3 — first recipe.** One `cookbook/<experiment>/` assembling the Modal app + prep + config + hook shim (the copy-forked skeleton collapses into one recipe, optionally a `_shared` helper). Fold in the slime cleanup; delete the superseded old tree.
+- **Phase 0 — skeleton.** ✅ Tree; `profiling/` → `tools/profiling/`; `tests/`; `pyproject`.
+- **Phase 1 — core, provable in-memory.** ✅ `versions.py`, `sync.py`, `service.py`, `publish.py`, the three port `base.py` — all provider/engine/framework-agnostic, with the in-memory harness (`tests/`) as the gate. Passes with fakes before any instance exists.
+- **Phase 2 — instances.** ✅ `stores/modal_volume`, `engines/sglang`, `pools/modal_flash` — proven code ported onto the ports, leaks killed (proxy engine-agnostic via `Engine`; `publish` agnostic; Volume durability inside the store; Pool client-only).
+- **Phase 3 — cookbook.** ✅ `common/` (shared, incl. the parameterized `register_server`) + `miles/` + `slime/`, each self-contained config, all experiments ported. The old `*_disagg` tree stays as reference **until e2e, then deleted**.
 - **Phase 4 — new-version fixes.** Land the miles/sglang updates (TE 2.17, etc.) on the clean structure — "make NVFP4 work," now on solid ground.
 
-Each phase is one reviewable PR. Phases 0–1 are pure and cheap; the leaks die in Phase 2; nothing gets a second instance or a stub until it is actually needed.
+Tests: `tests/` (core harnesses + the cookbook hook test) is the gate for Phases 0–3; the Modal-backed instances + recipes are validated e2e.
