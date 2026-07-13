@@ -6,11 +6,14 @@ compose the Store and Pool ports, so they work with any backend — no Modal her
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from stitch.pools.base import Pool
 from stitch.stores.base import Store
 from stitch.versions import VersionConstraint, VersionManifest, VersionRef, decide_pointer_move
+
+logger = logging.getLogger(__name__)
 
 
 def publish_version(
@@ -29,17 +32,29 @@ def publish_version(
     decide_pointer_move(store.read_pointer(), manifest.ref)  # raises PointerRewind on a rewind
     store.publish(manifest, version_dir)
     store.advance_pointer(manifest.ref)
-    if pool is not None:
-        pool.wake(pool.discover_replicas(), manifest.ref)
+    _wake(pool, manifest.ref)
     return manifest.ref
 
 
 def claim_run(store: Store, pool: Pool | None, run_id: str) -> None:
     """Start a run at base before its first publish: write the base pointer and wake the
-    pool, so every replica (cold or warm on a finished run) resets to base up front."""
+    pool, so every replica (cold or warm on a finished run) resets to base up front. A
+    reused ``run_id`` (the run's per-launch fence token) is a rewind — rejected here so a
+    restart can't leave the pool pinned to a dead incarnation's high-water mark."""
+    decide_pointer_move(store.read_pointer(), VersionRef(run_id, 0))  # raises PointerRewind on a reused run_id
     store.claim(run_id)
-    if pool is not None:
-        pool.wake(pool.discover_replicas(), VersionRef(run_id, 0))
+    _wake(pool, VersionRef(run_id, 0))
+
+
+def _wake(pool: Pool | None, ref: VersionRef) -> None:
+    """Best-effort pool wake: the pointer is already durable, so a transient control-plane
+    error just costs latency (replicas self-sync on their next poll/startup)."""
+    if pool is None:
+        return
+    try:
+        pool.wake(pool.discover_replicas(), ref)
+    except Exception:  # noqa: BLE001
+        logger.warning("pool wake failed for %s; replicas will self-sync", ref.identity, exc_info=True)
 
 
 def constrain_request(
