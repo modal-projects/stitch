@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 CommitMode = Literal["quiesce", "in_place"]
 
 
-class PolicyViolation(Exception):
+class ConstraintUnmet(Exception):
     """A request's version constraint cannot be met by this replica (a retryable 409)."""
 
     def __init__(self, error: dict[str, Any]) -> None:
@@ -84,14 +84,14 @@ class AdmissionGate:
     @asynccontextmanager
     async def admit(self, constraint: VersionConstraint | None = None):
         """Admit one request under a single lock acquisition, yielding the version it
-        is served on. Raises :class:`PolicyViolation` if the constraint can't be met."""
+        is served on. Raises :class:`ConstraintUnmet` if the constraint can't be met."""
         c = constraint or VersionConstraint()
         async with self._cond:
             await self._cond.wait_for(lambda: not self._gated(c))
             error = self._rejection(c)
             if error is not None:
                 self._on_reject(error)
-                raise PolicyViolation(error)
+                raise ConstraintUnmet(error)
             served = self.applied
             self._active += 1
             if c.exact_version is not None:
@@ -244,7 +244,7 @@ class Reconciler(AdmissionGate):
         self.sync_state = SyncState.PREFETCHING
         self.last_error = None
         target = self.store.read_manifest(pointer)
-        source_dir = self.store.open_version(pointer)
+        source_dir = self.store.materialize(pointer)
         m["target_version"] = pointer.version
 
         # Stage (host-side apply — the engine walks back to the nearest anchor and

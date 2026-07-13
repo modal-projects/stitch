@@ -6,7 +6,9 @@ from __future__ import annotations
 
 import asyncio
 
-from stitch.sync import PolicyViolation, Reconciler
+from stitch.engines.base import Engine
+from stitch.stores.base import Store
+from stitch.sync import ConstraintUnmet, Reconciler
 from stitch.versions import (
     VersionConstraint,
     VersionKind,
@@ -16,7 +18,7 @@ from stitch.versions import (
 )
 
 
-class FakeStore:
+class FakeStore(Store):
     def __init__(self, pointer: VersionRef | None = None, *manifests: VersionManifest) -> None:
         self._pointer = pointer
         self._manifests = {(m.ref.run_id, m.ref.version): m for m in manifests}
@@ -31,7 +33,7 @@ class FakeStore:
     def read_manifest(self, ref: VersionRef) -> VersionManifest:
         return self._manifests[(ref.run_id, ref.version)]
 
-    def open_version(self, ref: VersionRef) -> str:
+    def materialize(self, ref: VersionRef) -> str:
         return f"/fake/{ref.identity}"
 
     def advance_pointer(self, ref: VersionRef) -> None:
@@ -44,7 +46,7 @@ class FakeStore:
         self._manifests[(manifest.ref.run_id, manifest.ref.version)] = manifest
 
 
-class FakeEngine:
+class FakeEngine(Engine):
     def __init__(self) -> None:
         self.calls: list[str] = []          # ordered pause/flush/commit/reset/resume + stage
         self.staged: list[VersionRef] = []
@@ -76,7 +78,7 @@ class FakeEngine:
     def stamp_response(self, response, served, current) -> None:
         pass
 
-    def upstream_url(self) -> str:
+    def base_url(self) -> str:
         return "http://engine"
 
 
@@ -86,7 +88,7 @@ def _full(run: str, version: int) -> VersionManifest:
 
 def _delta(run: str, version: int, *, files: list[str]) -> VersionManifest:
     return VersionManifest(
-        VersionRef(run, version), VersionKind.DELTA, files, base_version=version - 1, diff="xor"
+        VersionRef(run, version), VersionKind.DELTA, files, base_version=version - 1, delta_encoding="xor"
     )
 
 
@@ -167,7 +169,7 @@ def test_admit_rejected_triggers_wake() -> None:
         try:
             async with r.admit(VersionConstraint(min_version=5)):
                 raise AssertionError("should have rejected")
-        except PolicyViolation as e:
+        except ConstraintUnmet as e:
             assert e.error["type"] == "WeightVersionNotReady"
             assert e.error["target_version"] == 5
         assert r._task is not None  # the 409 kicked off a catch-up reconcile

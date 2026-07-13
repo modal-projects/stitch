@@ -15,19 +15,20 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+from stitch.engines.base import Engine
 from stitch.versions import VersionManifest, VersionRef
 
 _EXTRA_KEY_DELIM = ";"
 
 
-class SGLangEngine:
-    def __init__(self, upstream_url: str, local_checkpoint_dir: str, *, control_timeout: float = 120.0) -> None:
-        self._upstream = upstream_url.rstrip("/")
+class SGLangEngine(Engine):
+    def __init__(self, base_url: str, local_checkpoint_dir: str, *, control_timeout: float = 120.0) -> None:
+        self._base_url = base_url.rstrip("/")
         self.local_checkpoint_dir = local_checkpoint_dir
         self._control_timeout = control_timeout
 
-    def upstream_url(self) -> str:
-        return self._upstream
+    def base_url(self) -> str:
+        return self._base_url
 
     async def stage(self, manifest: VersionManifest, source_dir: str) -> None:
         # source_dir is the target version's dir; its parent is the root of weight_v*
@@ -95,14 +96,14 @@ class SGLangEngine:
         import httpx
 
         async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
-            resp = await client.post(f"{self._upstream}{path}", json=payload)
+            resp = await client.post(f"{self._base_url}{path}", json=payload)
         _raise_for_engine(resp, action or path)
 
     async def _get(self, path: str, *, ok: tuple[int, ...] = (200,)) -> None:
         import httpx
 
         async with httpx.AsyncClient(timeout=self._control_timeout, trust_env=False) as client:
-            resp = await client.get(f"{self._upstream}{path}")
+            resp = await client.get(f"{self._base_url}{path}")
         if resp.status_code not in ok:
             _raise_for_engine(resp, path)
 

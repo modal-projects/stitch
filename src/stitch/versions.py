@@ -54,7 +54,7 @@ class VersionKind(str, Enum):
 class VersionManifest:
     """One published version, derived from its directory's HF index (never stored
     separately). ``kind`` alone decides how a replica applies it: FULL seeds from
-    ``files``; DELTA decodes (``diff`` / ``compression`` / ``checksum``) against
+    ``files``; DELTA decodes (``delta_encoding`` / ``compression`` / ``checksum``) against
     ``base_version``, which chains back to the nearest FULL anchor.
     """
 
@@ -62,7 +62,7 @@ class VersionManifest:
     kind: VersionKind
     files: list[str]
     base_version: int | None = None   # required iff DELTA; always the same run as ref
-    diff: str | None = None
+    delta_encoding: str | None = None
     compression: str | None = None
     checksum: str | None = None
     base_model: str | None = None
@@ -88,7 +88,7 @@ class VersionManifest:
             kind=VersionKind.DELTA if diff else VersionKind.FULL,
             files=sorted({str(f) for f in weight_map.values()}),
             base_version=int(base) if diff and base is not None else None,
-            diff=diff,
+            delta_encoding=diff,
             compression=meta.get("compression") or None,
             checksum=meta.get("checksum") or None,
             base_model=base_model,
