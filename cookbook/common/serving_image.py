@@ -27,7 +27,7 @@ _SERVING_ENV = {
     "SGLANG_DISABLE_CUDNN_CHECK": "1",
     "SGLANG_ENABLE_OVERLAP_PLAN_STREAM": "1",
     "SGLANG_TIMEOUT_KEEP_ALIVE": "300",
-    "SGLANG_ENABLE_RELOAD_LOAD_PLAN": "0",  # record path hangs the GLM fused-MoE loader; keep off
+    "SGLANG_ENABLE_RELOAD_LOAD_PLAN": "1",  # opt into load-plan reload replay (the old GLM fused-MoE record hang no longer reproduces on the pinned fork; under e2e evaluation)
 }
 
 

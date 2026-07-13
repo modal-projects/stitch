@@ -58,13 +58,13 @@ src/stitch/                     # THE LIBRARY — general: abstractions + logic 
   pools/base.py   + modal_flash.py    # Pool            + ModalFlashPool (client)
 cookbook/                       # NON-core: recipes (deployments), layered
   common/                       #   framework-agnostic, shared by every recipe:
-                                #     config.py (ModalConfig + mount paths), serving_image.py,
-                                #     server.py (register_server), sidecar.py (serve entrypoint),
+                                #     config.py (ModalConfig), constants.py (mount paths/ports),
+                                #     serving_image.py, server.py (serve_startup/stop), sidecar.py,
                                 #     hooks.py (publish/claim/request logic), launch.py, ray_cluster.py,
                                 #     process.py, smoke.py
-  miles/                        #   framework subdir: trainer_image.py (+ pins), config.py
+  miles_disagg/                 #   framework subdir: trainer_image.py (+ pins), config.py
                                 #     (MilesConfig), app.py, prep.py, configs/<experiment>.py
-  slime/                        #   symmetric (SlimeConfig; app.py; configs/<experiment>.py)
+  slime_disagg/                 #   symmetric (SlimeConfig; app.py; configs/<experiment>.py)
 tools/profiling/                # dev-only diagnostics (never imported by src/)
 tests/                          # unit tests + the in-memory core harness (was local_disagg)
 ```

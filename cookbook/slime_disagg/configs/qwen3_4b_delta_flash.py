@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
-from cookbook.slime_disagg.configs.base import DATA_PATH, ModalConfig, SlimeConfig
+from cookbook.common.config import ModalConfig
+from cookbook.common.constants import DATA_PATH
+from cookbook.slime_disagg.config import SlimeConfig
 
 
-APP_NAME = "slime-qwen3-4b-delta-flash"
-DELTA_VOLUME_NAME = "slime-delta-bulletin-qwen3-4b"
+APP_NAME = "stitch-qwen3-4b"
+DELTA_VOLUME_NAME = "stitch-delta-qwen3-4b"
 DELTA_BULLETIN_ROOT = "/delta-bulletin"
+LOCAL_CHECKPOINT_PATH = "/local-checkpoint"
 
 # How the rollout sidecar applies published weight versions. "in_place" pauses
 # the engine, applies, and resumes — in-flight requests keep decoding on stale
@@ -47,7 +50,7 @@ class _Slime(SlimeConfig):
     # Publish-only: slime launches no engines and routes /generate to the Modal
     # Flash gateway (filled in at launch); rollouts pull weights from the pool.
     rollout_endpoint_url = None
-    custom_rollout_request_hook_path = "stitch.trainers.slime.rollout_request_weight_version_hook"
+    custom_rollout_request_hook_path = "cookbook.common.hooks.gated_rollout_request_hook"
     rollout_request_weight_version_mode = "exact"
     rollout_request_weight_version_lag = 0
     rollout_request_retry_attempts = 240
@@ -66,7 +69,7 @@ class _Slime(SlimeConfig):
     update_weight_delta_encoding = "xor"
     update_weight_delta_checksum = "xxh3-128"
     update_weight_disk_dir = DELTA_BULLETIN_ROOT
-    custom_delta_pre_push_path = "cookbook.slime_disagg.hooks.commit_and_wake"
+    custom_delta_pre_push_path = "cookbook.common.hooks.commit_and_wake"
 
     # Data
     prompt_data = f"{DATA_PATH}/gsm8k/train.parquet"
