@@ -7,7 +7,8 @@ different config module, not an edit here.
 
 from __future__ import annotations
 
-from cookbook.common.config import DATA_PATH, PREP_PATH, ModalConfig
+from cookbook.common.config import ModalConfig
+from cookbook.common.constants import DATA_PATH, PREP_PATH
 from cookbook.miles.config import MilesConfig
 
 # ── identity + paths ─────────────────────────────────────────────────────────

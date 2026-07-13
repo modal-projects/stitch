@@ -14,7 +14,8 @@ compressed-tensors group_size (the export reads it from the base's quantization_
 
 from __future__ import annotations
 
-from cookbook.common.config import DATA_PATH, ModalConfig
+from cookbook.common.config import ModalConfig
+from cookbook.common.constants import DATA_PATH
 from cookbook.slime.config import SlimeConfig
 
 APP_NAME = "stitch-kimi-k2-6-int4"

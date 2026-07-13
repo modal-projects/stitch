@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from cookbook.common.config import DATA_PATH, ModalConfig
+from cookbook.common.config import ModalConfig
+from cookbook.common.constants import DATA_PATH
 from cookbook.slime.config import SlimeConfig
 
 

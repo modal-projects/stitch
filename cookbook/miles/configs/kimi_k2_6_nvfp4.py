@@ -56,7 +56,8 @@ Prerequisites the bring-up depends on (flagged, validated by the moonlight run):
 
 from __future__ import annotations
 
-from cookbook.common.config import DATA_PATH, PREP_PATH, ModalConfig
+from cookbook.common.config import ModalConfig
+from cookbook.common.constants import DATA_PATH, PREP_PATH
 from cookbook.miles.config import MilesConfig
 
 

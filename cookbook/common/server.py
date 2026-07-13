@@ -12,9 +12,7 @@ from __future__ import annotations
 from typing import Any
 
 from . import process
-
-SIDECAR_PORT = 8000
-SGLANG_PORT = 8001
+from .constants import SGLANG_PORT, SIDECAR_PORT
 
 
 def serve_startup(
