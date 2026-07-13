@@ -1,203 +1,120 @@
-"""SGLang rollout engine adapters."""
+"""``SGLangEngine`` — the ``Engine`` instance for a single sglang server.
+
+The weight apply lives inside sglang (``weight_sync/local_checkpoint``): ``stage``
+POSTs ``/pull_weights``, which chain-replays deltas from the applied checkpoint with
+per-tensor checksum verification (reseeding from base on corruption), and ``commit``
+reloads the materialized checkpoint via ``/update_weights_from_disk``. This client
+only drives those endpoints and translates the version protocol — it holds no
+host-side decoder and imports no trainer package.
+"""
 
 from __future__ import annotations
 
 import asyncio
-import logging
-import re
-import time
-from dataclasses import dataclass
+import shutil
 from pathlib import Path
 from typing import Any
 
-from stitch.protocol import VersionManifest
+from stitch.versions import VersionManifest, VersionRef
+
+_EXTRA_KEY_DELIM = ";"
 
 
-logger = logging.getLogger(__name__)
-EXTRA_KEY_DELIMITER = ";"
+class SGLangEngine:
+    def __init__(self, upstream_url: str, local_checkpoint_dir: str, *, control_timeout: float = 120.0) -> None:
+        self._upstream = upstream_url.rstrip("/")
+        self.local_checkpoint_dir = local_checkpoint_dir
+        self._control_timeout = control_timeout
 
+    def upstream_url(self) -> str:
+        return self._upstream
 
-def parse_reload_timing(message: str) -> dict[str, float]:
-    """Lift the engine's optional ``[reload timing] iter_wait=1.2s load=3.4s ...``
-    success-message suffix (emitted by the instrumented modal-projects/sglang
-    fork) into ``{"engine_iter_wait_s": 1.2, ...}``. Empty on engines without
-    the instrumentation, so callers can treat the result as best-effort."""
-    match = re.search(r"\[reload timing\]([^\[\]]*)", message)
-    if match is None:
-        return {}
-    return {
-        f"engine_{key}_s": float(value)
-        for key, value in re.findall(r"(\w+)=([0-9.]+)s", match.group(1))
-    }
+    async def stage(self, manifest: VersionManifest, source_dir: str) -> None:
+        # source_dir is the target version's dir; its parent is the root of weight_v*
+        # dirs the pull walks. Disk-only, so it runs while the engine serves.
+        await self._post(
+            "/pull_weights",
+            {
+                "local_checkpoint_dir": self.local_checkpoint_dir,
+                "source_dir": str(Path(source_dir).parent),
+                "target_version": manifest.ref.version,
+            },
+            timeout=None,
+            action="weight pull",
+        )
 
+    async def commit(self, ref: VersionRef) -> None:
+        # flush_cache stays off here: the reconciler flushes (quiesce) while drained,
+        # and the engine's own post-apply flush hard-asserts — killing the scheduler —
+        # if a request slipped in.
+        await self._post(
+            "/update_weights_from_disk",
+            {"model_path": self.local_checkpoint_dir, "weight_version": str(ref.version), "flush_cache": False},
+            timeout=None,
+            action="weight update",
+        )
 
-def _response_payload(resp: Any) -> dict[str, Any]:
-    """The engine's JSON body when there is one, else the raw text under
-    ``message`` — error responses must never lose the engine's explanation."""
-    try:
-        data = resp.json()
-    except ValueError:
-        return {"message": resp.text}
-    return data if isinstance(data, dict) else {"message": data}
+    async def flush(self) -> None:
+        await self._get("/flush_cache", ok=(200, 404))
 
+    async def pause(self) -> None:
+        await self._post("/pause_generation", {"mode": "in_place"}, timeout=self._control_timeout)
 
-def compose_extra_key(
-    version: int, user_extra_key: str | None = None, run_id: str | None = None
-) -> str:
-    """Compose a weight-version-namespaced SGLang radix-cache ``extra_key``,
-    e.g. ``wv7;my-key`` or ``wv1;run-a/my-key``.
-
-    The version prefix namespaces the KV cache per weight version; folding
-    ``run_id`` into the key content keeps two runs that both restart version
-    numbering at 1 in distinct namespaces, so a stale cross-run request can
-    never reuse another run's same-numbered KV.
-    """
-    run_segment = f"{run_id}/" if run_id else ""
-    return f"wv{int(version)}{EXTRA_KEY_DELIMITER}{run_segment}{user_extra_key or ''}"
-
-
-@dataclass
-class SGLangDiskDeltaAdapter:
-    """Syncs disk-delta weight versions into one local SGLang server via the
-    engine's ``/pull_weights`` endpoint.
-
-    The delta apply lives in the ENGINE (sglang ``weight_sync/local_checkpoint``):
-    ``stage_manifest`` POSTs ``/pull_weights``, which materializes the host-local
-    checkpoint — seeded from the engine's own ``model_path``, chain-replayed with
-    per-tensor checksum verification, and self-recovering (a torn or corrupt
-    local state is reseeded from base and replayed, never re-patched). Multi-
-    version catch-up is native: one pull chains every delta up to the target.
-    ``commit_manifest`` then reloads the materialized checkpoint through the
-    ordinary ``update_weights_from_disk`` path.
-
-    The sidecar holds no host-side decoder — no trainer package (slime/miles)
-    import at all. Cross-host object-store visibility is the engine's concern
-    too (``--custom-pull-weights-pre-read-hook`` on the server).
-    """
-
-    upstream_url: str
-    local_checkpoint_dir: str
-    backend: str = "disk_delta"
-
-    def __post_init__(self) -> None:
-        self.upstream_url = self.upstream_url.rstrip("/")
+    async def resume(self) -> None:
+        await self._post("/continue_generation", {}, timeout=self._control_timeout)
 
     async def reset(self) -> None:
-        """Discard the local checkpoint so the next pull reseeds from scratch.
-
-        Used on a run switch: the new run's chain forks at base, and version
-        numbers restart, so the engine-side pull cannot be allowed to chain the
-        new run's deltas onto the old run's bytes. Wiping the directory makes
-        the next ``/pull_weights`` take the fresh-host path (full seed from the
-        engine's base, then the new chain). The sync manager invokes this under
-        the commit gate (engine paused), so no reload races the wipe.
-        """
-        import shutil
-
+        # Wipe the local checkpoint so the next pull reseeds from the engine's base
+        # rather than chaining a new run's deltas onto the old run's bytes.
         await asyncio.to_thread(shutil.rmtree, self.local_checkpoint_dir, ignore_errors=True)
 
-    async def flush_cache(self) -> None:
+    def stamp_request(self, request: dict[str, Any], served: VersionRef) -> None:
+        user = request.get("extra_key")
+        if isinstance(user, list):
+            request["extra_key"] = [self._extra_key(served, k) for k in user]
+        else:
+            request["extra_key"] = self._extra_key(served, user)
+
+    def stamp_response(self, response: dict[str, Any], served: VersionRef, current: VersionRef) -> None:
+        meta = response.get("meta_info")
+        if isinstance(meta, dict):  # sglang /generate carries attribution in meta_info
+            meta["weight_version"] = str(served.version)
+            meta["weight_version_start"] = served.version
+            meta["weight_version_end"] = current.version
+        else:  # OpenAI-style routes at the top level
+            response["weight_version_start"] = served.version
+            response["weight_version_end"] = current.version
+
+    def _extra_key(self, served: VersionRef, user: str | None) -> str:
+        # Namespace the KV cache by version (and run, so two runs that both restart at
+        # v1 stay distinct): requests on different versions can't share radix prefixes.
+        run = f"{served.run_id}/" if served.run_id else ""
+        return f"wv{served.version}{_EXTRA_KEY_DELIM}{run}{user or ''}"
+
+    async def _post(self, path: str, payload: dict[str, Any], *, timeout: float | None, action: str | None = None) -> None:
         import httpx
 
-        async with httpx.AsyncClient(timeout=120.0, trust_env=False) as client:
-            resp = await client.get(f"{self.upstream_url}/flush_cache")
-            if resp.status_code not in (200, 404):
-                resp.raise_for_status()
+        async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
+            resp = await client.post(f"{self._upstream}{path}", json=payload)
+        _raise_for_engine(resp, action or path)
 
-    async def pause_generation(self) -> None:
-        """Pause the scheduler loop in place: in-flight requests stay resident
-        and resume decoding on their existing KV after continue_generation."""
+    async def _get(self, path: str, *, ok: tuple[int, ...] = (200,)) -> None:
         import httpx
 
-        async with httpx.AsyncClient(timeout=120.0, trust_env=False) as client:
-            resp = await client.post(f"{self.upstream_url}/pause_generation", json={"mode": "in_place"})
-            resp.raise_for_status()
+        async with httpx.AsyncClient(timeout=self._control_timeout, trust_env=False) as client:
+            resp = await client.get(f"{self._upstream}{path}")
+        if resp.status_code not in ok:
+            _raise_for_engine(resp, path)
 
-    async def continue_generation(self) -> None:
-        import httpx
 
-        async with httpx.AsyncClient(timeout=120.0, trust_env=False) as client:
-            resp = await client.post(f"{self.upstream_url}/continue_generation", json={})
-            resp.raise_for_status()
-
-    async def stage_manifest(self, manifest: VersionManifest, version_path: str) -> dict[str, Any] | None:
-        """Bring the local checkpoint up to this version via the engine's
-        ``/pull_weights`` (chain-replayed from whatever is applied, per-tensor
-        checksum-verified, reseed-on-corruption).
-
-        Safe to run while the engine serves: the pull is disk-only (weights live
-        on the GPU), so the sync manager calls this BEFORE closing the commit
-        gate. version_path is the published version dir; its parent is the root
-        of weight_v* dirs the pull walks.
-        """
-        import httpx
-
-        delta_root = str(Path(version_path).parent)
-        _t_apply = time.perf_counter()
-        async with httpx.AsyncClient(timeout=None, trust_env=False) as client:
-            resp = await client.post(
-                f"{self.upstream_url}/pull_weights",
-                json={
-                    "local_checkpoint_dir": self.local_checkpoint_dir,
-                    "source_dir": delta_root,
-                    "target_version": int(manifest.version),
-                },
-            )
-            # A failed pull comes back as HTTP 400 with the engine's traceback
-            # in the JSON body — read it before checking status or the actual
-            # error is lost behind a bare status code.
-            data = _response_payload(resp)
-            if resp.status_code != 200 or data.get("success") is False:
-                raise RuntimeError(
-                    f"SGLang rejected weight pull (HTTP {resp.status_code}): {data.get('message', data)}"
-                )
-        elapsed = time.perf_counter() - _t_apply
-        logger.info("[apply timing] v=%s engine_pull=%.2fs", manifest.version, elapsed)
-        return {"engine_pull_s": round(elapsed, 3)}
-
-    async def commit_manifest(
-        self,
-        manifest: VersionManifest,
-        version_path: str,
-        weight_names: list[str] | None = None,
-    ) -> dict[str, Any] | None:
-        """Reload the staged local checkpoint into the engine. The sync
-        manager calls this under the commit gate (engine paused in in_place
-        mode), after :meth:`stage_manifest` has materialized the version.
-
-        ``weight_names`` is the tail's union of touched tensor names; an
-        engine with the partial-reload load plan uses it to reload only the
-        touched modules (O(delta)) and silently full-reloads otherwise. The
-        pinned engine has no partial reload (full reloads re-derive quantized
-        kernel state correctly; partial needs a per-module restore design), so
-        the names are withheld unless ``STITCH_PARTIAL_RELOAD=1`` opts in."""
-        import os
-
-        import httpx
-
-        _t_reload = time.perf_counter()
-        payload: dict[str, Any] = {
-            "model_path": self.local_checkpoint_dir,
-            "weight_version": str(manifest.version),
-            # The sync manager flushes via GET /flush_cache while quiesced.
-            # The engine-side post-apply flush hard-asserts on failure
-            # (killing the scheduler process) if any request slipped in, so
-            # it must stay disabled here.
-            "flush_cache": False,
-        }
-        if weight_names and os.environ.get("STITCH_PARTIAL_RELOAD", "0") == "1":
-            payload["weight_names"] = list(weight_names)
-        async with httpx.AsyncClient(timeout=None, trust_env=False) as client:
-            resp = await client.post(f"{self.upstream_url}/update_weights_from_disk", json=payload)
-            # Failures come back as HTTP 400 with the engine's error in the
-            # JSON body — read it before checking status.
-            data = _response_payload(resp)
-            if resp.status_code != 200 or data.get("success") is False:
-                raise RuntimeError(
-                    f"SGLang rejected weight update (HTTP {resp.status_code}): {data.get('message', data)}"
-                )
-        elapsed = time.perf_counter() - _t_reload
-        logger.info("[apply timing] v=%s engine_reload=%.2fs", manifest.version, elapsed)
-        detail: dict[str, Any] = {"engine_reload_s": round(elapsed, 3)}
-        detail.update(parse_reload_timing(str(data.get("message") or "")))
-        return detail
+def _raise_for_engine(resp: Any, action: str) -> None:
+    # A failed control call comes back as HTTP 4xx with the engine's traceback in the
+    # JSON body — read the body before the status so the real error isn't lost.
+    try:
+        data = resp.json()
+        if not isinstance(data, dict):
+            data = {"message": data}
+    except ValueError:
+        data = {"message": resp.text}
+    if resp.status_code != 200 or data.get("success") is False:
+        raise RuntimeError(f"sglang rejected {action} (HTTP {resp.status_code}): {data.get('message', data)}")

@@ -40,8 +40,6 @@ class Engine(Protocol):
         """Reseed the local checkpoint to the engine's boot base."""
         ...
 
-    async def applied_version(self) -> VersionRef | None: ...
-
     def stamp_request(self, request: dict[str, Any], served: VersionRef) -> None:
         """Namespace a request to the version it's served on so requests from different
         versions can't share KV prefixes (engine-specific, e.g. sglang's extra_key).

@@ -70,16 +70,13 @@ class FakeEngine:
     async def reset(self) -> None:
         self.calls.append("reset")
 
-    async def applied_version(self) -> VersionRef | None:
-        return self.committed[-1] if self.committed else None
+    def stamp_request(self, request, served) -> None:
+        pass
 
-    def stamp_request(self, request, constraint):
-        return request
+    def stamp_response(self, response, served, current) -> None:
+        pass
 
-    def read_response_version(self, response):
-        return None
-
-    def generate_url(self) -> str:
+    def upstream_url(self) -> str:
         return "http://engine"
 
 
