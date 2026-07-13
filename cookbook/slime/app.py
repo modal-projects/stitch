@@ -11,19 +11,17 @@ from __future__ import annotations
 
 import importlib
 import os
-import shlex
 import subprocess
 import tempfile
 import uuid
 from types import SimpleNamespace
-from typing import Any
 
 import modal
 import modal.experimental
 
 from stitch.pools.modal_flash import ModalFlashPool
 
-from cookbook.common import ray_cluster, serving_image, server, smoke
+from cookbook.common import launch, ray_cluster, serving_image, server, smoke
 from cookbook.common.config import CHECKPOINTS_PATH, DATA_PATH, HF_CACHE_PATH
 from cookbook.slime import trainer_image
 from cookbook.slime.config import SlimeConfig, YAML_CONFIG_FIELDS
@@ -50,9 +48,9 @@ server_image = serving_image.build_serving_image(hf_cache_path=str(HF_CACHE_PATH
 if slime_local:
     server_image = server_image.add_local_dir(slime_local, remote_path=SLIME_ROOT, ignore=[".git", "**/__pycache__", "**/*.pyc"])
 
-hf_cache_volume = modal.Volume.from_name("huggingface-cache", create_if_missing=True)
-data_volume = modal.Volume.from_name("slime-data", create_if_missing=True)
-checkpoints_volume = modal.Volume.from_name("slime-checkpoints", create_if_missing=True)
+hf_cache_volume = modal.Volume.from_name("huggingface-cache", create_if_missing=True, version=2)
+data_volume = modal.Volume.from_name("slime-data", create_if_missing=True, version=2)
+checkpoints_volume = modal.Volume.from_name("slime-checkpoints", create_if_missing=True, version=2)
 delta_volume = modal.Volume.from_name(exp.DELTA_VOLUME_NAME, create_if_missing=True, version=2)
 
 train_volumes = {
@@ -146,8 +144,8 @@ class Trainer:
             "run_id": run_id,
         }
         cfg.custom_config_path = hook_knobs  # materialized to a YAML path below; keep the mapping for claim
-        _resolve_and_materialize(cfg, tempfile.mkdtemp())
-        cmd = _build_train_cmd(cfg)
+        launch.resolve_config(cfg, tempfile.mkdtemp(), YAML_CONFIG_FIELDS)
+        cmd = launch.build_train_cmd(cfg, SLIME_ROOT, "slime_model_script")
 
         # Claim the pool before slime publishes: reset every replica to base for this run.
         from cookbook.common import hooks
@@ -162,36 +160,6 @@ class Trainer:
 if N_TRAIN_NODES > 1:
     Trainer = modal.experimental.clustered(N_TRAIN_NODES, rdma=True)(Trainer)
 Trainer = app.cls(**_TRAINER_KWARGS)(Trainer)
-
-
-# ── slime launch helpers ──────────────────────────────────────────────────────
-def _build_train_cmd(cfg: Any) -> str:
-    """The slime train command, sourcing the model-arch MODEL_ARGS script if set."""
-    train_script = f"{SLIME_ROOT}/{'train_async.py' if cfg.async_mode else 'train.py'}"
-    if cfg.slime_model_script:
-        inner = (
-            f"source {SLIME_ROOT}/{cfg.slime_model_script} && "
-            f"python3 {train_script} ${{MODEL_ARGS[@]}} {shlex.join(cfg.cli_args())}"
-        )
-        return f"bash -c {shlex.quote(inner)}"
-    return f"python3 {train_script} {shlex.join(cfg.cli_args())}"
-
-
-def _resolve_and_materialize(cfg: Any, tmpdir: str) -> None:
-    """Resolve HF repo-id checkpoint fields to local paths and materialize inline YAML
-    config dicts to files the trainer reads. Absolute paths are left untouched."""
-    from huggingface_hub import snapshot_download
-    import yaml
-
-    for attr in ("hf_checkpoint", "load", "ref_load", "critic_load"):
-        if (val := getattr(cfg, attr, None)) and not str(val).startswith("/"):
-            setattr(cfg, attr, snapshot_download(val, local_files_only=True))
-    for field in YAML_CONFIG_FIELDS:
-        if isinstance(val := getattr(cfg, field, None), dict):
-            path = os.path.join(tmpdir, f"{field}.yaml")
-            with open(path, "w") as f:
-                yaml.dump(val, f)
-            setattr(cfg, field, path)
 
 
 # ── Preparation + entrypoints ──────────────────────────────────────────────────
