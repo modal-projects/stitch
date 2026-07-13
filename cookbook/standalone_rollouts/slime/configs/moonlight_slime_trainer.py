@@ -8,10 +8,9 @@ bulletin board.
 Key difference from slime_disagg's M3: staleness is gated by a PUBLISH-HOOK
 readiness BARRIER, not a per-request version pin. `announce_and_wait` copies the
 new version to S3, POSTs the hot-load API, and blocks until the front door
-reports every live replica ready on the new version (readiness_threshold defaults
-to 1.0), so the next rollouts always run on current weights. The request hook
-therefore leaves the version gate OFF and only carries auth headers, retries, and
-session affinity.
+reports every live replica ready on the new version (the barrier is fixed at
+100%), so the next rollouts always run on current weights. The request hook leaves
+the version gate off and only carries auth headers, retries, and session affinity.
 """
 
 from __future__ import annotations
@@ -71,7 +70,7 @@ class _Slime(SlimeConfig):
 
     # Disk-delta publish-only: write weight_v{N}/ to local disk; the pre-push hook
     # copies to the S3 transport, POSTs the hot-load API, and blocks until all live
-    # replicas report the new version (readiness_threshold 1.0 by default).
+    # replicas report the new version (the barrier is fixed at 100%).
     update_weight_mode = "delta"
     update_weight_transport = "disk"
     update_weight_delta_encoding = "xor"

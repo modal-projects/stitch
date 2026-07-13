@@ -4,7 +4,7 @@ These hooks run in SLIME, not in the rollout provider:
 
 1. Copy the completed SLIME disk-delta version directory to the mounted S3 transport.
 2. Announce the new snapshot identity to the provider.
-3. Poll the provider's pool readiness endpoint until enough replicas report
+3. Poll the provider's pool readiness endpoint until every live replica reports
    the target identity.
 
 They assume the provider can consume the files written by SLIME, or that a
@@ -19,13 +19,20 @@ import shutil
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from cookbook.rollout_control import apply_session_affinity
 from cookbook.rollout_control import distributed_rank as _distributed_rank
 from cookbook.rollout_control import read_setting as _setting
+from cookbook.standalone_rollouts.ledger import (
+    LEDGER_FILENAME,
+    IdentityLedger,
+    LedgerCorruption,
+    load_ledger_data,
+)
+from stitch.bulletin import FilesystemBulletinBoard
 from stitch.protocol import RolloutPoolState, parse_weight_identity, weight_identity
 
 
@@ -35,22 +42,14 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class ShimConfig:
     api_base_url: str
+    base_snapshot_identity: str
     transport_root: Path | None = None
     api_key: str | None = None
     provider_model: str | None = None
     provider_deployment: str | None = None
-    base_snapshot_identity: str = "base"
-    compression_format: str = "zstd"
     checksum_format: str = "xxh3-128"
-    reset_prompt_cache: str = "new_session"
-    readiness_threshold: float = 1.0
     poll_timeout_seconds: float = 30 * 60
     poll_interval_seconds: float = 5.0
-    # Run id: partitions the transport (`<run_id>/weight_v{N}/`) and is folded
-    # into the single self-identifying pointer, so a fresh run's chain is isolated
-    # and a finished run's pointer can't fast-forward a new run's cold start.
-    # None = the run-less customer flat layout.
-    run_id: str | None = None
 
     @classmethod
     def from_env(cls, args: Any | None = None) -> "ShimConfig":
@@ -79,33 +78,13 @@ class ShimConfig:
                 args,
                 "api_shim_base_snapshot_identity",
                 "STITCH_SHIM_BASE_SNAPSHOT_IDENTITY",
-                default="base",
-            ),
-            compression_format=_setting(
-                args,
-                "api_shim_compression_format",
-                "STITCH_SHIM_COMPRESSION_FORMAT",
-                default="zstd",
+                required=True,
             ),
             checksum_format=_setting(
                 args,
                 "api_shim_checksum_format",
                 "STITCH_SHIM_CHECKSUM_FORMAT",
                 default=str(getattr(args, "update_weight_delta_checksum", "xxh3-128")),
-            ),
-            reset_prompt_cache=_setting(
-                args,
-                "api_shim_reset_prompt_cache",
-                "STITCH_SHIM_RESET_PROMPT_CACHE",
-                default="new_session",
-            ),
-            readiness_threshold=float(
-                _setting(
-                    args,
-                    "api_shim_readiness_threshold",
-                    "STITCH_SHIM_READINESS_THRESHOLD",
-                    default="1.0",
-                )
             ),
             poll_timeout_seconds=float(
                 _setting(
@@ -123,10 +102,6 @@ class ShimConfig:
                     default="5",
                 )
             ),
-            # run_id is NOT read here: a per-launch value can't ride an --api-shim-*
-            # arg (dropped by slime's parser) or a late env var (doesn't reach the
-            # Ray actor this hook runs in). announce_and_wait derives it from the
-            # version dir slime wrote (update_weight_disk_dir = <local>/<run_id>).
         )
 
     def identity_for_version(self, version: int) -> str:
@@ -139,15 +114,44 @@ class ShimConfig:
 
     def transport_path_for_identity(self, identity: str) -> Path:
         if self.transport_root is None:
-            raise RuntimeError("transport_root is not configured (api_shim_transport_root)")
-        base = self.transport_root / self.run_id if self.run_id else self.transport_root
-        return base / identity
+            raise RuntimeError(
+                "transport_root is not configured (api_shim_transport_root)"
+            )
+        return self.transport_root / identity
 
-    def readiness_identity(self, identity: str) -> str:
-        """The run-scoped snapshot identity the pool reports for readiness matching
-        (``<run_id>/weight_vN``), so a replica on a finished run's same-numbered
-        version isn't miscounted as ready for this run."""
-        return f"{self.run_id}/{identity}" if self.run_id else identity
+
+def assert_clean_transport(cfg: ShimConfig) -> None:
+    """Require the base-only state used to start one append-only training run."""
+    if cfg.transport_root is None:
+        raise RuntimeError("transport_root is not configured (api_shim_transport_root)")
+    persisted = load_ledger_data(cfg.transport_root)
+    if persisted is None:
+        raise RuntimeError(
+            "identity ledger is not initialized; deploy the front door first"
+        )
+    try:
+        ledger = IdentityLedger.from_dict(
+            persisted, expected_base_identity=cfg.base_snapshot_identity
+        )
+        run_id, pointer_version = FilesystemBulletinBoard(
+            cfg.transport_root, layout="slime"
+        ).read_latest()
+    except (LedgerCorruption, ValueError) as exc:
+        raise RuntimeError(f"transport control state is invalid: {exc}") from exc
+    if run_id is not None or ledger.head_version != 0 or pointer_version != 0:
+        raise RuntimeError(
+            "transport prefix already contains a training chain; use a fresh prefix "
+            "and redeploy for an independent run"
+        )
+
+    allowed = {LEDGER_FILENAME, "latest"}
+    leftovers = sorted(
+        path.name for path in cfg.transport_root.iterdir() if path.name not in allowed
+    )
+    if leftovers:
+        raise RuntimeError(
+            f"transport prefix contains leftover uploads {leftovers!r}; use a fresh prefix"
+        )
 
 
 def announce_and_wait(args: Any, version_dir: str, rollout_engines: list[Any]) -> None:
@@ -158,7 +162,7 @@ def announce_and_wait(args: Any, version_dir: str, rollout_engines: list[Any]) -
     copies that version dir to the shared transport the provider pool pulls from,
     then signals the provider's customer hot-load API and blocks until the
     elastic pool reports the version ready — so the next rollout only runs once
-    enough replicas serve the new weights. The POST drives the front door, which
+    every live replica serves the new weights. The POST drives the front door, which
     owns the canonical ``latest`` pointer.
     """
 
@@ -172,63 +176,29 @@ def announce_and_wait(args: Any, version_dir: str, rollout_engines: list[Any]) -
         # with the disk-dir root, not a published version dir — nothing to
         # announce yet. Only weight_v{N} dirs are hot-loaded.
         return
+    if version == 0:
+        raise RuntimeError(
+            "SLIME v0 is the configured base and must not be uploaded as a delta"
+        )
     cfg = ShimConfig.from_env(args)
-    # The run id is the partition dir slime wrote into
-    # (update_weight_disk_dir = <local>/<run_id>): derive it from the version dir
-    # rather than an env var or --api-shim-* arg, neither of which crosses into the
-    # Ray training actor this hook runs in. update_weight_disk_dir is a known slime
-    # arg, so the partition reliably reaches here.
-    run_id = Path(version_dir).parent.name or None
-    if run_id:
-        cfg = replace(cfg, run_id=run_id)
     # slime's atomic-rename writer can't target the S3 mount (ENOSYS), so the
     # version dir lives on local disk; copy it to the transport (PutObject) the
     # provider pool reads before signalling the hot-load.
-    _copy_version_to_transport(Path(version_dir), cfg.transport_path_for_identity(identity))
+    _copy_version_to_transport(
+        Path(version_dir), cfg.transport_path_for_identity(identity)
+    )
     _post_hot_load(
         cfg,
         identity=identity,
         previous_identity=cfg.previous_identity_for_version(version),
     )
-    target = cfg.readiness_identity(identity)
     state = wait_until_ready(cfg, identity)
     logger.info(
         "Provider hot-load ready for %s: %s/%s replicas",
-        target,
-        state.ready_count(target_snapshot_identity=target),
+        identity,
+        state.ready_count(target_snapshot_identity=identity),
         len(state.replicas),
     )
-
-
-def announce_claim(args: Any, *, run_id: str) -> None:
-    """Trainer launch hook (rank 0): claim the rollout pool for this run via the
-    front door, the standalone counterpart to :func:`cookbook.bulletin_hooks.claim_pool`.
-
-    POST the empty pointer (``weight_v000000``) under a fresh ``run_id`` so the
-    front door's cross-run :func:`decide_pointer_move` resets ``latest`` to base
-    *before* the first delta — every replica (cold, or warm on a finished run)
-    reconciles to base up front instead of inferring the reset from the first
-    publish's run mismatch. Best-effort and non-blocking: the pool may be scaled
-    to zero at launch, and the first :func:`announce_and_wait` already blocks on
-    readiness, so a transient claim failure costs only the early reset, not
-    correctness. ``run_id`` must be fresh per launch (the epoch/fence token).
-    """
-    if _distributed_rank() not in (None, 0):
-        return
-    cfg = replace(ShimConfig.from_env(args), run_id=run_id)
-    try:
-        _post_hot_load(
-            cfg,
-            identity=weight_identity(0),
-            previous_identity=cfg.base_snapshot_identity,
-        )
-    except Exception:  # noqa: BLE001
-        logger.warning(
-            "Best-effort pool claim failed for run %r; the first publish's "
-            "cross-run reset will still establish base",
-            run_id,
-            exc_info=True,
-        )
 
 
 def rollout_request_weight_version_hook(
@@ -238,13 +208,12 @@ def rollout_request_weight_version_hook(
     auth headers, and session affinity for one rollout request.
 
     Version admission needs no per-request pin here: announce_and_wait blocks
-    the next rollout until the pool serves the target, and a lagging replica
-    rejects with a retryable 409.
+    the next rollout until every live replica serves the target, while a newly
+    started replica synchronizes to the latest version before becoming ready.
     """
-    # Generous retries on every rollout request so a cold/scaling/lagging replica
-    # (a transient 503, or a 409 weight-version reject) is retried rather than
-    # failing the rollout — the point of the elastic-pool readiness model. This
-    # also rides out a pool that is still warming when rollouts begin.
+    # Generous retries on every rollout request so transient cold-start or
+    # scaling failures do not fail the rollout. This also rides out a pool that
+    # is still warming when rollouts begin.
     request["max_retries"] = int(
         _setting(
             args,
@@ -282,19 +251,18 @@ def rollout_request_weight_version_hook(
         "STITCH_SHIM_SESSION_AFFINITY_HEADER",
         default="x-session-affinity",
     )
-    apply_session_affinity(request, getattr(sample, "session_id", None), affinity_header)
+    apply_session_affinity(
+        request, getattr(sample, "session_id", None), affinity_header
+    )
 
 
 def wait_until_ready(cfg: ShimConfig, identity: str) -> RolloutPoolState:
-    # The pool reports current_snapshot_identity run-scoped (`<run_id>/weight_vN`),
-    # so match against the same composite — otherwise a replica still serving a
-    # finished run's same-numbered version would falsely count as ready.
-    target = cfg.readiness_identity(identity)
+    target = identity
     deadline = time.monotonic() + cfg.poll_timeout_seconds
     while True:
         state = _get_hot_load_state(cfg)
         if state.is_ready(
-            threshold=cfg.readiness_threshold,
+            threshold=1.0,
             target_snapshot_identity=target,
         ):
             return state
@@ -302,13 +270,13 @@ def wait_until_ready(cfg: ShimConfig, identity: str) -> RolloutPoolState:
             ready = state.ready_count(target_snapshot_identity=target)
             raise TimeoutError(
                 f"Timed out waiting for {target}: {ready}/{len(state.replicas)} "
-                f"replicas ready at threshold {cfg.readiness_threshold}; last_state={state.to_dict()}"
+                f"replicas ready; last_state={state.to_dict()}"
             )
         logger.info(
             "Waiting for %s readiness: %.3f < %.3f",
             target,
             state.readiness_fraction(target_snapshot_identity=target),
-            cfg.readiness_threshold,
+            1.0,
         )
         time.sleep(cfg.poll_interval_seconds)
 
@@ -316,22 +284,27 @@ def wait_until_ready(cfg: ShimConfig, identity: str) -> RolloutPoolState:
 def _post_hot_load(cfg: ShimConfig, *, identity: str, previous_identity: str) -> None:
     payload = {
         "identity": identity,
-        # The run id tells the front door which (possibly new) run this belongs to;
-        # a new run restarts the version space instead of being a rewind.
-        "run_id": cfg.run_id,
         "incremental_snapshot_metadata": {
             "previous_snapshot_identity": previous_identity,
-            "compression_format": cfg.compression_format,
+            "compression_format": "zstd",
             "checksum_format": cfg.checksum_format,
         },
-        "reset_prompt_cache": cfg.reset_prompt_cache,
+        "reset_prompt_cache": "new_session",
     }
-    _request_json(
+    response = _request_json(
         f"{cfg.api_base_url}/hot_load/v1/models/hot_load",
         method="POST",
         headers=_headers(cfg),
         payload=payload,
     )
+    if (
+        not isinstance(response, dict)
+        or response.get("accepted") is not True
+        or response.get("identity") != identity
+    ):
+        raise RuntimeError(
+            f"provider did not accept identity {identity!r}: {response!r}"
+        )
 
 
 def _get_hot_load_state(cfg: ShimConfig) -> RolloutPoolState:
@@ -395,10 +368,26 @@ def _copy_version_to_transport(version_dir: Path, destination: Path) -> None:
     for path in files:
         target = destination / path.relative_to(version_dir)
         target.parent.mkdir(parents=True, exist_ok=True)
-        if target.exists():
-            target.unlink()  # the transport may reject overwrites
+        try:
+            identical = _files_equal(path, target)
+        except FileNotFoundError:
+            identical = False
+        else:
+            if not identical:
+                raise FileExistsError(
+                    f"immutable upload {target} already exists with different contents"
+                )
+            continue
         with path.open("rb") as src, target.open("wb") as dst:
             shutil.copyfileobj(src, dst)
 
 
-
+def _files_equal(left: Path, right: Path) -> bool:
+    with left.open("rb") as left_file, right.open("rb") as right_file:
+        while True:
+            left_chunk = left_file.read(1024 * 1024)
+            right_chunk = right_file.read(1024 * 1024)
+            if left_chunk != right_chunk:
+                return False
+            if not left_chunk:
+                return True
