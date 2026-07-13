@@ -17,7 +17,7 @@ from __future__ import annotations
 from cookbook.common.config import DATA_PATH, ModalConfig
 from cookbook.slime.config import SlimeConfig
 
-APP_NAME = "stitch-slime-kimi-k2-6-int4"
+APP_NAME = "stitch-kimi-k2-6-int4"
 DELTA_VOLUME_NAME = "stitch-delta-kimi-k2-6-int4"
 DELTA_BULLETIN_ROOT = "/delta-bulletin"
 LOCAL_CHECKPOINT_PATH = "/local-checkpoint"
