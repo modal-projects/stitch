@@ -24,7 +24,7 @@ SERVER_CLS_NAME = "Server"                 # the Flash-served rollout replica cl
 DELTA_VOLUME_NAME = "stitch-delta-glm45-air-fp8"  # the Store's Modal Volume
 DELTA_BULLETIN_ROOT = "/delta-bulletin"    # Store root: `latest` + <run_id>/ chains
 LOCAL_CHECKPOINT_PATH = "/local-checkpoint"  # engine's per-host materialized checkpoint
-SIDECAR_COMMIT_MODE = "quiesce"            # overrides the in_place default: fp8 reload is exact, so draining buys clean per-version attribution
+SIDECAR_COMMIT_MODE = "quiesce"            # fp8 reload is exact; draining buys clean per-version attribution
 
 HF_CACHE_PATH = Path("/root/.cache/huggingface")
 DATA_PATH = Path("/data")
