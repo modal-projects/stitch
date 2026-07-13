@@ -2,7 +2,7 @@
 
 The base image bakes Megatron-LM (native --fp4-format NVFP4) + TransformerEngine; the
 miles fork is cloned over it at a pinned commit. The serving half is separate and shared
-(common/images.py) — the pool installs no trainer package.
+(common/serving_image.py) — the pool installs no trainer package.
 """
 
 from __future__ import annotations

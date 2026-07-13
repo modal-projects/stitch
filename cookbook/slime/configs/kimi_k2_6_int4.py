@@ -76,8 +76,8 @@ class _Slime(SlimeConfig):
     rollout_endpoint_url = None          # filled at launch from the pool gateway
 
     # The three plug points stitch fills (slime's publish hook key is custom_delta_pre_push_path):
-    custom_rollout_request_hook_path = "cookbook.slime.hooks.gated_rollout_request_hook"
-    custom_delta_pre_push_path = "cookbook.slime.hooks.commit_and_wake"
+    custom_rollout_request_hook_path = "cookbook.common.hooks.gated_rollout_request_hook"
+    custom_delta_pre_push_path = "cookbook.common.hooks.commit_and_wake"
     rollout_request_weight_version_mode = "min"
     rollout_request_weight_version_lag = 1  # bounded staleness window
     rollout_request_retry_attempts = 240

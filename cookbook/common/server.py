@@ -31,7 +31,6 @@ def register_server(
     sglang_args: dict,
     tp: int,
     concurrency: int,
-    warmup_payload: dict,
     bulletin_root: str,
     local_checkpoint_dir: str,
     volume_name: str,
@@ -68,7 +67,12 @@ def register_server(
                 extra_server_args=sglang_args, health_timeout=startup_timeout, health_poll_interval=10.0,
             )
             self.endpoint.start()
-            warmup_chat_completions(port=SGLANG_PORT, payload=warmup_payload, successful_requests=2,
+            warmup = {
+                "model": model_name,
+                "messages": [{"role": "user", "content": "Reply with exactly OK."}],
+                "max_tokens": 8, "temperature": 0, "chat_template_kwargs": {"enable_thinking": False},
+            }
+            warmup_chat_completions(port=SGLANG_PORT, payload=warmup, successful_requests=2,
                                     request_timeout=120.0, max_attempts_per_request=3)
             # The engine serves model_name and materializes each version into
             # local_checkpoint_dir itself via /pull_weights; the sidecar drives the sync.
