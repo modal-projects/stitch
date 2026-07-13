@@ -1,8 +1,8 @@
-"""Sidecar entrypoint for the Server replica: build the Store + Engine and run the
-versioned rollout proxy in front of the local sglang.
+"""The shared Server-side entrypoint: build the Store + Engine and run the versioned
+rollout proxy in front of the local sglang. One entrypoint for every recipe.
 
-The Server container launches this as a subprocess:
-  python -m cookbook.glm45_air_fp8.sidecar --port 8000 --upstream http://127.0.0.1:8001 ...
+The Server container launches this as a subprocess (see common/process.py):
+  python -m cookbook.common.sidecar --port 8000 --upstream http://127.0.0.1:8001 ...
 Defaults come from the serving container's env, so the flags are optional.
 """
 

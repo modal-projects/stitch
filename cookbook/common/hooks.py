@@ -1,14 +1,11 @@
-"""Framework hook shims for the glm45_air_fp8 example.
+"""Shared framework-hook logic (miles and slime both write the same HF-delta layout to
+a Modal Volume and wake a Modal Flash pool, so the logic is one place).
 
-miles resolves these by dotted path (set on the run config):
-  custom_update_weight_post_write_path = "cookbook.glm45_air_fp8.hooks.commit_and_wake"
-  custom_rollout_request_hook_path     = "cookbook.glm45_air_fp8.hooks.gated_rollout_request_hook"
-and the launcher calls ``claim_pool`` once (rank 0) before the first publish.
-
-Each shim is a thin adapter: read the run's coordinates off the trainer's ``args``
-namespace (miles ``setattr``s ``custom_config_path`` onto it), build a ModalVolumeStore
-+ ModalFlashPool, and call the stitch core. Everything Modal-specific lives here in the
-example; the library stays general.
+Each framework re-exports these from its own ``hooks.py`` under the dotted paths its run
+config points at; the only per-framework difference is that thin re-export. Every shim
+reads the run's coordinates off the trainer's ``args`` namespace (the framework
+``setattr``s its ``custom_config_path`` onto it) and calls the stitch core against a
+ModalVolumeStore + ModalFlashPool.
 """
 
 from __future__ import annotations
@@ -30,11 +27,9 @@ logger = logging.getLogger(__name__)
 
 # ── publish ────────────────────────────────────────────────────────────────────
 def commit_and_wake(args: Any, version_dir: str, rollout_engines: Any = None) -> None:
-    """custom_update_weight_post_write_path: publish the version the trainer just wrote.
-
-    Rank 0 publishes it — derive the manifest, advance ``latest``, wake the pool. Every
-    other rank only flushes its own shard of the version's files to the volume, so the
-    whole version is durable before rank 0's pointer move points a replica at it."""
+    """Publish the version the trainer just wrote. Rank 0 publishes it (manifest +
+    pointer advance + pool wake); every other rank only flushes its own shard of the
+    version's files, so the whole version is durable before rank 0's pointer move."""
     del rollout_engines
     store = _store(args)
     if _rank() not in (None, 0):
@@ -57,9 +52,9 @@ def claim_pool(args: Any) -> None:
 
 # ── staleness-gated rollout requests ────────────────────────────────────────────
 async def gated_rollout_request_hook(args: Any, sample: Any, request: dict[str, Any]) -> None:
-    """custom_rollout_request_hook_path: pin each request to a bounded-staleness version,
-    so a too-stale replica returns a retryable 409 (nudging it to sync) instead of the
-    trainer spending rollout compute on weights beyond its lag bound."""
+    """Pin each request to a bounded-staleness version, so a too-stale replica returns a
+    retryable 409 (nudging it to sync) instead of the trainer spending rollout compute on
+    weights beyond its lag bound."""
     payload, headers = request["payload"], dict(request.get("headers") or {})
     mode = str(getattr(args, "rollout_request_weight_version_mode", "min"))
     affinity = str(getattr(args, "rollout_session_affinity_header", "x-session-affinity"))

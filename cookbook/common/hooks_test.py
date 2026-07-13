@@ -1,8 +1,8 @@
-"""Co-located harness for the example hook shims (AGENTS.md Google style).
+"""Co-located harness for the shared hook shims (AGENTS.md Google style).
 
-Runs without Modal/torch: the real ``_store`` builds a local dir (volume_name=None,
-resolved from the temp root), and only ``_pool`` is faked. Run directly:
-  PYTHONPATH=src:cookbook/glm45_air_fp8 python cookbook/glm45_air_fp8/hooks_test.py
+Runs without Modal/torch: the real ``_store`` builds a local dir (volume_name=None from
+the temp root) and only ``_pool`` is faked. Run directly:
+  PYTHONPATH=src:. python cookbook/common/hooks_test.py
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
-import hooks
+from cookbook.common import hooks
 from stitch.stores.modal_volume import ModalVolumeStore
 from stitch.versions import VersionRef
 
@@ -101,4 +101,4 @@ if __name__ == "__main__":
     for t in tests:
         t()
         print(f"  ok  {t.__name__}")
-    print(f"example hooks harness: {len(tests)} PASS")
+    print(f"common hooks harness: {len(tests)} PASS")
