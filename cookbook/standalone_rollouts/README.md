@@ -1,83 +1,78 @@
 # Standalone SGLang Rollout Provider
 
-This cookbook deploys a standalone Modal Flash pool of SGLang rollout servers
-that implements the customer hot-load API. External trainers upload checkpoints
-or deltas to S3, call the provider hot-load endpoint, poll readiness, then send
-rollout traffic to the same provider URL.
+This cookbook deploys a Modal Flash pool of SGLang rollout servers behind the
+customer hot-load API. A trainer uploads a delta under an opaque identity,
+signals its parent identity, waits for pool readiness, then sends inference to
+the same public URL.
 
-It is a **log-as-truth** design: a durable, monotonic `latest` pointer in the S3
-transport is the source of truth, and the elastic pool reconciles to it by pull.
+The transport is an append-only log:
 
-1. Modal starts one SGLang server + a stitch weight-sync sidecar per warm
-   container. Each sidecar is a `WeightSyncManager` that reconciles its engine
-   to `latest` (on startup, on a wake, and on a periodic poll).
-2. The **front door** — a singleton `App.server` (`min_containers=1`, pinned to
-   the same routing region as the pool) and the only writer of `latest` — serves
-   the customer API. `POST /hot_load/...` advances
-   `latest` (monotonic CAS; a rewind is rejected) and best-effort wakes the
-   pool. The pool pulls the new `weight_v{N}/`, applies the disk delta host-side
-   (slime `disk_delta`: chain-replay + per-tensor checksum), and reloads SGLang.
-3. `GET /hot_load/...` reports readiness by enumerating the **live** containers
-   and querying each `/server_info` — no self-reported replica state, so a
-   scaled-down replica can't haunt the readiness fraction.
-4. Inference (`/generate`, `/v1/chat/completions`, `/v1/completions`, …) is
-   proxied to the SGLang gateway.
+1. The configured base checkpoint is stitch v0. SGLang boots from, and the
+   sidecar seeds deltas from, the same resolved `BASE_CHECKPOINT` directory.
+2. The singleton front door owns `identities.json` and `latest`. It validates a
+   POST, derives a provider index without changing the upload, commits the new
+   identity to the ledger, then advances `latest`.
+3. Each sidecar pulls the ledger and pointer, builds an ephemeral local
+   `weight_vN` view, applies the contiguous delta tail, and reloads SGLang.
+4. Readiness comes from live `/server_info` responses. A replica is ready only
+   when it is idle, error-free, runless, and its integer version maps to the
+   requested opaque identity.
 
-## Layout
+Only `/generate`, `/v1/chat/completions`, and `/v1/completions` are proxied.
+Control routes are not exposed through the front door.
 
-| File | What it is |
+## Files
+
+| File | Responsibility |
 |---|---|
-| `modal_serve.py` | Standalone Modal rollout-provider app; owns the Modal `App`, the Server pool, and the singleton front door |
-| `frontdoor.py` | Front-door hot-load adapter logic (advance `latest`, live-readiness, proxy) — injected I/O, unit-tested |
-| `provider.py` | Per-container sidecar: a `WeightSyncManager` over a slime-layout board on the transport |
-| `configs/moonlight_hot_load.py` | Moonlight-16B-A3B provider config (DeepSeek-V3-arch MoE; routing replay) |
-| `slime/` | Optional SLIME integration-test harness for this provider |
+| `modal_serve.py` | Deployment App, utility App, SGLang pool, and singleton front door |
+| `opaque_protocol.py` | Strict request, startup recovery, and readiness rules |
+| `opaque_frontdoor.py` | Authenticated derive/ledger/pointer transaction |
+| `ledger.py` | Opaque identity to integer-version append-only mapping |
+| `delta_view.py` | Provider-owned indexes and immutable local version directories |
+| `provider.py` | Per-container `WeightSyncManager` sidecar |
+| `slime/` | Optional SLIME integration harness |
 
-## Compatibility Notes
+## Fixed Contract
 
-The provider targets the pinned modal-projects/slime fork commit (see
-`modal_serve.py`). Each version is a canonical HF/SafeTensors directory
-`weight_v{N}/` with a `model.safetensors.index.json`. Deltas are applied
-**host-side** (slime `disk_delta`: XOR or overwrite encoding, zstd compression,
-per-tensor checksums — all declared in the index's `metadata` block) onto a
-local full checkpoint, then reloaded through the ordinary
-`update_weights_from_disk` path; there is no engine-side delta receiver. The
-front door normalizes hot-load POST metadata into the index before advancing
-`latest`, so a customer-produced delta is directly applicable.
+`STITCH_SHIM_BASE_SNAPSHOT_IDENTITY` is required. It names the exact bytes
+loaded from `BASE_CHECKPOINT`; it does not select or upload another checkpoint.
+A POST without `incremental_snapshot_metadata` is only an idempotent assertion
+of that configured base while v0 remains current. Arbitrary full-snapshot
+activation and rewinds are unsupported.
 
-Session affinity is delegated to Modal's Flash gateway: external clients send
-the neutral `x-session-affinity` header to the front door, which rewrites it to
-`Modal-Session-ID` *before* the gateway so related requests route to the same
-replica. The rewrite must happen pre-gateway, so it lives in the front door
-rather than the per-container sidecar.
+Every delta must extend the current head. Its `identity` and
+`previous_snapshot_identity` are opaque strings, but each must be one safe
+filesystem path component. Exact retries must repeat the same parent and
+formats. Forks, old-identity retries, unknown parents, and contradictory retries
+return 409.
 
-## Deploy the Provider
+The supported decoder contract is:
 
-Work from the repo root. The provider expects:
+- delta encoding: XOR, fixed and not a customer field;
+- compression: `zstd`;
+- checksum: `adler32` (default), `xxh3-128`, or `blake3`.
 
-- `huggingface-secret` for downloading the base model into the HF cache Volume.
-- `stitch-api-shim-provider` for optional hot-load API auth.
+An upload becomes immutable when its POST is accepted. The customer owns
+`<identity>/model.safetensors.index.json` and its referenced shard objects. The
+provider owns `identities.json`, `latest`, and `.stitch/`; it never rewrites the
+customer index or exposes unreferenced shards to the decoder.
 
-The default config mounts the S3 bucket `modal-stitch-s3-transport` at
-`/mnt/stitch-s3-transport` with this Modal OIDC role:
+One S3 prefix is one durable chain. Restarting or redeploying the provider on
+that prefix is supported. An independent training run requires a fresh prefix
+and a recreate deploy; it does not reset or reuse the old chain.
 
-```text
-arn:aws:iam::459781239556:role/modal-buckets/stitch-s3-transport-role
-```
+## Deploy
 
-The mounted bucket prefix is `standalone-rollouts/moonlight/`, so the external
-S3 location for uploaded snapshots is:
+Work from the repository root. The default config uses:
 
-```text
-s3://modal-stitch-s3-transport/standalone-rollouts/moonlight/<identity>/
-```
+- app: `stitch-moonlight-api-shim`;
+- bucket: `modal-stitch-s3-transport`;
+- prefix: `standalone-rollouts/moonlight/`;
+- mount: `/mnt/stitch-s3-transport`.
 
-Override `STITCH_SHIM_S3_BUCKET_NAME`, `STITCH_SHIM_S3_KEY_PREFIX`,
-`STITCH_SHIM_S3_REGION`, or `STITCH_SHIM_S3_OIDC_AUTH_ROLE_ARN` at deploy time
-if you create another bucket or prefix. `STITCH_SHIM_S3_REGION` is optional,
-but useful when Modal's S3 Mountpoint cannot auto-detect the bucket region.
-
-Create the secret:
+The provider needs `huggingface-secret` for an HF base and
+`stitch-api-shim-provider` for its mandatory customer auth/base settings:
 
 ```bash
 ENVIRONMENT=...
@@ -88,53 +83,42 @@ uv run --extra modal modal secret create -e "$ENVIRONMENT" stitch-api-shim-provi
   STITCH_SHIM_PROVIDER_DEPLOYMENT=rollout-prod
 ```
 
-The S3 OIDC role must allow `s3:PutObject` on the prefix: the singleton front
-door writes the `latest` pointer there.
-
-Deploy:
+The S3 role needs read/write/delete access to the configured prefix. Override
+`STITCH_SHIM_S3_BUCKET_NAME`, `STITCH_SHIM_S3_KEY_PREFIX`,
+`STITCH_SHIM_S3_REGION`, or `STITCH_SHIM_S3_OIDC_AUTH_ROLE_ARN` when creating a
+separate deployment.
 
 ```bash
 alias m="uv run --extra modal modal"
 
 m run -e "$ENVIRONMENT" -m cookbook.standalone_rollouts.modal_serve::download_model
-m deploy -e "$ENVIRONMENT" --strategy recreate -m cookbook.standalone_rollouts.modal_serve::app
+m deploy -e "$ENVIRONMENT" --strategy recreate \
+  -m cookbook.standalone_rollouts.modal_serve::app
 m run -e "$ENVIRONMENT" -m cookbook.standalone_rollouts.modal_serve::print_url
-# Authenticated smoke from inside Modal (reads the provider secret; the API key
-# never leaves Modal): polls GET /hot_load readiness + a base completion.
 m run -e "$ENVIRONMENT" -m cookbook.standalone_rollouts.modal_serve::check
 ```
 
-`--strategy recreate` is required: the front door is the sole ledger writer,
-and a rolling deploy can overlap old and new revisions.
+`--strategy recreate` is a correctness requirement. Modal rolling deploys can
+overlap old and new revisions, but the front door must remain the sole ledger
+writer. Utility functions live on a separate Modal App so `modal run` cannot
+warm a second front door or GPU pool.
 
-The default app is `stitch-moonlight-api-shim`. To create a separate deployment,
-add a config under `configs/` and deploy with:
+To deploy another provider config:
 
 ```bash
 PROVIDER_CONFIG=my_provider_config m deploy -e "$ENVIRONMENT" --strategy recreate \
   -m cookbook.standalone_rollouts.modal_serve::app
 ```
 
-## External Trainer Contract
+## External Trainer
 
-Upload each snapshot to:
+Upload a plain HF-compatible delta directory to:
 
 ```text
-s3://modal-stitch-s3-transport/standalone-rollouts/moonlight/<identity>/
+s3://modal-stitch-s3-transport/standalone-rollouts/moonlight/<opaque-identity>/
 ```
 
-Signal it:
-
-```bash
-curl -X POST "$GATEWAY/hot_load/v1/models/hot_load" \
-  -H "Authorization: Bearer $STITCH_SHIM_API_KEY" \
-  -H "Provider-Model: moonlight" \
-  -H "Provider-Deployment: rollout-prod" \
-  -H "Content-Type: application/json" \
-  -d '{"identity":"weight_v000001"}'
-```
-
-For a compatible SGLang/SLIME delta:
+Then signal the uploaded identity and its current parent:
 
 ```bash
 curl -X POST "$GATEWAY/hot_load/v1/models/hot_load" \
@@ -143,9 +127,9 @@ curl -X POST "$GATEWAY/hot_load/v1/models/hot_load" \
   -H "Provider-Deployment: rollout-prod" \
   -H "Content-Type: application/json" \
   -d '{
-    "identity": "weight_v000002",
+    "identity": "checkpoint-step-100",
     "incremental_snapshot_metadata": {
-      "previous_snapshot_identity": "weight_v000001",
+      "previous_snapshot_identity": "<configured-base-identity>",
       "compression_format": "zstd",
       "checksum_format": "xxh3-128"
     },
@@ -153,7 +137,7 @@ curl -X POST "$GATEWAY/hot_load/v1/models/hot_load" \
   }'
 ```
 
-Poll readiness:
+The next delta names `checkpoint-step-100` as its parent. Poll readiness with:
 
 ```bash
 curl "$GATEWAY/hot_load/v1/models/hot_load" \
@@ -162,43 +146,31 @@ curl "$GATEWAY/hot_load/v1/models/hot_load" \
   -H "Provider-Deployment: rollout-prod"
 ```
 
-A replica counts as ready only when `readiness` is true and
-`current_snapshot_identity` matches the requested identity.
+Count a replica only when `readiness` is true and
+`current_snapshot_identity` equals the signalled opaque identity.
 
-## Optional SLIME Test Harness
+## SLIME Harness
 
-The provider app above is standalone and can be used by any external trainer
-that follows the same S3 + hot-load contract. For end-to-end testing, this
-cookbook also includes `slime/`, a Modal-hosted SLIME trainer harness that
-copies sparse deltas into the mounted S3 transport and calls the deployed
-provider.
+The optional harness publishes SLIME disk deltas through the same external
+contract. It requires a front-door-seeded, base-only prefix before training;
+missing/corrupt control state, advanced state, a base mismatch, or leftover
+uploads fail before the GPU training command starts.
 
-The provider owns the Modal app. Deploying `modal_serve.py` publishes only the
-SGLang rollout provider. Deploying `slime/modal_train.py` imports that same
-app and adds the trainer functions, so the resulting Modal app contains both
-the standalone provider and the SLIME integration-test trainer.
-
-The trainer reuses `stitch-api-shim-provider` for optional shim API auth. It
-derives the provider URL from the deployed Flash `Server` class, and the S3
-transport uses the same Modal `CloudBucketMount` OIDC role as the provider.
-
-Then redeploy the same Modal app with the trainer functions included and launch
-the trainer:
+Deploying `slime/modal_train.py::app` adds the Trainer to the provider App.
+Dataset preparation remains on the utility App; launch and its clean-prefix
+check use a dedicated CPU-only preflight App.
+`launch_train` first runs a CPU-only clean-prefix check, before allocating the
+Trainer GPUs, and the Trainer repeats the check immediately before execution.
 
 ```bash
 m run -e "$ENVIRONMENT" -m cookbook.standalone_rollouts.modal_serve::download_model
 m run -e "$ENVIRONMENT" -m cookbook.standalone_rollouts.slime.modal_train::prepare_dataset
-m deploy -e "$ENVIRONMENT" --strategy recreate -m cookbook.standalone_rollouts.slime.modal_train::app
+m deploy -e "$ENVIRONMENT" --strategy recreate \
+  -m cookbook.standalone_rollouts.slime.modal_train::app
 m run -e "$ENVIRONMENT" -m cookbook.standalone_rollouts.slime.modal_train::launch_train
 ```
 
-The trainer (`slime/configs/moonlight_slime_trainer.py`) runs **async-first**
-(`train_async`, one-step off-policy) with **rollout routing replay** enabled, in
-SLIME publish-only mode: it launches no rollout engines, routes `/generate` to
-the provider front door, and writes each `weight_v{N}/` to a local disk dir.
-
-Staleness is gated by a **publish-hook readiness barrier**, not a per-request
-pin (the key difference from `slime_disagg`, which uses a min-version request
-gate): the `announce_and_wait` publish hook copies each new version to the S3
-transport, POSTs the hot-load API, and blocks until the front door reports every
-live replica ready — so the next rollouts always run on current weights.
+The rank-zero publish hook copies each local `weight_vN` directory to the flat
+transport prefix, POSTs it with the preceding identity, validates the acceptance
+response, and blocks until every live replica reports the new identity. A retry
+compares existing upload bytes and never overwrites them.
