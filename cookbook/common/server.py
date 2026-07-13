@@ -51,6 +51,9 @@ def register_server(
         min_containers=min_containers, max_containers=max_containers,
         timeout=40 * MINUTES, scaledown_window=15 * MINUTES,
         ephemeral_disk=ephemeral_disk_mib, memory=memory_mib, include_source=False,
+        # Server is built by this factory, not at module scope, so Modal must serialize
+        # it (cloudpickle) rather than import it by reference.
+        serialized=True,
     )
     @modal.experimental.http_server(
         port=SIDECAR_PORT, proxy_regions=proxy_regions,
