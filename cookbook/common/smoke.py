@@ -26,6 +26,14 @@ def smoke_flash_pool(*, app_name: str, cls_name: str, model_name: str, weight_ve
         try:
             gateway = pool.gateway_url()
             print(f"Gateway URL: {gateway}")
+            # A fresh pool serves the base but has no claimed run, so version 0 (run-scoped)
+            # is unpinnable — an exact-version request would 409. Pre-claim, gate on plain
+            # serving; the version check only makes sense once a run has claimed the pool.
+            if _get_json(f"{gateway}/server_info", timeout=60).get("run_id") is None:
+                data = _post_json(f"{gateway}/v1/chat/completions", _completion(model_name), timeout=900)
+                _check_serves(data)
+                print(f"Pool serves base (unclaimed): {data.get('choices')}")
+                return
             data = _post_json(f"{gateway}/v1/chat/completions", _completion(model_name, weight_version), timeout=900)
             print(f"Gateway completion: {data}")
             _check_completion(data, weight_version)
@@ -64,15 +72,23 @@ def _check_completion(data: dict, expected: int) -> None:
         raise RuntimeError(f"unexpected gateway weight metadata: {data}")
 
 
-def _completion(model_name: str, expected: int) -> dict:
-    return {
+def _check_serves(data: dict) -> None:
+    choices = data.get("choices") or []
+    if not choices or not ((choices[0].get("message") or {}).get("content")):
+        raise RuntimeError(f"pool did not return a completion: {data}")
+
+
+def _completion(model_name: str, expected: int | None = None) -> dict:
+    payload = {
         "model": model_name,
         "messages": [{"role": "user", "content": "Reply with exactly OK."}],
         "max_tokens": 8,
         "temperature": 0,
-        "weight_version": {"exact_version": expected},
         "chat_template_kwargs": {"enable_thinking": False},
     }
+    if expected is not None:  # pin the version only against a claimed pool
+        payload["weight_version"] = {"exact_version": expected}
+    return payload
 
 
 def _get_json(url: str, *, timeout: float) -> dict:
