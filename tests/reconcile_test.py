@@ -72,6 +72,9 @@ class FakeEngine(Engine):
     async def reset(self) -> None:
         self.calls.append("reset")
 
+    async def prefetch(self) -> None:
+        self.calls.append("prefetch")
+
     def stamp_request(self, request, served) -> None:
         pass
 
@@ -107,6 +110,17 @@ def test_fresh_reconcile() -> None:
         assert VersionRef("r1", 3) in engine.committed
         assert r.sync_state is SyncState.IDLE
         assert engine.calls.index("flush") < engine.calls.index("commit:3")  # quiesce flushes first
+
+    _run(go())
+
+
+def test_startup_prefetches_base() -> None:
+    async def go() -> None:
+        engine = FakeEngine()
+        r = Reconciler(store=FakeStore(), engine=engine)  # unclaimed pool: reconcile is a no-op
+        await r.startup()
+        await r._prefetch_task  # let the background base-seed finish
+        assert "prefetch" in engine.calls
 
     _run(go())
 

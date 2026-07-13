@@ -162,10 +162,21 @@ class Reconciler(AdmissionGate):
         self.last_error: str | None = None
         self.metrics: dict[str, Any] = {}
         self._task: asyncio.Task[None] | None = None
+        self._prefetch_task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
 
     async def startup(self) -> None:
+        # Seed the base into the host-local checkpoint in the background so the first real
+        # stage() is delta-only, not a full base copy on the trainer's critical path. Safe to
+        # overlap the reconcile below: the engine's pull is flock-serialized and idempotent.
+        self._prefetch_task = asyncio.create_task(self._prefetch_base())
         await self.reconcile()
+
+    async def _prefetch_base(self) -> None:
+        try:
+            await self.engine.prefetch()
+        except Exception:  # noqa: BLE001 — best-effort; the first real pull falls back to a full copy
+            logger.exception("base prefetch failed; first sync will pay the full base copy")
 
     def server_info(self) -> dict[str, Any]:
         # Superset of ReplicaState's wire keys (ready/applied/sync_state/reason) plus

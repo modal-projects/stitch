@@ -40,6 +40,12 @@ class Engine:
         """Reseed the local checkpoint to the engine's boot base."""
         raise NotImplementedError
 
+    async def prefetch(self) -> None:
+        """Optional: seed the host-local checkpoint from the engine's base ahead of the first
+        stage(), so stage only applies the delta instead of copying the full base off the
+        critical path. Default no-op — an engine with no host-local checkpoint needs nothing."""
+        return
+
     def stamp_request(self, request: dict[str, Any], served: VersionRef) -> None:
         """Namespace a request to the version it's served on so requests from different
         versions can't share KV prefixes (engine-specific, e.g. sglang's extra_key).

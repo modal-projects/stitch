@@ -50,6 +50,19 @@ class SGLangEngine(Engine):
             action="weight pull",
         )
 
+    async def prefetch(self) -> None:
+        # Seed the host-local checkpoint from the served base now (target_version=0): the
+        # receiver copies its own model_path into local_checkpoint_dir and applies no deltas,
+        # so the first real stage() only applies the delta rather than paying the full base
+        # copy. Disk-only (serves throughout) and flock-serialized + idempotent with a
+        # concurrent stage. source_dir is unused for the base seed (a placeholder here).
+        await self._post(
+            "/pull_weights",
+            {"local_checkpoint_dir": self.local_checkpoint_dir, "source_dir": self.local_checkpoint_dir, "target_version": 0},
+            timeout=None,
+            action="base prefetch",
+        )
+
     async def commit(self, ref: VersionRef) -> None:
         # flush_cache defaults off: the reconciler owns flushing — it calls flush()
         # itself before a quiesce reload, and in_place deliberately keeps in-flight KV.
