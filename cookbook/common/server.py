@@ -9,6 +9,7 @@ private sglang on SGLANG_PORT).
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from . import process
@@ -27,12 +28,17 @@ def serve_startup(
     volume_name: str,
     commit_mode: str,
     startup_timeout: int,
+    sglang_env: dict[str, str] | None = None,
 ) -> None:
     """Start sglang + the versioned-proxy sidecar on a Server replica (from ``@modal.enter``).
     The engine serves ``model_name`` and materializes each version into
-    ``local_checkpoint_dir`` itself via /pull_weights; the sidecar drives the sync."""
+    ``local_checkpoint_dir`` itself via /pull_weights; the sidecar drives the sync.
+    ``sglang_env`` is a per-config override of the sglang process env (over the image's
+    baked defaults) — set before launch so the engine subprocess inherits it."""
     from autoinference_utils.endpoint import SGLangEndpoint, warmup_chat_completions
 
+    if sglang_env:
+        os.environ.update(sglang_env)
     replica.endpoint = SGLangEndpoint(
         model_path=model_name, worker_port=SGLANG_PORT, tp=tp,
         extra_server_args=sglang_args, health_timeout=startup_timeout, health_poll_interval=10.0,

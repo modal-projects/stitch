@@ -44,6 +44,12 @@ SGLANG_SERVER_ARGS = {
     "--skip-server-warmup": "",
 }
 
+# Native load here is already multithreaded + fast (~15s), so sglang's load-plan reload
+# replay is a net ~2x regression (its own thread-pool dispatch loses to the multithread
+# loader). Override the image default off. The flag stays on for models whose native load
+# is single-threaded (e.g. Kimi NVFP4, ~300s -> ~10s), where the plan is a large win.
+SGLANG_ENV = {"SGLANG_ENABLE_RELOAD_LOAD_PLAN": "0"}
+
 
 class _Miles(MilesConfig):
     miles_model_script = "scripts/models/glm4.5-106B-A12B.sh"
