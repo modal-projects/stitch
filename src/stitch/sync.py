@@ -198,7 +198,7 @@ class Reconciler(AdmissionGate):
                 caught_up = await self._reconcile_once()
                 if caught_up:
                     # A publish can land mid-commit; re-check before idling.
-                    self.store.refresh()
+                    await asyncio.to_thread(self.store.refresh)
                     if self._behind(self.store.read_pointer()):
                         caught_up = False
             except Exception as exc:  # noqa: BLE001
@@ -232,7 +232,8 @@ class Reconciler(AdmissionGate):
                     self.metrics = m
 
     async def _reconcile_once_measured(self, m: dict[str, Any]) -> bool:
-        self.store.refresh()
+        # refresh() may block on I/O; offload it so it never stalls the serving loop.
+        await asyncio.to_thread(self.store.refresh)
         pointer = self.store.read_pointer()
         if pointer is None:
             return True
@@ -244,7 +245,7 @@ class Reconciler(AdmissionGate):
         self.sync_state = SyncState.PREFETCHING
         self.last_error = None
         target = self.store.read_manifest(pointer)
-        source_dir = self.store.materialize(pointer)
+        source_dir = await asyncio.to_thread(self.store.materialize, pointer)
         m["target_version"] = pointer.version
 
         # Stage (host-side apply — the engine walks back to the nearest anchor and

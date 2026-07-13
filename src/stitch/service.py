@@ -3,9 +3,12 @@ entrypoint (``serve``), and cross-replica readiness aggregation (``readiness``).
 
 Engine- and provider-agnostic: request/response version stamping is delegated to the
 Engine, and the proxy forwards everything else to the engine's own HTTP surface.
-"""
 
-from __future__ import annotations
+No ``from __future__ import annotations`` here: the FastAPI route handlers below are
+introspected at runtime, and their ``Request`` type is a create_app-local import — under
+stringized annotations FastAPI can't resolve it (it looks only in module globals) and
+demotes ``request`` to a required query param, 422-ing every call.
+"""
 
 import asyncio
 import contextlib
