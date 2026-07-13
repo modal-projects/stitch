@@ -6,17 +6,9 @@ import socket
 import subprocess
 import time
 from pathlib import Path
-from typing import Any
 
 RAY_START_TIMEOUT = 240
 RAY_WORKER_JOIN_TIMEOUT = 180
-
-
-def training_nodes(cfg: Any) -> int:
-    nodes = int(getattr(cfg, "actor_num_nodes", 1))
-    if getattr(cfg, "use_critic", False) or getattr(cfg, "advantage_estimator", None) == "ppo":
-        nodes += int(getattr(cfg, "critic_num_nodes", nodes))
-    return nodes
 
 
 def get_modal_cluster_context(n_nodes: int) -> tuple[int, str, str]:

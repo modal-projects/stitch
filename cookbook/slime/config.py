@@ -28,6 +28,14 @@ class SlimeConfig:
         for k, v in kwargs.items():
             setattr(self, k, v)
 
+    @property
+    def n_train_nodes(self) -> int:
+        """Trainer node count: actor nodes, plus critic nodes for PPO/critic setups."""
+        nodes = int(getattr(self, "actor_num_nodes", 1))
+        if getattr(self, "use_critic", False) or getattr(self, "advantage_estimator", None) == "ppo":
+            nodes += int(getattr(self, "critic_num_nodes", nodes))
+        return nodes
+
     def _fields(self) -> dict[str, Any]:
         """Merged fields across the class hierarchy; instance attrs win."""
         fields: dict[str, Any] = {}
