@@ -7,9 +7,9 @@ and publishes XOR deltas through a Modal Volume the pool syncs from.
     EXPERIMENT_CONFIG=glm45_air_fp8 uv run --extra modal modal deploy -m cookbook.miles.app
 
 Config access is uniform: the experiment module ``exp`` is the single source of truth —
-its ``exp.modal`` (infra), ``exp.miles`` (training), and ``exp.<CONST>`` are read directly.
-The only values resolved here are the two below (a deploy-time override and a fallback);
-everything else is a direct config read.
+its ``exp.modal`` (infra), ``exp.miles`` (training), and ``exp.<CONST>`` are read directly;
+shared deployment constants come from ``common.constants``. ``ROLLOUT_CONCURRENCY`` is the
+one resolved value (the experiment's Flash target, else the engine's concurrency).
 """
 
 from __future__ import annotations
@@ -28,12 +28,15 @@ import modal.experimental
 from stitch.pools.modal_flash import ModalFlashPool
 
 from cookbook.common import launch, ray_cluster, serving_image, server, smoke
-from cookbook.common.config import CHECKPOINTS_PATH, DATA_PATH, HF_CACHE_PATH, PREP_PATH
+from cookbook.common.constants import (
+    CHECKPOINTS_PATH, DATA_PATH, HF_CACHE_PATH, MINUTES, PREP_PATH, RAY_PORT,
+    SERVER_STARTUP_TIMEOUT, SGLANG_CACHE_PATH, SIDECAR_PORT,
+)
 from cookbook.miles import prep, trainer_image
 from cookbook.miles.config import MilesConfig, YAML_CONFIG_FIELDS
 from cookbook.miles.trainer_image import MEGATRON_PATH, MILES_ROOT
 
-# ── deploy-time environment (selection + overrides, NOT experiment config) ──────
+# Deploy-time environment (selection + dev overlay, NOT experiment config).
 EXPERIMENT = os.environ.get("EXPERIMENT_CONFIG", "glm45_air_fp8")
 MILES_LOCAL_DIR = os.environ.get("MILES_LOCAL_DIR")  # dev overlay of a local miles checkout
 
@@ -41,18 +44,9 @@ exp = importlib.import_module(f"cookbook.miles.configs.{EXPERIMENT}")
 modal_cfg = exp.modal
 miles_cfg = exp.miles
 
-# The two resolved values (everything else is read straight off modal_cfg/miles_cfg/exp):
-#  - MIN_CONTAINERS: the experiment's pool floor, overridable to 0 to deploy the pool down
-#    so prepare_* can run before the served base exists.
-#  - ROLLOUT_CONCURRENCY: the Flash autoscaler target (and sglang concurrency cap) — the
-#    experiment's explicit target_inputs, else the engine's configured concurrency.
-MIN_CONTAINERS = int(os.environ.get("POOL_MIN_CONTAINERS", modal_cfg.rollout_min_containers))
+# The Flash autoscaler target (and sglang concurrency cap): the experiment's explicit
+# target_inputs, else the engine's configured concurrency.
 ROLLOUT_CONCURRENCY = modal_cfg.rollout_target_inputs or miles_cfg.sglang_server_concurrency
-
-MINUTES = 60
-RAY_PORT = 6379
-SERVER_STARTUP_TIMEOUT = 35 * MINUTES
-SGLANG_CACHE_PATH = "/root/.cache/sglang"
 
 image = trainer_image.build_trainer_image(hf_cache_path=str(HF_CACHE_PATH), miles_local=MILES_LOCAL_DIR)
 server_image = serving_image.build_serving_image(hf_cache_path=str(HF_CACHE_PATH), delta_volume_name=exp.DELTA_VOLUME_NAME)
@@ -100,13 +94,13 @@ SGLANG_SERVER_ARGS = {
         SGLANG_CACHE_PATH: sglang_cache_volume,
         exp.DELTA_BULLETIN_ROOT: delta_volume,
     },
-    min_containers=MIN_CONTAINERS, max_containers=modal_cfg.rollout_max_containers,
+    min_containers=modal_cfg.rollout_min_containers, max_containers=modal_cfg.rollout_max_containers,
     timeout=40 * MINUTES, scaledown_window=15 * MINUTES,
     ephemeral_disk=modal_cfg.rollout_ephemeral_disk_mib, memory=modal_cfg.rollout_memory_mib,
     include_source=False,
 )
 @modal.experimental.http_server(
-    port=server.SIDECAR_PORT, proxy_regions=modal_cfg.proxy_regions,
+    port=SIDECAR_PORT, proxy_regions=modal_cfg.proxy_regions,
     exit_grace_period=25, startup_timeout=SERVER_STARTUP_TIMEOUT,
 )
 @modal.concurrent(target_inputs=ROLLOUT_CONCURRENCY)
@@ -246,7 +240,9 @@ def prepare_checkpoints() -> None:
     prep.prepare_checkpoints(exp, prep_volume)
 
 
-def _prepare_torch_dist() -> None:
+# torch_dist conversion is clustered when >1 node; wrap the same name in place so Modal
+# registers a single function (a leftover unregistered PartialFunction confuses the runner).
+def prepare_torch_dist() -> None:
     rank, master_addr, _ = ray_cluster.get_modal_cluster_context(modal_cfg.torch_dist_prep_nodes)
     prep.prepare_torch_dist(exp, prep_volume, rank=rank, master_addr=master_addr)
 
@@ -259,9 +255,9 @@ _torch_dist_kwargs = dict(
     secrets=[modal.Secret.from_name("huggingface-secret")], include_source=False,
 )
 if modal_cfg.torch_dist_prep_nodes > 1:
-    _prepare_torch_dist = modal.experimental.clustered(modal_cfg.torch_dist_prep_nodes, rdma=True)(_prepare_torch_dist)
+    prepare_torch_dist = modal.experimental.clustered(modal_cfg.torch_dist_prep_nodes, rdma=True)(prepare_torch_dist)
     _torch_dist_kwargs["experimental_options"] = {"efa_enabled": True}
-prepare_torch_dist = app.function(**_torch_dist_kwargs)(_prepare_torch_dist)
+prepare_torch_dist = app.function(**_torch_dist_kwargs)(prepare_torch_dist)
 
 
 @app.function(

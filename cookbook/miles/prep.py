@@ -9,7 +9,7 @@ import json
 import os
 import subprocess
 
-from cookbook.common.config import PREP_PATH
+from cookbook.common.constants import PREP_PATH
 from cookbook.miles.trainer_image import MEGATRON_PATH, MILES_ROOT, TORCH_DIST_CONVERT_WRAPPER
 
 

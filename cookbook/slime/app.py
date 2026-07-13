@@ -7,8 +7,9 @@ and publishes XOR deltas through a Modal Volume the pool syncs from.
     EXPERIMENT_CONFIG=kimi_k2_6_int4 uv run --extra modal modal deploy -m cookbook.slime.app
 
 Config access is uniform: the experiment module ``exp`` is the single source of truth —
-its ``exp.modal`` (infra), ``exp.slime`` (training), and ``exp.<CONST>`` are read directly.
-The only values resolved here are the two below (a deploy-time override and a fallback).
+its ``exp.modal`` (infra), ``exp.slime`` (training), and ``exp.<CONST>`` are read directly;
+shared deployment constants come from ``common.constants``. ``ROLLOUT_CONCURRENCY`` is the
+one resolved value (the experiment's Flash target, else the engine's concurrency).
 """
 
 from __future__ import annotations
@@ -26,12 +27,14 @@ import modal.experimental
 from stitch.pools.modal_flash import ModalFlashPool
 
 from cookbook.common import launch, ray_cluster, serving_image, server, smoke
-from cookbook.common.config import CHECKPOINTS_PATH, DATA_PATH, HF_CACHE_PATH
+from cookbook.common.constants import (
+    CHECKPOINTS_PATH, DATA_PATH, HF_CACHE_PATH, MINUTES, RAY_PORT, SERVER_STARTUP_TIMEOUT, SIDECAR_PORT,
+)
 from cookbook.slime import trainer_image
 from cookbook.slime.config import SlimeConfig, YAML_CONFIG_FIELDS
 from cookbook.slime.trainer_image import SLIME_ROOT
 
-# ── deploy-time environment (selection + overrides, NOT experiment config) ──────
+# Deploy-time environment (selection + dev overlay, NOT experiment config).
 EXPERIMENT = os.environ.get("EXPERIMENT_CONFIG", "kimi_k2_6_int4")
 SLIME_LOCAL_DIR = os.environ.get("SLIME_LOCAL_DIR")  # dev overlay of a local slime checkout
 
@@ -39,17 +42,9 @@ exp = importlib.import_module(f"cookbook.slime.configs.{EXPERIMENT}")
 modal_cfg = exp.modal
 slime_cfg = exp.slime
 
-# The two resolved values (everything else is read straight off modal_cfg/slime_cfg/exp):
-#  - MIN_CONTAINERS: the experiment's pool floor, overridable to 0 to deploy the pool down
-#    so download_model can run before the served base exists.
-#  - ROLLOUT_CONCURRENCY: the Flash autoscaler target (and sglang concurrency cap) — the
-#    experiment's explicit target_inputs, else the engine's configured concurrency.
-MIN_CONTAINERS = int(os.environ.get("POOL_MIN_CONTAINERS", modal_cfg.rollout_min_containers))
+# The Flash autoscaler target (and sglang concurrency cap): the experiment's explicit
+# target_inputs, else the engine's configured concurrency.
 ROLLOUT_CONCURRENCY = modal_cfg.rollout_target_inputs or slime_cfg.sglang_server_concurrency
-
-MINUTES = 60
-RAY_PORT = 6379
-SERVER_STARTUP_TIMEOUT = 35 * MINUTES
 
 image = trainer_image.build_trainer_image(hf_cache_path=str(HF_CACHE_PATH), slime_local=SLIME_LOCAL_DIR)
 server_image = serving_image.build_serving_image(hf_cache_path=str(HF_CACHE_PATH), delta_volume_name=exp.DELTA_VOLUME_NAME)
@@ -88,13 +83,13 @@ SGLANG_SERVER_ARGS = {
     gpu=f"{modal_cfg.gpu}:{slime_cfg.rollout_num_gpus_per_engine}",
     cloud=modal_cfg.cloud, region=modal_cfg.region,
     volumes={str(HF_CACHE_PATH): hf_cache_volume, exp.DELTA_BULLETIN_ROOT: delta_volume},
-    min_containers=MIN_CONTAINERS, max_containers=modal_cfg.rollout_max_containers,
+    min_containers=modal_cfg.rollout_min_containers, max_containers=modal_cfg.rollout_max_containers,
     timeout=40 * MINUTES, scaledown_window=15 * MINUTES,
     ephemeral_disk=modal_cfg.rollout_ephemeral_disk_mib, memory=modal_cfg.rollout_memory_mib,
     include_source=False,
 )
 @modal.experimental.http_server(
-    port=server.SIDECAR_PORT, proxy_regions=modal_cfg.proxy_regions,
+    port=SIDECAR_PORT, proxy_regions=modal_cfg.proxy_regions,
     exit_grace_period=25, startup_timeout=SERVER_STARTUP_TIMEOUT,
 )
 @modal.concurrent(target_inputs=ROLLOUT_CONCURRENCY)

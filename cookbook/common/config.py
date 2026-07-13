@@ -7,14 +7,7 @@ each framework's subdir; only this infra grouping is common.
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any, Literal
-
-# Standard Modal Volume mount points, shared by every recipe.
-HF_CACHE_PATH = Path("/root/.cache/huggingface")
-DATA_PATH = Path("/data")
-CHECKPOINTS_PATH = Path("/checkpoints")
-PREP_PATH = Path("/prep")  # <PREP>/<tag>/{bf16 masters, served base, torch_dist ref_load}
 
 GPUType = Literal["H100", "H200", "B200", "B300", "A100"]
 
