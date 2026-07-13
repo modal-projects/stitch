@@ -55,12 +55,12 @@ src/stitch/                     # THE LIBRARY — general: abstractions + logic 
   stores/modal_volume.py        # ModalVolumeStore        — a Store instance
   engines/sglang.py             # SGLangEngine            — an Engine instance
   pools/modal_flash.py          # ModalFlashPool (client) — a Pool instance
-examples/<experiment>/          # a config owning the WHOLE experiment (customizable, provider-specific):
+cookbook/<experiment>/          # a recipe owning the WHOLE experiment (customizable, provider-specific):
                                 #   the Modal app (image + Server cls running serve()+engine + Flash +
                                 #   Trainer cls + entrypoints), model prep, run config, the ~2-line
                                 #   framework hook shim, and any consumer facade (e.g. cognition /hot_load)
-  _modal/                       # OPTIONAL shared example helper (Modal app factory) — keeps examples DRY,
-                                #   lives in the example layer, NOT general core
+  _shared/                      # OPTIONAL shared Modal-app factory — keeps recipes DRY,
+                                #   lives in the cookbook layer, NOT general core
 tools/profiling/                # dev-only diagnostics (never imported by src/)
 tests/                          # unit tests + the in-memory core harness (was local_disagg)
 ```
@@ -105,7 +105,7 @@ Both miles and slime write the same HF-safetensors + delta-metadata layout, so t
 | Flash *client* half of `providers/modal.py` | `pools/modal_flash.py` (`ModalFlashPool`) |
 | `cookbook/bulletin_hooks.py` | `publish.py` (`publish_from_hf_layout`, `stamp_request`) |
 | `cookbook/sidecar.py` | `service.py` (`serve`) |
-| `cookbook/{miles,slime}_disagg`, `standalone_rollouts`, `{ray_cluster,sidecar_process,serving,trainer_helpers}.py`, the Modal `Server`/`Trainer` skeletons | `examples/<experiment>/` (+ optional `_modal` helper) |
+| `cookbook/{miles,slime}_disagg`, `standalone_rollouts`, `{ray_cluster,sidecar_process,serving,trainer_helpers}.py`, the Modal `Server`/`Trainer` skeletons | `cookbook/<experiment>/` (+ optional `_shared` helper) |
 | `src/stitch/trainers/slime.py` (dead `publish_delta_version`) | deleted; live hook → an example shim |
 | `cookbook/local_disagg` | `tests/` (in-memory core harness) |
 | `profiling/` | `tools/profiling/` |
@@ -115,10 +115,10 @@ Both miles and slime write the same HF-safetensors + delta-metadata layout, so t
 
 Core logic is already proven (today's `local_disagg`). This is relocation + naming the abstractions + fixing the inward-dependency leaks.
 
-- **Phase 0 — skeleton.** Lay out the tree; move `profiling/` → `tools/profiling/`; create `tests/` + `examples/`; wire `pyproject`. No logic.
+- **Phase 0 — skeleton.** Lay out the tree; move `profiling/` → `tools/profiling/`; create `tests/` + `cookbook/`; wire `pyproject`. No logic.
 - **Phase 1 — core, provable in-memory.** `contract.py` (abstractions + types + rules), `sync.py`, `service.py`, `publish.py` — all provider/engine/framework-agnostic — with the in-memory harness (port of `local_disagg`) as the gate. **Gate: core passes with fakes before any instance exists.**
 - **Phase 2 — instances.** `stores/modal_volume`, `engines/sglang`, `pools/modal_flash` — port the proven code onto the abstractions and kill the leaks (proxy engine-agnostic via `Engine.stamp`; `publish` agnostic; Volume durability inside the store; Pool is client-only).
-- **Phase 3 — first example.** One `examples/<experiment>/` assembling the Modal app + prep + config + hook shim (the copy-forked skeleton collapses into one example, optionally an `_modal` helper). Fold in the slime cleanup; delete the superseded old tree.
+- **Phase 3 — first recipe.** One `cookbook/<experiment>/` assembling the Modal app + prep + config + hook shim (the copy-forked skeleton collapses into one recipe, optionally a `_shared` helper). Fold in the slime cleanup; delete the superseded old tree.
 - **Phase 4 — new-version fixes.** Land the miles/sglang updates (TE 2.17, etc.) on the clean structure — "make NVFP4 work," now on solid ground.
 
 Each phase is one reviewable PR. Phases 0–1 are pure and cheap; the leaks die in Phase 2; nothing gets a second instance or a stub until it is actually needed.

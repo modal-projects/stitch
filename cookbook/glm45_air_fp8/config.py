@@ -24,7 +24,7 @@ SERVER_CLS_NAME = "Server"                 # the Flash-served rollout replica cl
 DELTA_VOLUME_NAME = "stitch-delta-glm45-air-fp8"  # the Store's Modal Volume
 DELTA_BULLETIN_ROOT = "/delta-bulletin"    # Store root: `latest` + <run_id>/ chains
 LOCAL_CHECKPOINT_PATH = "/local-checkpoint"  # engine's per-host materialized checkpoint
-SIDECAR_COMMIT_MODE = "quiesce"            # fp8 reload is exact; no in_place needed
+SIDECAR_COMMIT_MODE = "quiesce"            # overrides the in_place default: fp8 reload is exact, so draining buys clean per-version attribution
 
 HF_CACHE_PATH = Path("/root/.cache/huggingface")
 DATA_PATH = Path("/data")
@@ -36,7 +36,7 @@ SOURCE_MODEL = "zai-org/GLM-4.5-Air"          # bf16 masters + trainer arch
 ROLLOUT_SOURCE_MODEL = "zai-org/GLM-4.5-Air-FP8"  # the served FP8 base
 
 # R3 routing-replay needs the dropless Megatron dispatch fix applied at trainer start.
-MEGATRON_RUNTIME_PATCHES = ["/root/examples/glm45_air_fp8/patches/megatron-r3-dispatch.patch"]
+MEGATRON_RUNTIME_PATCHES = ["/root/cookbook/glm45_air_fp8/patches/megatron-r3-dispatch.patch"]
 
 GPUType = Literal["H100", "H200", "B200", "B300", "A100"]
 
@@ -174,8 +174,8 @@ class _Miles(MilesConfig):
     use_miles_router = True
 
     # The three plug points stitch fills (resolved by miles inside the trainer process):
-    custom_rollout_request_hook_path = "examples.glm45_air_fp8.hooks.gated_rollout_request_hook"
-    custom_update_weight_post_write_path = "examples.glm45_air_fp8.hooks.commit_and_wake"
+    custom_rollout_request_hook_path = "cookbook.glm45_air_fp8.hooks.gated_rollout_request_hook"
+    custom_update_weight_post_write_path = "cookbook.glm45_air_fp8.hooks.commit_and_wake"
     custom_config_path = {
         "rollout_request_weight_version_mode": "min",
         "rollout_request_weight_version_lag": 1,

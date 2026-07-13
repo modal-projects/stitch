@@ -2,7 +2,7 @@
 
 Runs without Modal/torch: the real ``_store`` builds a local dir (volume_name=None,
 resolved from the temp root), and only ``_pool`` is faked. Run directly:
-  PYTHONPATH=src:examples/glm45_air_fp8 python examples/glm45_air_fp8/hooks_test.py
+  PYTHONPATH=src:cookbook/glm45_air_fp8 python cookbook/glm45_air_fp8/hooks_test.py
 """
 
 from __future__ import annotations

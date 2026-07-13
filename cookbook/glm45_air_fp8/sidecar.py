@@ -2,7 +2,7 @@
 versioned rollout proxy in front of the local sglang.
 
 The Server container launches this as a subprocess:
-  python -m examples.glm45_air_fp8.sidecar --port 8000 --upstream http://127.0.0.1:8001 ...
+  python -m cookbook.glm45_air_fp8.sidecar --port 8000 --upstream http://127.0.0.1:8001 ...
 Defaults come from the serving container's env, so the flags are optional.
 """
 
@@ -24,7 +24,7 @@ def main() -> None:
     p.add_argument("--bulletin-root", default=os.environ.get("DELTA_BULLETIN_ROOT", "/delta-bulletin"))
     p.add_argument("--volume-name", default=os.environ.get("DELTA_VOLUME_NAME", ""))
     p.add_argument("--local-checkpoint-dir", default=os.environ.get("STITCH_LOCAL_CHECKPOINT_DIR", "/local-checkpoint"))
-    p.add_argument("--commit-mode", choices=["quiesce", "in_place"], default=os.environ.get("SIDECAR_COMMIT_MODE", "quiesce"))
+    p.add_argument("--commit-mode", choices=["quiesce", "in_place"], default=os.environ.get("SIDECAR_COMMIT_MODE", "in_place"))
     p.add_argument("--run-id", default=os.environ.get("DISAGG_RUN_ID") or None)
     p.add_argument("--debug-requests", action="store_true")
     args = p.parse_args()

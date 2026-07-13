@@ -6,7 +6,7 @@ stitch pieces are small and live elsewhere: the Server runs ``stitch.service.ser
 over a ModalVolumeStore + SGLangEngine (sidecar.py), and the Trainer wires miles' three
 plug points to the core (hooks.py). Everything here is the Modal/miles/Ray deployment.
 
-    uv run --extra modal modal deploy -m examples.glm45_air_fp8.modal_app
+    uv run --extra modal modal deploy -m cookbook.glm45_air_fp8.modal_app
 """
 
 from __future__ import annotations
@@ -52,7 +52,7 @@ MILES_REPO_URL = "https://github.com/modal-projects/miles.git"
 MILES_REPO_REF = "bdaf8d04bbc26981ff4bc95b8cfe679c3cd29013"
 
 TORCH_DIST_CONVERT_WRAPPER = "/root/convert_hf_to_torch_dist_modal.py"
-EXAMPLE_REMOTE = "/root/examples/glm45_air_fp8"  # mount point; /root is on PYTHONPATH
+RECIPE_DIR = "/root/cookbook/glm45_air_fp8"  # mount point; /root is on PYTHONPATH
 
 # Pinned weight-sync sglang: the base supplies kernels/CUDA; the fork carries
 # /pull_weights, the hardened local_checkpoint receiver, and the quantized-reload
@@ -65,10 +65,10 @@ SGLANG_FORK_COMMIT = "2347c32817479e0521ac578230604fa4bbdc6cea"
 
 def _mount_example(image: modal.Image) -> modal.Image:
     """Mount stitch + this example so the trainer, Ray actors, and the sidecar
-    subprocess (`python -m examples.glm45_air_fp8.sidecar`) all resolve their imports.
+    subprocess (`python -m cookbook.glm45_air_fp8.sidecar`) all resolve their imports.
     Mounted at container start, so code edits never rebuild the image."""
     return image.add_local_python_source("stitch").add_local_dir(
-        Path(__file__).parent, remote_path=EXAMPLE_REMOTE, ignore=["**/__pycache__"]
+        Path(__file__).parent, remote_path=RECIPE_DIR, ignore=["**/__pycache__"]
     )
 
 
@@ -472,7 +472,7 @@ def launch_train() -> None:
     except NotFoundError:
         raise SystemExit(
             f"App {APP_NAME!r} is not deployed. Run:\n"
-            f"  uv run --extra modal modal deploy -m examples.glm45_air_fp8.modal_app"
+            f"  uv run --extra modal modal deploy -m cookbook.glm45_air_fp8.modal_app"
         )
     print(f"Spawned train on {APP_NAME}: {call.object_id}")
 
