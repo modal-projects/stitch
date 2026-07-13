@@ -67,6 +67,13 @@ class ModalVolumeStore:
         self.refresh()  # materialize this host's view before the files are read
         return str(self._version_dir(ref))
 
+    def commit(self) -> None:
+        """Durably flush pending writes on this host (e.g. one trainer rank's shard of a
+        version's files). Not part of the Store port — a Modal-Volume affordance the
+        publish hook uses on non-writer ranks; a no-op without a backing volume."""
+        if self.volume_name:
+            _volume(self.volume_name).commit()
+
     def _version_dir(self, ref: VersionRef) -> Path:
         # ref.identity is exactly the run-partitioned dir name (<run_id>/weight_vNNNNNN),
         # so the pointer spelling and the on-disk layout share one source of truth.

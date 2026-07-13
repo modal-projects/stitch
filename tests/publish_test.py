@@ -87,6 +87,15 @@ def test_claim_run() -> None:
     assert pool.woke == [VersionRef("r2", 0)]
 
 
+def test_claim_rewind_rejected() -> None:
+    store = FakeStore(VersionRef("r2", 3))
+    try:
+        claim_run(store, None, "r2")  # reused run_id already at v3 -> rewind to base
+        raise AssertionError("expected PointerRewind")
+    except PointerRewind:
+        pass
+
+
 def test_constrain_lag() -> None:
     payload, headers = {}, {}
     constrain_request(payload, headers, latest=10, lag=2, session_id="g1", affinity_header="X-Session")
