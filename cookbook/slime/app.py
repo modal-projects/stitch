@@ -5,6 +5,10 @@ Server (sglang + stitch sidecar) is the shared common one; the Trainer runs slim
 and publishes XOR deltas through a Modal Volume the pool syncs from.
 
     EXPERIMENT_CONFIG=kimi_k2_6_int4 uv run --extra modal modal deploy -m cookbook.slime.app
+
+Config access is uniform: the experiment module ``exp`` is the single source of truth —
+its ``exp.modal`` (infra), ``exp.slime`` (training), and ``exp.<CONST>`` are read directly.
+The only values resolved here are the two below (a deploy-time override and a fallback).
 """
 
 from __future__ import annotations
@@ -27,26 +31,30 @@ from cookbook.slime import trainer_image
 from cookbook.slime.config import SlimeConfig, YAML_CONFIG_FIELDS
 from cookbook.slime.trainer_image import SLIME_ROOT
 
+# ── deploy-time environment (selection + overrides, NOT experiment config) ──────
 EXPERIMENT = os.environ.get("EXPERIMENT_CONFIG", "kimi_k2_6_int4")
+SLIME_LOCAL_DIR = os.environ.get("SLIME_LOCAL_DIR")  # dev overlay of a local slime checkout
+
 exp = importlib.import_module(f"cookbook.slime.configs.{EXPERIMENT}")
 modal_cfg = exp.modal
 slime_cfg = exp.slime
 
-POOL_MIN_CONTAINERS = int(os.environ.get("POOL_MIN_CONTAINERS", modal_cfg.rollout_min_containers))
-APP_NAME = exp.APP_NAME
-MODEL_NAME = slime_cfg.hf_checkpoint
+# The two resolved values (everything else is read straight off modal_cfg/slime_cfg/exp):
+#  - MIN_CONTAINERS: the experiment's pool floor, overridable to 0 to deploy the pool down
+#    so download_model can run before the served base exists.
+#  - ROLLOUT_CONCURRENCY: the Flash autoscaler target (and sglang concurrency cap) — the
+#    experiment's explicit target_inputs, else the engine's configured concurrency.
+MIN_CONTAINERS = int(os.environ.get("POOL_MIN_CONTAINERS", modal_cfg.rollout_min_containers))
 ROLLOUT_CONCURRENCY = modal_cfg.rollout_target_inputs or slime_cfg.sglang_server_concurrency
-N_TRAIN_NODES = ray_cluster.training_nodes(slime_cfg)
 
 MINUTES = 60
 RAY_PORT = 6379
 SERVER_STARTUP_TIMEOUT = 35 * MINUTES
 
-slime_local = os.environ.get("SLIME_LOCAL_DIR")  # dev overlay of a local slime checkout
-image = trainer_image.build_trainer_image(hf_cache_path=str(HF_CACHE_PATH), slime_local=slime_local)
+image = trainer_image.build_trainer_image(hf_cache_path=str(HF_CACHE_PATH), slime_local=SLIME_LOCAL_DIR)
 server_image = serving_image.build_serving_image(hf_cache_path=str(HF_CACHE_PATH), delta_volume_name=exp.DELTA_VOLUME_NAME)
-if slime_local:
-    server_image = server_image.add_local_dir(slime_local, remote_path=SLIME_ROOT, ignore=[".git", "**/__pycache__", "**/*.pyc"])
+if SLIME_LOCAL_DIR:
+    server_image = server_image.add_local_dir(SLIME_LOCAL_DIR, remote_path=SLIME_ROOT, ignore=[".git", "**/__pycache__", "**/*.pyc"])
 
 hf_cache_volume = modal.Volume.from_name("huggingface-cache", create_if_missing=True, version=2)
 data_volume = modal.Volume.from_name("slime-data", create_if_missing=True, version=2)
@@ -60,10 +68,10 @@ train_volumes = {
     exp.DELTA_BULLETIN_ROOT: delta_volume,
 }
 
-app = modal.App(APP_NAME)
+app = modal.App(exp.APP_NAME)
 
 SGLANG_SERVER_ARGS = {
-    "--served-model-name": MODEL_NAME,
+    "--served-model-name": slime_cfg.hf_checkpoint,
     "--dtype": "bfloat16",
     "--cuda-graph-max-bs": str(ROLLOUT_CONCURRENCY),
     "--max-running-requests": str(ROLLOUT_CONCURRENCY),
@@ -71,6 +79,8 @@ SGLANG_SERVER_ARGS = {
     "--custom-pull-weights-pre-read-hook": "stitch.stores.modal_volume.pull_weights_pre_read_hook",
     **exp.SGLANG_SERVER_ARGS,
 }
+
+
 # The rollout Server: a thin module-level class (Modal requires @app.cls at global scope)
 # whose enter/exit delegate to the shared common.server logic. sglang + the stitch sidecar.
 @app.cls(
@@ -78,7 +88,7 @@ SGLANG_SERVER_ARGS = {
     gpu=f"{modal_cfg.gpu}:{slime_cfg.rollout_num_gpus_per_engine}",
     cloud=modal_cfg.cloud, region=modal_cfg.region,
     volumes={str(HF_CACHE_PATH): hf_cache_volume, exp.DELTA_BULLETIN_ROOT: delta_volume},
-    min_containers=POOL_MIN_CONTAINERS, max_containers=modal_cfg.rollout_max_containers,
+    min_containers=MIN_CONTAINERS, max_containers=modal_cfg.rollout_max_containers,
     timeout=40 * MINUTES, scaledown_window=15 * MINUTES,
     ephemeral_disk=modal_cfg.rollout_ephemeral_disk_mib, memory=modal_cfg.rollout_memory_mib,
     include_source=False,
@@ -92,7 +102,7 @@ class Server:
     @modal.enter()
     def startup(self) -> None:
         server.serve_startup(
-            self, model_name=MODEL_NAME, sglang_args=SGLANG_SERVER_ARGS,
+            self, model_name=slime_cfg.hf_checkpoint, sglang_args=SGLANG_SERVER_ARGS,
             tp=slime_cfg.rollout_num_gpus_per_engine, concurrency=ROLLOUT_CONCURRENCY,
             bulletin_root=exp.DELTA_BULLETIN_ROOT, local_checkpoint_dir=exp.LOCAL_CHECKPOINT_PATH,
             volume_name=exp.DELTA_VOLUME_NAME, commit_mode=exp.SIDECAR_COMMIT_MODE,
@@ -115,7 +125,7 @@ _TRAINER_KWARGS = dict(
     timeout=24 * 60 * MINUTES, startup_timeout=20 * MINUTES, scaledown_window=30 * MINUTES,
     include_source=False,
 )
-if N_TRAIN_NODES > 1:
+if slime_cfg.n_train_nodes > 1:
     _TRAINER_KWARGS["experimental_options"] = {"efa_enabled": True}
 
 
@@ -127,7 +137,7 @@ class Trainer:
     def start_ray(self) -> None:
         from cookbook.common import process
 
-        rank, master_addr, my_ip = ray_cluster.get_modal_cluster_context(N_TRAIN_NODES)
+        rank, master_addr, my_ip = ray_cluster.get_modal_cluster_context(slime_cfg.n_train_nodes)
         self.rank = rank
         process.start_host_mem_monitor()  # per-node host-RAM trace (publish gather is the OOM peak)
         os.environ.update({
@@ -137,7 +147,7 @@ class Trainer:
             **slime_cfg.environment,
         })
         if rank == 0:
-            ray_cluster.start_ray_head(my_ip, N_TRAIN_NODES, ray_port=RAY_PORT)
+            ray_cluster.start_ray_head(my_ip, slime_cfg.n_train_nodes, ray_port=RAY_PORT)
         else:
             ray_cluster.start_ray_worker(my_ip, master_addr, ray_port=RAY_PORT)
 
@@ -150,12 +160,12 @@ class Trainer:
             return
 
         cfg = SlimeConfig.from_payload(payload)
-        cfg.rollout_endpoint_url = ModalFlashPool(APP_NAME, "Server").gateway_url()
+        cfg.rollout_endpoint_url = ModalFlashPool(exp.APP_NAME, "Server").gateway_url()
         run_id = uuid.uuid4().hex[:12]  # per-launch fence token; forks a fresh chain
         cfg.update_weight_disk_dir = f"{exp.DELTA_BULLETIN_ROOT}/{run_id}"
         hook_knobs = {
             "update_weight_delta_volume_name": exp.DELTA_VOLUME_NAME,
-            "rollout_modal_flash_app_name": APP_NAME,
+            "rollout_modal_flash_app_name": exp.APP_NAME,
             "rollout_modal_flash_server_cls_name": "Server",
             "run_id": run_id,
         }
@@ -168,13 +178,13 @@ class Trainer:
 
         hooks.claim_pool(SimpleNamespace(update_weight_disk_dir=cfg.update_weight_disk_dir, **hook_knobs))
 
-        print(f"Training {EXPERIMENT}: nodes={N_TRAIN_NODES}, rollout_endpoint={cfg.rollout_endpoint_url}")
+        print(f"Training {EXPERIMENT}: nodes={slime_cfg.n_train_nodes}, rollout_endpoint={cfg.rollout_endpoint_url}")
         print(f"Command: {cmd}")
         subprocess.run(["bash", "-lc", cmd], check=True)
 
 
-if N_TRAIN_NODES > 1:
-    Trainer = modal.experimental.clustered(N_TRAIN_NODES, rdma=True)(Trainer)
+if slime_cfg.n_train_nodes > 1:
+    Trainer = modal.experimental.clustered(slime_cfg.n_train_nodes, rdma=True)(Trainer)
 Trainer = app.cls(**_TRAINER_KWARGS)(Trainer)
 
 
@@ -187,7 +197,7 @@ def download_model() -> None:
     """Snapshot the served model into the HF cache (sglang serves it by repo id)."""
     from huggingface_hub import snapshot_download
 
-    snapshot_download(repo_id=MODEL_NAME)
+    snapshot_download(repo_id=slime_cfg.hf_checkpoint)
     hf_cache_volume.commit()
 
 
@@ -208,20 +218,20 @@ def launch_train() -> None:
     from modal.exception import NotFoundError
 
     try:
-        trainer = modal.Cls.from_name(APP_NAME, "Trainer")()
+        trainer = modal.Cls.from_name(exp.APP_NAME, "Trainer")()
         call = trainer.train.spawn(slime_cfg.to_payload())
     except NotFoundError:
         raise SystemExit(
-            f"App {APP_NAME!r} is not deployed. Run:\n"
+            f"App {exp.APP_NAME!r} is not deployed. Run:\n"
             f"  EXPERIMENT_CONFIG={EXPERIMENT} uv run --extra modal modal deploy -m cookbook.slime.app"
         )
-    print(f"Spawned train on {APP_NAME}: {call.object_id}")
+    print(f"Spawned train on {exp.APP_NAME}: {call.object_id}")
 
 
 @app.local_entrypoint()
 def smoke_flash_pool(weight_version: int = 0, timeout_seconds: int = 30 * MINUTES) -> None:
     """Check the deployed Flash pool serves completions at the expected weight version."""
     smoke.smoke_flash_pool(
-        app_name=APP_NAME, cls_name="Server", model_name=MODEL_NAME,
+        app_name=exp.APP_NAME, cls_name="Server", model_name=slime_cfg.hf_checkpoint,
         weight_version=weight_version, timeout_seconds=timeout_seconds,
     )
