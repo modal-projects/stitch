@@ -10,12 +10,13 @@ from __future__ import annotations
 import logging
 from concurrent.futures import ThreadPoolExecutor
 
+from stitch.pools.base import Pool
 from stitch.versions import VersionRef
 
 logger = logging.getLogger(__name__)
 
 
-class ModalFlashPool:
+class ModalFlashPool(Pool):
     def __init__(self, app_name: str, cls_name: str) -> None:
         self.app_name = app_name
         self.cls_name = cls_name
@@ -37,7 +38,7 @@ class ModalFlashPool:
 
         modal.Cls.from_name(self.app_name, self.cls_name)  # client-side resolve side effect
         containers = modal.experimental.flash_get_containers(self.app_name, self.cls_name)
-        return [_https(h) for c in containers if (h := _host(c))]
+        return [_normalize_url(h) for c in containers if (h := _host(c))]
 
     def wake(self, replicas: list[str], ref: VersionRef) -> None:
         # Kick each replica to reconcile now; it re-reads the authoritative pointer,
@@ -77,6 +78,6 @@ def _host(container) -> str | None:
     return getattr(container, "host", None)
 
 
-def _https(host: str) -> str:
+def _normalize_url(host: str) -> str:
     host = str(host).rstrip("/")
     return host if host.startswith(("http://", "https://")) else f"https://{host}"

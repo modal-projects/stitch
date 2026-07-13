@@ -25,7 +25,7 @@ stitch is separate from the *framework* (miles and slime present the identical s
 > **Non-core** = a concrete *deployment*, an experiment *config*, a customer *facade*, dev *tooling*, or *tests*.
 
 The generality test both ways:
-- **Different store / engine / pool?** add a new instance behind the abstraction — a core file, or a third-party package implementing the Protocol. Zero core-logic edits.
+- **Different store / engine / pool?** add a new instance behind the abstraction — a core file, or a third-party package subclassing the base. Zero core-logic edits.
 - **Different deployment** (k8s, another image, another provider, another model)? it's an **example**. Core never changes.
 
 stitch is a **library, not a baked service** — every concrete deployment (including the Modal pool app) is an example.
@@ -36,9 +36,11 @@ A **version** is a published policy state `(run_id, version)`. It is an **anchor
 
 ## Abstractions (ports)
 
-- **Store** — where versions live + the `latest` pointer (read/publish/pointer/claim/refresh/open_version).
-- **Engine** — drive one inference engine: `stage`/`commit`/`reset`/`applied_version` + request version-`stamp`/read + `generate_url`.
-- **Pool** — reach the replica set: `gateway_url`/`discover_replicas`/`wake`(opt)/`scale`(opt). A *client* to a running pool, not its deployment.
+Each port is a plain base class; an instance subclasses it and overrides its methods (a missing override surfaces as `NotImplementedError` when called).
+
+- **Store** — where versions live + the `latest` pointer: `refresh`/`read_pointer`/`advance_pointer`/`claim`/`read_manifest`/`publish`/`materialize`.
+- **Engine** — drive one inference engine: `stage`/`commit`/`flush`/`pause`/`resume`/`reset` + `stamp_request`/`stamp_response` + `base_url`.
+- **Pool** — reach the replica set: `gateway_url`/`discover_replicas` + `wake`(opt)/`scale`(opt, default no-op). A *client* to a running pool, not its deployment.
 
 ## Layout
 
@@ -72,7 +74,7 @@ Only three files in the library are Modal/sglang-specific (the instances), each 
 - **delta-sync** = one base anchor + deltas (slime `update_weight_from_disk_delta.py`, miles)
 - **periodic-full** = anchors every K (bounds joiner catch-up, enables GC)
 
-No codec component: encode lives in the framework, decode inside the engine; stitch carries the format as manifest data (`diff`/`compression`/`checksum`) so the two agree.
+No codec component: encode lives in the framework, decode inside the engine; stitch carries the format as manifest data (`delta_encoding`/`compression`/`checksum`) so the two agree.
 
 ## Framework integration — agnostic helper + example shim
 
@@ -83,7 +85,7 @@ Both miles and slime write the same HF-safetensors + delta-metadata layout, so t
 1. **Applied-version flips atomically, only after `commit` succeeds** — the gate never advertises an unserved version. Under `in_place` commit, attribution comes from the request's own stamp, not the replica's live version.
 2. **Publish writes files → then advances the pointer; apply verifies checksums; a missing source = retry, not reseed.**
 3. **Retention: never GC an anchor or delta any replica's chain still needs** (keep newest-anchor ≤ `min(applied)` through `latest`).
-4. **`Store.open_version` guarantees files are locally readable before returning** (hides mount vs download).
+4. **`Store.materialize` guarantees files are locally readable before returning** (hides mount vs download).
 
 ## Naming conventions
 

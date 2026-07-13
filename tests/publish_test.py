@@ -6,11 +6,13 @@ import json
 import tempfile
 from pathlib import Path
 
+from stitch.pools.base import Pool
 from stitch.publish import claim_run, constrain_request, publish_version
+from stitch.stores.base import Store
 from stitch.versions import PointerRewind, VersionRef
 
 
-class FakeStore:
+class FakeStore(Store):
     def __init__(self, pointer: VersionRef | None = None) -> None:
         self._pointer = pointer
         self.published: list = []
@@ -28,7 +30,7 @@ class FakeStore:
         self._pointer = VersionRef(run_id, 0)
 
 
-class FakePool:
+class FakePool(Pool):
     def __init__(self) -> None:
         self.woke: list = []
 
@@ -66,7 +68,7 @@ def test_publish_delta() -> None:
         store = FakeStore(VersionRef("r1", 1))
         publish_version(store, None, _version_dir(tmp, version=2, base=1, diff="xor"), run_id="r1")
         man = store.published[0]
-        assert man.kind.value == "delta" and man.base_version == 1 and man.diff == "xor"
+        assert man.kind.value == "delta" and man.base_version == 1 and man.delta_encoding == "xor"
         assert store._pointer == VersionRef("r1", 2)
 
 

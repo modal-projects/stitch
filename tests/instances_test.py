@@ -52,7 +52,7 @@ def test_store_publish_full_roundtrip() -> None:
         assert store.read_pointer() == VersionRef("r1", 1)  # pointer parses back to the ref
         man = store.read_manifest(ref)
         assert man.kind is VersionKind.FULL and man.base_version is None
-        assert (Path(store.open_version(ref)) / "model.safetensors.index.json").exists()
+        assert (Path(store.materialize(ref)) / "model.safetensors.index.json").exists()
 
 
 def test_store_claim_then_delta_chain() -> None:
@@ -65,7 +65,7 @@ def test_store_claim_then_delta_chain() -> None:
         publish_version(store, None, _write_version(root, VersionRef("r1", 2), base=1, diff="xor"), run_id="r1")
         assert store.read_pointer() == VersionRef("r1", 2)
         man = store.read_manifest(VersionRef("r1", 2))
-        assert man.kind is VersionKind.DELTA and man.base_version == 1 and man.diff == "xor"
+        assert man.kind is VersionKind.DELTA and man.base_version == 1 and man.delta_encoding == "xor"
 
 
 def test_store_copies_when_files_dir_is_external() -> None:

@@ -18,7 +18,7 @@ from typing import Any
 from stitch.engines.base import Engine
 from stitch.pools.base import Pool
 from stitch.stores.base import Store
-from stitch.sync import CommitMode, PolicyViolation, Reconciler
+from stitch.sync import CommitMode, ConstraintUnmet, Reconciler
 from stitch.versions import PoolState, ReplicaState, VersionConstraint
 
 logger = logging.getLogger(__name__)
@@ -57,7 +57,7 @@ def create_app(
     from fastapi.responses import JSONResponse, Response
     import httpx
 
-    upstream = engine.upstream_url().rstrip("/")
+    engine_url = engine.base_url().rstrip("/")
     timeout = httpx.Timeout(upstream_timeout, connect=10.0)
     versioned = {r.strip("/") for r in versioned_routes}
     pooled: dict[str, Any] = {}
@@ -133,7 +133,7 @@ def create_app(
                 kwargs: dict[str, Any] = {"params": request.query_params, "headers": headers}
                 kwargs["json" if payload is not None else "content"] = payload if payload is not None else body
 
-                upstream_task = asyncio.ensure_future(client().request(request.method, f"{upstream}/{path}", **kwargs))
+                upstream_task = asyncio.ensure_future(client().request(request.method, f"{engine_url}/{path}", **kwargs))
                 disconnect_task = asyncio.ensure_future(_watch_disconnect(request))
                 try:
                     await asyncio.wait({upstream_task, disconnect_task}, return_when=asyncio.FIRST_COMPLETED)
@@ -142,7 +142,7 @@ def create_app(
                         with contextlib.suppress(BaseException):
                             await upstream_task
                         if rid is not None:
-                            await _abort(client(), upstream, rid)
+                            await _abort(client(), engine_url, rid)
                         return Response(status_code=499)
                 finally:
                     disconnect_task.cancel()
@@ -155,7 +155,7 @@ def create_app(
                                     media_type=resp.headers.get("content-type") or None)
                 data = resp.json()
                 current = reconciler.applied  # captured while still pinned, before any commit advances it
-        except PolicyViolation as exc:
+        except ConstraintUnmet as exc:
             return JSONResponse(exc.error, status_code=409)
 
         if is_versioned and isinstance(data, dict) and served is not None and current is not None:
@@ -168,9 +168,9 @@ def create_app(
 _DROP_HEADERS = {"host", "content-length", "connection"}
 
 
-async def _abort(client: Any, upstream: str, rid: str) -> None:
+async def _abort(client: Any, engine_url: str, rid: str) -> None:
     try:
-        await client.request("POST", f"{upstream}/abort_request", json={"rid": rid}, timeout=10.0)
+        await client.request("POST", f"{engine_url}/abort_request", json={"rid": rid}, timeout=10.0)
     except Exception:  # noqa: BLE001
         logger.warning("failed to abort upstream rid=%s", rid, exc_info=True)
 

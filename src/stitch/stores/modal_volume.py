@@ -14,12 +14,13 @@ import os
 import tempfile
 from pathlib import Path
 
+from stitch.stores.base import Store
 from stitch.versions import VersionManifest, VersionRef
 
 _POINTER = "latest"
 
 
-class ModalVolumeStore:
+class ModalVolumeStore(Store):
     def __init__(self, root: str | Path, *, volume_name: str | None = None) -> None:
         self.root = Path(root)
         self.volume_name = volume_name
@@ -63,7 +64,7 @@ class ModalVolumeStore:
         if self.volume_name:
             _volume(self.volume_name).commit()
 
-    def open_version(self, ref: VersionRef) -> str:
+    def materialize(self, ref: VersionRef) -> str:
         self.refresh()  # materialize this host's view before the files are read
         return str(self._version_dir(ref))
 
