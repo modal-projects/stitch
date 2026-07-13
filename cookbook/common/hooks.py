@@ -26,20 +26,24 @@ logger = logging.getLogger(__name__)
 
 
 # ── publish ────────────────────────────────────────────────────────────────────
-def commit_and_wake(args: Any, version_dir: str, rollout_engines: Any = None) -> None:
-    """Publish the version the trainer just wrote. Rank 0 publishes it (manifest +
-    pointer advance + pool wake); every other rank only flushes its own shard of the
-    version's files, so the whole version is durable before rank 0's pointer move."""
+def commit_and_wake(args: Any, published_dir: str, rollout_engines: Any = None) -> None:
+    """Bridge the framework's disk-delta publish to the stitch store. The framework fires
+    this at each shared-store durability boundary (a dir to flush to the volume): an actual
+    version dir (``weight_vNNNNNN``, holding the HF index) and — at baseline / pointer
+    commit — the run dir. Every rank flushes its own writes; rank 0 publishes (manifest +
+    pointer advance + pool wake) ONLY when handed a version dir. Keying on the dir the
+    framework names, not on reading an index, is what makes the run-dir calls (no index yet)
+    a clean no-op instead of a missing-file crash."""
     del rollout_engines
     store = _store(args)
-    if _rank() not in (None, 0):
-        store.commit()
+    store.commit()  # flush this rank's local writes (shards / index / pointer) to the volume
+    if _rank() not in (None, 0) or not Path(published_dir).name.startswith("weight_v"):
         return
     try:
-        publish_version(store, _pool(args), version_dir, run_id=_run_id(args))
+        publish_version(store, _pool(args), published_dir, run_id=_run_id(args))
     except PointerRewind:
         # A same-run republish (e.g. a retried step) — drop it rather than serve stale.
-        logger.warning("publish of %s would rewind latest; dropping", version_dir, exc_info=True)
+        logger.warning("publish of %s would rewind latest; dropping", published_dir, exc_info=True)
 
 
 def claim_pool(args: Any) -> None:

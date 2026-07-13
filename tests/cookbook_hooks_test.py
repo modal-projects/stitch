@@ -54,6 +54,21 @@ def test_commit_and_wake_publishes() -> None:
         assert pool.woke == [VersionRef("run-abc", 1)]
 
 
+def test_commit_and_wake_baseline_is_noop() -> None:
+    # The framework fires the hook at baseline/pointer-commit with the RUN dir (name is the
+    # run_id, no version written). Keying on the dir name means we flush the volume but read
+    # no index and publish nothing — the regression was reading an index that wasn't there.
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        pool = _FakePool()
+        hooks._pool = lambda args: pool
+        run_dir = root / "run-abc"
+        run_dir.mkdir(parents=True)
+        hooks.commit_and_wake(_args(str(root)), str(run_dir))
+        assert ModalVolumeStore(root).read_pointer() is None
+        assert pool.woke == []
+
+
 def test_claim_pool_resets_to_base() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         pool = _FakePool()
