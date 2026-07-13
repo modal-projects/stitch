@@ -80,6 +80,23 @@ class ModalVolumeStore:
         return self.root / ref.identity
 
 
+def pull_weights_pre_read_hook(source_dir: str, target_version: int) -> None:
+    """Engine-side ``--custom-pull-weights-pre-read-hook``: reload the delta Volume onto
+    THIS host exactly once so the engine's pull can read the published version.
+
+    One reload, not a loop: the sidecar only pulls after seeing ``target_version`` at the
+    pointer, and a reload loop thrashes the Modal-v2 mount (turned ~3s delta pulls into
+    100-500s ones and tripped the engine's 300s watchdog). Completeness is handled
+    downstream — the engine size-verifies each staged delta, and a not-yet-materialized
+    blob fails fast so the sidecar retries with a fresh single reload. The volume name
+    travels via ``DELTA_VOLUME_NAME`` (set on the serving container)."""
+    del source_dir  # the engine passes it; the reload is by volume name, not path
+    volume_name = os.environ.get("DELTA_VOLUME_NAME", "")
+    if not volume_name or target_version <= 0:
+        return
+    _volume(volume_name).reload()
+
+
 def _volume(name: str):
     import modal
 
