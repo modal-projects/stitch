@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import importlib
 import os
-import shlex
 import subprocess
 import tempfile
 import uuid
@@ -23,7 +22,7 @@ import modal.experimental
 
 from stitch.pools.modal_flash import ModalFlashPool
 
-from cookbook.common import ray_cluster, serving_image, server, smoke
+from cookbook.common import launch, ray_cluster, serving_image, server, smoke
 from cookbook.common.config import CHECKPOINTS_PATH, DATA_PATH, HF_CACHE_PATH, PREP_PATH
 from cookbook.miles import prep, trainer_image
 from cookbook.miles.config import MilesConfig, YAML_CONFIG_FIELDS
@@ -54,11 +53,11 @@ server_image = serving_image.build_serving_image(hf_cache_path=str(HF_CACHE_PATH
 if miles_local:
     server_image = server_image.add_local_dir(miles_local, remote_path=MILES_ROOT, ignore=[".git", "**/__pycache__", "**/*.pyc"])
 
-hf_cache_volume = modal.Volume.from_name("huggingface-cache", create_if_missing=True)
-data_volume = modal.Volume.from_name("miles-data", create_if_missing=True)
-checkpoints_volume = modal.Volume.from_name("miles-checkpoints", create_if_missing=True)
-prep_volume = modal.Volume.from_name("miles-prep-checkpoints", create_if_missing=True)
-sglang_cache_volume = modal.Volume.from_name("miles-sglang-cache", create_if_missing=True)  # survives cold starts
+hf_cache_volume = modal.Volume.from_name("huggingface-cache", create_if_missing=True, version=2)
+data_volume = modal.Volume.from_name("miles-data", create_if_missing=True, version=2)
+checkpoints_volume = modal.Volume.from_name("miles-checkpoints", create_if_missing=True, version=2)
+prep_volume = modal.Volume.from_name("miles-prep-checkpoints", create_if_missing=True, version=2)
+sglang_cache_volume = modal.Volume.from_name("miles-sglang-cache", create_if_missing=True, version=2)  # survives cold starts
 delta_volume = modal.Volume.from_name(exp.DELTA_VOLUME_NAME, create_if_missing=True, version=2)
 
 SGLANG_CACHE_PATH = "/root/.cache/sglang"
@@ -173,8 +172,8 @@ class Trainer:
             "run_id": run_id,
         }
         cfg.custom_config_path = custom_config
-        _resolve_and_materialize(cfg, tempfile.mkdtemp())
-        cmd = _build_train_cmd(cfg)
+        launch.resolve_config(cfg, tempfile.mkdtemp(), YAML_CONFIG_FIELDS)
+        cmd = launch.build_train_cmd(cfg, MILES_ROOT, "miles_model_script")
 
         # Claim the pool before miles publishes: reset every replica to base for this run.
         from cookbook.common import hooks
@@ -201,36 +200,7 @@ if N_TRAIN_NODES > 1:
 Trainer = app.cls(**_TRAINER_KWARGS)(Trainer)
 
 
-# ── miles launch helpers ──────────────────────────────────────────────────────
-def _build_train_cmd(cfg: Any) -> str:
-    """The miles train command, sourcing the model-arch MODEL_ARGS script if set."""
-    train_script = f"{MILES_ROOT}/{'train_async.py' if cfg.async_mode else 'train.py'}"
-    if cfg.miles_model_script:
-        inner = (
-            f"source {MILES_ROOT}/{cfg.miles_model_script} && "
-            f"python3 {train_script} ${{MODEL_ARGS[@]}} {shlex.join(cfg.cli_args())}"
-        )
-        return f"bash -c {shlex.quote(inner)}"
-    return f"python3 {train_script} {shlex.join(cfg.cli_args())}"
-
-
-def _resolve_and_materialize(cfg: Any, tmpdir: str) -> None:
-    """Resolve HF repo-id checkpoint fields to local paths and materialize inline YAML
-    config dicts to files the trainer reads. Absolute paths are left untouched."""
-    from huggingface_hub import snapshot_download
-    import yaml
-
-    for attr in ("hf_checkpoint", "load", "ref_load", "critic_load"):
-        if (val := getattr(cfg, attr, None)) and not str(val).startswith("/"):
-            setattr(cfg, attr, snapshot_download(val, local_files_only=True))
-    for field in YAML_CONFIG_FIELDS:
-        if isinstance(val := getattr(cfg, field, None), dict):
-            path = os.path.join(tmpdir, f"{field}.yaml")
-            with open(path, "w") as f:
-                yaml.dump(val, f)
-            setattr(cfg, field, path)
-
-
+# ── miles launch helper (te_precision_config_file is miles-only) ──────────────────
 def _materialize_node_local_yaml(cfg: Any, field: str, dest_dir: str = "/root/.miles_node_yaml") -> None:
     """Write an inline YAML config to a deterministic node-local path on EVERY node.
     Fields like te_precision_config_file are re-read on each Ray actor, so they must
