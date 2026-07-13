@@ -71,21 +71,37 @@ SGLANG_SERVER_ARGS = {
     "--custom-pull-weights-pre-read-hook": "stitch.stores.modal_volume.pull_weights_pre_read_hook",
     **exp.SGLANG_SERVER_ARGS,
 }
-# The rollout Server is the shared common one — registered with this experiment's config.
-Server = server.register_server(
-    app,
+# The rollout Server: a thin module-level class (Modal requires @app.cls at global scope)
+# whose enter/exit delegate to the shared common.server logic. sglang + the stitch sidecar.
+@app.cls(
     image=server_image,
     gpu=f"{modal_cfg.gpu}:{slime_cfg.rollout_num_gpus_per_engine}",
     cloud=modal_cfg.cloud, region=modal_cfg.region,
     volumes={str(HF_CACHE_PATH): hf_cache_volume, exp.DELTA_BULLETIN_ROOT: delta_volume},
-    model_name=MODEL_NAME, sglang_args=SGLANG_SERVER_ARGS, tp=slime_cfg.rollout_num_gpus_per_engine,
-    concurrency=ROLLOUT_CONCURRENCY,
-    bulletin_root=exp.DELTA_BULLETIN_ROOT, local_checkpoint_dir=exp.LOCAL_CHECKPOINT_PATH,
-    volume_name=exp.DELTA_VOLUME_NAME, commit_mode=exp.SIDECAR_COMMIT_MODE,
     min_containers=POOL_MIN_CONTAINERS, max_containers=modal_cfg.rollout_max_containers,
-    proxy_regions=modal_cfg.proxy_regions, ephemeral_disk_mib=modal_cfg.rollout_ephemeral_disk_mib,
-    memory_mib=modal_cfg.rollout_memory_mib, startup_timeout=SERVER_STARTUP_TIMEOUT,
+    timeout=40 * MINUTES, scaledown_window=15 * MINUTES,
+    ephemeral_disk=modal_cfg.rollout_ephemeral_disk_mib, memory=modal_cfg.rollout_memory_mib,
+    include_source=False,
 )
+@modal.experimental.http_server(
+    port=server.SIDECAR_PORT, proxy_regions=modal_cfg.proxy_regions,
+    exit_grace_period=25, startup_timeout=SERVER_STARTUP_TIMEOUT,
+)
+@modal.concurrent(target_inputs=ROLLOUT_CONCURRENCY)
+class Server:
+    @modal.enter()
+    def startup(self) -> None:
+        server.serve_startup(
+            self, model_name=MODEL_NAME, sglang_args=SGLANG_SERVER_ARGS,
+            tp=slime_cfg.rollout_num_gpus_per_engine, concurrency=ROLLOUT_CONCURRENCY,
+            bulletin_root=exp.DELTA_BULLETIN_ROOT, local_checkpoint_dir=exp.LOCAL_CHECKPOINT_PATH,
+            volume_name=exp.DELTA_VOLUME_NAME, commit_mode=exp.SIDECAR_COMMIT_MODE,
+            startup_timeout=SERVER_STARTUP_TIMEOUT,
+        )
+
+    @modal.exit()
+    def stop(self) -> None:
+        server.serve_stop(self)
 
 
 # ── Trainer (slime on Ray) ────────────────────────────────────────────────────
