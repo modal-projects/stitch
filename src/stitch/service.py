@@ -180,7 +180,7 @@ def serve(
     engine: Engine,
     *,
     run_id: str | None = None,
-    commit_mode: CommitMode = "in_place",
+    commit_mode: CommitMode = "quiesce",
     host: str = "0.0.0.0",
     port: int = 8000,
     debug_requests: bool = False,
