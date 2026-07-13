@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol, runtime_checkable
 
-from stitch.versions import VersionConstraint, VersionManifest, VersionRef
+from stitch.versions import VersionManifest, VersionRef
 
 
 @runtime_checkable
@@ -42,12 +42,18 @@ class Engine(Protocol):
 
     async def applied_version(self) -> VersionRef | None: ...
 
-    def stamp_request(
-        self, request: dict[str, Any], constraint: VersionConstraint
-    ) -> dict[str, Any]:
-        """Stamp the version constraint onto a request (engine-specific, e.g. sglang's extra_key)."""
+    def stamp_request(self, request: dict[str, Any], served: VersionRef) -> None:
+        """Namespace a request to the version it's served on so requests from different
+        versions can't share KV prefixes (engine-specific, e.g. sglang's extra_key).
+        Mutates ``request`` in place."""
         ...
 
-    def read_response_version(self, response: dict[str, Any]) -> VersionRef | None: ...
+    def stamp_response(self, response: dict[str, Any], served: VersionRef, current: VersionRef) -> None:
+        """Record which version generated a response, in the engine's response shape
+        (e.g. sglang's meta_info vs OpenAI top-level). Mutates ``response`` in place."""
+        ...
 
-    def generate_url(self) -> str: ...
+    def upstream_url(self) -> str:
+        """The engine's base HTTP URL — the proxy forwards to it, and the engine's own
+        stage/commit calls target it."""
+        ...
