@@ -226,9 +226,9 @@ def start_sidecar(
     *, sidecar_port: int, sglang_port: int, bulletin_root: str, local_checkpoint_dir: str,
     volume_name: str, commit_mode: str, debug_requests: bool = False,
 ) -> subprocess.Popen:
-    """Launch the versioned rollout proxy (examples.glm45_air_fp8.sidecar) beside sglang."""
+    """Launch the versioned rollout proxy (cookbook.glm45_air_fp8.sidecar) beside sglang."""
     cmd = [
-        "python3", "-m", "examples.glm45_air_fp8.sidecar",
+        "python3", "-m", "cookbook.glm45_air_fp8.sidecar",
         "--host", "0.0.0.0", "--port", str(sidecar_port),
         "--upstream", f"http://127.0.0.1:{sglang_port}",
         "--bulletin-root", bulletin_root,

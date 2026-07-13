@@ -42,7 +42,7 @@ class AdmissionGate:
     version flip, so no request is ever admitted seeing the stale version on new weights.
     """
 
-    def __init__(self, *, commit_mode: CommitMode = "quiesce") -> None:
+    def __init__(self, *, commit_mode: CommitMode = "in_place") -> None:
         self.commit_mode = commit_mode
         self.applied: VersionRef | None = None
         self._cond = asyncio.Condition()
@@ -150,7 +150,7 @@ class Reconciler(AdmissionGate):
         store: Store,
         engine: Engine,
         run_id: str | None = None,
-        commit_mode: CommitMode = "quiesce",
+        commit_mode: CommitMode = "in_place",
         debug_requests: bool = False,
     ) -> None:
         super().__init__(commit_mode=commit_mode)

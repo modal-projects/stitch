@@ -100,7 +100,7 @@ def _run(coro) -> None:
 def test_fresh_reconcile() -> None:
     async def go() -> None:
         engine = FakeEngine()
-        r = Reconciler(store=FakeStore(VersionRef("r1", 3), _full("r1", 3)), engine=engine)
+        r = Reconciler(store=FakeStore(VersionRef("r1", 3), _full("r1", 3)), engine=engine, commit_mode="quiesce")
         await r.startup()
         assert r.applied == VersionRef("r1", 3)
         assert engine.staged[-1] == VersionRef("r1", 3)
@@ -114,11 +114,12 @@ def test_fresh_reconcile() -> None:
 def test_catch_up() -> None:
     async def go() -> None:
         engine = FakeEngine()
-        r = Reconciler(store=FakeStore(VersionRef("r1", 5), _full("r1", 5)), engine=engine)
+        r = Reconciler(store=FakeStore(VersionRef("r1", 5), _full("r1", 5)), engine=engine)  # default commit_mode
         r.applied = VersionRef("r1", 3)
         await r.reconcile()
         assert r.applied == VersionRef("r1", 5)
         assert engine.committed == [VersionRef("r1", 5)]  # one composed stage+reload, not per-version
+        assert "flush" not in engine.calls  # in_place is the default: no drain/flush, pause+reload+resume
 
     _run(go())
 

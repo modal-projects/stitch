@@ -41,6 +41,9 @@ BLOCKED_ROUTES = frozenset(
 
 VERSIONED_ROUTES = ("generate", "v1/chat/completions", "v1/completions")
 
+# Hop-by-hop / rewritten headers the proxy never forwards upstream.
+_DROP_HEADERS = {"host", "content-length", "connection"}
+
 
 def create_app(
     reconciler: Reconciler,
@@ -165,9 +168,6 @@ def create_app(
     return app
 
 
-_DROP_HEADERS = {"host", "content-length", "connection"}
-
-
 async def _abort(client: Any, engine_url: str, rid: str) -> None:
     try:
         await client.request("POST", f"{engine_url}/abort_request", json={"rid": rid}, timeout=10.0)
@@ -180,7 +180,7 @@ def serve(
     engine: Engine,
     *,
     run_id: str | None = None,
-    commit_mode: CommitMode = "quiesce",
+    commit_mode: CommitMode = "in_place",
     host: str = "0.0.0.0",
     port: int = 8000,
     debug_requests: bool = False,

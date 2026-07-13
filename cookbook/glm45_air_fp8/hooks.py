@@ -1,8 +1,8 @@
 """Framework hook shims for the glm45_air_fp8 example.
 
 miles resolves these by dotted path (set on the run config):
-  custom_update_weight_post_write_path = "examples.glm45_air_fp8.hooks.commit_and_wake"
-  custom_rollout_request_hook_path     = "examples.glm45_air_fp8.hooks.gated_rollout_request_hook"
+  custom_update_weight_post_write_path = "cookbook.glm45_air_fp8.hooks.commit_and_wake"
+  custom_rollout_request_hook_path     = "cookbook.glm45_air_fp8.hooks.gated_rollout_request_hook"
 and the launcher calls ``claim_pool`` once (rank 0) before the first publish.
 
 Each shim is a thin adapter: read the run's coordinates off the trainer's ``args``

@@ -18,14 +18,20 @@ from typing import Any
 from stitch.engines.base import Engine
 from stitch.versions import VersionManifest, VersionRef
 
-_EXTRA_KEY_DELIM = ";"
-
 
 class SGLangEngine(Engine):
-    def __init__(self, base_url: str, local_checkpoint_dir: str, *, control_timeout: float = 120.0) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        local_checkpoint_dir: str,
+        *,
+        control_timeout: float = 120.0,
+        flush_on_commit: bool = False,
+    ) -> None:
         self._base_url = base_url.rstrip("/")
         self.local_checkpoint_dir = local_checkpoint_dir
         self._control_timeout = control_timeout
+        self._flush_on_commit = flush_on_commit
 
     def base_url(self) -> str:
         return self._base_url
@@ -45,12 +51,13 @@ class SGLangEngine(Engine):
         )
 
     async def commit(self, ref: VersionRef) -> None:
-        # flush_cache stays off here: the reconciler flushes (quiesce) while drained,
-        # and the engine's own post-apply flush hard-asserts — killing the scheduler —
-        # if a request slipped in.
+        # flush_cache defaults off: the reconciler owns flushing — it calls flush()
+        # itself before a quiesce reload, and in_place deliberately keeps in-flight KV.
+        # flush_on_commit is the escape hatch for a setup that wants the reload to evict.
         await self._post(
             "/update_weights_from_disk",
-            {"model_path": self.local_checkpoint_dir, "weight_version": str(ref.version), "flush_cache": False},
+            {"model_path": self.local_checkpoint_dir, "weight_version": str(ref.version),
+             "flush_cache": self._flush_on_commit},
             timeout=None,
             action="weight update",
         )
@@ -90,7 +97,7 @@ class SGLangEngine(Engine):
         # Namespace the KV cache by version (and run, so two runs that both restart at
         # v1 stay distinct): requests on different versions can't share radix prefixes.
         run = f"{served.run_id}/" if served.run_id else ""
-        return f"wv{served.version}{_EXTRA_KEY_DELIM}{run}{user or ''}"
+        return f"wv{served.version};{run}{user or ''}"
 
     async def _post(self, path: str, payload: dict[str, Any], *, timeout: float | None, action: str | None = None) -> None:
         import httpx
