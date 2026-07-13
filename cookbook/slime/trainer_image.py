@@ -1,6 +1,6 @@
 """The slime trainer image + the versions pinned to launch a slime run.
 
-The serving half is separate and shared (common/images.py) — the pool installs no
+The serving half is separate and shared (common/serving_image.py) — the pool installs no
 trainer package, so slime and miles serve on the identical weight-sync sglang image.
 """
 

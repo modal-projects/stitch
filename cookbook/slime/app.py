@@ -23,11 +23,11 @@ import modal.experimental
 
 from stitch.pools.modal_flash import ModalFlashPool
 
-from cookbook.common import images, ray, server, smoke
+from cookbook.common import ray_cluster, serving_image, server, smoke
 from cookbook.common.config import CHECKPOINTS_PATH, DATA_PATH, HF_CACHE_PATH
-from cookbook.slime import pins
+from cookbook.slime import trainer_image
 from cookbook.slime.config import SlimeConfig, YAML_CONFIG_FIELDS
-from cookbook.slime.pins import SLIME_ROOT
+from cookbook.slime.trainer_image import SLIME_ROOT
 
 EXPERIMENT = os.environ.get("EXPERIMENT_CONFIG", "kimi_k2_6_int4")
 exp = importlib.import_module(f"cookbook.slime.configs.{EXPERIMENT}")
@@ -38,15 +38,15 @@ POOL_MIN_CONTAINERS = int(os.environ.get("POOL_MIN_CONTAINERS", modal_cfg.rollou
 APP_NAME = exp.APP_NAME
 MODEL_NAME = slime_cfg.hf_checkpoint
 ROLLOUT_CONCURRENCY = modal_cfg.rollout_target_inputs or slime_cfg.sglang_server_concurrency
-N_TRAIN_NODES = ray.training_nodes(slime_cfg)
+N_TRAIN_NODES = ray_cluster.training_nodes(slime_cfg)
 
 MINUTES = 60
 RAY_PORT = 6379
 SERVER_STARTUP_TIMEOUT = 35 * MINUTES
 
 slime_local = os.environ.get("SLIME_LOCAL_DIR")  # dev overlay of a local slime checkout
-image = pins.build_trainer_image(hf_cache_path=str(HF_CACHE_PATH), slime_local=slime_local)
-server_image = images.build_serving_image(hf_cache_path=str(HF_CACHE_PATH), delta_volume_name=exp.DELTA_VOLUME_NAME)
+image = trainer_image.build_trainer_image(hf_cache_path=str(HF_CACHE_PATH), slime_local=slime_local)
+server_image = serving_image.build_serving_image(hf_cache_path=str(HF_CACHE_PATH), delta_volume_name=exp.DELTA_VOLUME_NAME)
 if slime_local:
     server_image = server_image.add_local_dir(slime_local, remote_path=SLIME_ROOT, ignore=[".git", "**/__pycache__", "**/*.pyc"])
 
@@ -73,12 +73,6 @@ SGLANG_SERVER_ARGS = {
     "--custom-pull-weights-pre-read-hook": "stitch.stores.modal_volume.pull_weights_pre_read_hook",
     **exp.SGLANG_SERVER_ARGS,
 }
-WARMUP_PAYLOAD = {
-    "model": MODEL_NAME,
-    "messages": [{"role": "user", "content": "Reply with exactly OK."}],
-    "max_tokens": 8, "temperature": 0, "chat_template_kwargs": {"enable_thinking": False},
-}
-
 # The rollout Server is the shared common one — registered with this experiment's config.
 Server = server.register_server(
     app,
@@ -87,7 +81,7 @@ Server = server.register_server(
     cloud=modal_cfg.cloud, region=modal_cfg.region,
     volumes={str(HF_CACHE_PATH): hf_cache_volume, exp.DELTA_BULLETIN_ROOT: delta_volume},
     model_name=MODEL_NAME, sglang_args=SGLANG_SERVER_ARGS, tp=slime_cfg.rollout_num_gpus_per_engine,
-    concurrency=ROLLOUT_CONCURRENCY, warmup_payload=WARMUP_PAYLOAD,
+    concurrency=ROLLOUT_CONCURRENCY,
     bulletin_root=exp.DELTA_BULLETIN_ROOT, local_checkpoint_dir=exp.LOCAL_CHECKPOINT_PATH,
     volume_name=exp.DELTA_VOLUME_NAME, commit_mode=exp.SIDECAR_COMMIT_MODE,
     min_containers=POOL_MIN_CONTAINERS, max_containers=modal_cfg.rollout_max_containers,
@@ -119,7 +113,7 @@ class Trainer:
     def start_ray(self) -> None:
         from cookbook.common import process
 
-        rank, master_addr, my_ip = ray.get_modal_cluster_context(N_TRAIN_NODES)
+        rank, master_addr, my_ip = ray_cluster.get_modal_cluster_context(N_TRAIN_NODES)
         self.rank = rank
         process.start_host_mem_monitor()  # per-node host-RAM trace (publish gather is the OOM peak)
         os.environ.update({
@@ -129,9 +123,9 @@ class Trainer:
             **slime_cfg.environment,
         })
         if rank == 0:
-            ray.start_ray_head(my_ip, N_TRAIN_NODES, ray_port=RAY_PORT)
+            ray_cluster.start_ray_head(my_ip, N_TRAIN_NODES, ray_port=RAY_PORT)
         else:
-            ray.start_ray_worker(my_ip, master_addr, ray_port=RAY_PORT)
+            ray_cluster.start_ray_worker(my_ip, master_addr, ray_port=RAY_PORT)
 
     @modal.method()
     def train(self, payload: dict) -> None:
@@ -156,7 +150,7 @@ class Trainer:
         cmd = _build_train_cmd(cfg)
 
         # Claim the pool before slime publishes: reset every replica to base for this run.
-        from cookbook.slime import hooks
+        from cookbook.common import hooks
 
         hooks.claim_pool(SimpleNamespace(update_weight_disk_dir=cfg.update_weight_disk_dir, **hook_knobs))
 

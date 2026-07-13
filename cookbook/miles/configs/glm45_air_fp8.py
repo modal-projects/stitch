@@ -62,8 +62,8 @@ class _Miles(MilesConfig):
     use_miles_router = True
 
     # The three plug points stitch fills (resolved by miles inside the trainer process):
-    custom_rollout_request_hook_path = "cookbook.miles.hooks.gated_rollout_request_hook"
-    custom_update_weight_post_write_path = "cookbook.miles.hooks.commit_and_wake"
+    custom_rollout_request_hook_path = "cookbook.common.hooks.gated_rollout_request_hook"
+    custom_update_weight_post_write_path = "cookbook.common.hooks.commit_and_wake"
     custom_config_path = {
         "rollout_request_weight_version_mode": "min",
         "rollout_request_weight_version_lag": 1,

@@ -23,11 +23,11 @@ import modal.experimental
 
 from stitch.pools.modal_flash import ModalFlashPool
 
-from cookbook.common import images, ray, server, smoke
+from cookbook.common import ray_cluster, serving_image, server, smoke
 from cookbook.common.config import CHECKPOINTS_PATH, DATA_PATH, HF_CACHE_PATH, PREP_PATH
-from cookbook.miles import pins, prep
+from cookbook.miles import prep, trainer_image
 from cookbook.miles.config import MilesConfig, YAML_CONFIG_FIELDS
-from cookbook.miles.pins import MEGATRON_PATH, MILES_ROOT
+from cookbook.miles.trainer_image import MEGATRON_PATH, MILES_ROOT
 
 EXPERIMENT = os.environ.get("EXPERIMENT_CONFIG", "glm45_air_fp8")
 exp = importlib.import_module(f"cookbook.miles.configs.{EXPERIMENT}")
@@ -42,15 +42,15 @@ POOL_MIN_CONTAINERS = int(os.environ.get("POOL_MIN_CONTAINERS", modal_cfg.rollou
 APP_NAME = exp.APP_NAME
 MODEL_NAME = miles_cfg.hf_checkpoint
 ROLLOUT_CONCURRENCY = modal_cfg.rollout_target_inputs or miles_cfg.sglang_server_concurrency
-N_TRAIN_NODES = ray.training_nodes(miles_cfg)
+N_TRAIN_NODES = ray_cluster.training_nodes(miles_cfg)
 
 MINUTES = 60
 RAY_PORT = 6379
 SERVER_STARTUP_TIMEOUT = 35 * MINUTES
 
 miles_local = os.environ.get("MILES_LOCAL_DIR")  # dev overlay of a local miles checkout
-image = pins.build_trainer_image(hf_cache_path=str(HF_CACHE_PATH), miles_local=miles_local)
-server_image = images.build_serving_image(hf_cache_path=str(HF_CACHE_PATH), delta_volume_name=exp.DELTA_VOLUME_NAME)
+image = trainer_image.build_trainer_image(hf_cache_path=str(HF_CACHE_PATH), miles_local=miles_local)
+server_image = serving_image.build_serving_image(hf_cache_path=str(HF_CACHE_PATH), delta_volume_name=exp.DELTA_VOLUME_NAME)
 if miles_local:
     server_image = server_image.add_local_dir(miles_local, remote_path=MILES_ROOT, ignore=[".git", "**/__pycache__", "**/*.pyc"])
 
@@ -82,11 +82,6 @@ SGLANG_SERVER_ARGS = {
     "--custom-pull-weights-pre-read-hook": "stitch.stores.modal_volume.pull_weights_pre_read_hook",
     **exp.SGLANG_SERVER_ARGS,
 }
-WARMUP_PAYLOAD = {
-    "model": MODEL_NAME,
-    "messages": [{"role": "user", "content": "Reply with exactly OK."}],
-    "max_tokens": 8, "temperature": 0, "chat_template_kwargs": {"enable_thinking": False},
-}
 
 # The rollout Server is the shared common one — registered with this experiment's
 # image / GPU / volumes / config.
@@ -102,7 +97,7 @@ Server = server.register_server(
         exp.DELTA_BULLETIN_ROOT: delta_volume,
     },
     model_name=MODEL_NAME, sglang_args=SGLANG_SERVER_ARGS, tp=miles_cfg.rollout_num_gpus_per_engine,
-    concurrency=ROLLOUT_CONCURRENCY, warmup_payload=WARMUP_PAYLOAD,
+    concurrency=ROLLOUT_CONCURRENCY,
     bulletin_root=exp.DELTA_BULLETIN_ROOT, local_checkpoint_dir=exp.LOCAL_CHECKPOINT_PATH,
     volume_name=exp.DELTA_VOLUME_NAME, commit_mode=exp.SIDECAR_COMMIT_MODE,
     min_containers=POOL_MIN_CONTAINERS, max_containers=modal_cfg.rollout_max_containers,
@@ -134,7 +129,7 @@ class Trainer:
     def start_ray(self) -> None:
         from cookbook.common import process
 
-        rank, master_addr, my_ip = ray.get_modal_cluster_context(N_TRAIN_NODES)
+        rank, master_addr, my_ip = ray_cluster.get_modal_cluster_context(N_TRAIN_NODES)
         process.apply_git_patches(list(getattr(exp, "MEGATRON_RUNTIME_PATCHES", [])), MEGATRON_PATH, "Megatron patch")
         self.rank = rank
         process.start_host_mem_monitor()  # per-node host-RAM trace (publish gather is the OOM peak)
@@ -146,9 +141,9 @@ class Trainer:
             **miles_cfg.environment,
         })
         if rank == 0:
-            ray.start_ray_head(my_ip, N_TRAIN_NODES, ray_port=RAY_PORT)
+            ray_cluster.start_ray_head(my_ip, N_TRAIN_NODES, ray_port=RAY_PORT)
         else:
-            ray.start_ray_worker(my_ip, master_addr, ray_port=RAY_PORT)
+            ray_cluster.start_ray_worker(my_ip, master_addr, ray_port=RAY_PORT)
 
     @modal.method()
     def train(self, payload: dict) -> None:
@@ -182,7 +177,7 @@ class Trainer:
         cmd = _build_train_cmd(cfg)
 
         # Claim the pool before miles publishes: reset every replica to base for this run.
-        from cookbook.miles import hooks
+        from cookbook.common import hooks
 
         hooks.claim_pool(SimpleNamespace(update_weight_disk_dir=cfg.update_weight_disk_dir, **custom_config))
 
@@ -261,7 +256,7 @@ def prepare_checkpoints() -> None:
 
 
 def _prepare_torch_dist() -> None:
-    rank, master_addr, _ = ray.get_modal_cluster_context(modal_cfg.torch_dist_prep_nodes)
+    rank, master_addr, _ = ray_cluster.get_modal_cluster_context(modal_cfg.torch_dist_prep_nodes)
     prep.prepare_torch_dist(exp, prep_volume, rank=rank, master_addr=master_addr)
 
 
