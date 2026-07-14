@@ -109,6 +109,8 @@ def _atomic_write(path: Path, text: str) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
+            f.flush()
+            os.fsync(f.fileno())  # durable before the rename (stitch#30)
         os.replace(tmp, path)
     except BaseException:
         with contextlib.suppress(FileNotFoundError):
