@@ -37,12 +37,16 @@ class VersionRef:
 
     @classmethod
     def parse(cls, text: str) -> "VersionRef":
+        # ``[<run_id>/]weight_vNNNNNN`` (or a legacy bare ``NNNNNN``). A missing pointer
+        # is handled by callers (they pass "" -> None before this); non-empty content
+        # that doesn't parse is corrupt control state -> raise, never a silent fall back
+        # to base (which would serve the wrong weights). Ref: stitch#31.
         text = (text or "").strip()
-        if not text:
-            return cls(None, 0)  # no valid pointer -> treated as not-ready, not a misparse
         run_id, _, tail = text.rpartition("/")
         digits = tail[len(_WEIGHT_PREFIX):] if tail.startswith(_WEIGHT_PREFIX) else tail
-        return cls(run_id or None, int(digits) if digits.isdigit() else 0)
+        if not digits.isdigit():
+            raise ValueError(f"unparseable snapshot pointer: {text!r}")
+        return cls(run_id or None, int(digits))
 
 
 class VersionKind(str, Enum):
