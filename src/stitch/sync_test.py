@@ -1,6 +1,6 @@
 """In-memory core harness (the Phase-1 gate): the real Reconciler + AdmissionGate
 against fake Store / Engine — no Modal, sglang, or GPU. Runnable directly
-(``python tests/reconcile_test.py``) or under pytest."""
+(``python src/stitch/sync_test.py``) or under pytest."""
 
 from __future__ import annotations
 
