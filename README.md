@@ -40,9 +40,6 @@ workloads it targets:
    returns a retryable `409`, so the caller waits or reroutes and never gets a stale
    generation.
 
-For the architecture — the three ports (Store / Engine / Pool), the domain model, and the
-correctness invariants — see **[DESIGN.md](DESIGN.md)**.
-
 ## Elastic rollout — spin up engines mid-run
 
 The pool is a set of independent, self-syncing replicas: each reads the authoritative

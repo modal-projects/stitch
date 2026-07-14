@@ -1,4 +1,4 @@
-"""Co-located harness for the shared hook shims (AGENTS.md Google style).
+"""Harness for the shared hook shims.
 
 Runs without Modal/torch: the real ``_store`` builds a local dir (volume_name=None from
 the temp root) and only ``_pool`` is faked. Run directly:
