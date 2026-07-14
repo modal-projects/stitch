@@ -27,6 +27,11 @@ def main() -> None:
     p.add_argument("--commit-mode", choices=["quiesce", "in_place"], default=os.environ.get("SIDECAR_COMMIT_MODE", "quiesce"))
     p.add_argument("--run-id", default=os.environ.get("DISAGG_RUN_ID") or None)
     p.add_argument("--debug-requests", action="store_true")
+    # Background convergence backstop: re-check latest every N seconds so a replica that
+    # missed its wake (cold start racing the last publish, or a lost best-effort wake) still
+    # catches up. 0 disables it (wake + 409-self-heal only).
+    p.add_argument("--reconcile-interval", type=float,
+                   default=float(os.environ.get("STITCH_RECONCILE_INTERVAL", "5.0")))
     args = p.parse_args()
 
     store = ModalVolumeStore(args.bulletin_root, volume_name=args.volume_name or None)
@@ -35,6 +40,7 @@ def main() -> None:
         store, engine,
         run_id=args.run_id, commit_mode=args.commit_mode,
         host=args.host, port=args.port, debug_requests=args.debug_requests,
+        reconcile_interval=args.reconcile_interval,
     )
 
 
