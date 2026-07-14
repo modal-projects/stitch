@@ -1,23 +1,19 @@
-"""Convergence-liveness conformance tests for the wake-driven Reconciler.
+"""Convergence-liveness conformance tests for the Reconciler.
 
 The property under test (call it *self-convergence*): **every replica eventually
 reaches the store's durable pointer, given only a healthy store — no further
-publishes, no external nudges, no particular traffic mix.** v1's sidecar provided
-it with a background reconcile loop (`servers/sglang.py`, `background_sync_interval`);
-v2 dropped the loop, leaving three triggers only: a delivered `/wake`, a
-constraint-409 (`Reconciler._on_reject`), and process startup (`sync.py`).
+publishes, no external nudges, no particular traffic mix.** The wake-driven-only
+rewrite lost it (these started as red xfail tests); the periodic backstop
+(``reconcile_interval``, sync.py) restored it.
 
-The xfail(strict=True) tests are RED today: each is a scenario where the durable
-pointer is ahead, the store is healthy, and no mechanism ever converges the
-replica. If a self-convergence mechanism lands (a periodic re-arm, a wake
-generation counter, ...), they XPASS as errors — promote them to plain tests.
-The green companions pin down the recovery channels that DO exist, so together
-the file states the exact boundary of the current guarantee:
+Each scenario therefore runs twice: with the backstop (must converge — pins the
+fix) and with ``reconcile_interval=0`` (must NOT converge — documents exactly
+what pure wake-driven operation cannot recover, and keeps the boundary honest):
 
-    convergence <=> (a wake is delivered while the pass can still see its effects)
-                    or (traffic carries a version constraint that 409s)
+    wake-driven-only convergence <=> (a wake is delivered while the pass can
+    still see its effects) or (traffic carries a version constraint that 409s)
 
-Run the reds loud with: ``uv run pytest tests/reconcile_liveness_test.py --runxfail``
+The green companions at the bottom pin the two event-driven recovery channels.
 """
 
 from __future__ import annotations
@@ -31,6 +27,11 @@ import pytest
 from reconcile_test import FakeEngine, FakeStore, _full
 from stitch.sync import ConstraintUnmet, Reconciler
 from stitch.versions import SyncState, VersionConstraint, VersionManifest, VersionRef
+
+# The two sides of the liveness boundary: a fast backstop must converge the
+# scenario; wake-driven-only (interval=0) must not.
+BACKSTOP = pytest.param(0.05, True, id="backstop")
+WAKE_ONLY = pytest.param(0, False, id="wake-only")
 
 
 class FlakyStore(FakeStore):
@@ -85,66 +86,58 @@ def _run(coro) -> None:
     asyncio.run(coro)
 
 
-# ── RED: self-convergence scenarios wake-driven-only cannot recover ──────────
-@pytest.mark.xfail(
-    strict=True,
-    reason="no self-driven reconcile: after an ERROR pass, reconcile() returns and only an "
-    "external wake retries — a healed store is never revisited (sync.py reconcile/wake)",
-)
-def test_transient_store_error_recovers_unaided() -> None:
+# ── self-convergence: healed / missed-wake / raced-wake replicas ─────────────
+@pytest.mark.parametrize(("interval", "converges"), [BACKSTOP, WAKE_ONLY])
+def test_transient_store_error_self_heals(interval: float, converges: bool) -> None:
     """Pointer at v1, one transient store error at boot, store heals immediately.
-    Unconstrained traffic flows. The replica must eventually serve v1."""
+    Unconstrained traffic flows. Only the backstop revisits the healed store —
+    an ERROR pass otherwise retries on external wake alone."""
 
     async def go() -> None:
         store = FlakyStore(VersionRef("r1", 1), _full("r1", 1), failures=1)
-        r = Reconciler(store=store, engine=FakeEngine())
+        r = Reconciler(store=store, engine=FakeEngine(), reconcile_interval=interval)
         await r.startup()  # the pass hits the transient error -> SyncState.ERROR
         for _ in range(3):  # store is healed; unconstrained traffic doesn't nudge anything
             async with r.admit(None):
                 pass
-        assert await _converged(r, VersionRef("r1", 1))
+        assert await _converged(r, VersionRef("r1", 1)) is converges
+        await r.shutdown()
 
     _run(go())
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="publish-time pool wake is best-effort (publish.py _wake swallows failures; "
-    "pools/modal_flash.py logs and drops) and unconstrained requests never 409, so a "
-    "replica that misses the wake serves stale until an unrelated future publish",
-)
-def test_lost_publish_wake_converges() -> None:
-    """A publish advances the durable pointer but its wake is lost in transit.
-    Unconstrained traffic flows. The replica must eventually serve v1."""
+@pytest.mark.parametrize(("interval", "converges"), [BACKSTOP, WAKE_ONLY])
+def test_lost_publish_wake_self_heals(interval: float, converges: bool) -> None:
+    """A publish advances the durable pointer but its best-effort wake is lost
+    (publish.py _wake swallows failures; pools/modal_flash.py logs and drops).
+    Unconstrained requests never 409, so only the backstop ever notices."""
 
     async def go() -> None:
         store = FakeStore(VersionRef("r1", 0))
-        r = Reconciler(store=store, engine=FakeEngine())
+        r = Reconciler(store=store, engine=FakeEngine(), reconcile_interval=interval)
         await r.startup()  # converges to the claimed base (r1, 0)
         store.publish(_full("r1", 1), "/fake/src")
         store.advance_pointer(VersionRef("r1", 1))  # durable; the wake never arrives
         for _ in range(3):
             async with r.admit(None):
                 pass
-        assert await _converged(r, VersionRef("r1", 1))
+        assert await _converged(r, VersionRef("r1", 1)) is converges
+        await r.shutdown()
 
     _run(go())
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="wake() is a no-op while a pass runs (sync.py), and the pass's caught-up recheck "
-    "reads a snapshot taken before the publish — the delivered wake is consumed by a pass "
-    "that cannot see its effects (v1's wake-generation counter closed exactly this)",
-)
-def test_wake_delivered_during_pass_finale_converges() -> None:
+@pytest.mark.parametrize(("interval", "converges"), [BACKSTOP, WAKE_ONLY])
+def test_wake_delivered_during_pass_finale_self_heals(interval: float, converges: bool) -> None:
     """Even with perfect wake delivery: a wake lands while the previous publish's
-    pass is finishing on a pre-publish snapshot. The replica must reach v3."""
+    pass is finishing on a pre-publish snapshot — wake() is a no-op against the
+    running task, so the delivered wake is consumed by a pass that cannot see its
+    effects. The backstop's next tick recovers it; wake-driven-only never does."""
 
     async def go() -> None:
         engine = FakeEngine()
         store = HostViewStore(VersionRef("r1", 1), _full("r1", 1), _full("r1", 2), _full("r1", 3))
-        r = Reconciler(store=store, engine=engine)
+        r = Reconciler(store=store, engine=engine, reconcile_interval=interval)
         await r.startup()  # converges to v1, ungated
 
         gate = store.refresh_gate = queue.Queue()
@@ -159,18 +152,19 @@ def test_wake_delivered_during_pass_finale_converges() -> None:
         store.refresh_gate = None
         await r._task  # the recheck's snapshot showed v2: the pass idles at v2
 
-        assert await _converged(r, VersionRef("r1", 3))
+        assert await _converged(r, VersionRef("r1", 3)) is converges
+        await r.shutdown()
 
     _run(go())
 
 
-# ── GREEN: the recovery channels that do exist (the guarantee's boundary) ────
+# ── the event-driven recovery channels (work with or without the backstop) ──
 def test_explicit_wake_recovers_error_state() -> None:
     """A delivered wake after the store heals converges the ERROR replica."""
 
     async def go() -> None:
         store = FlakyStore(VersionRef("r1", 1), _full("r1", 1), failures=1)
-        r = Reconciler(store=store, engine=FakeEngine())
+        r = Reconciler(store=store, engine=FakeEngine(), reconcile_interval=0)
         await r.startup()
         assert r.sync_state is SyncState.ERROR
         r.wake()
@@ -185,7 +179,7 @@ def test_constrained_409_recovers_error_state() -> None:
 
     async def go() -> None:
         store = FlakyStore(VersionRef("r1", 1), _full("r1", 1), failures=1)
-        r = Reconciler(store=store, engine=FakeEngine())
+        r = Reconciler(store=store, engine=FakeEngine(), reconcile_interval=0)
         await r.startup()
         assert r.sync_state is SyncState.ERROR
         with pytest.raises(ConstraintUnmet):
@@ -197,15 +191,15 @@ def test_constrained_409_recovers_error_state() -> None:
 
 
 def test_constrained_409_recovers_lost_wake() -> None:
-    """Same lost-wake scenario as the red test, but the traffic carries a
-    staleness floor — the 409 self-wake is the one channel that heals it."""
+    """Same lost-wake scenario as above, but the traffic carries a staleness
+    floor — the 409 self-wake is the event-driven channel that heals it."""
 
     async def go() -> None:
         store = FakeStore(VersionRef("r1", 0))
-        r = Reconciler(store=store, engine=FakeEngine())
+        r = Reconciler(store=store, engine=FakeEngine(), reconcile_interval=0)
         await r.startup()
         store.publish(_full("r1", 1), "/fake/src")
-        store.advance_pointer(VersionRef("r1", 1))  # wake lost, as in the red test
+        store.advance_pointer(VersionRef("r1", 1))  # wake lost, as above
         with pytest.raises(ConstraintUnmet):
             async with r.admit(VersionConstraint(min_version=1)):
                 pass
