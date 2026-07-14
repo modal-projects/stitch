@@ -27,3 +27,4 @@ exclude = ["*_test.py"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["*_test.py"]
+pythonpath = ["."]  # so the cookbook hook test imports the top-level cookbook/ package

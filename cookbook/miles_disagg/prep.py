@@ -36,7 +36,7 @@ def prepare_checkpoints(exp, prep_volume) -> None:
     tools = f"{MILES_ROOT}/tools"
 
     src = snapshot_download(exp.SOURCE_MODEL)
-    is_int4 = "int4" in exp.SOURCE_MODEL.lower() or _is_int4(src)
+    is_int4 = _is_int4(src)  # read the source's quant scheme, not its repo name
 
     def _build_bf16(out: str) -> None:
         if is_int4:

@@ -42,14 +42,13 @@ SGLANG_SERVER_ARGS = {
     "--chunked-prefill-size": "8192",
     "--max-prefill-tokens": "16384",
     "--cuda-graph-max-bs-prefill": "2048",  # avoid H200 cold-start graph-compile hangs
-    "--model-loader-extra-config": '{"enable_multithread_load":true,"num_threads":8}',
     "--skip-server-warmup": "",
 }
 
 # Native load here is already multithreaded + fast (~15s), so sglang's load-plan reload
 # replay is a net ~2x regression (its own thread-pool dispatch loses to the multithread
-# loader). Override the image default off. The flag stays on for models whose native load
-# is single-threaded (e.g. Kimi NVFP4, ~300s -> ~10s), where the plan is a large win.
+# loader) — leave it off. The NVFP4 recipes opt in instead (their single-threaded native
+# load, ~300s -> ~10s, is where the plan is a large win).
 SGLANG_ENV = {"SGLANG_ENABLE_RELOAD_LOAD_PLAN": "0"}
 
 

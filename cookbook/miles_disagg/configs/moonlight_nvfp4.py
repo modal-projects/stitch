@@ -83,6 +83,8 @@ SGLANG_SERVER_ARGS = {
     "--enable-return-routed-experts": "",
 }
 
+SGLANG_ENV = {"SGLANG_ENABLE_RELOAD_LOAD_PLAN": "1"}  # NVFP4: load-plan replay + O(delta) partial reload
+
 modal = ModalConfig(
     gpu="B200",
     region="us",
