@@ -5,6 +5,8 @@ against fake Store / Engine — no Modal, sglang, or GPU. Runnable directly
 from __future__ import annotations
 
 import asyncio
+import queue
+import threading
 
 from stitch.engines.base import Engine
 from stitch.stores.base import Store
@@ -192,6 +194,112 @@ def test_reconcile_interval_zero_disables_backstop() -> None:
         assert r.applied == VersionRef("r1", 3)  # no backstop: stays until a wake/409
         assert r._periodic_task is None
         await r.shutdown()
+
+    _run(go())
+
+
+# ── convergence liveness ─────────────────────────────────────────────────────
+# The backstop self-heals what wake-driven-only cannot (the red tests behind
+# stitch#45): each scenario converges with the backstop and never with interval=0.
+
+
+async def _converged(r: Reconciler, target: VersionRef, timeout: float = 1.0) -> bool:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        if r.applied == target and r.sync_state is SyncState.IDLE:
+            return True
+        await asyncio.sleep(0.02)
+    return False
+
+
+class FlakyStore(FakeStore):
+    """read_manifest fails once, then heals — a transient store-side error."""
+
+    failures = 1
+
+    def read_manifest(self, ref: VersionRef) -> VersionManifest:
+        if self.failures:
+            self.failures -= 1
+            raise RuntimeError("transient store error")
+        return super().read_manifest(ref)
+
+
+async def _heals_transient_error(interval: float) -> bool:
+    r = Reconciler(store=FlakyStore(VersionRef("r1", 1), _full("r1", 1)), engine=FakeEngine(),
+                   reconcile_interval=interval)
+    await r.startup()  # the pass hits the error -> ERROR; the store is healed from here on
+    async with r.admit(None):
+        pass  # unconstrained traffic never 409s, so it nudges nothing
+    ok = await _converged(r, VersionRef("r1", 1))
+    await r.shutdown()
+    return ok
+
+
+def test_transient_error_recovery_needs_backstop() -> None:
+    assert asyncio.run(_heals_transient_error(0.05))
+    assert not asyncio.run(_heals_transient_error(0))  # ERROR retries only on external wake
+
+
+class HostViewStore(FakeStore):
+    """advance_pointer lands on the durable *remote*; read_pointer sees it only after
+    refresh() snapshots remote -> local (Volume reload semantics). refresh_gate lets a
+    test hold a pass open on a pre-publish snapshot."""
+
+    refresh_gate: queue.Queue[threading.Event] | None = None
+
+    def __init__(self, pointer: VersionRef | None = None, *manifests: VersionManifest) -> None:
+        super().__init__(None, *manifests)
+        self.remote_pointer = pointer
+
+    def refresh(self) -> None:
+        self._pointer = self.remote_pointer
+        if self.refresh_gate is not None:
+            self.refresh_gate.put(release := threading.Event())
+            release.wait(timeout=10)
+
+    def advance_pointer(self, ref: VersionRef) -> None:
+        self.remote_pointer = ref
+
+
+async def _heals_dropped_wake(interval: float) -> bool:
+    """A wake IS delivered, but mid-pass: wake() no-ops against the running task, whose
+    caught-up recheck already snapshotted pre-publish state — the wake is lost."""
+    store = HostViewStore(VersionRef("r1", 1), _full("r1", 1), _full("r1", 2))
+    r = Reconciler(store=store, engine=FakeEngine(), reconcile_interval=interval)
+    await r.startup()  # converges to v1, ungated
+
+    gate = store.refresh_gate = queue.Queue()
+    r.wake()  # start an idle pass
+    (await asyncio.to_thread(gate.get, True, 10)).set()  # release its pass-start refresh
+    recheck = await asyncio.to_thread(gate.get, True, 10)  # its recheck: snapshotted v1, held
+    store.advance_pointer(VersionRef("r1", 2))
+    r.wake()  # v2's wake: delivered mid-pass -> dropped; the pass idles on its v1 snapshot
+    recheck.set()
+    store.refresh_gate = None
+    ok = await _converged(r, VersionRef("r1", 2))
+    await r.shutdown()
+    return ok
+
+
+def test_dropped_wake_recovery_needs_backstop() -> None:
+    assert asyncio.run(_heals_dropped_wake(0.05))
+    assert not asyncio.run(_heals_dropped_wake(0))
+
+
+def test_constrained_409_recovers_without_backstop() -> None:
+    """The event-driven channel: a min_version 409 self-wakes a stale ERROR replica."""
+
+    async def go() -> None:
+        r = Reconciler(store=FlakyStore(VersionRef("r1", 1), _full("r1", 1)), engine=FakeEngine(),
+                       reconcile_interval=0)
+        await r.startup()
+        assert r.sync_state is SyncState.ERROR
+        try:
+            async with r.admit(VersionConstraint(min_version=1)):
+                raise AssertionError("should have rejected")
+        except ConstraintUnmet:
+            pass
+        assert await _converged(r, VersionRef("r1", 1))
 
     _run(go())
 
