@@ -58,6 +58,14 @@ Recipes (`cookbook/`, non-core deployments):
 The core package has no required dependencies; extras pull in what each adapter
 needs (`modal`, `sglang`, `boto3`).
 
+## The sglang fork
+
+Rollout engines run a patched sglang (the disaggregated `/pull_weights`, correct
+quantized reloads, and the O(delta) partial reload are not upstream yet). The pin
+and its docs live next to each other in `cookbook/common/`:
+**[`SGLANG_FORK.md`](cookbook/common/SGLANG_FORK.md)** documents the full patch stack,
+the upstreaming PRs, and how to re-port the patches onto a newer sglang release.
+
 ## Elastic rollout — spin up engines mid-run
 
 The pool is a set of independent, self-syncing replicas: each reads the

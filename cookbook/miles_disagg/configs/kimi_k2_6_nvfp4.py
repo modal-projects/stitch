@@ -84,6 +84,8 @@ MEGATRON_RUNTIME_PATCHES = [
 # --trust-remote-code; only the Kimi/MLA/cache extras live here. mem-fraction and
 # context-length are STARTING POINTS — measure on a warm B200:4 and adjust.
 SGLANG_SERVER_ARGS = {
+    "--weight-loader-prefetch-checkpoints": "",
+    "--weight-loader-prefetch-num-threads": "8",
     "--tool-call-parser": "kimi_k2",
     "--reasoning-parser": "kimi_k2",
     "--dist-timeout": "3600",

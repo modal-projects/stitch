@@ -3,8 +3,11 @@
 Trainer-agnostic: no trainer package is installed (the delta apply lives in the engine
 behind ``/pull_weights``), so miles and slime serve on the identical image; precision
 comes from the served checkpoint, not a ``--quantization`` flag. The base image supplies
-kernels/CUDA; the fork pin carries ``/pull_weights``, the hardened local_checkpoint
-receiver, and the quantized-reload restore protocol (reload == init).
+kernels/CUDA; the fork pin (branch ``stitch-sglang-v0.5.15`` over base tag ``v0.5.15``)
+carries ``/pull_weights``, the hardened local_checkpoint receiver, the quantized-reload
+restore protocol (reload == init), and the O(delta) partial-reload load plan. See
+``SGLANG_FORK.md`` next to this file for the full patch stack, the upstreaming PRs, and
+how to re-port these patches onto a newer sglang release.
 """
 
 from __future__ import annotations
@@ -13,10 +16,13 @@ from pathlib import Path
 
 import modal
 
-SGLANG_IMAGE_TAG = "lmsysorg/sglang:v0.5.14"
+# Fork = base sglang tag + the stitch weight-sync patch stack (see SGLANG_FORK.md).
+# The base tag MUST match the branch's base tag: the fork overlays python/ only, so the
+# baked kernels/CUDA come from this image and must be ABI-compatible with that python/.
+SGLANG_IMAGE_TAG = "lmsysorg/sglang:v0.5.15"
 SGLANG_FORK_REPO = "https://github.com/modal-projects/sglang.git"
-SGLANG_FORK_BRANCH = "weight-sync-miles"
-SGLANG_FORK_COMMIT = "2347c32817479e0521ac578230604fa4bbdc6cea"
+SGLANG_FORK_BRANCH = "stitch-sglang-v0.5.15"
+SGLANG_FORK_COMMIT = "27ca14ef94dbfa462d4e4ab48efaee200786ee29"
 
 _COOKBOOK_DIR = Path(__file__).resolve().parent.parent  # .../cookbook
 

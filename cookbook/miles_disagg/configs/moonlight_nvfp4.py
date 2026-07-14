@@ -70,6 +70,8 @@ MEGATRON_RUNTIME_PATCHES = [
 # --quantization flag — NVFP4 is driven by the served checkpoint's own
 # quant config. mem-fraction / context-length are STARTING POINTS; measure.
 SGLANG_SERVER_ARGS = {
+    "--weight-loader-prefetch-checkpoints": "",
+    "--weight-loader-prefetch-num-threads": "8",
     "--attention-backend": "tokenspeed_mla",
     "--kv-cache-dtype": "fp8_e4m3",  # tokenspeed_mla requires this
     "--context-length": "8192",  # Moonlight's max_position_embeddings

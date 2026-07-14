@@ -41,6 +41,8 @@ SIDECAR_DEBUG_REQUESTS = True
 # is a STARTING POINT -- measure it on a warm container and adjust (the only
 # datapoint from the colocated recipe is 0.7 at TP8, a different topology).
 SGLANG_SERVER_ARGS = {
+    "--weight-loader-prefetch-checkpoints": "",
+    "--weight-loader-prefetch-num-threads": "8",
     "--context-length": "8192",
     "--mem-fraction-static": "0.85",
     # Routing replay: the pool must emit per-token routed experts. slime

@@ -40,6 +40,8 @@ SIDECAR_DEBUG_REQUESTS = True
 # No build_serving_image: the pool reuses the trainer image, whose SGLang serves
 # this native-INT4 checkpoint on a single H200 (no Blackwell fork needed).
 SGLANG_SERVER_ARGS = {
+    "--weight-loader-prefetch-checkpoints": "",
+    "--weight-loader-prefetch-num-threads": "8",
     "--context-length": "16384",
     "--mem-fraction-static": "0.85",
     "--enable-return-routed-experts": "",  # routing replay
