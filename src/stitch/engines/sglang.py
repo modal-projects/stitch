@@ -85,9 +85,18 @@ class SGLangEngine(Engine):
         await self._post("/continue_generation", {}, timeout=self._control_timeout)
 
     async def reset(self) -> None:
-        # Wipe the local checkpoint so the next pull reseeds from the engine's base
-        # rather than chaining a new run's deltas onto the old run's bytes.
+        # Re-materialize base and reload it into the engine, so a run switch that lands at
+        # v0 serves base on the GPU -- not the previous run's weights under the new
+        # (run, 0) identity. Runs under the commit gate (engine paused). Ref: stitch#32.
         await asyncio.to_thread(shutil.rmtree, self.local_checkpoint_dir, ignore_errors=True)
+        await self.prefetch()  # reseed base (target_version=0) into the wiped checkpoint
+        await self._post(
+            "/update_weights_from_disk",
+            {"model_path": self.local_checkpoint_dir, "weight_version": "0",
+             "flush_cache": self._flush_on_commit},
+            timeout=None,
+            action="reset reload to base",
+        )
 
     def stamp_request(self, request: dict[str, Any], served: VersionRef) -> None:
         user = request.get("extra_key")
