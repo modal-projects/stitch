@@ -118,10 +118,15 @@ class AdmissionGate:
         """Wait for the commit point, close the gate, apply, flip the served version
         (``on_applied``) while the gate is held, then reopen. ``on_applied`` runs only
         after a successful apply; in ``in_place`` the flip happens before ``resume``."""
+        # Close admission BEFORE draining (stitch#32): with the gate still open during
+        # the drain, new requests keep being admitted and an in_place non-exact request
+        # can straddle a base reset. Set _committing first, then wait for the drain.
         async with self._cond:
-            await self._cond.wait_for(self._commit_ready)
             self._committing = True
+            self._cond.notify_all()
         try:
+            async with self._cond:
+                await self._cond.wait_for(self._commit_ready)
             if self.commit_mode == "in_place" and pause is not None:
                 await pause()
                 try:
@@ -300,7 +305,11 @@ class Reconciler(AdmissionGate):
         Runs through the commit gate so no in-flight request decodes across the wipe."""
         old_run = self.applied.run_id if self.applied else None
         logger.info("run change %r -> %r: resetting to base", old_run, new_run)
-        was_patched = self.applied is not None and self.applied.version > 0
+        # Reset when the engine holds patched weights (v>0), or a prior pass errored and
+        # may have left the local checkpoint dirty even at v0 (stitch#32).
+        was_patched = self.applied is not None and (
+            self.applied.version > 0 or self.last_error is not None
+        )
 
         async def apply() -> None:
             if was_patched:
