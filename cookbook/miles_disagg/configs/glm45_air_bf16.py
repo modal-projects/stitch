@@ -37,7 +37,6 @@ SGLANG_SERVER_ARGS = {
     "--context-length": "32768",
     "--mem-fraction-static": "0.8",
     "--chunked-prefill-size": "16384",
-    "--model-loader-extra-config": '{"enable_multithread_load":true,"num_threads":8}',
     "--skip-server-warmup": "",
 }
 

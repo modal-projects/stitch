@@ -121,7 +121,12 @@ class Server:
 
 
 # ── Trainer (miles on Ray) ────────────────────────────────────────────────────
-_TRAINER_KWARGS = dict(
+# Multi-node needs an RDMA gang (clustered) over the EFA fabric; single-node takes
+# neither. Both are inline on the decorator so there's one declaration, not a rebind.
+_MULTINODE = miles_cfg.n_train_nodes > 1
+
+
+@app.cls(
     image=image,
     gpu=f"{modal_cfg.gpu}:{miles_cfg.actor_num_gpus_per_node}",
     memory=modal_cfg.memory,
@@ -130,11 +135,9 @@ _TRAINER_KWARGS = dict(
     ephemeral_disk=modal_cfg.trainer_ephemeral_disk_mib,
     timeout=24 * 60 * MINUTES, startup_timeout=20 * MINUTES, scaledown_window=30 * MINUTES,
     include_source=False,
+    **({"experimental_options": {"efa_enabled": True}} if _MULTINODE else {}),
 )
-if miles_cfg.n_train_nodes > 1:
-    _TRAINER_KWARGS["experimental_options"] = {"efa_enabled": True}
-
-
+@(modal.experimental.clustered(miles_cfg.n_train_nodes, rdma=True) if _MULTINODE else lambda c: c)
 class Trainer:
     """miles actor cluster. Ray comes up once per container in enter(), so back-to-back
     runs reuse it."""
@@ -180,7 +183,7 @@ class Trainer:
         # Merge the run's bulletin identity into custom_config_path (already carrying the
         # request-gating knobs); miles setattr's every key onto args for the hooks.
         custom_config = {
-            **dict(getattr(cfg, "custom_config_path", {}) or {}),
+            **(cfg.custom_config_path or {}),
             "update_weight_delta_volume_name": exp.DELTA_VOLUME_NAME,
             "rollout_modal_flash_app_name": exp.APP_NAME,
             "rollout_modal_flash_server_cls_name": "Server",
@@ -210,11 +213,6 @@ class Trainer:
                 print(f"WARNING: could not commit train log: {exc}")
 
 
-if miles_cfg.n_train_nodes > 1:
-    Trainer = modal.experimental.clustered(miles_cfg.n_train_nodes, rdma=True)(Trainer)
-Trainer = app.cls(**_TRAINER_KWARGS)(Trainer)
-
-
 # ── miles launch helper (te_precision_config_file is miles-only) ──────────────────
 def _materialize_node_local_yaml(cfg: Any, field: str, dest_dir: str = "/root/.miles_node_yaml") -> None:
     """Write an inline YAML config to a deterministic node-local path on EVERY node.
@@ -240,24 +238,22 @@ def prepare_checkpoints() -> None:
     prep.prepare_checkpoints(exp, prep_volume)
 
 
-# torch_dist conversion is clustered when >1 node; wrap the same name in place so Modal
-# registers a single function (a leftover unregistered PartialFunction confuses the runner).
-def prepare_torch_dist() -> None:
-    rank, master_addr, _ = ray_cluster.get_modal_cluster_context(modal_cfg.torch_dist_prep_nodes)
-    prep.prepare_torch_dist(exp, prep_volume, rank=rank, master_addr=master_addr)
+# torch_dist conversion is clustered across nodes (a large MoE won't fit an 8-way split).
+_TORCH_DIST_MULTINODE = modal_cfg.torch_dist_prep_nodes > 1
 
 
-_torch_dist_kwargs = dict(
+@app.function(
     image=image, gpu=f"{modal_cfg.gpu}:{modal_cfg.torch_dist_prep_gpus_per_node}",
     volumes={str(HF_CACHE_PATH): hf_cache_volume, str(PREP_PATH): prep_volume},
     timeout=6 * 60 * MINUTES,
     ephemeral_disk=(modal_cfg.torch_dist_prep_ephemeral_disk_mib or modal_cfg.rollout_ephemeral_disk_mib),
     secrets=[modal.Secret.from_name("huggingface-secret")], include_source=False,
+    **({"experimental_options": {"efa_enabled": True}} if _TORCH_DIST_MULTINODE else {}),
 )
-if modal_cfg.torch_dist_prep_nodes > 1:
-    prepare_torch_dist = modal.experimental.clustered(modal_cfg.torch_dist_prep_nodes, rdma=True)(prepare_torch_dist)
-    _torch_dist_kwargs["experimental_options"] = {"efa_enabled": True}
-prepare_torch_dist = app.function(**_torch_dist_kwargs)(prepare_torch_dist)
+@(modal.experimental.clustered(modal_cfg.torch_dist_prep_nodes, rdma=True) if _TORCH_DIST_MULTINODE else lambda fn: fn)
+def prepare_torch_dist() -> None:
+    rank, master_addr, _ = ray_cluster.get_modal_cluster_context(modal_cfg.torch_dist_prep_nodes)
+    prep.prepare_torch_dist(exp, prep_volume, rank=rank, master_addr=master_addr)
 
 
 @app.function(

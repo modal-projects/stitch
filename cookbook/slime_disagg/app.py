@@ -110,7 +110,12 @@ class Server:
 
 
 # ── Trainer (slime on Ray) ────────────────────────────────────────────────────
-_TRAINER_KWARGS = dict(
+# Multi-node needs an RDMA gang (clustered) over the EFA fabric; single-node takes
+# neither. Both are inline on the decorator so there's one declaration, not a rebind.
+_MULTINODE = slime_cfg.n_train_nodes > 1
+
+
+@app.cls(
     image=image,
     gpu=f"{modal_cfg.gpu}:{slime_cfg.actor_num_gpus_per_node}",
     memory=modal_cfg.memory,
@@ -119,11 +124,9 @@ _TRAINER_KWARGS = dict(
     ephemeral_disk=modal_cfg.trainer_ephemeral_disk_mib,
     timeout=24 * 60 * MINUTES, startup_timeout=20 * MINUTES, scaledown_window=30 * MINUTES,
     include_source=False,
+    **({"experimental_options": {"efa_enabled": True}} if _MULTINODE else {}),
 )
-if slime_cfg.n_train_nodes > 1:
-    _TRAINER_KWARGS["experimental_options"] = {"efa_enabled": True}
-
-
+@(modal.experimental.clustered(slime_cfg.n_train_nodes, rdma=True) if _MULTINODE else lambda c: c)
 class Trainer:
     """slime actor cluster. Ray comes up once per container in enter(), so back-to-back
     runs reuse it."""
@@ -176,11 +179,6 @@ class Trainer:
         print(f"Training {EXPERIMENT}: nodes={slime_cfg.n_train_nodes}, rollout_endpoint={cfg.rollout_endpoint_url}")
         print(f"Command: {cmd}")
         subprocess.run(["bash", "-lc", cmd], check=True)
-
-
-if slime_cfg.n_train_nodes > 1:
-    Trainer = modal.experimental.clustered(slime_cfg.n_train_nodes, rdma=True)(Trainer)
-Trainer = app.cls(**_TRAINER_KWARGS)(Trainer)
 
 
 # ── Preparation + entrypoints ──────────────────────────────────────────────────

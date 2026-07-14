@@ -13,7 +13,9 @@ from typing import Any
 # Fields that are launcher instructions, not miles CLI args.
 _MILES_SKIP = {"environment", "async_mode", "miles_model_script"}
 # Fields miles reads as YAML files; inline dicts are materialized before launch.
-YAML_CONFIG_FIELDS = ("eval_config", "custom_config_path", "sglang_config", "te_precision_config_file")
+# (te_precision_config_file is handled separately in app.py — it needs an identical
+# node-local path on every Ray actor, not a per-launch tmpdir.)
+YAML_CONFIG_FIELDS = ("eval_config", "custom_config_path", "sglang_config")
 
 
 class MilesConfig:
