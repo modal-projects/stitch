@@ -22,7 +22,7 @@ import modal
 SGLANG_IMAGE_TAG = "lmsysorg/sglang:v0.5.15"
 SGLANG_FORK_REPO = "https://github.com/modal-projects/sglang.git"
 SGLANG_FORK_BRANCH = "stitch-sglang-v0.5.15"
-SGLANG_FORK_COMMIT = "27ca14ef94dbfa462d4e4ab48efaee200786ee29"
+SGLANG_FORK_COMMIT = "43fccb0cf6be72ecb0096d010eeaf8507cc302d0"
 
 _COOKBOOK_DIR = Path(__file__).resolve().parent.parent  # .../cookbook
 

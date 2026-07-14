@@ -14,7 +14,7 @@ sglang release*.
 ```python
 SGLANG_IMAGE_TAG   = "lmsysorg/sglang:v0.5.15"          # base kernels/CUDA
 SGLANG_FORK_BRANCH = "stitch-sglang-v0.5.15"            # modal-projects/sglang
-SGLANG_FORK_COMMIT = "27ca14ef94dbfa462d4e4ab48efaee200786ee29"
+SGLANG_FORK_COMMIT = "43fccb0cf6be72ecb0096d010eeaf8507cc302d0"
 ```
 
 The branch is **`v0.5.15` + the patch stack below, nothing else** — every commit
@@ -47,7 +47,7 @@ commit bodies for the details — this is the map.
    reloads silently diverge from the served kernel format.
    *Upstreaming:* https://github.com/sgl-project/sglang/pull/30761
 
-### Optimization — O(delta) reload (authored by Jason Mancuso)
+### Optimization — O(delta) reload (Jason Mancuso; commit 6 by Nan)
 
 3. **`[RL] reload: record/replay load plans for repeated reloads`**
    Record the model's first-reload weight dispatch once, replay it directly after
@@ -63,10 +63,20 @@ commit bodies for the details — this is the map.
 
 5. **`[RL] modelopt fp4: incremental post-loading for partial reloads`**
    The NVFP4 model-side enabler for (4): `process_weights_after_partial_loading`
-   re-derives kernel state for only the touched experts (CUTLASS per-expert
-   re-swizzle; declines trtllm/cutedsl/marlin/padded → full reload). Without it,
-   NVFP4 partial reload declines and pays a full reload.
+   re-derives kernel state for only the touched experts — CUTLASS per-expert
+   re-swizzle and TRT-LLM per-expert re-alignment — declining marlin/cutedsl and any
+   padded/whole-layer layout to a safe full reload. Also restores NVFP4 raw bit-exact
+   compare in the weight checker (v0.5.15 replaced it with a NotImplementedError) so a
+   partial reload is byte-verifiable against a full one via `/weights_checker`. Without
+   this, NVFP4 partial reload declines and pays a full reload.
    *Upstreaming:* not yet filed.
+
+6. **`[RL] load plan: record during the initial load so reloads start already-replaying`** (Nan)
+   Record the load plan during the model's initial boot load, so the first
+   `update_weights_from_disk` already replays / goes O(delta) partial instead of paying
+   a full record-reload — the full reload is eliminated from steady state (matters most
+   for elastic joiners that boot then immediately catch up via deltas). Gated on the
+   same flag; drops the plan and falls back to a plain load on any failure.
 
 `SGLANG_ENABLE_RELOAD_LOAD_PLAN` is on by default in the serving image; a recipe whose
 native load is already multithreaded+fast can override it off per-config via
