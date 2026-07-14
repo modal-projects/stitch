@@ -170,13 +170,16 @@ class Reconciler(AdmissionGate):
         self.metrics: dict[str, Any] = {}
         self._task: asyncio.Task[None] | None = None
         self._prefetch_task: asyncio.Task[None] | None = None
+        self._prefetch_done = False
+        self._prefetch_error: str | None = None
         self._periodic_task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
 
     async def startup(self) -> None:
         # Seed the base into the host-local checkpoint in the background so the first real
-        # stage() is delta-only, not a full base copy on the trainer's critical path. Safe to
-        # overlap the reconcile below: the engine's pull is flock-serialized and idempotent.
+        # stage() is delta-only, not a full base copy on the trainer's critical path. The
+        # replica serves throughout (this is disk-only); a stage() waits for this to finish
+        # before writing the same dir (see _reconcile_once_measured), so the two never race.
         self._prefetch_task = asyncio.create_task(self._prefetch_base())
         await self.reconcile()
         if self.reconcile_interval > 0:
@@ -202,12 +205,17 @@ class Reconciler(AdmissionGate):
     async def _prefetch_base(self) -> None:
         try:
             await self.engine.prefetch()
-        except Exception:  # noqa: BLE001 — best-effort; the first real pull falls back to a full copy
+            self._prefetch_done = True
+        except Exception as exc:  # noqa: BLE001 — best-effort; the first real pull falls back to a full copy
+            self._prefetch_error = str(exc)
             logger.exception("base prefetch failed; first sync will pay the full base copy")
 
     def server_info(self) -> dict[str, Any]:
         # Superset of ReplicaState's wire keys (ready/applied/sync_state/reason) plus
-        # diagnostics; the readiness poll reads the first four.
+        # diagnostics; the readiness poll reads the first four. Two-level readiness: `ready`
+        # means serveable (weights on the GPU, version applied) and does NOT wait on the base
+        # prefetch — the replica serves while the prefetch runs. `prefetch_done`/`prefetch_error`
+        # expose whether the O(delta) fast path is primed, so a slow/failed seed is observable.
         return {
             "ready": self.applied is not None and self.sync_state is not SyncState.ERROR,
             "applied": self.applied.identity if self.applied else None,
@@ -216,6 +224,8 @@ class Reconciler(AdmissionGate):
             "run_id": self.run_id,
             "commit_mode": self.commit_mode,
             "active_requests": self._active,
+            "prefetch_done": self._prefetch_done,
+            "prefetch_error": self._prefetch_error,
             "metrics": self.metrics,
         }
 
@@ -285,6 +295,15 @@ class Reconciler(AdmissionGate):
         target = self.store.read_manifest(pointer)
         source_dir = await asyncio.to_thread(self.store.materialize, pointer)
         m["target_version"] = pointer.version
+
+        # Serialize the base prefetch with this stage: both write the host-local checkpoint,
+        # so wait for the prefetch here rather than rely on the engine's file lock — prefetch
+        # then stage is strictly ordered. If the prefetch failed, this stage seeds the full
+        # base itself (recorded so the slow fallback is visible, not silent).
+        if self._prefetch_task is not None and not self._prefetch_task.done():
+            await self._prefetch_task
+        if self._prefetch_error is not None:
+            m["paid_base_copy"] = True
 
         # Stage (host-side apply — the engine walks back to the nearest anchor and
         # replays the whole tail) runs while serving; the gate covers only the reload.
