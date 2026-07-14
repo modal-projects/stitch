@@ -198,6 +198,32 @@ def test_reconcile_interval_zero_disables_backstop() -> None:
     _run(go())
 
 
+def test_stage_waits_for_prefetch() -> None:
+    # The base prefetch and a stage both write /local; the stage must wait for the prefetch
+    # (serialized in the reconciler, not left to the engine's file lock) so they never race.
+    async def go() -> None:
+        engine = FakeEngine()
+        release = asyncio.Event()
+        base_prefetch = engine.prefetch
+
+        async def slow_prefetch() -> None:
+            await release.wait()
+            await base_prefetch()
+
+        engine.prefetch = slow_prefetch  # type: ignore[method-assign]
+        r = Reconciler(store=FakeStore(VersionRef("r1", 2), _full("r1", 2)), engine=engine, reconcile_interval=0.0)
+        r.applied = VersionRef("r1", 0)  # same run, behind -> stage v2 (no run switch)
+        task = asyncio.create_task(r.startup())
+        await asyncio.sleep(0.05)  # startup fires the prefetch; reconcile reaches the await
+        assert "stage:2" not in engine.calls  # blocked on the (still-running) prefetch
+        release.set()
+        await task
+        assert engine.calls.index("prefetch") < engine.calls.index("stage:2")  # prefetch, then stage
+        await r.shutdown()
+
+    _run(go())
+
+
 # ── convergence liveness ─────────────────────────────────────────────────────
 # The backstop self-heals what wake-driven-only cannot (the red tests behind
 # stitch#45): each scenario converges with the backstop and never with interval=0.
