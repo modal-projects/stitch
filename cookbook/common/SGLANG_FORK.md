@@ -28,7 +28,7 @@ Two tiers. The **base case** makes disaggregated weight sync work at all; the
 **optimization** tier makes a reload O(delta) instead of O(full checkpoint). Read the
 commit bodies for the details — this is the map.
 
-### Base case — weight sync works (authored by Nan)
+### Base case — weight sync works
 
 1. **`[RL] /pull_weights: engine-side pull ... into a host-local checkpoint`**
    The disaggregated receiver: `POST /pull_weights` walks the published
@@ -47,7 +47,7 @@ commit bodies for the details — this is the map.
    reloads silently diverge from the served kernel format.
    *Upstreaming:* https://github.com/sgl-project/sglang/pull/30761
 
-### Optimization — O(delta) reload (Jason Mancuso; commit 6 by Nan)
+### Optimization — O(delta) reload
 
 3. **`[RL] reload: record/replay load plans for repeated reloads`**
    Record the model's first-reload weight dispatch once, replay it directly after
@@ -71,16 +71,17 @@ commit bodies for the details — this is the map.
    this, NVFP4 partial reload declines and pays a full reload.
    *Upstreaming:* not yet filed.
 
-6. **`[RL] load plan: record during the initial load so reloads start already-replaying`** (Nan)
+6. **`[RL] load plan: record during the initial load so reloads start already-replaying`**
    Record the load plan during the model's initial boot load, so the first
    `update_weights_from_disk` already replays / goes O(delta) partial instead of paying
    a full record-reload — the full reload is eliminated from steady state (matters most
    for elastic joiners that boot then immediately catch up via deltas). Gated on the
    same flag; drops the plan and falls back to a plain load on any failure.
 
-`SGLANG_ENABLE_RELOAD_LOAD_PLAN` is on by default in the serving image; a recipe whose
-native load is already multithreaded+fast can override it off per-config via
-`SGLANG_ENV` (see `cookbook/miles_disagg/configs/glm45_air_fp8.py`).
+`SGLANG_ENABLE_RELOAD_LOAD_PLAN` is opt-in per recipe (off unless set): the NVFP4 configs
+enable it via `SGLANG_ENV` — their native load is single-threaded, so replay is a large win —
+while a recipe whose native load is already multithreaded+fast leaves it off (see
+`cookbook/miles_disagg/configs/glm45_air_fp8.py`).
 
 ## Re-porting to a newer sglang release (`stitch-sglang-vX`)
 

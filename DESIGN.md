@@ -1,4 +1,4 @@
-# stitch — design & rewrite plan
+# stitch — design
 
 ## Purpose
 
@@ -97,31 +97,9 @@ Both miles and slime write the same HF-safetensors + delta-metadata layout, so t
 - One internal name per concept, translated to external wire spellings only at the boundary: `delta_encoding`/`compression`/`checksum` (manifest) map to Cognition's `compression_format`/`checksum_format`; the manifest reads the wire key `diff` but the field is `delta_encoding`.
 - `base_url` (the engine's HTTP base), `materialize` (ensure a version is locally readable) — named for what they are, not proxy/handle metaphors.
 
-## What moved (old tree → this structure)
+## Testing
 
-| Old | New home |
-|---|---|
-| `protocol.py` | `versions.py` (types + pointer rules) + `{stores,engines,pools}/base.py` (the ports) |
-| `sync.py` (`WeightSyncManager`, `RolloutAdmissionGate`) | `sync.py` (`Reconciler`, `AdmissionGate`) |
-| `bulletin.py` + Volume half of `providers/modal.py` | `stores/modal_volume.py` (`ModalVolumeStore`) |
-| `servers/sglang.py` | `service.py` (engine-agnostic; stamp behind `Engine`) |
-| `engines/sglang.py` (adapter) | `engines/sglang.py` (`SGLangEngine`) |
-| Flash *client* half of `providers/modal.py` | `pools/modal_flash.py` (`ModalFlashPool`) |
-| `cookbook/bulletin_hooks.py` | `publish.py` helpers + `cookbook/common/hooks.py` (shared logic) |
-| `cookbook/sidecar.py` | `service.py` (`serve`) + `cookbook/common/sidecar.py` (entrypoint) |
-| `cookbook/{ray_cluster,sidecar_process,serving,trainer_helpers}.py` | `cookbook/common/{ray_cluster,process,serving_image,launch}.py` + `server.py`/`smoke.py` |
-| `cookbook/{miles,slime}_disagg/` (copy-forked apps + configs) | `cookbook/{miles,slime}/` (shared Server; per-framework Trainer + pins + configs) |
-| `src/stitch/trainers/slime.py` (dead) | deleted |
-| `cookbook/local_disagg` | `tests/` (in-memory core harness) |
-| `profiling/` | `tools/profiling/` |
-| `VersionManifest.from_slime_index` | `from_hf_index` |
-
-## Rewrite plan (branch `stitch-v2`) — extract & de-leak, not reinvent
-
-- **Phase 0 — skeleton.** ✅ Tree; `profiling/` → `tools/profiling/`; `tests/`; `pyproject`.
-- **Phase 1 — core, provable in-memory.** ✅ `versions.py`, `sync.py`, `service.py`, `publish.py`, the three port `base.py` — all provider/engine/framework-agnostic, with the in-memory harness (`tests/`) as the gate. Passes with fakes before any instance exists.
-- **Phase 2 — instances.** ✅ `stores/modal_volume`, `engines/sglang`, `pools/modal_flash` — proven code ported onto the ports, leaks killed (proxy engine-agnostic via `Engine`; `publish` agnostic; Volume durability inside the store; Pool client-only).
-- **Phase 3 — cookbook.** ✅ `common/` (shared, incl. the parameterized `register_server`) + `miles/` + `slime/`, each self-contained config, all experiments ported. The old `*_disagg` tree stays as reference **until e2e, then deleted**.
-- **Phase 4 — new-version fixes.** Land the miles/sglang updates (TE 2.17, etc.) on the clean structure — "make NVFP4 work," now on solid ground.
-
-Tests: `tests/` (core harnesses + the cookbook hook test) is the gate for Phases 0–3; the Modal-backed instances + recipes are validated e2e.
+`tests/` mirrors `src/stitch/` and carries an **in-memory core harness**: it runs the real
+`Reconciler` / `AdmissionGate` / pointer-rules path against fake `Store` / `Engine`
+instances — no Modal, no sglang, no GPU — so the core is provable without any concrete
+instance. The Modal-backed instances and the cookbook recipes are validated end-to-end.
