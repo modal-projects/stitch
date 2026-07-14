@@ -1,21 +1,7 @@
-"""Kimi-K2.5 2-layer NVFP4 disaggregated — the FAST iteration proxy for K2.6.
+"""Kimi-K2.5 2-layer NVFP4 disaggregated — the FAST single-node iteration proxy for K2.6.
 
-CharyZeng/Kimi-K2.5-2layer is the identical arch class as K2.6
-(KimiK25ForConditionalGeneration, model_type "kimi_k25": MLA + DeepSeek-MoE, 384
-experts, topk 8, first_k_dense_replace 1, compressed-tensors INT4) but only 2
-layers. So it exercises the EXACT K2.6-specific path — INT4->bf16 dequant, NVFP4
-convert, the KimiK25 mbridge import converter, raw-mode build, torch_dist load,
-te-precision NVFP4 QAT, disk-delta publish, NVFP4 serving — on a SINGLE node in
-minutes, instead of 16x8 B200 + ~40 min init. Shake out the init/converter path
-here, then run the full kimi_k2_6_nvfp4 once it's clean.
-
-    EXPERIMENT_CONFIG=kimi_k25_2layer_nvfp4 \
-      uv run --extra modal modal run --detach -m cookbook.miles_disagg.app::prepare_checkpoints
-    EXPERIMENT_CONFIG=kimi_k25_2layer_nvfp4 \
-      uv run --extra modal modal run --detach -m cookbook.miles_disagg.app::prepare_torch_dist
-    EXPERIMENT_CONFIG=kimi_k25_2layer_nvfp4 \
-      uv run --extra modal modal deploy --strategy recreate -m cookbook.miles_disagg.app
-    # then ::launch_train
+Deploy (::prepare_checkpoints, ::prepare_torch_dist, deploy, then ::launch_train):
+    EXPERIMENT_CONFIG=kimi_k25_2layer_nvfp4 uv run --extra modal modal deploy --strategy recreate -m cookbook.miles_disagg.app
 """
 
 from __future__ import annotations
@@ -76,7 +62,6 @@ class _Miles(MilesConfig):
     megatron_to_hf_mode = "raw"
     model_name = "kimi_k25"  # KimiK25 mbridge import + convert_kimi_k25_to_hf export
 
-    # Disaggregated publish-only rollout on a single node (B200:4 trainer).
     actor_num_nodes = 1
     actor_num_gpus_per_node = 4
     num_gpus_per_node = 4

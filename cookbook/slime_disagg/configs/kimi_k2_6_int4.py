@@ -1,15 +1,6 @@
 """Kimi K2.6 GRPO on Modal, disaggregated, native-INT4 end to end.
 
-Kimi K2.6 is a ~1T DeepSeek-V3-arch MoE, far too large to serve bf16/fp8 on 4xB200, so
-the pool serves its native compressed-tensors INT4 (W4A16) checkpoint. That single INT4
-format is what makes the disagg weight-sync work: the trainer fake-quantizes in-loop
-(INT4 QAT), its megatron->hf export emits native W4A16, and the sidecar XORs those onto
-the native-INT4 base — one format end to end, no re-quantization step.
-
-INVARIANT: OPEN_TRAINING_INT4_GROUP_SIZE must equal the served checkpoint's
-compressed-tensors group_size (the export reads it from the base's quantization_config).
-
-    EXPERIMENT_CONFIG=kimi_k2_6_int4 uv run --extra modal modal deploy -m cookbook.slime_disagg.app
+Deploy: EXPERIMENT_CONFIG=kimi_k2_6_int4 uv run --extra modal modal deploy -m cookbook.slime_disagg.app
 """
 
 from __future__ import annotations
@@ -26,8 +17,7 @@ LOCAL_CHECKPOINT_PATH = "/local-checkpoint"
 # QAT grouping; MUST match the served INT4 checkpoint's compressed-tensors group_size.
 INT4_GROUP_SIZE = "32"
 
-# Async one-step off-policy: in_place applies weights without draining in-flight rollouts;
-# stale-version KV is isolated per version by the sidecar's extra_key stamping.
+# in_place applies weights without draining in-flight rollouts; stale KV isolated per version.
 SIDECAR_COMMIT_MODE = "in_place"
 
 SGLANG_SERVER_ARGS = {
@@ -63,7 +53,7 @@ modal = ModalConfig(
 
 
 class _Slime(SlimeConfig):
-    # Architecture is sourced from the model script (MLA + the full DeepSeek-MoE arg set).
+    # Arch comes from the model script.
     slime_model_script = "scripts/models/kimi-k2-thinking.sh"
 
     # The native-INT4 base is the served model, the QAT init, and the disk-delta base.

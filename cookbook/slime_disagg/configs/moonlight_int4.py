@@ -1,23 +1,8 @@
-"""Moonlight-16B-A3B GRPO on Modal, disaggregated, native-INT4 end to end.
+"""Moonlight-16B-A3B GRPO on Modal, disaggregated, native-INT4 end to end — the cheap de-risk for kimi_k2_6_int4.
 
-The cheap de-risk rung for `kimi_k2_6_int4`. Moonlight-16B-A3B is the same
-DeepSeek-V3 architecture (MLA + DeepSeek-MoE) and the same native compressed-
-tensors INT4 (W4A16) serving path as Kimi K2.6, at a size that fits a single
-H200 — so it exercises the *exact* INT4-QAT + disk-delta + native-INT4-serve loop
-without the B200 / Blackwell-SGLang-fork variable (it reuses the trainer image's
-SGLang, which already serves INT4 in the colocated recipe). Get this green first;
-then `kimi_k2_6_int4` changes only scale and the serving image.
+INVARIANT: OPEN_TRAINING_INT4_GROUP_SIZE MUST equal the served checkpoint's compressed-tensors group_size (128 here).
 
-INVARIANT (as in the Kimi config): OPEN_TRAINING_INT4_GROUP_SIZE MUST equal the
-served checkpoint's compressed-tensors group_size — 128 here, per the colocated
-scripts/low_precision/run-moonlight-16B-A3B-int4.sh recipe.
-
-Deploy as its own app:
-    EXPERIMENT_CONFIG=moonlight_int4 m deploy --strategy recreate -m cookbook.slime_disagg.app
-
-Prerequisite: hf_checkpoint must resolve to a native compressed-tensors INT4
-(W4A16) Moonlight checkpoint with group_size 128 (the recipe quantizes
-Moonlight-16B-A3B-Instruct to INT4 offline). Verify the repo id / config.json.
+Deploy: EXPERIMENT_CONFIG=moonlight_int4 m deploy --strategy recreate -m cookbook.slime_disagg.app
 """
 
 from __future__ import annotations
@@ -37,8 +22,7 @@ INT4_GROUP_SIZE = "128"
 SIDECAR_COMMIT_MODE = "in_place"
 SIDECAR_DEBUG_REQUESTS = True
 
-# No build_serving_image: the pool reuses the trainer image, whose SGLang serves
-# this native-INT4 checkpoint on a single H200 (no Blackwell fork needed).
+# The pool reuses the trainer image (its SGLang serves native INT4; no Blackwell fork).
 SGLANG_SERVER_ARGS = {
     "--weight-loader-prefetch-checkpoints": "",
     "--weight-loader-prefetch-num-threads": "8",
@@ -51,17 +35,14 @@ modal = ModalConfig(gpu="H200", region="us")
 
 
 class _Slime(SlimeConfig):
-    # Architecture is sourced from the model script (MLA + DeepSeek-MoE). MLA
-    # models must not set --attention-backend flash, so it is omitted.
+    # Arch comes from the model script. MLA models must not set --attention-backend flash.
     slime_model_script = "scripts/models/moonlight.sh"
 
-    # The native-INT4 base is the served model, the QAT init, and the disk-delta
-    # base — all the same checkpoint (see prerequisite).
+    # The native-INT4 base is the served model, the QAT init, and the disk-delta base.
     hf_checkpoint = "moonshotai/Moonlight-16B-A3B-Instruct-INT4"
     ref_load = hf_checkpoint
     megatron_to_hf_mode = "bridge"
 
-    # Disaggregated publish-only rollout; modal_train fills rollout_endpoint_url.
     actor_num_nodes = 1  # 1x8 H200 (the recipe trains on 1x4; 1 node here)
     actor_num_gpus_per_node = 8
     colocate = False
@@ -78,8 +59,7 @@ class _Slime(SlimeConfig):
     async_mode = True
     update_weights_interval = 1
 
-    # Disk-delta publish-only: the export emits native compressed-tensors INT4, so
-    # the XOR delta is byte-exact against the native-INT4 base.
+    # disk-delta: export emits native INT4, so the XOR delta is byte-exact against the base.
     update_weight_mode = "delta"
     update_weight_transport = "disk"
     update_weight_delta_encoding = "xor"
@@ -161,8 +141,6 @@ class _Slime(SlimeConfig):
     def prepare_data(self) -> None:
         from datasets import load_dataset
 
-        # DAPO-Math-17k: lift reward_model.ground_truth into a `label` column (see
-        # the Kimi config for the rationale). A shuffled subset is ample.
         ds = load_dataset("BytedTsinghua-SIA/DAPO-Math-17k", split="train")
         ds = ds.shuffle(seed=42).select(range(min(50000, ds.num_rows)))
         ds = ds.map(lambda ex: {"label": ex["reward_model"]["ground_truth"]})
