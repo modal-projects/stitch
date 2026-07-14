@@ -81,6 +81,7 @@ def create_app(
         try:
             yield
         finally:
+            await reconciler.shutdown()
             c = pooled.pop("client", None)
             if c is not None:
                 await c.aclose()
@@ -187,13 +188,15 @@ def serve(
     host: str = "0.0.0.0",
     port: int = 8000,
     debug_requests: bool = False,
+    reconcile_interval: float = 5.0,
 ) -> None:
     """Run one replica's sidecar: build the Reconciler over the given store+engine
     and serve the versioned proxy. The deployment supplies the concrete instances."""
     import uvicorn
 
     reconciler = Reconciler(
-        store=store, engine=engine, run_id=run_id, commit_mode=commit_mode, debug_requests=debug_requests
+        store=store, engine=engine, run_id=run_id, commit_mode=commit_mode,
+        debug_requests=debug_requests, reconcile_interval=reconcile_interval,
     )
     uvicorn.run(create_app(reconciler, engine), host=host, port=port, log_level="info")
 

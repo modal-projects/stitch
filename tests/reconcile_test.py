@@ -165,6 +165,37 @@ def test_empty_delta_skips_reload() -> None:
     _run(go())
 
 
+def test_periodic_reconcile_recovers_missed_wake() -> None:
+    async def go() -> None:
+        engine = FakeEngine()
+        store = FakeStore(VersionRef("r1", 3), _full("r1", 3), _full("r1", 5))
+        r = Reconciler(store=store, engine=engine, reconcile_interval=0.02)
+        await r.startup()
+        assert r.applied == VersionRef("r1", 3)
+        # A publish advances latest, but its wake never lands (cold start raced it, or the
+        # best-effort wake was lost). No wake() call, no request — only the background loop.
+        store.advance_pointer(VersionRef("r1", 5))
+        await asyncio.sleep(0.1)
+        assert r.applied == VersionRef("r1", 5)  # the backstop caught up on its own
+        await r.shutdown()
+
+    _run(go())
+
+
+def test_reconcile_interval_zero_disables_backstop() -> None:
+    async def go() -> None:
+        store = FakeStore(VersionRef("r1", 3), _full("r1", 3), _full("r1", 5))
+        r = Reconciler(store=store, engine=FakeEngine(), reconcile_interval=0.0)
+        await r.startup()
+        store.advance_pointer(VersionRef("r1", 5))
+        await asyncio.sleep(0.1)
+        assert r.applied == VersionRef("r1", 3)  # no backstop: stays until a wake/409
+        assert r._periodic_task is None
+        await r.shutdown()
+
+    _run(go())
+
+
 # ── admission gate ───────────────────────────────────────────────────────────
 def test_admit_satisfied() -> None:
     async def go() -> None:

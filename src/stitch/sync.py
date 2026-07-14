@@ -13,7 +13,7 @@ import logging
 import time
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import Any, Literal
 
 from stitch.engines.base import Engine
@@ -157,17 +157,20 @@ class Reconciler(AdmissionGate):
         run_id: str | None = None,
         commit_mode: CommitMode = "quiesce",
         debug_requests: bool = False,
+        reconcile_interval: float = 5.0,
     ) -> None:
         super().__init__(commit_mode=commit_mode)
         self.store = store
         self.engine = engine
         self.run_id = run_id  # static replica label for server_info, not the active chain
         self.debug_requests = debug_requests
+        self.reconcile_interval = reconcile_interval
         self.sync_state = SyncState.IDLE
         self.last_error: str | None = None
         self.metrics: dict[str, Any] = {}
         self._task: asyncio.Task[None] | None = None
         self._prefetch_task: asyncio.Task[None] | None = None
+        self._periodic_task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
 
     async def startup(self) -> None:
@@ -176,6 +179,25 @@ class Reconciler(AdmissionGate):
         # overlap the reconcile below: the engine's pull is flock-serialized and idempotent.
         self._prefetch_task = asyncio.create_task(self._prefetch_base())
         await self.reconcile()
+        if self.reconcile_interval > 0:
+            self._periodic_task = asyncio.create_task(self._periodic_reconcile())
+
+    async def shutdown(self) -> None:
+        for task in (self._periodic_task, self._prefetch_task):
+            if task is not None:
+                task.cancel()
+                with suppress(BaseException):
+                    await task
+
+    async def _periodic_reconcile(self) -> None:
+        # Convergence backstop: re-check the pointer every interval so a replica that never
+        # got a wake still catches up — a cold start that raced the last publish/wake, or a
+        # best-effort wake that was lost, would otherwise sit stale until the NEXT publish.
+        # wake() is idempotent and non-cancelling, so an already-caught-up tick is a cheap
+        # pointer read and an in-flight reconcile is left to finish.
+        while True:
+            await asyncio.sleep(self.reconcile_interval)
+            self.wake()
 
     async def _prefetch_base(self) -> None:
         try:
