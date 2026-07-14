@@ -90,7 +90,7 @@ class _Miles(MilesConfig):
         "kimi_k25"  # megatron_to_hf export dispatch (convert_kimi_k25_to_hf + NVFP4)
     )
 
-    actor_num_nodes = 16  # 16x8 B200 = 128 GPUs (trainer only; pool is elastic on top)
+    actor_num_nodes = 8  # 8x8 B200 = 64 GPUs (trainer only; pool is elastic on top)
     actor_num_gpus_per_node = 8
     num_gpus_per_node = 8
     colocate = False
@@ -175,8 +175,8 @@ class _Miles(MilesConfig):
     rm_type = "deepscaler"
     eval_interval = None
 
-    num_rollout = 3  # trimmed e2e loop-closure smoke (scale up for a real run)
-    save_interval = 20  # megatron requires it; > num_rollout so the smoke skips saves
+    num_rollout = 10  # 10 GRPO steps; each publishes a delta to inspect for tensor-sparsity
+    save_interval = 20  # megatron requires it; > num_rollout so this run skips saves
     rollout_batch_size = 32
     rollout_max_response_len = 4096
     rollout_temperature = 0.8
@@ -187,15 +187,15 @@ class _Miles(MilesConfig):
 
     use_rollout_routing_replay = True
 
-    # Trainer parallelism for 16x8=128 GPUs (from the proven Kimi 32x8 TP8/PP8/CP4/EP32,
-    # halving the non-PP width: TP8*PP8*CP2=128, EP16 over the experts).
+    # Trainer parallelism for 8x8=64 GPUs: TP8*PP2*CP4=64, EP32 over the experts — the
+    # proven kimi_k25_lora_8nodes topology. EP32 keeps expert weights+grads ~63GB/rank.
     tensor_model_parallel_size = 8
     sequence_parallel = True
-    pipeline_model_parallel_size = 8
-    context_parallel_size = 2
-    expert_model_parallel_size = 16
+    pipeline_model_parallel_size = 2
+    context_parallel_size = 4
+    expert_model_parallel_size = 32
     expert_tensor_parallel_size = 1
-    decoder_last_pipeline_num_layers = 5
+    decoder_last_pipeline_num_layers = 30
     use_dynamic_batch_size = True
     max_tokens_per_gpu = 16384
     recompute_granularity = "full"
