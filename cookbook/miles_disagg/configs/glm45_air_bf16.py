@@ -29,6 +29,8 @@ MEGATRON_RUNTIME_PATCHES = [
 
 
 SGLANG_SERVER_ARGS = {
+    "--weight-loader-prefetch-checkpoints": "",
+    "--weight-loader-prefetch-num-threads": "8",
     "--reasoning-parser": "glm45",
     "--tool-call-parser": "glm45",
     "--dist-timeout": "3600",

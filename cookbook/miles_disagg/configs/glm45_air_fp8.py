@@ -31,6 +31,8 @@ DISABLE_HF_TRANSFER = True
 MEGATRON_RUNTIME_PATCHES = ["/root/cookbook/miles_disagg/patches/megatron-r3-dispatch.patch"]
 
 SGLANG_SERVER_ARGS = {
+    "--weight-loader-prefetch-checkpoints": "",
+    "--weight-loader-prefetch-num-threads": "8",
     "--dtype": "auto",
     "--reasoning-parser": "glm45",
     "--tool-call-parser": "glm45",
@@ -39,7 +41,7 @@ SGLANG_SERVER_ARGS = {
     "--mem-fraction-static": "0.7",
     "--chunked-prefill-size": "8192",
     "--max-prefill-tokens": "16384",
-    "--piecewise-cuda-graph-max-tokens": "2048",  # avoid H200 cold-start graph-compile hangs
+    "--cuda-graph-max-bs-prefill": "2048",  # avoid H200 cold-start graph-compile hangs
     "--model-loader-extra-config": '{"enable_multithread_load":true,"num_threads":8}',
     "--skip-server-warmup": "",
 }

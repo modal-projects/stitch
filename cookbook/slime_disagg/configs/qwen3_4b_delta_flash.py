@@ -25,6 +25,8 @@ SIDECAR_DEBUG_REQUESTS = True
 
 # SGLang server tuning, merged over the structural args set in modal_train.py.
 SGLANG_SERVER_ARGS = {
+    "--weight-loader-prefetch-checkpoints": "",
+    "--weight-loader-prefetch-num-threads": "8",
     "--reasoning-parser": "qwen3",
     "--context-length": "16384",
     "--mem-fraction-static": "0.84",
