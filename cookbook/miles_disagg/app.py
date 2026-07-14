@@ -36,9 +36,8 @@ from cookbook.miles_disagg import prep, trainer_image
 from cookbook.miles_disagg.config import MilesConfig, YAML_CONFIG_FIELDS
 from cookbook.miles_disagg.trainer_image import MEGATRON_PATH, MILES_ROOT
 
-# Deploy-time environment (selection + dev overlay, NOT experiment config).
-EXPERIMENT = os.environ.get("EXPERIMENT_CONFIG", "glm45_air_fp8")
-MILES_LOCAL_DIR = os.environ.get("MILES_LOCAL_DIR")  # dev overlay of a local miles checkout
+EXPERIMENT = os.environ["EXPERIMENT_CONFIG"]  # required; a default would silently serve the wrong experiment
+MILES_LOCAL_DIR = os.environ.get("MILES_LOCAL_DIR")  # optional dev overlay of a local miles checkout
 
 exp = importlib.import_module(f"cookbook.miles_disagg.configs.{EXPERIMENT}")
 modal_cfg = exp.modal
@@ -48,8 +47,10 @@ miles_cfg = exp.miles
 # target_inputs, else the engine's configured concurrency.
 ROLLOUT_CONCURRENCY = modal_cfg.rollout_target_inputs or miles_cfg.sglang_server_concurrency
 
-image = trainer_image.build_trainer_image(hf_cache_path=str(HF_CACHE_PATH), miles_local=MILES_LOCAL_DIR)
-server_image = serving_image.build_serving_image(hf_cache_path=str(HF_CACHE_PATH), delta_volume_name=exp.DELTA_VOLUME_NAME)
+# EXPERIMENT_CONFIG is baked into both images (inside build_*_image) so the container's
+# re-import resolves the same experiment as the deploy, not the default.
+image = trainer_image.build_trainer_image(hf_cache_path=str(HF_CACHE_PATH), experiment=EXPERIMENT, miles_local=MILES_LOCAL_DIR)
+server_image = serving_image.build_serving_image(hf_cache_path=str(HF_CACHE_PATH), delta_volume_name=exp.DELTA_VOLUME_NAME, experiment=EXPERIMENT)
 if MILES_LOCAL_DIR:
     server_image = server_image.add_local_dir(MILES_LOCAL_DIR, remote_path=MILES_ROOT, ignore=[".git", "**/__pycache__", "**/*.pyc"])
 
@@ -72,7 +73,7 @@ app = modal.App(exp.APP_NAME)
 
 SGLANG_SERVER_ARGS = {
     "--served-model-name": miles_cfg.hf_checkpoint,
-    "--cuda-graph-max-bs": str(ROLLOUT_CONCURRENCY),
+    "--cuda-graph-max-bs-decode": str(ROLLOUT_CONCURRENCY),
     "--max-running-requests": str(ROLLOUT_CONCURRENCY),
     "--trust-remote-code": "",
     # The engine reads published versions off the Modal Volume; this hook reloads it

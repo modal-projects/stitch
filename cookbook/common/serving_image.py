@@ -36,9 +36,10 @@ _SERVING_ENV = {
 }
 
 
-def build_serving_image(*, hf_cache_path: str, delta_volume_name: str) -> modal.Image:
-    """The rollout-pool image. ``DELTA_VOLUME_NAME`` is read by the engine's pre-read
-    hook and the sidecar's Store; stitch + the whole cookbook package are mounted so the
+def build_serving_image(*, hf_cache_path: str, delta_volume_name: str, experiment: str) -> modal.Image:
+    """The rollout-pool image. ``DELTA_VOLUME_NAME`` is read by the engine's pre-read hook
+    and the sidecar's Store; ``EXPERIMENT_CONFIG`` so the container's re-import resolves the
+    same experiment as the deploy; stitch + the whole cookbook package are mounted so the
     sidecar (``python -m cookbook.common.sidecar``) and the framework hooks resolve."""
     return (
         modal.Image.from_registry(SGLANG_IMAGE_TAG)
@@ -52,7 +53,7 @@ def build_serving_image(*, hf_cache_path: str, delta_volume_name: str) -> modal.
             "fastapi", "httpx", "uvicorn",  # the stitch sidecar
             "zstandard", "xxhash", "blake3",  # engine-side /pull_weights receiver's codecs
         )
-        .env({**_SERVING_ENV, "DELTA_VOLUME_NAME": delta_volume_name})
+        .env({**_SERVING_ENV, "DELTA_VOLUME_NAME": delta_volume_name, "EXPERIMENT_CONFIG": experiment})
         # The kernel-cache volume mounts at /root/.cache/sglang, which can't mount over a
         # non-empty path — clear it as the final filesystem step (repopulated on boot).
         .run_commands("rm -rf /root/.cache/sglang")
