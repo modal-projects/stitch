@@ -2,7 +2,7 @@
 
 Exercises the pointer round-trip and the publish -> read_manifest -> materialize path the
 reconciler drives, so the store's S3 key layout + download-to-cache logic is verified without
-a bucket. Run directly: PYTHONPATH=src python tests/s3_store_test.py
+a bucket. Run directly: PYTHONPATH=src python src/stitch/stores/s3_test.py
 """
 
 from __future__ import annotations

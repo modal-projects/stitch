@@ -86,9 +86,9 @@ def apply_git_patches(patch_paths: list[str], repo_dir: str, label: str) -> None
 
 
 def start_host_mem_monitor(interval_s: int = 20) -> None:
-    """Log this node's host-RAM trajectory from a daemon thread. The trainer can
-    OOM-kill at host-RAM exhaustion (the publish weight-gather is the peak) and Modal
-    leaves no peak behind, so this makes `modal app logs -f` show the blow. Best-effort."""
+    """Trace this node's host-RAM from a daemon thread. Host-RAM exhaustion OOM-kills the
+    trainer (the peak is the publish weight-gather) and Modal exposes no host-RAM metric, so
+    this log line is the only signal. Best-effort."""
     host = socket.gethostname()
 
     def _meminfo() -> tuple[float, float]:
