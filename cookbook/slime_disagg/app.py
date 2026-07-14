@@ -35,8 +35,8 @@ from cookbook.slime_disagg.config import SlimeConfig, YAML_CONFIG_FIELDS
 from cookbook.slime_disagg.trainer_image import SLIME_ROOT
 
 # Deploy-time environment (selection + dev overlay, NOT experiment config).
-EXPERIMENT = os.environ.get("EXPERIMENT_CONFIG", "kimi_k2_6_int4")
-SLIME_LOCAL_DIR = os.environ.get("SLIME_LOCAL_DIR")  # dev overlay of a local slime checkout
+EXPERIMENT = os.environ["EXPERIMENT_CONFIG"]  # required; a default would silently serve the wrong experiment
+SLIME_LOCAL_DIR = os.environ.get("SLIME_LOCAL_DIR")  # optional dev overlay of a local slime checkout
 
 exp = importlib.import_module(f"cookbook.slime_disagg.configs.{EXPERIMENT}")
 modal_cfg = exp.modal
@@ -46,8 +46,10 @@ slime_cfg = exp.slime
 # target_inputs, else the engine's configured concurrency.
 ROLLOUT_CONCURRENCY = modal_cfg.rollout_target_inputs or slime_cfg.sglang_server_concurrency
 
-image = trainer_image.build_trainer_image(hf_cache_path=str(HF_CACHE_PATH), slime_local=SLIME_LOCAL_DIR)
-server_image = serving_image.build_serving_image(hf_cache_path=str(HF_CACHE_PATH), delta_volume_name=exp.DELTA_VOLUME_NAME)
+# EXPERIMENT_CONFIG is baked into both images (inside build_*_image) so the container's
+# re-import resolves the same experiment as the deploy, not the default.
+image = trainer_image.build_trainer_image(hf_cache_path=str(HF_CACHE_PATH), experiment=EXPERIMENT, slime_local=SLIME_LOCAL_DIR)
+server_image = serving_image.build_serving_image(hf_cache_path=str(HF_CACHE_PATH), delta_volume_name=exp.DELTA_VOLUME_NAME, experiment=EXPERIMENT)
 if SLIME_LOCAL_DIR:
     server_image = server_image.add_local_dir(SLIME_LOCAL_DIR, remote_path=SLIME_ROOT, ignore=[".git", "**/__pycache__", "**/*.pyc"])
 
@@ -68,7 +70,7 @@ app = modal.App(exp.APP_NAME)
 SGLANG_SERVER_ARGS = {
     "--served-model-name": slime_cfg.hf_checkpoint,
     "--dtype": "bfloat16",
-    "--cuda-graph-max-bs": str(ROLLOUT_CONCURRENCY),
+    "--cuda-graph-max-bs-decode": str(ROLLOUT_CONCURRENCY),
     "--max-running-requests": str(ROLLOUT_CONCURRENCY),
     "--trust-remote-code": "",
     "--custom-pull-weights-pre-read-hook": "stitch.stores.modal_volume.pull_weights_pre_read_hook",
