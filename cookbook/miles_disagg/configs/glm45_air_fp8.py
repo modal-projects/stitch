@@ -1,9 +1,4 @@
-"""GLM-4.5-Air trained in bf16, served in native HF FP8 through the disaggregated pool.
-
-Owns the whole experiment: identity + paths both deployment halves key off, the Modal
-infra config, and the miles training config. A different model or precision is a
-different config module, not an edit here.
-"""
+"""GLM-4.5-Air: bf16 trainer, served in native HF FP8 through the disaggregated pool."""
 
 from __future__ import annotations
 
@@ -11,23 +6,20 @@ from cookbook.common.config import ModalConfig
 from cookbook.common.constants import DATA_PATH, PREP_PATH
 from cookbook.miles_disagg.config import MilesConfig
 
-# ── identity + paths ─────────────────────────────────────────────────────────
 APP_NAME = "stitch-glm45-air-fp8"
 DELTA_VOLUME_NAME = "stitch-delta-glm45-air-fp8"
-DELTA_BULLETIN_ROOT = "/delta-bulletin"     # Store root: `latest` + <run_id>/ chains
-LOCAL_CHECKPOINT_PATH = "/local-checkpoint"  # engine's per-host materialized checkpoint
-SIDECAR_COMMIT_MODE = "quiesce"             # fp8 reload is exact; draining buys clean per-version attribution
+DELTA_BULLETIN_ROOT = "/delta-bulletin"
+LOCAL_CHECKPOINT_PATH = "/local-checkpoint"
+SIDECAR_COMMIT_MODE = "quiesce"  # fp8 reload is exact; draining buys clean per-version attribution
 
 MODEL_TAG = "glm45-air-bf16"
-SOURCE_MODEL = "zai-org/GLM-4.5-Air"           # bf16 masters + trainer arch
-ROLLOUT_SOURCE_MODEL = "zai-org/GLM-4.5-Air-FP8"  # the served FP8 base
+SOURCE_MODEL = "zai-org/GLM-4.5-Air"
+ROLLOUT_SOURCE_MODEL = "zai-org/GLM-4.5-Air-FP8"
 SERVED_CHECKPOINT_FORMAT = "fp8"
 USE_MODAL_TORCH_DIST_WRAPPER = True
-# The standard HF downloader was the path that finished reliably for this model.
-DISABLE_HF_XET = True
+DISABLE_HF_XET = True       # the plain HF downloader is the path that finished reliably here
 DISABLE_HF_TRANSFER = True
 
-# R3 routing-replay needs the dropless Megatron dispatch fix applied at trainer start.
 MEGATRON_RUNTIME_PATCHES = ["/root/cookbook/miles_disagg/patches/megatron-r3-dispatch.patch"]
 
 SGLANG_SERVER_ARGS = {
@@ -45,18 +37,12 @@ SGLANG_SERVER_ARGS = {
     "--skip-server-warmup": "",
 }
 
-# Native load here is already multithreaded + fast (~15s), so sglang's load-plan reload
-# replay is a net ~2x regression (its own thread-pool dispatch loses to the multithread
-# loader) — leave it off. The NVFP4 recipes opt in instead (their single-threaded native
-# load, ~300s -> ~10s, is where the plan is a large win).
-SGLANG_ENV = {"SGLANG_ENABLE_RELOAD_LOAD_PLAN": "0"}
-
 
 class _Miles(MilesConfig):
     miles_model_script = "scripts/models/glm4.5-106B-A12B.sh"
 
-    hf_checkpoint = f"{PREP_PATH}/{MODEL_TAG}/fp8"        # served FP8 base
-    ref_load = f"{PREP_PATH}/{MODEL_TAG}/torch_dist"      # trainer weights (raw-mode Megatron)
+    hf_checkpoint = f"{PREP_PATH}/{MODEL_TAG}/fp8"
+    ref_load = f"{PREP_PATH}/{MODEL_TAG}/torch_dist"
     megatron_to_hf_mode = "raw"
     model_name = "glm4moe"
 
@@ -64,12 +50,11 @@ class _Miles(MilesConfig):
     actor_num_gpus_per_node = 8
     num_gpus_per_node = 8
     colocate = False
-    rollout_num_gpus = 0                 # external rollout: the framework runs no local engines
+    rollout_num_gpus = 0                 # external rollout: framework runs no local engines
     rollout_num_gpus_per_engine = 4
     rollout_endpoint_url = None          # filled at launch from the pool gateway
     use_miles_router = True
 
-    # The three plug points stitch fills (resolved by miles inside the trainer process):
     custom_rollout_request_hook_path = "cookbook.common.hooks.gated_rollout_request_hook"
     custom_update_weight_post_write_path = "cookbook.common.hooks.commit_and_wake"
     custom_config_path = {

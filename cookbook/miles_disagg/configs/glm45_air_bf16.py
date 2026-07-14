@@ -16,16 +16,12 @@ SOURCE_MODEL = "zai-org/GLM-4.5-Air"
 MODEL_TAG = "glm45-air-bf16"
 SERVED_CHECKPOINT_FORMAT = "bf16"
 USE_MODAL_TORCH_DIST_WRAPPER = True
-# The standard HF downloader was the path that finished reliably for this model.
-DISABLE_HF_XET = True
+DISABLE_HF_XET = True       # the plain HF downloader is the path that finished reliably here
 DISABLE_HF_TRANSFER = True
 
 SIDECAR_COMMIT_MODE = "in_place"
 SIDECAR_DEBUG_REQUESTS = True
-# R3 routing-replay needs the dropless Megatron dispatch fix at startup.
-MEGATRON_RUNTIME_PATCHES = [
-    "/root/cookbook/miles_disagg/patches/megatron-r3-dispatch.patch",
-]
+MEGATRON_RUNTIME_PATCHES = ["/root/cookbook/miles_disagg/patches/megatron-r3-dispatch.patch"]
 
 
 SGLANG_SERVER_ARGS = {
