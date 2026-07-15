@@ -12,15 +12,15 @@ sglang release*.
 `python/` onto a stock sglang container:
 
 ```python
-SGLANG_IMAGE_TAG   = "lmsysorg/sglang:v0.5.15"          # base kernels/CUDA
-SGLANG_FORK_BRANCH = "stitch-sglang-v0.5.15"            # modal-projects/sglang
-SGLANG_FORK_COMMIT = "13479b59cccd77459fb003d2f2e138e4cca8ed17"
+SGLANG_IMAGE_TAG   = "lmsysorg/sglang:v0.5.15.post1"    # base kernels/CUDA
+SGLANG_FORK_BRANCH = "stitch-sglang-v0.5.15-post1"      # modal-projects/sglang
+SGLANG_FORK_COMMIT = "fd86c9155dfb651019a13f7229cd83bd0577752d"
 ```
 
-The branch is **`v0.5.15` + the patch stack below, nothing else** — every commit
-`git log v0.5.15..stitch-sglang-v0.5.15` is one of ours. Because only `python/` is
-overlaid, `SGLANG_IMAGE_TAG` **must** be the same sglang version the branch is based
-on (`v0.5.15`), or the baked C++/CUDA ops will be ABI-mismatched with the python.
+The branch is **`v0.5.15.post1` + the patch stack below, nothing else** — every commit
+`git log v0.5.15.post1..stitch-sglang-v0.5.15-post1` is one of ours. Because only `python/`
+is overlaid, `SGLANG_IMAGE_TAG` **must** be the same sglang version the branch is based on
+(`v0.5.15.post1`), or the baked C++/CUDA ops will be ABI-mismatched with the python.
 
 ## The patch stack
 
@@ -119,6 +119,11 @@ When bumping the base (e.g. to `v0.5.16`):
    same bytes via `/weights_checker` (per-tensor checksums) before shipping — this is
    how the NVFP4 partial pass is proven correct.
 5. Update the three constants in `cookbook/common/serving_image.py` and this file.
+
+_Most recent bump: `v0.5.15` → `v0.5.15.post1` — a clean cherry-pick of all seven commits.
+`git range-diff` was identical (post1's changes are disjoint from the patch surface except
+`scheduler.py` / `server_args.py`, which auto-merged). GPU byte-identical reload validation
+runs at the next e2e._
 
 ## Upstreaming
 
