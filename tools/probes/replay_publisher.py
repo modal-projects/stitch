@@ -21,21 +21,25 @@ def replay(
     *,
     root: str,
     source_run: str,
-    app_name: str,
+    app_name: str | None = None,
     cls_name: str = "Server",
+    pool: object = None,  # any stitch Pool; overrides app_name (local shakeout / tests)
     volume_name: str | None = None,
     cadence_s: float = 30.0,
     limit: int | None = None,
     run_id: str | None = None,
 ) -> str:
     """Claim the pool under a fresh run, then publish the recorded chain v1..vN with
-    ``cadence_s`` between publishes. Returns the run_id used."""
-    from stitch.pools.modal_flash import ModalFlashPool
+    ``cadence_s`` between publishes. Returns the run_id used. With neither ``pool``
+    nor ``app_name`` there are no wakes — replicas converge via their backstop."""
     from stitch.publish import claim_run, publish_version
     from stitch.stores.modal_volume import ModalVolumeStore
 
     store = ModalVolumeStore(root, volume_name=volume_name)
-    pool = ModalFlashPool(app_name, cls_name)
+    if pool is None and app_name is not None:
+        from stitch.pools.modal_flash import ModalFlashPool
+
+        pool = ModalFlashPool(app_name, cls_name)
     run_id = run_id or f"replay-{uuid.uuid4().hex[:8]}"
 
     src = Path(root) / source_run

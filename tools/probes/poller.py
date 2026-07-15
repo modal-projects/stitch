@@ -25,21 +25,25 @@ async def poll(
     interval: float = 2.0,
     duration: float | None = None,
     out_path: str,
+    replicas: list[str] | None = None,  # static list: skip Modal discovery (local shakeout)
 ) -> None:
     import httpx
 
-    from stitch.pools.modal_flash import ModalFlashPool
+    fixed = list(replicas) if replicas else None
+    pool = None
+    if fixed is None:
+        from stitch.pools.modal_flash import ModalFlashPool
 
-    pool = ModalFlashPool(app_name, cls_name)
+        pool = ModalFlashPool(app_name, cls_name)
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
-    replicas: list[str] = []
+    replicas = fixed or []
     last_discover = 0.0
     deadline = time.time() + duration if duration else None
     async with httpx.AsyncClient(timeout=10.0, trust_env=False) as client:
         with out.open("a") as f:
             while deadline is None or time.time() < deadline:
-                if not replicas or time.time() - last_discover >= REDISCOVER_EVERY:
+                if pool is not None and (not replicas or time.time() - last_discover >= REDISCOVER_EVERY):
                     replicas = await asyncio.to_thread(pool.discover_replicas)
                     last_discover = time.time()
                 for row in await asyncio.gather(*(_probe(client, url) for url in replicas)):
