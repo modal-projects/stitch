@@ -6,10 +6,11 @@ requires-python = ">=3.11"
 dependencies = []
 
 [project.optional-dependencies]
-# providers/modal.py uses the Modal SDK and httpx (rollout-pool wake).
+# The Modal instances (stores/modal_volume.py, pools/modal_flash.py) use the Modal
+# SDK and httpx (the pool wake).
 modal = ["modal>=1.5.1.dev9", "httpx"]
-# The cookbook sidecars run the app under uvicorn, but Modal images install it
-# explicitly; the packaged server code needs only fastapi + httpx.
+# The sidecar runs the versioned proxy under uvicorn (Modal images install it
+# explicitly); the packaged service code needs only fastapi + httpx.
 sglang = ["fastapi", "httpx"]
 
 [dependency-groups]
@@ -24,5 +25,6 @@ packages = ["src/stitch"]
 exclude = ["*_test.py"]
 
 [tool.pytest.ini_options]
-testpaths = ["src", "cookbook"]
+testpaths = ["src", "cookbook"]  # google-style: foo_test.py sits beside foo.py
 python_files = ["*_test.py"]
+pythonpath = ["."]  # so the co-located cookbook hook test imports the top-level cookbook/ package

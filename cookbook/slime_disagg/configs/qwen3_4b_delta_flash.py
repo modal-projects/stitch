@@ -2,26 +2,25 @@
 
 from __future__ import annotations
 
-from cookbook.slime_disagg.configs.base import DATA_PATH, ModalConfig, SlimeConfig
+from cookbook.common.config import ModalConfig
+from cookbook.common.constants import DATA_PATH
+from cookbook.slime_disagg.config import SlimeConfig
 
 
-APP_NAME = "slime-qwen3-4b-delta-flash"
-DELTA_VOLUME_NAME = "slime-delta-bulletin-qwen3-4b"
+APP_NAME = "stitch-qwen3-4b"
+DELTA_VOLUME_NAME = "stitch-delta-qwen3-4b"
 DELTA_BULLETIN_ROOT = "/delta-bulletin"
+LOCAL_CHECKPOINT_PATH = "/local-checkpoint"
 
-# How the rollout sidecar applies published weight versions. "in_place" pauses
-# the engine, applies, and resumes — in-flight requests keep decoding on stale
-# KV and cross-version isolation comes from extra_key stamping, so commits stop
-# blocking behind over-generation/eval stragglers and skip the full-tree flush.
-# "quiesce" is the safe fallback that drains in-flight requests before applying.
+# in_place applies weights without draining; stale KV isolated per version via extra_key.
 SIDECAR_COMMIT_MODE = "in_place"
 
-# Log every versioned sidecar proxy request (start/end + injected rid) at INFO,
-# so a stuck rollout can be traced hop-by-hop: slime rid -> sidecar -> SGLang.
+# Log versioned sidecar proxy requests at INFO to trace a stuck rollout hop-by-hop.
 SIDECAR_DEBUG_REQUESTS = True
 
-# SGLang server tuning, merged over the structural args set in modal_train.py.
 SGLANG_SERVER_ARGS = {
+    "--weight-loader-prefetch-checkpoints": "",
+    "--weight-loader-prefetch-num-threads": "8",
     "--reasoning-parser": "qwen3",
     "--context-length": "16384",
     "--mem-fraction-static": "0.84",
@@ -33,42 +32,32 @@ modal = ModalConfig(gpu="H200")
 
 
 class _Slime(SlimeConfig):
-    # Model
     hf_checkpoint = "Qwen/Qwen3-4B"
     ref_load = hf_checkpoint
     megatron_to_hf_mode = "bridge"
 
-    # Modal Flash disaggregated rollout through slime's generic HTTP endpoint mode.
     actor_num_nodes = 1
     actor_num_gpus_per_node = 8
     colocate = False
     rollout_num_gpus = 0
     rollout_num_gpus_per_engine = 1
-    # Publish-only: slime launches no engines and routes /generate to the Modal
-    # Flash gateway (filled in at launch); rollouts pull weights from the pool.
-    rollout_endpoint_url = None
-    custom_rollout_request_hook_path = "stitch.trainers.slime.rollout_request_weight_version_hook"
+    rollout_endpoint_url = None  # publish-only: slime routes /generate to the Flash gateway
+    custom_rollout_request_hook_path = "cookbook.common.hooks.gated_rollout_request_hook"
     rollout_request_weight_version_mode = "exact"
     rollout_request_weight_version_lag = 0
     rollout_request_retry_attempts = 240
     rollout_request_retry_sleep = 1.0
-    # The trainer hits the Modal Flash gateway directly, which routes session
-    # affinity on Modal-Session-ID; emit that so GRPO siblings co-locate.
+    # session affinity so GRPO siblings co-locate on one Flash replica.
     rollout_session_affinity_header = "Modal-Session-ID"
 
-    # Disk-delta publish-only over the Modal Volume bulletin board: slime writes
-    # weight_v{N}/ + a `latest` pointer to update_weight_disk_dir (the Volume),
-    # the pre-push hook commits the Volume + wakes the pool, and each sidecar
-    # applies the delta host-side via slime's disk_delta. Publish-only is implied
-    # by rollout_endpoint_url, so no local-checkpoint dir is required here.
+    # disk-delta publish-only: slime writes weight_v{N}/ + `latest`; the hook commits and wakes the pool.
     update_weight_mode = "delta"
     update_weight_transport = "disk"
     update_weight_delta_encoding = "xor"
     update_weight_delta_checksum = "xxh3-128"
     update_weight_disk_dir = DELTA_BULLETIN_ROOT
-    custom_delta_pre_push_path = "cookbook.slime_disagg.hooks.commit_and_wake"
+    custom_delta_pre_push_path = "cookbook.common.hooks.commit_and_wake"
 
-    # Data
     prompt_data = f"{DATA_PATH}/gsm8k/train.parquet"
     eval_prompt_data = ["gsm8k", f"{DATA_PATH}/gsm8k/test.parquet"]
     input_key = "messages"
@@ -77,7 +66,6 @@ class _Slime(SlimeConfig):
     rollout_shuffle = True
     rm_type = "math"
 
-    # Rollout
     rollout_function_path = "slime.rollout.sglang_rollout.generate_rollout"
     num_rollout = 3
     rollout_batch_size = 64
@@ -89,13 +77,11 @@ class _Slime(SlimeConfig):
     sglang_server_concurrency = 64
     use_fault_tolerance = False
 
-    # Eval
     eval_interval = None
     n_samples_per_eval_prompt = 4
     eval_max_response_len = 8192
     eval_top_p = 1.0
 
-    # Training
     tensor_model_parallel_size = 1
     sequence_parallel = False
     use_dynamic_batch_size = True
@@ -108,7 +94,6 @@ class _Slime(SlimeConfig):
     accumulate_allreduce_grads_in_fp32 = True
     attention_softmax_in_fp32 = True
 
-    # Optimizer
     optimizer = "adam"
     lr = 1e-6
     lr_decay_style = "constant"
@@ -116,7 +101,6 @@ class _Slime(SlimeConfig):
     adam_beta1 = 0.9
     adam_beta2 = 0.98
 
-    # Algorithm
     advantage_estimator = "grpo"
     eps_clip = 0.2
     eps_clip_high = 0.28
@@ -125,7 +109,6 @@ class _Slime(SlimeConfig):
     kl_loss_type = "low_var_kl"
     entropy_coef = 0.0
 
-    # Qwen3-4B architecture
     num_layers = 36
     hidden_size = 2560
     ffn_hidden_size = 9728
