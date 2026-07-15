@@ -153,6 +153,66 @@ def test_run_switch_resets_in_place() -> None:
     _run(go())
 
 
+def test_run_switch_drains_rolling_requests() -> None:
+    # A base reset is an incompatible transition: even in in_place mode no rolling request
+    # is admitted during, or decodes across, the wipe (drain_all; stitch#32 / review P0-B).
+    async def go() -> None:
+        engine = FakeEngine()
+        r = Reconciler(store=FakeStore(VersionRef("r2", 1), _full("r2", 1)), engine=engine, commit_mode="in_place")
+        r.applied = VersionRef("r1", 5)
+        release = asyncio.Event()
+        late_served: list[VersionRef | None] = []
+
+        async def rolling() -> None:
+            async with r.admit(None):
+                await release.wait()
+
+        async def late() -> None:
+            async with r.admit(None) as served:
+                late_served.append(served)
+
+        req = asyncio.create_task(rolling())
+        await asyncio.sleep(0)  # admitted before the switch begins
+        sync = asyncio.create_task(r.reconcile())
+        for _ in range(1000):  # bounded: without drain_all the switch completes without draining
+            if r._committing:
+                break
+            await asyncio.sleep(0.001)
+        late_task = asyncio.create_task(late())
+        await asyncio.sleep(0.05)
+        assert "reset" not in engine.calls  # the wipe waits for the rolling request
+        assert not late_served  # and nothing is admitted while draining
+        release.set()
+        await asyncio.gather(req, sync, late_task)
+        assert "reset" in engine.calls
+        assert late_served[0] is not None and late_served[0].run_id == "r2"  # admitted post-wipe
+
+    _run(go())
+
+
+def test_rolling_requests_cross_in_place_commit() -> None:
+    # The counterpart: a *compatible* in_place commit never waits on rolling traffic —
+    # the update applies while the request keeps decoding; only a base reset drains.
+    async def go() -> None:
+        engine = FakeEngine()
+        r = Reconciler(store=FakeStore(VersionRef("r1", 4), _full("r1", 4)), engine=engine, commit_mode="in_place")
+        r.applied = VersionRef("r1", 3)
+        release = asyncio.Event()
+
+        async def rolling() -> None:
+            async with r.admit(None):
+                await release.wait()
+
+        req = asyncio.create_task(rolling())
+        await asyncio.sleep(0)
+        await r.reconcile()  # completes while the rolling request is still in flight
+        assert r.applied == VersionRef("r1", 4)
+        release.set()
+        await req
+
+    _run(go())
+
+
 def test_empty_delta_skips_reload() -> None:
     async def go() -> None:
         engine = FakeEngine()
