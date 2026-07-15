@@ -1,68 +1,85 @@
 # stitch
 
-A framework-agnostic protocol for disaggregated reinforcement learning of
-LLMs.
+A framework-agnostic protocol for **disaggregated reinforcement learning** of LLMs.
 
-When training and rollout generation run on separate machines, the rollout
-servers need a way to pick up new weights as the trainer produces them, and
-each rollout request needs to know which weight version it was served with.
-`stitch` provides the protocol and glue for that. Trainers publish immutable,
-versioned weight artifacts to a shared "bulletin board" directory, rollout
-servers sync to a requested version, and completion requests declare which
-versions they will accept.
+When training and rollout generation run on separate machines, the rollout servers need
+new weights as the trainer produces them, and every rollout sample needs to know which
+weight version produced it. stitch is the protocol and glue for that: trainers publish
+immutable, versioned weight artifacts to a shared store; rollout replicas sync themselves
+to a requested version; completion requests declare which versions they accept, and
+responses report which version served them.
 
-`stitch` is unopinionated about algorithm/training framework but is strongly
-opinionated about supporting workloads that are:
-- async-first
-- agentic-first
-- elastic rollout compute
+It is unopinionated about the algorithm and training framework, and opinionated about the
+workloads it targets:
+- **async-first** — the trainer never blocks on rollout, nor rollout on the trainer
+- **agentic-first** — a sample can be a long multi-turn episode spanning weight versions
+- **elastic** — rollout replicas join and leave mid-run
+
+## What it does that a raw endpoint can't
+
+1. **Weight sync** — get each published version into an elastic, multi-replica pool and
+   reloaded into the live engine, in place, without stopping generation.
+2. **Version correctness** — every sample is attributable to the weight version(s) that
+   produced it, and the trainer can bound staleness (serve only within N versions of
+   `latest`).
+3. **Elastic sync** — a replica added mid-run boots, catches up over the delta chain, and
+   joins the rotation on its own; one still behind rejects requests it cannot serve yet
+   (retryable `409`) rather than emit a stale-version generation.
+4. **Coordination** — full-vs-delta apply, session affinity, and MoE router replay, agreed
+   across publish and serve.
 
 ## How it works
 
-1. After an optimizer step, the trainer writes weight artifacts (e.g. sparse
-   deltas) for version `v` to the bulletin board, publishes a
-   `manifest.json` describing them, then advances `latest.json`.
-2. A sidecar in front of each rollout server watches the board. When a request
-   arrives pinned to version `v` (via a `weight_version` constraint in the
-   request body), the sidecar applies versions in order until it reaches `v`,
-   then proxies the request to the engine.
-3. Responses carry the version they were served with, and a server that hasn't
-   caught up returns `409 WeightVersionNotReady` so the trainer can retry.
+1. After an optimizer step, the trainer publishes version `v`'s weight artifacts (a full
+   anchor, or a sparse delta against an earlier version) under the store, then advances the
+   `latest` pointer. The version's HF `model.safetensors.index.json` *is* its manifest.
+2. A sidecar in front of each rollout replica reconciles to `latest`. A request pinned to
+   version `v` waits until the replica has applied the chain up to `v`, then proxies to the
+   engine; the engine reloads new versions in place while it keeps serving.
+3. Responses carry the version that served them; a replica behind the pinned version
+   returns a retryable `409`, so the caller waits or reroutes and never gets a stale
+   generation.
+
+## Elastic rollout — spin up engines mid-run
+
+The pool is a set of independent, self-syncing replicas: each reads the authoritative
+`latest` pointer and converges itself, so adding one needs no coordination. Scale the Modal
+Flash pool up and the new containers boot, base-seed, replay the delta chain to the current
+version, and join the rotation on their own:
+
+```bash
+# bump the floor from 2 -> 4; Flash boots 2 more containers that self-sync
+python -c "from stitch.pools.modal_flash import ModalFlashPool; \
+  ModalFlashPool('<app-name>', 'Server').scale(min=4, max=4)"
+```
+
+A joiner pays a one-time catch-up (materialize the base, replay from the newest anchor),
+which periodic full anchors bound. While it is behind, version-pinned requests it cannot
+serve yet get a retryable `409` and route to caught-up replicas.
+
+## The sglang fork
+
+Rollout engines run a patched sglang: the disaggregated `/pull_weights`, correct quantized
+reloads, and the O(delta) partial reload are not upstream yet. The pin and its rationale
+live in **[cookbook/common/SGLANG_FORK.md](cookbook/common/SGLANG_FORK.md)** — the full
+patch stack, the upstreaming PRs, and how to re-port onto a newer sglang release.
 
 ## Layout
 
-- `src/stitch/protocol.py`: Wire protocol. Version manifests, artifacts,
-  request policies, the `latest.json` pointer, version-namespaced cache keys.
-- `src/stitch/bulletin.py`: Bulletin board storage (filesystem-backed, with
-  a pluggable refresh hook for remote volumes).
-- `src/stitch/sync.py`: Sync state machine that drives a server from its
-  current version to a target, with `quiesce` (drain, then apply) and
-  `in_place` (pause/apply/continue) commit modes.
-- `src/stitch/servers/sglang.py`: HTTP sidecar that adds version semantics
-  to an SGLang server.
-- `src/stitch/engines/sglang.py`: SGLang prepare/commit adapter using
-  `/update_weights_from_disk`.
-- `src/stitch/trainers/slime.py`: Hooks for
-  [slime](https://github.com/THUDM/slime) that publish sparse-delta versions
-  from training ranks.
-- `src/stitch/providers/modal.py`: Modal helpers for Volume commit/reload and
-  Flash container discovery.
-- `cookbook/`: End-to-end examples.
-  - `local_disagg/`: minimal in-memory harness that exercises the sync
-    protocol with a fake engine — start here.
-  - `slime_disagg/`: SLIME plus a stitch-managed Modal Flash/SGLang pool.
-  - `miles_disagg/`: the miles twin of `slime_disagg` (NVFP4 QAT on Blackwell).
-  - `standalone_rollouts/`: standalone Modal/SGLang rollout provider with a hot-load API shim.
+- `src/stitch/` — the library: the domain vocabulary and the sync / serve / publish logic,
+  plus the three ports (**Store**, **Engine**, **Pool**) and their instances. Framework-,
+  engine-, and provider-agnostic; no required dependencies (extras pull in `modal` /
+  `sglang` / `boto3`).
+- `cookbook/` — deployments, not core: `common/` (shared image builds, the sidecar, the
+  publish/claim/request hooks, launch helpers) and the `miles_disagg/` / `slime_disagg/`
+  recipes with per-experiment `configs/`.
 
-The core package has no required dependencies; extras pull in what each
-adapter needs (`modal`, `sglang`).
+## Adding to it
 
-## Adding adapters
-
-Trainer adapters should publish canonical Hugging Face tensor names so engine
-adapters stay trainer-agnostic. Engine adapters implement the same
-prepare/commit contract as the SGLang one; the request protocol doesn't
-change.
+- A different store / engine / pool is a new subclass behind the port — zero core edits.
+- A different deployment or model is a new `cookbook/` recipe — core never changes.
+- Trainer adapters publish canonical Hugging Face tensor names, so engine adapters stay
+  trainer-agnostic.
 
 ## Development
 

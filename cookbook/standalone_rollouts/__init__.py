@@ -1,1 +1,0 @@
-"""Standalone rollout-provider cookbook."""

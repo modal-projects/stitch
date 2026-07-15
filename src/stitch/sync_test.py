@@ -1,549 +1,443 @@
+"""In-memory core harness (the Phase-1 gate): the real Reconciler + AdmissionGate
+against fake Store / Engine — no Modal, sglang, or GPU. Runnable directly
+(``python src/stitch/sync_test.py``) or under pytest."""
+
 from __future__ import annotations
 
 import asyncio
-import json
-import tempfile
-import unittest
-from pathlib import Path
+import queue
+import threading
 
-from stitch.bulletin import FilesystemBulletinBoard
-from stitch.protocol import SyncState, VersionManifest, WeightVersionPolicy
-from stitch.sync import PolicyViolation, RolloutAdmissionGate, WeightSyncManager
-
-
-async def _settle() -> None:
-    """Drain currently-ready callbacks so a task that is about to park on an
-    asyncio primitive reaches and parks at its await point. Deterministic
-    replacement for a wall-clock ``sleep`` when asserting a task is *blocked*."""
-    for _ in range(10):
-        await asyncio.sleep(0)
+from stitch.engines.base import Engine
+from stitch.stores.base import Store
+from stitch.sync import ConstraintUnmet, Reconciler
+from stitch.versions import (
+    VersionConstraint,
+    VersionKind,
+    VersionManifest,
+    VersionRef,
+    SyncState,
+)
 
 
-def _write_slime_version(
-    base: Path, version: int, prev: int, *, weight_map: dict[str, str] | None = None
-) -> None:
-    vdir = base / f"weight_v{version:06d}"
-    vdir.mkdir(parents=True)
-    if weight_map is None:
-        weight_map = {"w": "model-00001-of-00001.safetensors"}
-    (vdir / "model.safetensors.index.json").write_text(
-        json.dumps(
-            {
-                "metadata": {"version": f"{version:06d}", "base_version": f"{prev:06d}"},
-                "weight_map": weight_map,
-            }
-        ),
-        encoding="utf-8",
+class FakeStore(Store):
+    def __init__(self, pointer: VersionRef | None = None, *manifests: VersionManifest) -> None:
+        self._pointer = pointer
+        self._manifests = {(m.ref.run_id, m.ref.version): m for m in manifests}
+        self.refreshed = 0
+
+    def refresh(self) -> None:
+        self.refreshed += 1
+
+    def read_pointer(self) -> VersionRef | None:
+        return self._pointer
+
+    def read_manifest(self, ref: VersionRef) -> VersionManifest:
+        return self._manifests[(ref.run_id, ref.version)]
+
+    def materialize(self, ref: VersionRef) -> str:
+        return f"/fake/{ref.identity}"
+
+    def advance_pointer(self, ref: VersionRef) -> None:
+        self._pointer = ref
+
+    def claim(self, run_id: str) -> None:
+        self._pointer = VersionRef(run_id, 0)
+
+    def publish(self, manifest: VersionManifest, files_dir: str) -> None:
+        self._manifests[(manifest.ref.run_id, manifest.ref.version)] = manifest
+
+
+class FakeEngine(Engine):
+    def __init__(self) -> None:
+        self.calls: list[str] = []          # ordered pause/flush/commit/reset/resume + stage
+        self.staged: list[VersionRef] = []
+        self.committed: list[VersionRef] = []
+
+    async def stage(self, manifest: VersionManifest, source_dir: str) -> None:
+        self.staged.append(manifest.ref)
+        self.calls.append(f"stage:{manifest.ref.version}")
+
+    async def commit(self, ref: VersionRef) -> None:
+        self.committed.append(ref)
+        self.calls.append(f"commit:{ref.version}")
+
+    async def flush(self) -> None:
+        self.calls.append("flush")
+
+    async def pause(self) -> None:
+        self.calls.append("pause")
+
+    async def resume(self) -> None:
+        self.calls.append("resume")
+
+    async def reset(self) -> None:
+        self.calls.append("reset")
+
+    async def prefetch(self) -> None:
+        self.calls.append("prefetch")
+
+    def stamp_request(self, request, served) -> None:
+        pass
+
+    def stamp_response(self, response, served, current) -> None:
+        pass
+
+    def base_url(self) -> str:
+        return "http://engine"
+
+
+def _full(run: str, version: int) -> VersionManifest:
+    return VersionManifest(VersionRef(run, version), VersionKind.FULL, ["model.safetensors"])
+
+
+def _delta(run: str, version: int, *, files: list[str]) -> VersionManifest:
+    return VersionManifest(
+        VersionRef(run, version), VersionKind.DELTA, files, base_version=version - 1, delta_encoding="xor"
     )
 
 
-class FakeEngine:
-    backend = "fake"
-
-    def __init__(self) -> None:
-        self.flushes = 0
-        self.applies: list[tuple[int, str]] = []
-        self.events: list[str] = []
-        self.apply_gate: asyncio.Event | None = None
-        self.apply_started: asyncio.Event = asyncio.Event()
-
-    async def flush_cache(self) -> None:
-        self.flushes += 1
-        self.events.append("flush")
-
-    async def apply_manifest(self, manifest: VersionManifest, version_path: str) -> None:
-        self.apply_started.set()
-        if self.apply_gate is not None:
-            await self.apply_gate.wait()
-        self.applies.append((manifest.version, version_path))
-        self.events.append("apply")
-
-    async def reset(self) -> None:
-        self.events.append("reset")
-
-    async def pause_generation(self) -> None:
-        self.events.append("pause")
-
-    async def continue_generation(self) -> None:
-        self.events.append("continue")
-
-
-class StagedEngine(FakeEngine):
-    """FakeEngine plus the optional staged split (stage/commit instead of the
-    combined apply)."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.commit_weight_names: list[list[str] | None] = []
-
-    async def stage_manifest(self, manifest: VersionManifest, version_path: str) -> dict | None:
-        self.events.append("stage")
-        return {"host_delta_apply_s": 0.0}
-
-    async def commit_manifest(
-        self, manifest: VersionManifest, version_path: str, weight_names: list[str] | None = None
-    ) -> dict | None:
-        self.apply_started.set()
-        if self.apply_gate is not None:
-            await self.apply_gate.wait()
-        self.applies.append((manifest.version, version_path))
-        self.commit_weight_names.append(weight_names)
-        self.events.append("commit")
-        return {"engine_reload_s": 0.0}
-
-
-class SyncManagerTest(unittest.TestCase):
-    def test_startup_sync_composes_tail_into_one_apply(self) -> None:
-        async def run() -> None:
-            with tempfile.TemporaryDirectory() as tmp:
-                board = FilesystemBulletinBoard(tmp)
-                board.publish_manifest(VersionManifest(version=1, base_version=0, backend="fake", load_format="noop"))
-                board.publish_manifest(VersionManifest(version=2, base_version=1, backend="fake", load_format="noop"))
-                engine = FakeEngine()
-                manager = WeightSyncManager(board=board, engine=engine)
-
-                await manager.startup_sync()
-
-                self.assertEqual(manager.current_version, 2)
-                self.assertEqual(manager.sync_state, SyncState.IDLE)
-                # A multi-version catch-up composes the tail host-side and reloads
-                # once: a single apply at the target version, not one per version.
-                self.assertEqual([v for v, _ in engine.applies], [2])
-                self.assertEqual(engine.flushes, 1)
-
-        asyncio.run(run())
-
-    def test_sync_keeps_queued_work_that_arrives_during_commit(self) -> None:
-        async def run() -> None:
-            with tempfile.TemporaryDirectory() as tmp:
-                board = FilesystemBulletinBoard(tmp)
-                board.publish_manifest(VersionManifest(version=1, base_version=0, backend="fake", load_format="noop"))
-                engine = FakeEngine()
-                engine.apply_gate = asyncio.Event()
-                manager = WeightSyncManager(board=board, engine=engine)
-
-                sync = asyncio.create_task(manager.sync_to())
-                await engine.apply_started.wait()
-
-                board.publish_manifest(VersionManifest(version=2, base_version=1, backend="fake", load_format="noop"))
-                manager.queue_sync(2)
-                self.assertEqual(manager.queued_target_version, 2)
-
-                engine.apply_gate.set()
-                await sync
-
-                self.assertEqual(manager.current_version, 2)
-                self.assertEqual(manager.sync_state, SyncState.IDLE)
-                self.assertIsNone(manager.queued_target_version)
-                self.assertEqual([version for version, _ in engine.applies], [1, 2])
-
-        asyncio.run(run())
-
-    def test_run_change_rematerializes_and_resets_under_gate(self) -> None:
-        async def run() -> None:
-            with tempfile.TemporaryDirectory() as tmp:
-                root = Path(tmp)
-                board = FilesystemBulletinBoard(root, layout="slime")
-                _write_slime_version(root / "run-a", 1, 0)
-                _write_slime_version(root / "run-a", 2, 1)
-                board.write_latest("run-a", 2)
-                engine = FakeEngine()
-                manager = WeightSyncManager(board=board, engine=engine, commit_mode="in_place")
-
-                await manager.startup_sync()
-                self.assertEqual(manager.current_run_id, "run-a")
-                self.assertEqual(manager.current_version, 2)
-                # The two-version tail is composed into one apply at the target.
-                self.assertEqual([v for v, _ in engine.applies], [2])
-
-                # A new run forks at base with its version space restarting at 1.
-                _write_slime_version(root / "run-b", 1, 0)
-                board.write_latest("run-b", 1)
-                await manager.sync_to()
-
-                self.assertEqual(manager.current_run_id, "run-b")
-                self.assertEqual(manager.current_version, 1)
-                self.assertIn("run-b", engine.applies[-1][1])  # applied the new run's chain
-                # The re-materialize ran under the commit gate: the reset is
-                # bracketed by pause/continue, so no request decodes across it.
-                i = engine.events.index("reset")
-                self.assertEqual(engine.events[i - 1], "pause")
-                self.assertEqual(engine.events[i + 1], "continue")
-
-        asyncio.run(run())
-
-    def test_stitch_layout_never_switches_run(self) -> None:
-        async def run() -> None:
-            with tempfile.TemporaryDirectory() as tmp:
-                board = FilesystemBulletinBoard(tmp)  # stitch layout: run-less
-                board.publish_manifest(VersionManifest(version=1, base_version=0, backend="fake", load_format="noop"))
-                board.publish_manifest(VersionManifest(version=2, base_version=1, backend="fake", load_format="noop"))
-                engine = FakeEngine()
-                manager = WeightSyncManager(board=board, engine=engine)
-
-                await manager.startup_sync()
-
-                self.assertIsNone(manager.current_run_id)
-                self.assertEqual(manager.current_version, 2)
-                self.assertNotIn("reset", engine.events)
-
-        asyncio.run(run())
-
-    def test_request_context_pins_and_reports_serving_version(self) -> None:
-        async def run() -> None:
-            with tempfile.TemporaryDirectory() as tmp:
-                board = FilesystemBulletinBoard(tmp)
-                board.publish_manifest(VersionManifest(version=1, base_version=0, backend="fake", load_format="noop"))
-                manager = WeightSyncManager(board=board, engine=FakeEngine())
-                await manager.sync_to(1)
-
-                async with manager.request_context(WeightVersionPolicy(exact_version=1)) as version:
-                    self.assertEqual(version, 1)
-                    self.assertEqual(manager.active_requests, 1)
-                    info = await manager.server_info()
-                    self.assertEqual(info["inflight_exact_versions"], {"1": 1})
-                self.assertEqual(manager.active_requests, 0)
-                info = await manager.server_info()
-                self.assertEqual(info["inflight_exact_versions"], {})
-
-                with self.assertRaises(PolicyViolation) as cm:
-                    async with manager.request_context(WeightVersionPolicy(exact_version=0)):
-                        pass
-                self.assertEqual(cm.exception.error["error"]["type"], "WeightVersionTooOld")
-
-        asyncio.run(run())
-
-    def test_commit_window_gates_admissions(self) -> None:
-        """A request arriving while the engine apply is in flight must not be
-        validated against the stale pre-commit version (it would otherwise be
-        served on the new weights while reporting the old version)."""
-
-        async def run() -> None:
-            with tempfile.TemporaryDirectory() as tmp:
-                board = FilesystemBulletinBoard(tmp)
-                board.publish_manifest(VersionManifest(version=1, base_version=0, backend="fake", load_format="noop"))
-                engine = FakeEngine()
-                engine.apply_gate = asyncio.Event()
-                manager = WeightSyncManager(board=board, engine=engine)
-
-                sync = asyncio.create_task(manager.sync_to(1))
-                await engine.apply_started.wait()
-                # Engine apply for v1 is now in flight; current_version still 0.
-                self.assertEqual(manager.current_version, 0)
-
-                async def admit_exact_zero() -> str:
-                    try:
-                        async with manager.request_context(WeightVersionPolicy(exact_version=0)):
-                            return "served"
-                    except PolicyViolation as exc:
-                        return exc.error["error"]["type"]
-
-                admit = asyncio.create_task(admit_exact_zero())
-                await _settle()
-                # The admission must be gated, not validated against version 0.
-                self.assertFalse(admit.done())
-
-                engine.apply_gate.set()
-                await sync
-                # After the commit lands, exact_version=0 is no longer
-                # satisfiable and must be rejected, not silently served on v1.
-                self.assertEqual(await admit, "WeightVersionTooOld")
-                self.assertEqual(manager.current_version, 1)
-
-                async with manager.request_context(WeightVersionPolicy(min_required_version=1)) as version:
-                    self.assertEqual(version, 1)
-
-        asyncio.run(run())
-
-    def test_in_place_commit_pauses_applies_continues_without_flush(self) -> None:
-        async def run() -> None:
-            with tempfile.TemporaryDirectory() as tmp:
-                board = FilesystemBulletinBoard(tmp)
-                board.publish_manifest(VersionManifest(version=1, base_version=0, backend="fake", load_format="noop"))
-
-                versions_at_continue: list[int] = []
-
-                class InPlaceEngine(FakeEngine):
-                    async def continue_generation(self) -> None:
-                        versions_at_continue.append(manager.current_version)
-                        await super().continue_generation()
-
-                engine = InPlaceEngine()
-                manager = WeightSyncManager(board=board, engine=engine, commit_mode="in_place")
-                await manager.sync_to(1)
-
-                self.assertEqual(manager.current_version, 1)
-                self.assertEqual(engine.events, ["pause", "apply", "continue"])
-                self.assertEqual(engine.flushes, 0)
-                # New admissions must see the new namespace before the engine
-                # resumes, so the bump happens before continue_generation.
-                self.assertEqual(versions_at_continue, [1])
-
-        asyncio.run(run())
-
-    def test_in_place_commit_continues_engine_on_apply_failure(self) -> None:
-        async def run() -> None:
-            with tempfile.TemporaryDirectory() as tmp:
-                board = FilesystemBulletinBoard(tmp)
-                board.publish_manifest(VersionManifest(version=1, base_version=0, backend="fake", load_format="noop"))
-
-                class FailingEngine(FakeEngine):
-                    async def apply_manifest(self, manifest: VersionManifest, version_path: str) -> None:
-                        raise RuntimeError("apply blew up")
-
-                engine = FailingEngine()
-                manager = WeightSyncManager(board=board, engine=engine, commit_mode="in_place")
-                await manager.sync_to(1)
-
-                self.assertEqual(manager.sync_state, SyncState.ERROR)
-                self.assertEqual(manager.current_version, 0)
-                # The engine must not be left paused after a failed apply.
-                self.assertEqual(engine.events, ["pause", "continue"])
-                async with manager.request_context() as version:
-                    self.assertEqual(version, 0)
-
-        asyncio.run(run())
-
-    def test_in_place_commit_gates_exact_but_admits_nonstrict(self) -> None:
-        async def run() -> None:
-            with tempfile.TemporaryDirectory() as tmp:
-                board = FilesystemBulletinBoard(tmp)
-                board.publish_manifest(VersionManifest(version=1, base_version=0, backend="fake", load_format="noop"))
-                engine = FakeEngine()
-                engine.apply_gate = asyncio.Event()
-                manager = WeightSyncManager(board=board, engine=engine, commit_mode="in_place")
-
-                # An exact-version request in flight blocks the commit point.
-                exact_ctx = manager.request_context(WeightVersionPolicy(exact_version=0))
-                await exact_ctx.__aenter__()
-                sync = asyncio.create_task(manager.sync_to(1))
-                await _settle()
-                self.assertFalse(engine.apply_started.is_set())
-
-                # Releasing the exact request lets the commit proceed.
-                await exact_ctx.__aexit__(None, None, None)
-                await engine.apply_started.wait()
-
-                # Mid-commit: non-strict requests are admitted (and stamped
-                # with the pre-commit version); exact requests are gated.
-                async with manager.request_context() as version:
-                    self.assertEqual(version, 0)
-
-                async def admit_exact() -> str:
-                    try:
-                        async with manager.request_context(WeightVersionPolicy(exact_version=0)):
-                            return "served"
-                    except PolicyViolation as exc:
-                        return exc.error["error"]["type"]
-
-                gated = asyncio.create_task(admit_exact())
-                await _settle()
-                self.assertFalse(gated.done())
-
-                engine.apply_gate.set()
-                await sync
-                self.assertEqual(manager.current_version, 1)
-                self.assertEqual(await gated, "WeightVersionTooOld")
-
-        asyncio.run(run())
-
-    def test_staged_adapter_applies_host_side_before_pause(self) -> None:
-        """An adapter with the stage/commit split gets its host-side apply run
-        BEFORE the engine pause, so the pause covers only the reload."""
-
-        async def run() -> None:
-            with tempfile.TemporaryDirectory() as tmp:
-                board = FilesystemBulletinBoard(tmp)
-                board.publish_manifest(VersionManifest(version=1, base_version=0, backend="fake", load_format="noop"))
-                engine = StagedEngine()
-                manager = WeightSyncManager(board=board, engine=engine, commit_mode="in_place")
-                await manager.sync_to(1)
-
-                self.assertEqual(manager.current_version, 1)
-                self.assertEqual(engine.events, ["stage", "pause", "commit", "continue"])
-                self.assertEqual([v for v, _ in engine.applies], [1])
-                # The stage/commit breakdown is surfaced for scraping.
-                info = await manager.server_info()
-                metrics = info["metrics"]
-                self.assertEqual(metrics["target_version"], 1)
-                self.assertEqual(metrics["stage_detail"], {"host_delta_apply_s": 0.0})
-                self.assertEqual(metrics["commit_detail"], {"engine_reload_s": 0.0})
-                for key in ("board_refresh_s", "stage_s", "pause_s", "commit_s", "resume_s", "gate_s", "drain_wait_s"):
-                    self.assertIn(key, metrics)
-
-        asyncio.run(run())
-
-    def test_empty_delta_tail_advances_version_without_reload(self) -> None:
-        """A disk-delta tail that touches zero tensors (all-empty publishes)
-        advances the served version without pausing or reloading the engine."""
-
-        async def run() -> None:
-            with tempfile.TemporaryDirectory() as tmp:
-                root = Path(tmp)
-                # Run-less slime layout: no startup run switch to pause through.
-                board = FilesystemBulletinBoard(root, layout="slime")
-                _write_slime_version(root, 1, 0, weight_map={})
-                _write_slime_version(root, 2, 1, weight_map={})
-                board.write_latest(None, 2)
-                engine = StagedEngine()
-                manager = WeightSyncManager(board=board, engine=engine, commit_mode="in_place")
-
-                await manager.startup_sync()
-
-                self.assertEqual(manager.current_version, 2)
-                # Staged (host marker advanced), but never paused or reloaded.
-                self.assertEqual(engine.events, ["stage"])
-                self.assertEqual(engine.applies, [])
-                info = await manager.server_info()
-                self.assertTrue(info["metrics"]["skipped_noop_reload"])
-                self.assertEqual(info["metrics"]["tail_transition_files"], 0)
-
-                # A later non-empty version reloads as usual.
-                _write_slime_version(root, 3, 2)
-                board.write_latest(None, 3)
-                await manager.sync_to()
-                self.assertEqual(manager.current_version, 3)
-                self.assertEqual(engine.events, ["stage", "stage", "pause", "commit", "continue"])
-
-        asyncio.run(run())
-
-    def test_tail_weight_names_reach_commit(self) -> None:
-        """The tail's union of touched tensor names flows to commit_manifest
-        (for engine-side partial reloads); a tail version with files but no
-        names withholds the whole set."""
-
-        async def run() -> None:
-            with tempfile.TemporaryDirectory() as tmp:
-                root = Path(tmp)
-                board = FilesystemBulletinBoard(root, layout="slime")
-                _write_slime_version(root, 1, 0, weight_map={"a": "f1", "b": "f1"})
-                _write_slime_version(root, 2, 1, weight_map={"b": "f1", "c": "f2"})
-                board.write_latest(None, 2)
-                engine = StagedEngine()
-                manager = WeightSyncManager(board=board, engine=engine, commit_mode="in_place")
-                await manager.startup_sync()
-                self.assertEqual(engine.commit_weight_names, [["a", "b", "c"]])
-                info = await manager.server_info()
-                self.assertEqual(info["metrics"]["tail_weights"], 3)
-
-                # A slime-layout version always names its weights, so simulate
-                # an unknown-names version via the stitch layout instead.
-                board2 = FilesystemBulletinBoard(tmp + "-stitch")
-                board2.publish_manifest(
-                    VersionManifest(
-                        version=1, base_version=0, backend="disk_delta",
-                        load_format="auto", transition_files=["model-00001.safetensors"],
-                    )
-                )
-                engine2 = StagedEngine()
-                manager2 = WeightSyncManager(board=board2, engine=engine2, commit_mode="in_place")
-                await manager2.startup_sync()
-                self.assertEqual(engine2.commit_weight_names, [None])
-
-        asyncio.run(run())
-
-    def test_commit_gate_clears_on_apply_failure(self) -> None:
-        async def run() -> None:
-            with tempfile.TemporaryDirectory() as tmp:
-                board = FilesystemBulletinBoard(tmp)
-                board.publish_manifest(VersionManifest(version=1, base_version=0, backend="fake", load_format="noop"))
-
-                class FailingEngine(FakeEngine):
-                    async def apply_manifest(self, manifest: VersionManifest, version_path: str) -> None:
-                        raise RuntimeError("apply blew up")
-
-                manager = WeightSyncManager(board=board, engine=FailingEngine())
-                await manager.sync_to(1)
-                self.assertEqual(manager.sync_state, SyncState.ERROR)
-
-                # The gate must not be left set after a failed commit.
-                async with manager.request_context() as version:
-                    self.assertEqual(version, 0)
-
-        asyncio.run(run())
-
-
-class AdmissionGateCommitDriverTest(unittest.TestCase):
-    """The shared commit_version driver both WeightSyncManager and the hot-load
-    ProviderShim commit through."""
-
-    def test_in_place_commit_advances_version_before_resume(self) -> None:
-        async def run() -> None:
-            gate = RolloutAdmissionGate(commit_mode="in_place")
-            events: list[str] = []
-
-            async def pause() -> None:
-                events.append("pause")
-
-            async def apply() -> None:
-                events.append("apply")
-
-            async def resume() -> None:
-                events.append("resume")
-
-            await gate.commit_version(
-                apply=apply,
-                on_applied=lambda: events.append("applied"),
-                pause=pause,
-                resume=resume,
-            )
-
-            # Pause, apply, advance the served version, then resume.
-            self.assertEqual(events, ["pause", "apply", "applied", "resume"])
-            # The gate reopened afterward: a second commit drives cleanly through.
-            await gate.commit_version(
-                apply=apply,
-                on_applied=lambda: events.append("applied"),
-                pause=pause,
-                resume=resume,
-            )
-            self.assertEqual(
-                events,
-                ["pause", "apply", "applied", "resume", "pause", "apply", "applied", "resume"],
-            )
-
-        asyncio.run(run())
-
-    def test_quiesce_commit_skips_pause_and_unwinds_on_failure(self) -> None:
-        async def run() -> None:
-            gate = RolloutAdmissionGate(commit_mode="quiesce")
-            events: list[str] = []
-
-            async def pause() -> None:
-                events.append("pause")
-
-            async def apply() -> None:
-                events.append("apply")
-                raise RuntimeError("boom")
-
-            async def resume() -> None:
-                events.append("resume")
-
-            with self.assertRaises(RuntimeError):
-                await gate.commit_version(
-                    apply=apply,
-                    on_applied=lambda: events.append("applied"),
-                    pause=pause,
-                    resume=resume,
-                )
-
-            # quiesce never pauses; a failed apply advances nothing.
-            self.assertEqual(events, ["apply"])
-
-            async def ok_apply() -> None:
-                events.append("apply")
-
-            # The gate cleared despite the failure: a subsequent commit proceeds.
-            await gate.commit_version(
-                apply=ok_apply,
-                on_applied=lambda: events.append("applied"),
-                pause=pause,
-                resume=resume,
-            )
-            self.assertEqual(events, ["apply", "apply", "applied"])
-
-        asyncio.run(run())
+def _run(coro) -> None:
+    asyncio.run(coro)
+
+
+# ── reconcile ────────────────────────────────────────────────────────────────
+def test_fresh_reconcile() -> None:
+    async def go() -> None:
+        engine = FakeEngine()
+        r = Reconciler(store=FakeStore(VersionRef("r1", 3), _full("r1", 3)), engine=engine)
+        await r.startup()
+        assert r.applied == VersionRef("r1", 3)
+        assert engine.staged[-1] == VersionRef("r1", 3)
+        assert VersionRef("r1", 3) in engine.committed
+        assert r.sync_state is SyncState.IDLE
+        assert engine.calls.index("flush") < engine.calls.index("commit:3")  # quiesce flushes first
+
+    _run(go())
+
+
+def test_startup_prefetches_base() -> None:
+    async def go() -> None:
+        engine = FakeEngine()
+        r = Reconciler(store=FakeStore(), engine=engine)  # unclaimed pool: reconcile is a no-op
+        await r.startup()
+        await r._prefetch_task  # let the background base-seed finish
+        assert "prefetch" in engine.calls
+
+    _run(go())
+
+
+def test_catch_up() -> None:
+    async def go() -> None:
+        engine = FakeEngine()
+        r = Reconciler(store=FakeStore(VersionRef("r1", 5), _full("r1", 5)), engine=engine)
+        r.applied = VersionRef("r1", 3)
+        await r.reconcile()
+        assert r.applied == VersionRef("r1", 5)
+        assert engine.committed == [VersionRef("r1", 5)]  # one composed stage+reload, not per-version
+
+    _run(go())
+
+
+def test_run_switch_resets_in_place() -> None:
+    async def go() -> None:
+        engine = FakeEngine()
+        r = Reconciler(store=FakeStore(VersionRef("r2", 2), _full("r2", 2)), engine=engine, commit_mode="in_place")
+        r.applied = VersionRef("r1", 5)
+        await r.reconcile()
+        assert r.applied == VersionRef("r2", 2)
+        assert "reset" in engine.calls  # was patched -> reseed base for the new run
+        assert engine.calls.index("pause") < engine.calls.index("reset") < engine.calls.index("resume")
+        assert "flush" not in engine.calls  # in_place never flushes
+
+    _run(go())
+
+
+def test_run_switch_drains_rolling_requests() -> None:
+    # A base reset is an incompatible transition: even in in_place mode no rolling request
+    # is admitted during, or decodes across, the wipe (drain_all; stitch#32 / review P0-B).
+    async def go() -> None:
+        engine = FakeEngine()
+        r = Reconciler(store=FakeStore(VersionRef("r2", 1), _full("r2", 1)), engine=engine, commit_mode="in_place")
+        r.applied = VersionRef("r1", 5)
+        release = asyncio.Event()
+        late_served: list[VersionRef | None] = []
+
+        async def rolling() -> None:
+            async with r.admit(None):
+                await release.wait()
+
+        async def late() -> None:
+            async with r.admit(None) as served:
+                late_served.append(served)
+
+        req = asyncio.create_task(rolling())
+        await asyncio.sleep(0)  # admitted before the switch begins
+        sync = asyncio.create_task(r.reconcile())
+        for _ in range(1000):  # bounded: without drain_all the switch completes without draining
+            if r._committing:
+                break
+            await asyncio.sleep(0.001)
+        late_task = asyncio.create_task(late())
+        await asyncio.sleep(0.05)
+        assert "reset" not in engine.calls  # the wipe waits for the rolling request
+        assert not late_served  # and nothing is admitted while draining
+        release.set()
+        await asyncio.gather(req, sync, late_task)
+        assert "reset" in engine.calls
+        assert late_served[0] is not None and late_served[0].run_id == "r2"  # admitted post-wipe
+
+    _run(go())
+
+
+def test_rolling_requests_cross_in_place_commit() -> None:
+    # The counterpart: a *compatible* in_place commit never waits on rolling traffic —
+    # the update applies while the request keeps decoding; only a base reset drains.
+    async def go() -> None:
+        engine = FakeEngine()
+        r = Reconciler(store=FakeStore(VersionRef("r1", 4), _full("r1", 4)), engine=engine, commit_mode="in_place")
+        r.applied = VersionRef("r1", 3)
+        release = asyncio.Event()
+
+        async def rolling() -> None:
+            async with r.admit(None):
+                await release.wait()
+
+        req = asyncio.create_task(rolling())
+        await asyncio.sleep(0)
+        await r.reconcile()  # completes while the rolling request is still in flight
+        assert r.applied == VersionRef("r1", 4)
+        release.set()
+        await req
+
+    _run(go())
+
+
+def test_empty_delta_skips_reload() -> None:
+    async def go() -> None:
+        engine = FakeEngine()
+        r = Reconciler(store=FakeStore(VersionRef("r1", 4), _delta("r1", 4, files=[])), engine=engine)
+        r.applied = VersionRef("r1", 3)
+        await r.reconcile()
+        assert r.applied == VersionRef("r1", 4)
+        assert engine.staged == [VersionRef("r1", 4)]
+        assert engine.committed == []  # no reload for a zero-file delta
+        assert r.metrics.get("skipped_reload") is True
+
+    _run(go())
+
+
+def test_periodic_reconcile_recovers_missed_wake() -> None:
+    async def go() -> None:
+        engine = FakeEngine()
+        store = FakeStore(VersionRef("r1", 3), _full("r1", 3), _full("r1", 5))
+        r = Reconciler(store=store, engine=engine, reconcile_interval=0.02)
+        await r.startup()
+        assert r.applied == VersionRef("r1", 3)
+        # A publish advances latest, but its wake never lands (cold start raced it, or the
+        # best-effort wake was lost). No wake() call, no request — only the background loop.
+        store.advance_pointer(VersionRef("r1", 5))
+        await asyncio.sleep(0.1)
+        assert r.applied == VersionRef("r1", 5)  # the backstop caught up on its own
+        await r.shutdown()
+
+    _run(go())
+
+
+def test_reconcile_interval_zero_disables_backstop() -> None:
+    async def go() -> None:
+        store = FakeStore(VersionRef("r1", 3), _full("r1", 3), _full("r1", 5))
+        r = Reconciler(store=store, engine=FakeEngine(), reconcile_interval=0.0)
+        await r.startup()
+        store.advance_pointer(VersionRef("r1", 5))
+        await asyncio.sleep(0.1)
+        assert r.applied == VersionRef("r1", 3)  # no backstop: stays until a wake/409
+        assert r._periodic_task is None
+        await r.shutdown()
+
+    _run(go())
+
+
+def test_stage_waits_for_prefetch() -> None:
+    # The base prefetch and a stage both write /local; the stage must wait for the prefetch
+    # (serialized in the reconciler, not left to the engine's file lock) so they never race.
+    async def go() -> None:
+        engine = FakeEngine()
+        release = asyncio.Event()
+        base_prefetch = engine.prefetch
+
+        async def slow_prefetch() -> None:
+            await release.wait()
+            await base_prefetch()
+
+        engine.prefetch = slow_prefetch  # type: ignore[method-assign]
+        r = Reconciler(store=FakeStore(VersionRef("r1", 2), _full("r1", 2)), engine=engine, reconcile_interval=0.0)
+        r.applied = VersionRef("r1", 0)  # same run, behind -> stage v2 (no run switch)
+        task = asyncio.create_task(r.startup())
+        await asyncio.sleep(0.05)  # startup fires the prefetch; reconcile reaches the await
+        assert "stage:2" not in engine.calls  # blocked on the (still-running) prefetch
+        release.set()
+        await task
+        assert engine.calls.index("prefetch") < engine.calls.index("stage:2")  # prefetch, then stage
+        await r.shutdown()
+
+    _run(go())
+
+
+# ── convergence liveness ─────────────────────────────────────────────────────
+# The backstop self-heals what wake-driven-only cannot (the red tests behind
+# stitch#45): each scenario converges with the backstop and never with interval=0.
+
+
+async def _converged(r: Reconciler, target: VersionRef, timeout: float = 1.0) -> bool:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        if r.applied == target and r.sync_state is SyncState.IDLE:
+            return True
+        await asyncio.sleep(0.02)
+    return False
+
+
+class FlakyStore(FakeStore):
+    """read_manifest fails once, then heals — a transient store-side error."""
+
+    failures = 1
+
+    def read_manifest(self, ref: VersionRef) -> VersionManifest:
+        if self.failures:
+            self.failures -= 1
+            raise RuntimeError("transient store error")
+        return super().read_manifest(ref)
+
+
+async def _heals_transient_error(interval: float) -> bool:
+    r = Reconciler(store=FlakyStore(VersionRef("r1", 1), _full("r1", 1)), engine=FakeEngine(),
+                   reconcile_interval=interval)
+    await r.startup()  # the pass hits the error -> ERROR; the store is healed from here on
+    async with r.admit(None):
+        pass  # unconstrained traffic never 409s, so it nudges nothing
+    ok = await _converged(r, VersionRef("r1", 1))
+    await r.shutdown()
+    return ok
+
+
+def test_transient_error_recovery_needs_backstop() -> None:
+    assert asyncio.run(_heals_transient_error(0.05))
+    assert not asyncio.run(_heals_transient_error(0))  # ERROR retries only on external wake
+
+
+class HostViewStore(FakeStore):
+    """advance_pointer lands on the durable *remote*; read_pointer sees it only after
+    refresh() snapshots remote -> local (Volume reload semantics). refresh_gate lets a
+    test hold a pass open on a pre-publish snapshot."""
+
+    refresh_gate: queue.Queue[threading.Event] | None = None
+
+    def __init__(self, pointer: VersionRef | None = None, *manifests: VersionManifest) -> None:
+        super().__init__(None, *manifests)
+        self.remote_pointer = pointer
+
+    def refresh(self) -> None:
+        self._pointer = self.remote_pointer
+        if self.refresh_gate is not None:
+            self.refresh_gate.put(release := threading.Event())
+            release.wait(timeout=10)
+
+    def advance_pointer(self, ref: VersionRef) -> None:
+        self.remote_pointer = ref
+
+
+async def _heals_dropped_wake(interval: float) -> bool:
+    """A wake IS delivered, but mid-pass: wake() no-ops against the running task, whose
+    caught-up recheck already snapshotted pre-publish state — the wake is lost."""
+    store = HostViewStore(VersionRef("r1", 1), _full("r1", 1), _full("r1", 2))
+    r = Reconciler(store=store, engine=FakeEngine(), reconcile_interval=interval)
+    await r.startup()  # converges to v1, ungated
+
+    gate = store.refresh_gate = queue.Queue()
+    r.wake()  # start an idle pass
+    (await asyncio.to_thread(gate.get, True, 10)).set()  # release its pass-start refresh
+    recheck = await asyncio.to_thread(gate.get, True, 10)  # its recheck: snapshotted v1, held
+    store.advance_pointer(VersionRef("r1", 2))
+    r.wake()  # v2's wake: delivered mid-pass -> dropped; the pass idles on its v1 snapshot
+    recheck.set()
+    store.refresh_gate = None
+    ok = await _converged(r, VersionRef("r1", 2))
+    await r.shutdown()
+    return ok
+
+
+def test_dropped_wake_recovery_needs_backstop() -> None:
+    assert asyncio.run(_heals_dropped_wake(0.05))
+    assert not asyncio.run(_heals_dropped_wake(0))
+
+
+def test_constrained_409_recovers_without_backstop() -> None:
+    """The event-driven channel: a min_version 409 self-wakes a stale ERROR replica."""
+
+    async def go() -> None:
+        r = Reconciler(store=FlakyStore(VersionRef("r1", 1), _full("r1", 1)), engine=FakeEngine(),
+                       reconcile_interval=0)
+        await r.startup()
+        assert r.sync_state is SyncState.ERROR
+        try:
+            async with r.admit(VersionConstraint(min_version=1)):
+                raise AssertionError("should have rejected")
+        except ConstraintUnmet:
+            pass
+        assert await _converged(r, VersionRef("r1", 1))
+
+    _run(go())
+
+
+# ── admission gate ───────────────────────────────────────────────────────────
+def test_admit_satisfied() -> None:
+    async def go() -> None:
+        r = Reconciler(store=FakeStore(), engine=FakeEngine())
+        r.applied = VersionRef("r1", 5)
+        async with r.admit(VersionConstraint(min_version=3)) as served:
+            assert served == VersionRef("r1", 5)
+
+    _run(go())
+
+
+def test_admit_rejected_triggers_wake() -> None:
+    async def go() -> None:
+        r = Reconciler(store=FakeStore(VersionRef("r1", 5), _full("r1", 5)), engine=FakeEngine())
+        r.applied = VersionRef("r1", 2)
+        try:
+            async with r.admit(VersionConstraint(min_version=5)):
+                raise AssertionError("should have rejected")
+        except ConstraintUnmet as e:
+            assert e.error["type"] == "WeightVersionNotReady"
+            assert e.error["target_version"] == 5
+        assert r._task is not None  # the 409 kicked off a catch-up reconcile
+
+    _run(go())
+
+
+def test_version_flips_before_resume() -> None:
+    async def go() -> None:
+        engine = FakeEngine()
+        r = Reconciler(store=FakeStore(VersionRef("r1", 4), _full("r1", 4)), engine=engine, commit_mode="in_place")
+        r.applied = VersionRef("r1", 3)
+        seen: dict[str, VersionRef | None] = {}
+        base_resume = engine.resume
+
+        async def resume_spy() -> None:
+            seen["applied"] = r.applied
+            await base_resume()
+
+        engine.resume = resume_spy  # type: ignore[method-assign]
+        await r.reconcile()
+        assert seen["applied"] == VersionRef("r1", 4)  # flipped under the gate, before resume
+
+    _run(go())
 
 
 if __name__ == "__main__":
-    unittest.main()
+    tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
+    for t in tests:
+        t()
+        print(f"  ok  {t.__name__}")
+    print(f"reconcile harness: {len(tests)} PASS")

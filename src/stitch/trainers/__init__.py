@@ -1,1 +1,0 @@
-"""Trainer framework adapters."""
