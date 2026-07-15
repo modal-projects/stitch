@@ -14,7 +14,7 @@ sglang release*.
 ```python
 SGLANG_IMAGE_TAG   = "lmsysorg/sglang:v0.5.15"          # base kernels/CUDA
 SGLANG_FORK_BRANCH = "stitch-sglang-v0.5.15"            # modal-projects/sglang
-SGLANG_FORK_COMMIT = "43fccb0cf6be72ecb0096d010eeaf8507cc302d0"
+SGLANG_FORK_COMMIT = "13479b59cccd77459fb003d2f2e138e4cca8ed17"
 ```
 
 The branch is **`v0.5.15` + the patch stack below, nothing else** — every commit
@@ -78,9 +78,23 @@ commit bodies for the details — this is the map.
    for elastic joiners that boot then immediately catch up via deltas). Gated on the
    same flag; drops the plan and falls back to a plain load on any failure.
 
+7. **`[RL] fastsafetensors: env-gated nogds for sandboxed (no-GDS) hosts`**
+   The fast full-reload path for a DENSE checkpoint, where the O(delta) partial reload
+   (3–6) doesn't apply (e.g. fp8 — the delta touches ~all weight tensors). Upstream
+   `--load-format fastsafetensors` splits the safetensors files across TP ranks (each
+   rank reads only its 1/N) but defaults to GDS/cuFile, which needs the `nvidia-fs`
+   driver — absent under gVisor, so it fails at open (`"Error opening file"`). Read
+   `SGLANG_FASTSAFETENSORS_NOGDS` to force the nogds path (O_DIRECT + host bounce
+   buffer); default preserves upstream GDS behavior. The win is *fewer bytes*, not the
+   disk: under gVisor the read is bound by the Sentry's single-thread byte-copy
+   (~5 GB/s/node), so cutting the per-node read ~408→~102 GB takes GLM-4.5-Air-fp8's
+   reload ~130 s → ~23 s. Enabled per recipe via `--load-format fastsafetensors`.
+   *Upstreaming:* not yet filed.
+
 `SGLANG_ENABLE_RELOAD_LOAD_PLAN` is opt-in per recipe (off unless set): the NVFP4 configs
-enable it via `SGLANG_ENV` — their native load is single-threaded, so replay is a large win —
-while a recipe whose native load is already multithreaded+fast leaves it off (see
+enable it via `SGLANG_ENV` — their native load is single-threaded, so replay is a large win.
+A dense config where partial reload can't apply (fp8) instead uses `--load-format
+fastsafetensors` (patch 7) for a fast *full* reload and leaves the load plan off (see
 `cookbook/miles_disagg/configs/glm45_air_fp8.py`).
 
 ## Re-porting to a newer sglang release (`stitch-sglang-vX`)
@@ -88,10 +102,10 @@ while a recipe whose native load is already multithreaded+fast leaves it off (se
 When bumping the base (e.g. to `v0.5.16`):
 
 1. Branch `stitch-sglang-vX` off the new tag on `modal-projects/sglang`.
-2. Re-apply the five commits **in the order above** (cherry-pick from
+2. Re-apply the seven commits **in the order above** (cherry-pick from
    `stitch-sglang-v0.5.15`, or from the source branches `weight-sync-miles` /
    `fp8-reload-main` / `weight-sync-upstream`). Squash-preserving is fine; keep the
-   two tiers legible.
+   two tiers legible. Patch 7 (fastsafetensors nogds) is a small standalone one-liner.
 3. **Audit before trusting a clean cherry-pick** — a clean apply does not prove the
    patch is still needed or correct. In particular:
    - `[RL] modelopt fp4 ...` (5) is tightly coupled to sglang's NVFP4 MoE post-load

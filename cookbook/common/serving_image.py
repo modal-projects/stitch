@@ -22,7 +22,7 @@ import modal
 SGLANG_IMAGE_TAG = "lmsysorg/sglang:v0.5.15"
 SGLANG_FORK_REPO = "https://github.com/modal-projects/sglang.git"
 SGLANG_FORK_BRANCH = "stitch-sglang-v0.5.15"
-SGLANG_FORK_COMMIT = "43fccb0cf6be72ecb0096d010eeaf8507cc302d0"
+SGLANG_FORK_COMMIT = "13479b59cccd77459fb003d2f2e138e4cca8ed17"
 
 _COOKBOOK_DIR = Path(__file__).resolve().parent.parent  # .../cookbook
 
@@ -33,6 +33,9 @@ _SERVING_ENV = {
     "SGLANG_DISABLE_CUDNN_CHECK": "1",
     "SGLANG_ENABLE_OVERLAP_PLAN_STREAM": "1",
     "SGLANG_TIMEOUT_KEEP_ALIVE": "300",
+    # GDS/cuFile needs nvidia-fs, absent under gVisor → force fastsafetensors onto its
+    # nogds path (O_DIRECT + host bounce). Only read when --load-format fastsafetensors.
+    "SGLANG_FASTSAFETENSORS_NOGDS": "1",
 }
 
 
@@ -52,6 +55,7 @@ def build_serving_image(*, hf_cache_path: str, delta_volume_name: str, experimen
             "autoinference-utils==0.2.0",  # sglang server lifecycle
             "fastapi", "httpx", "uvicorn",  # the stitch sidecar
             "zstandard", "xxhash", "blake3",  # engine-side /pull_weights receiver's codecs
+            "fastsafetensors",  # --load-format fastsafetensors: per-rank read (nogds, see env below)
         )
         .env({**_SERVING_ENV, "DELTA_VOLUME_NAME": delta_volume_name, "EXPERIMENT_CONFIG": experiment})
         # The kernel-cache volume mounts at /root/.cache/sglang, which can't mount over a
