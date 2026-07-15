@@ -38,8 +38,11 @@ class AdmissionGate:
 
     ``quiesce`` drains all in-flight requests and flushes before applying; ``in_place``
     pauses the engine and lets non-exact requests keep decoding on stale KV (only exact
-    pins are drained). Either way the committer holds the lock across the apply and the
-    version flip, so no request is ever admitted seeing the stale version on new weights.
+    pins are drained) — but only across *compatible* commits: an incompatible transition
+    (a run switch's base reset) commits with ``drain_all=True``, which drains and gates
+    everything regardless of mode. Either way the committer holds the lock across the
+    apply and the version flip, so no request is ever admitted seeing the stale version
+    on new weights.
     """
 
     def __init__(self, *, commit_mode: CommitMode = "quiesce") -> None:
@@ -48,6 +51,7 @@ class AdmissionGate:
         self._cond = asyncio.Condition()
         self._active = 0
         self._committing = False
+        self._drain_all = False
         self._exact_inflight: dict[int, int] = defaultdict(int)
 
     @property
@@ -57,9 +61,12 @@ class AdmissionGate:
     def _gated(self, c: VersionConstraint) -> bool:
         if not self._committing:
             return False
-        # in_place lets non-exact requests cross a commit — they were stamped with the
-        # admission version, so a mislabel is only old-era impurity. Exact pins can't cross.
-        return c.exact_version is not None if self.commit_mode == "in_place" else True
+        # in_place lets non-exact requests cross a compatible commit — they were stamped
+        # with the admission version, so a mislabel is only old-era impurity. Exact pins
+        # can't cross, and nothing crosses an incompatible (drain_all) transition.
+        if self._drain_all or self.commit_mode != "in_place":
+            return True
+        return c.exact_version is not None
 
     def _rejection(self, c: VersionConstraint) -> dict[str, Any] | None:
         applied = self.applied.version if self.applied else None
@@ -77,7 +84,7 @@ class AdmissionGate:
         """Hook, run under the lock, when a request is rejected."""
 
     def _commit_ready(self) -> bool:
-        if self.commit_mode == "in_place":
+        if self.commit_mode == "in_place" and not self._drain_all:
             return not any(self._exact_inflight.values())
         return self._active == 0
 
@@ -114,15 +121,20 @@ class AdmissionGate:
         on_applied: Callable[[], None],
         pause: Callable[[], Awaitable[None]] | None = None,
         resume: Callable[[], Awaitable[None]] | None = None,
+        drain_all: bool = False,
     ) -> None:
         """Wait for the commit point, close the gate, apply, flip the served version
         (``on_applied``) while the gate is held, then reopen. ``on_applied`` runs only
-        after a successful apply; in ``in_place`` the flip happens before ``resume``."""
+        after a successful apply; in ``in_place`` the flip happens before ``resume``.
+        ``drain_all`` marks an incompatible transition (a base reset): drain and gate
+        every request regardless of mode — rolling requests may cross a compatible
+        weight update, never a change of lineage (stitch#32)."""
         # Close admission BEFORE draining (stitch#32): with the gate still open during
         # the drain, new requests keep being admitted and an in_place non-exact request
         # can straddle a base reset. Set _committing first, then wait for the drain.
         async with self._cond:
             self._committing = True
+            self._drain_all = drain_all
             self._cond.notify_all()
         try:
             async with self._cond:
@@ -141,6 +153,7 @@ class AdmissionGate:
         finally:
             async with self._cond:
                 self._committing = False
+                self._drain_all = False
                 self._cond.notify_all()
 
 
@@ -343,7 +356,9 @@ class Reconciler(AdmissionGate):
 
     async def _switch_run(self, new_run: str | None) -> None:
         """Rebase onto a new run: reset to base (the engine reseeds on the next stage).
-        Runs through the commit gate so no in-flight request decodes across the wipe."""
+        Commits with ``drain_all`` — a base reset is an incompatible transition, so even
+        in ``in_place`` mode no rolling request is admitted during, or decodes across,
+        the wipe."""
         old_run = self.applied.run_id if self.applied else None
         logger.info("run change %r -> %r: resetting to base", old_run, new_run)
         # Reset when the engine holds patched weights (v>0), or a prior pass errored and
@@ -365,4 +380,5 @@ class Reconciler(AdmissionGate):
             on_applied=on_applied,
             pause=self.engine.pause,
             resume=self.engine.resume,
+            drain_all=True,
         )
