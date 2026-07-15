@@ -54,12 +54,13 @@ SGLANG_ENV = {"SGLANG_ENABLE_RELOAD_LOAD_PLAN": "1"}  # NVFP4: load-plan replay 
 
 modal = ModalConfig(
     gpu="B200",
-    region="us",
     # Request Modal's max (nodes are 1.79 TiB): the CPU-offloaded 1T optimizer + publish
     # snapshot peak ~1.2 TiB, and a smaller *request* got OOM-killed (excess is best-effort).
     memory=1_650_688,
-    rollout_min_containers=8,  # warm floor: skip the cold 2->N ramp that 502'd v5's rollout
-    # scale OUT at ~32 concurrent/container so Flash spreads load, not a few KV caches.
+    # Keep the rollout pool small (2x B200:4 = 8 GPUs) so the 64-GPU trainer gang can
+    # co-schedule; min==max pins it, else it autoscales up and re-competes for B200.
+    rollout_min_containers=2,
+    rollout_max_containers=2,
     rollout_target_inputs=32,
     proxy_regions=["us-west"],
     rollout_ephemeral_disk_mib=819_200,  # ~591 GB base copy + in-place delta-apply headroom

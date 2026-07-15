@@ -23,8 +23,11 @@ DISABLE_HF_TRANSFER = True
 MEGATRON_RUNTIME_PATCHES = ["/root/cookbook/miles_disagg/patches/megatron-r3-dispatch.patch"]
 
 SGLANG_SERVER_ARGS = {
-    "--weight-loader-prefetch-checkpoints": "",
-    "--weight-loader-prefetch-num-threads": "8",
+    # Dense FP8 delta => no partial reload => every step reloads the full checkpoint from disk.
+    # mmap page-faults on Modal's ephemeral disk are pathological (~0.3 GB/s); buffered +
+    # multithreaded read is ~8 GB/s.
+    "--weight-loader-disable-mmap": "",
+    "--model-loader-extra-config": '{"enable_multithread_load":true,"num_threads":64}',
     "--dtype": "auto",
     "--reasoning-parser": "glm45",
     "--tool-call-parser": "glm45",
@@ -149,7 +152,6 @@ class _Miles(MilesConfig):
 
 modal = ModalConfig(
     gpu="H200",
-    region="us",
     memory=1_048_576,
     rollout_min_containers=2,
     rollout_max_containers=4,   # start at 2; scale to 4 mid-run to exercise elastic join
