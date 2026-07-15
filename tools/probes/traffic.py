@@ -48,6 +48,10 @@ def _filler(rng: random.Random, tokens: int) -> str:
     return " ".join(rng.choices(_WORDS, k=max(1, int(tokens * 0.75))))  # ~0.75 words/token
 
 
+def _estimate_tokens(messages: list[dict[str, str]]) -> int:
+    return int(sum(len(m["content"].split()) for m in messages) / 0.75)
+
+
 async def run(
     gateway: str,
     model: str,
@@ -56,6 +60,7 @@ async def run(
     concurrency: int = 16,
     duration: float = 600.0,
     lag: int | None = None,  # floor requests at (gateway-observed version - lag); None = unconstrained
+    context_limit: int = 16384,  # engine --context-length; sessions stop growing before it
     out_path: str | None = None,
     seed: int = 0,
 ) -> dict[str, Any]:
@@ -68,7 +73,9 @@ async def run(
         if floor:
             await floor.start(client)
         workers = [
-            asyncio.create_task(_worker(client, gateway, model, shape, deadline, rows, floor, lag, i, random.Random(seed + i)))
+            asyncio.create_task(
+                _worker(client, gateway, model, shape, deadline, rows, floor, lag, context_limit, i, random.Random(seed + i))
+            )
             for i in range(concurrency)
         ]
         await asyncio.gather(*workers)
@@ -81,22 +88,29 @@ async def run(
     return summarize(rows)
 
 
-async def _worker(client, gateway, model, shape_name, deadline, rows, floor, lag, worker_id, rng) -> None:  # noqa: ANN001
+async def _worker(client, gateway, model, shape_name, deadline, rows, floor, lag, context_limit, worker_id, rng) -> None:  # noqa: ANN001
     n = 0  # one worker = sequential sessions
     while time.time() < deadline:
         name = shape_name if shape_name != "mixed" else rng.choices(*zip(*MIXED_WEIGHTS.items()))[0]
-        await _session(client, gateway, model, name, SHAPES[name], rng, rows, floor, lag, session_id=f"w{worker_id}-{n}")
+        await _session(
+            client, gateway, model, name, SHAPES[name], rng, rows, floor, lag, context_limit,
+            session_id=f"w{worker_id}-{n}",
+        )
         n += 1
 
 
-async def _session(client, gateway, model, name, spec, rng, rows, floor, lag, session_id) -> None:  # noqa: ANN001
-    messages = [{"role": "user", "content": _filler(rng, rng.randint(*spec.prompt_tokens))}]
+async def _session(client, gateway, model, name, spec, rng, rows, floor, lag, context_limit, session_id) -> None:  # noqa: ANN001
+    prompt_tokens = min(rng.randint(*spec.prompt_tokens), context_limit - max(spec.max_tokens) - 256)
+    messages = [{"role": "user", "content": _filler(rng, prompt_tokens)}]
     headers = {AFFINITY_HEADER: session_id}
     for turn in range(rng.randint(*spec.turns)):
+        max_tokens = rng.randint(*spec.max_tokens)
+        if _estimate_tokens(messages) + max_tokens + 256 > context_limit:
+            break  # the session has outgrown the engine's context window
         payload: dict[str, Any] = {
             "model": model,
             "messages": messages,
-            "max_tokens": rng.randint(*spec.max_tokens),
+            "max_tokens": max_tokens,
             "temperature": 0.8,
         }
         if floor is not None and floor.version is not None:
