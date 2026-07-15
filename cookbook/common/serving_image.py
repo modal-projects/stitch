@@ -39,17 +39,33 @@ _SERVING_ENV = {
 }
 
 
-def build_serving_image(*, hf_cache_path: str, delta_volume_name: str, experiment: str) -> modal.Image:
+def build_serving_image(
+    *,
+    hf_cache_path: str,
+    delta_volume_name: str,
+    experiment: str,
+    extra_commands: tuple[str, ...] = (),
+    extra_env: dict[str, str] | None = None,
+) -> modal.Image:
     """The rollout-pool image. ``DELTA_VOLUME_NAME`` is read by the engine's pre-read hook
     and the sidecar's Store; ``EXPERIMENT_CONFIG`` so the container's re-import resolves the
     same experiment as the deploy; stitch + the whole cookbook package are mounted so the
-    sidecar (``python -m cookbook.common.sidecar``) and the framework hooks resolve."""
-    return (
+    sidecar (``python -m cookbook.common.sidecar``) and the framework hooks resolve.
+
+    ``extra_commands`` / ``extra_env`` let an experiment extend the shared image (e.g. the
+    NVFP4 4/6 recipe's flashinfer lockstep upgrade and its FLASHINFER_* quantizer
+    contract) without forking it; commands run after the fork checkout."""
+    image = (
         modal.Image.from_registry(SGLANG_IMAGE_TAG)
         .run_commands(
             f"cd /sgl-workspace/sglang && git remote add modal-fork {SGLANG_FORK_REPO}"
             f" && git fetch modal-fork {SGLANG_FORK_BRANCH} && git checkout {SGLANG_FORK_COMMIT} -- python/"
         )
+    )
+    for cmd in extra_commands:
+        image = image.run_commands(cmd)
+    return (
+        image
         .run_commands(f"rm -rf {hf_cache_path}")  # baked HF cache must not shadow the mounted volume
         .pip_install(
             "autoinference-utils==0.2.0",  # sglang server lifecycle
@@ -57,7 +73,7 @@ def build_serving_image(*, hf_cache_path: str, delta_volume_name: str, experimen
             "zstandard", "xxhash", "blake3",  # engine-side /pull_weights receiver's codecs
             "fastsafetensors",  # --load-format fastsafetensors: per-rank read (nogds, see env below)
         )
-        .env({**_SERVING_ENV, "DELTA_VOLUME_NAME": delta_volume_name, "EXPERIMENT_CONFIG": experiment})
+        .env({**_SERVING_ENV, **(extra_env or {}), "DELTA_VOLUME_NAME": delta_volume_name, "EXPERIMENT_CONFIG": experiment})
         # The kernel-cache volume mounts at /root/.cache/sglang, which can't mount over a
         # non-empty path — clear it as the final filesystem step (repopulated on boot).
         .run_commands("rm -rf /root/.cache/sglang")
