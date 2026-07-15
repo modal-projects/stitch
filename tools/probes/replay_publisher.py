@@ -23,7 +23,7 @@ def replay(
     source_run: str,
     app_name: str | None = None,
     cls_name: str = "Server",
-    pool: object = None,  # any stitch Pool; overrides app_name (local shakeout / tests)
+    pool: object = None,  # any stitch Pool; overrides app_name
     volume_name: str | None = None,
     cadence_s: float = 30.0,
     limit: int | None = None,

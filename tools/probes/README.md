@@ -40,10 +40,6 @@ and **traffic**, so the harness decouples them:
 ## Quickstart
 
 ```bash
-# step 0 — local shakeout: the whole harness against the real serving stack
-# (real SGLangEngine/Reconciler/create_app over a mock engine; no Modal, no GPUs)
-uv run --extra sglang --extra modal --with uvicorn python -m tools.probes.local_shakeout
-
 # once
 uv run --extra modal modal environment create stitch-dev
 

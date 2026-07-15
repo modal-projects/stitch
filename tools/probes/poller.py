@@ -25,7 +25,7 @@ async def poll(
     interval: float = 2.0,
     duration: float | None = None,
     out_path: str,
-    replicas: list[str] | None = None,  # static list: skip Modal discovery (local shakeout)
+    replicas: list[str] | None = None,  # static URL list: skip Modal discovery
 ) -> None:
     import httpx
 
