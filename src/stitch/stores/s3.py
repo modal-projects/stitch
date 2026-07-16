@@ -75,10 +75,6 @@ class S3Store(Store):
         self._sync(self._key(ref.run_id), self.cache_dir / ref.run_id)
         return str(self.cache_dir / ref.identity)
 
-    def commit(self) -> None:
-        """No-op: S3 writes are immediately durable. Present only so the shared publish hook's
-        ``store.commit()`` (a Modal-Volume affordance for non-writer ranks) is safe here too."""
-
     # ── S3 helpers ───────────────────────────────────────────────────────────────
     def _key(self, *parts: str) -> str:
         return "/".join(p.strip("/") for p in (self.prefix, *parts) if p.strip("/"))

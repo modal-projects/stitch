@@ -92,9 +92,7 @@ def _full(run: str, version: int) -> VersionManifest:
 
 
 def _delta(run: str, version: int, *, files: list[str]) -> VersionManifest:
-    return VersionManifest(
-        VersionRef(run, version), VersionKind.DELTA, files, base_version=version - 1, delta_encoding="xor"
-    )
+    return VersionManifest(VersionRef(run, version), VersionKind.DELTA, files)
 
 
 def _run(coro) -> None:

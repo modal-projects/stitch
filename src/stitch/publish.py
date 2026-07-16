@@ -22,13 +22,12 @@ def publish_version(
     version_dir: str,
     *,
     run_id: str,
-    base_model: str | None = None,
 ) -> VersionRef:
     """Publish one version from a framework-written directory (full or delta): derive the
     manifest from its HF index, write it durably, advance ``latest`` (rejecting a rewind),
     then wake the pool. Files land before the pointer moves, so a replica never sees a
     pointer to incomplete bytes."""
-    manifest = VersionManifest.from_hf_index(version_dir, run_id=run_id, base_model=base_model)
+    manifest = VersionManifest.from_hf_index(version_dir, run_id=run_id)
     decide_pointer_move(store.read_pointer(), manifest.ref)  # raises PointerRewind on a rewind
     store.publish(manifest, version_dir)
     store.advance_pointer(manifest.ref)

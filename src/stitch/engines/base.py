@@ -1,7 +1,8 @@
 """The ``Engine`` port — a client to one inference engine.
 
-Instances subclass this base and override every method: ``engines/sglang.py`` (sglang).
-Add vllm as a new subclass.
+``engines/sglang.py`` is the working instance; ``engines/vllm.py`` sketches the vLLM
+shape. Subclasses override the methods they use — ``prefetch`` and ``blocked_routes``
+have safe defaults.
 """
 
 from __future__ import annotations
@@ -12,8 +13,8 @@ from stitch.versions import VersionManifest, VersionRef
 
 
 class Engine:
-    """Drives one engine and translates the version protocol; the heavy weight
-    apply runs inside the engine, not here. Subclasses override every method."""
+    """Drives one engine and translates the version protocol; the heavy weight apply
+    runs inside the engine, not here."""
 
     async def stage(self, manifest: VersionManifest, source_dir: str) -> None:
         """Bring the local checkpoint to ``manifest.ref``: seed from the nearest FULL
@@ -61,3 +62,8 @@ class Engine:
         """The engine's base HTTP URL — the proxy forwards to it, and the engine's own
         stage/commit calls target it."""
         raise NotImplementedError
+
+    def blocked_routes(self) -> frozenset[str]:
+        """Engine control routes the versioned proxy must never forward: a stray external
+        call would mutate engine state behind the reconciler's back. Default: none."""
+        return frozenset()

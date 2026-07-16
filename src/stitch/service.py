@@ -26,22 +26,6 @@ from stitch.versions import PoolState, ReplicaState, VersionConstraint
 
 logger = logging.getLogger(__name__)
 
-# Engine control routes the body-blind gateway must never reach: a stray call would
-# mutate engine state behind the reconciler's back and corrupt its version bookkeeping.
-# The sidecar drives these on the engine directly, not through the proxy.
-BLOCKED_ROUTES = frozenset(
-    {
-        "update_weights_from_disk",
-        "update_weights_from_distributed",
-        "update_weights_from_tensor",
-        "pull_weights",
-        "flush_cache",
-        "pause_generation",
-        "continue_generation",
-        "abort_request",
-    }
-)
-
 VERSIONED_ROUTES = ("generate", "v1/chat/completions", "v1/completions")
 
 # Hop-by-hop / rewritten headers the proxy never forwards upstream.
@@ -64,6 +48,7 @@ def create_app(
     import httpx
 
     engine_url = engine.base_url().rstrip("/")
+    blocked = engine.blocked_routes()  # engine-owned: control routes external traffic must not reach
     timeout = httpx.Timeout(upstream_timeout, connect=10.0)
     versioned = {r.strip("/") for r in versioned_routes}
     pooled: dict[str, Any] = {}
@@ -109,7 +94,7 @@ def create_app(
     @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
     async def proxy(path: str, request: Request) -> Response:
         route = path.strip("/")
-        if route in BLOCKED_ROUTES:
+        if route in blocked:
             return JSONResponse(
                 {"error": {"type": "RouteBlocked", "message": f"/{route} is managed by the sidecar"}},
                 status_code=403,

@@ -12,7 +12,7 @@ from typing import Any
 # Fields that are launcher instructions, not slime CLI args.
 _SLIME_SKIP = {"environment", "async_mode", "slime_model_script"}
 # Fields slime reads as YAML files; inline dicts are materialized before launch.
-YAML_CONFIG_FIELDS = ("eval_config", "custom_config_path", "sglang_config")
+YAML_CONFIG_FIELDS = ("custom_config_path",)
 
 
 class SlimeConfig:

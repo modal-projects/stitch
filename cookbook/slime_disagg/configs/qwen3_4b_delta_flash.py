@@ -16,7 +16,6 @@ LOCAL_CHECKPOINT_PATH = "/local-checkpoint"
 SIDECAR_COMMIT_MODE = "in_place"
 
 # Log versioned sidecar proxy requests at INFO to trace a stuck rollout hop-by-hop.
-SIDECAR_DEBUG_REQUESTS = True
 
 SGLANG_SERVER_ARGS = {
     "--weight-loader-prefetch-checkpoints": "",
