@@ -25,20 +25,37 @@ _COOKBOOK_DIR = Path(__file__).resolve().parent.parent  # .../cookbook
 _TORCH_DIST_WRAPPER_SRC = Path(__file__).resolve().parent / "convert_hf_to_torch_dist_modal.py"
 
 
-def build_trainer_image(*, hf_cache_path: str, experiment: str, miles_local: str | None = None) -> modal.Image:
+def build_trainer_image(
+    *,
+    hf_cache_path: str,
+    experiment: str,
+    miles_local: str | None = None,
+    image_tag: str | None = None,
+    miles_repo_ref: str | None = None,
+    setup_commands: tuple[str, ...] = (),
+) -> modal.Image:
     """The miles trainer image: RDMA/EFA userspace + the pinned miles fork + the
     trainer-side delta encoder's codecs. stitch + the cookbook package are mounted so the
-    trainer, Ray actors, and the sidecar subprocess resolve their imports."""
+    trainer, Ray actors, and the sidecar subprocess resolve their imports.
+
+    ``image_tag`` / ``miles_repo_ref`` / ``setup_commands`` let an experiment carry a
+    different stack (e.g. the 4/6 recipe's TE 2.17 upgrade) without forking the app;
+    ``setup_commands`` run after the cache cleanup and before the miles clone, so a setup
+    change never invalidates the miles layer cache."""
     image = (
-        modal.Image.from_registry(MILES_IMAGE_TAG)
+        modal.Image.from_registry(image_tag or MILES_IMAGE_TAG)
         .entrypoint([])
         # RDMA/EFA userspace so multi-node NCCL binds EFA under rdma=True instead of TCP.
         .apt_install("libibverbs-dev", "libibverbs1", "libhwloc-dev", "libnl-route-3-200")
         .run_commands(f"rm -rf {hf_cache_path}")  # baked HF cache must not shadow the mounted volume
-        .run_commands(
+    )
+    for cmd in setup_commands:
+        image = image.run_commands(cmd)
+    image = (
+        image.run_commands(
             f"rm -rf {MILES_ROOT}"
             f" && git clone {MILES_REPO_URL} {MILES_ROOT}"
-            f" && cd {MILES_ROOT} && git fetch origin {MILES_REPO_REF} && git checkout FETCH_HEAD"
+            f" && cd {MILES_ROOT} && git fetch origin {miles_repo_ref or MILES_REPO_REF} && git checkout FETCH_HEAD"
             f" && python3 -m pip install --no-deps -e {MILES_ROOT}"
         )
         # The trainer-side delta ENCODER (miles delta.py) needs the codecs even under --no-deps.

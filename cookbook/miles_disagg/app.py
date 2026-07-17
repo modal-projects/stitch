@@ -48,18 +48,44 @@ miles_cfg = exp.miles
 ROLLOUT_CONCURRENCY = modal_cfg.rollout_target_inputs or miles_cfg.sglang_server_concurrency
 
 # EXPERIMENT_CONFIG is baked into both images (inside build_*_image) so the container's
-# re-import resolves the same experiment as the deploy, not the default.
-image = trainer_image.build_trainer_image(hf_cache_path=str(HF_CACHE_PATH), experiment=EXPERIMENT, miles_local=MILES_LOCAL_DIR)
-server_image = serving_image.build_serving_image(hf_cache_path=str(HF_CACHE_PATH), delta_volume_name=exp.DELTA_VOLUME_NAME, experiment=EXPERIMENT)
+# re-import resolves the same experiment as the deploy, not the default. An experiment
+# may override the trainer stack (image tag / miles ref / setup) and extend the shared
+# serving image (extra commands / env) — see the 4/6 recipe config.
+image = trainer_image.build_trainer_image(
+    hf_cache_path=str(HF_CACHE_PATH), experiment=EXPERIMENT, miles_local=MILES_LOCAL_DIR,
+    image_tag=getattr(exp, "MILES_IMAGE_TAG", None),
+    miles_repo_ref=getattr(exp, "MILES_REPO_REF", None),
+    setup_commands=tuple(getattr(exp, "TRAINER_IMAGE_SETUP", ())),
+)
+server_image = serving_image.build_serving_image(
+    hf_cache_path=str(HF_CACHE_PATH), delta_volume_name=exp.DELTA_VOLUME_NAME, experiment=EXPERIMENT,
+    extra_commands=tuple(getattr(exp, "SERVING_IMAGE_EXTRA_COMMANDS", ())),
+    extra_env=getattr(exp, "SERVING_IMAGE_ENV", None),
+)
 if MILES_LOCAL_DIR:
     server_image = server_image.add_local_dir(MILES_LOCAL_DIR, remote_path=MILES_ROOT, ignore=[".git", "**/__pycache__", "**/*.pyc"])
 
-hf_cache_volume = modal.Volume.from_name("huggingface-cache", create_if_missing=True, version=2)
-data_volume = modal.Volume.from_name("miles-data", create_if_missing=True, version=2)
-checkpoints_volume = modal.Volume.from_name("miles-checkpoints", create_if_missing=True, version=2)
-prep_volume = modal.Volume.from_name("miles-prep-checkpoints", create_if_missing=True, version=2)
-sglang_cache_volume = modal.Volume.from_name("miles-sglang-cache", create_if_missing=True, version=2)  # survives cold starts
-delta_volume = modal.Volume.from_name(exp.DELTA_VOLUME_NAME, create_if_missing=True, version=2)
+def _volume(name: str) -> modal.Volume:
+    """Volume v2 by default, tolerating environments where the name already exists as v1.
+
+    ``from_name`` is lazy, so the version-mismatch error would otherwise only surface at
+    deploy/run; hydrating here resolves it eagerly and falls back to the volume's actual
+    version. Fresh environments always get v2."""
+    vol = modal.Volume.from_name(name, create_if_missing=True, version=2)
+    try:
+        vol.hydrate()
+    except modal.exception.InvalidError:
+        vol = modal.Volume.from_name(name, create_if_missing=True)
+        vol.hydrate()
+    return vol
+
+
+hf_cache_volume = _volume("huggingface-cache")
+data_volume = _volume("miles-data")
+checkpoints_volume = _volume("miles-checkpoints")
+prep_volume = _volume("miles-prep-checkpoints")
+sglang_cache_volume = _volume("miles-sglang-cache")  # survives cold starts
+delta_volume = _volume(exp.DELTA_VOLUME_NAME)
 
 train_volumes = {
     str(HF_CACHE_PATH): hf_cache_volume,

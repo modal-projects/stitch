@@ -25,6 +25,10 @@ def prepare_checkpoints(exp, prep_volume) -> None:
         os.environ.pop("HF_XET_HIGH_PERFORMANCE", None)
     if getattr(exp, "DISABLE_HF_TRANSFER", False):
         os.environ.pop("HF_HUB_ENABLE_HF_TRANSFER", None)
+    # Quantizer envs the conversion must share with the trainer (e.g. the 4/6 recipe's
+    # NVTE_NVFP4_4OVER6 family): the served base and the trainer export must be produced
+    # under identical settings or the delta baseline diverges from the export layout.
+    os.environ.update(getattr(exp, "PREP_ENV", {}))
     from huggingface_hub import snapshot_download
 
     prep_volume.reload()
