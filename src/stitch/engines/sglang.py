@@ -26,12 +26,10 @@ class SGLangEngine(Engine):
         local_checkpoint_dir: str,
         *,
         control_timeout: float = 120.0,
-        flush_cache_on_commit: bool = False,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self.local_checkpoint_dir = local_checkpoint_dir
         self._control_timeout = control_timeout
-        self._flush_cache_on_commit = flush_cache_on_commit
 
     def base_url(self) -> str:
         return self._base_url
@@ -72,15 +70,13 @@ class SGLangEngine(Engine):
             action="base prefetch",
         )
 
-    async def commit(self, ref: VersionRef) -> None:
-        # flush_cache is configurable via flush_cache_on_commit. The reconciler already flush()es
-        # before a quiesce reload and in_place deliberately keeps in-flight KV, so the default
-        # is off — but whether the reload itself evicts the prefix/KV cache is a real per-run
-        # choice (e.g. flush even in in_place), so a deployment can turn it on.
+    async def commit(self, ref: VersionRef, *, flush_cache: bool = False) -> None:
+        # flush_cache (the reconciler's commit-policy decision) evicts sglang's prefix/KV
+        # cache as part of the reload.
         await self._post(
             "/update_weights_from_disk",
             {"model_path": self.local_checkpoint_dir, "weight_version": str(ref.version),
-             "flush_cache": self._flush_cache_on_commit},
+             "flush_cache": flush_cache},
             timeout=None,
             action="weight update",
         )
@@ -103,7 +99,7 @@ class SGLangEngine(Engine):
         await self._post(
             "/update_weights_from_disk",
             {"model_path": self.local_checkpoint_dir, "weight_version": "0",
-             "flush_cache": self._flush_cache_on_commit},
+             "flush_cache": False},  # a run switch relies on run-namespaced KV, not a flush
             timeout=None,
             action="reset reload to base",
         )

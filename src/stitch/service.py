@@ -170,6 +170,7 @@ def serve(
     *,
     run_id: str | None = None,
     commit_mode: CommitMode = "quiesce",
+    flush_cache_on_commit: bool = False,
     host: str = "0.0.0.0",
     port: int = 8000,
     debug_requests: bool = False,
@@ -181,6 +182,7 @@ def serve(
 
     reconciler = Reconciler(
         store=store, engine=engine, run_id=run_id, commit_mode=commit_mode,
+        flush_cache_on_commit=flush_cache_on_commit,
         debug_requests=debug_requests, reconcile_interval=reconcile_interval,
     )
     uvicorn.run(create_app(reconciler, engine), host=host, port=port, log_level="info")

@@ -36,10 +36,11 @@ def main() -> None:
     args = p.parse_args()
 
     store = ModalVolumeStore(args.bulletin_root, volume_name=args.volume_name or None)
-    engine = SGLangEngine(args.upstream, args.local_checkpoint_dir, flush_cache_on_commit=args.flush_cache_on_commit)
+    engine = SGLangEngine(args.upstream, args.local_checkpoint_dir)
     serve(
         store, engine,
         run_id=args.run_id, commit_mode=args.commit_mode,
+        flush_cache_on_commit=args.flush_cache_on_commit,
         host=args.host, port=args.port, debug_requests=args.debug_requests,
         reconcile_interval=args.reconcile_interval,
     )

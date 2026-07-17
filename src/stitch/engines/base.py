@@ -21,8 +21,10 @@ class Engine:
         anchor, then replay deltas forward. May run while the engine serves."""
         raise NotImplementedError
 
-    async def commit(self, ref: VersionRef) -> None:
-        """Reload the staged checkpoint into the serving weights — the gate covers only this."""
+    async def commit(self, ref: VersionRef, *, flush_cache: bool = False) -> None:
+        """Reload the staged checkpoint into the serving weights — the gate covers only this.
+        ``flush_cache`` (a commit-policy decision the reconciler passes) evicts the engine's
+        prefix/KV cache as part of the reload."""
         raise NotImplementedError
 
     async def flush(self) -> None:
