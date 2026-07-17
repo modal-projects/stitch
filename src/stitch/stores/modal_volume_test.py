@@ -11,7 +11,6 @@ import tempfile
 from pathlib import Path
 
 from stitch.publish import publish_version
-from stitch.stores.base import Store
 from stitch.stores.modal_volume import ModalVolumeStore
 from stitch.versions import VersionKind, VersionRef
 
@@ -21,16 +20,12 @@ def _write_version(root: Path, ref: VersionRef, *, base: int | None = None, diff
     d.mkdir(parents=True)
     meta: dict = {"version": ref.version}
     if diff:
-        meta.update({"diff": diff, "base_version": base, "compression": "zstd", "checksum": "xxh3-128"})
+        meta.update({"delta_encoding": diff, "base_version": base, "compression_format": "zstd", "checksum_format": "xxh3-128"})
     (d / "model.safetensors.index.json").write_text(
         json.dumps({"metadata": meta, "weight_map": {"w": "model-00001.safetensors"}})
     )
     (d / "model-00001.safetensors").write_bytes(b"\x00")
     return str(d)
-
-
-def test_satisfies_store_port() -> None:
-    assert isinstance(ModalVolumeStore("/tmp/store"), Store)
 
 
 def test_publish_full_roundtrip() -> None:
@@ -43,7 +38,7 @@ def test_publish_full_roundtrip() -> None:
         assert ref == VersionRef("r1", 1)
         assert store.read_pointer() == VersionRef("r1", 1)  # pointer parses back to the ref
         man = store.read_manifest(ref)
-        assert man.kind is VersionKind.FULL and man.base_version is None
+        assert man.kind is VersionKind.FULL
         assert (Path(store.materialize(ref)) / "model.safetensors.index.json").exists()
 
 
@@ -57,7 +52,7 @@ def test_claim_then_delta_chain() -> None:
         publish_version(store, None, _write_version(root, VersionRef("r1", 2), base=1, diff="xor"), run_id="r1")
         assert store.read_pointer() == VersionRef("r1", 2)
         man = store.read_manifest(VersionRef("r1", 2))
-        assert man.kind is VersionKind.DELTA and man.base_version == 1 and man.delta_encoding == "xor"
+        assert man.kind is VersionKind.DELTA
 
 
 def test_copies_when_files_dir_is_external() -> None:

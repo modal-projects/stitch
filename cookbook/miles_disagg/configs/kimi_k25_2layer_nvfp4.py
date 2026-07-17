@@ -20,7 +20,7 @@ SOURCE_MODEL = "CharyZeng/Kimi-K2.5-2layer"  # INT4, KimiK25 arch, 2 layers
 MODEL_TAG = "kimi-k25-2layer-nvfp4"
 
 SIDECAR_COMMIT_MODE = "in_place"
-SIDECAR_DEBUG_REQUESTS = True
+SIDECAR_FLUSH_CACHE_ON_COMMIT = False  # flush sglang prefix/KV cache on the weight reload
 # R3 routing-replay needs the dropless Megatron dispatch fix at startup.
 MEGATRON_RUNTIME_PATCHES = [
     "/root/cookbook/miles_disagg/patches/megatron-r3-dispatch.patch",

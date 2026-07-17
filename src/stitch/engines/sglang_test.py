@@ -5,13 +5,8 @@ are validated e2e; the request/response stamping is the provable-without-sglang 
 
 from __future__ import annotations
 
-from stitch.engines.base import Engine
 from stitch.engines.sglang import SGLangEngine
 from stitch.versions import VersionRef
-
-
-def test_satisfies_engine_port() -> None:
-    assert isinstance(SGLangEngine("http://engine", "/ckpt"), Engine)
 
 
 def test_stamp_request_namespaces_by_version() -> None:

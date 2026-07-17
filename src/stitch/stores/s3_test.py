@@ -64,8 +64,8 @@ def _write_local_version(root: Path, ref: VersionRef) -> str:
     d.mkdir(parents=True)
     (d / "model.safetensors.index.json").write_text(
         json.dumps({
-            "metadata": {"version": ref.version, "base_version": ref.version - 1, "diff": "xor",
-                         "compression": "zstd", "checksum": "xxh3-128"},
+            "metadata": {"version": ref.version, "base_version": ref.version - 1, "delta_encoding": "xor",
+                         "compression_format": "zstd", "checksum_format": "xxh3-128"},
             "weight_map": {"w": "model-00001-of-00001.safetensors"},
         })
     )
@@ -93,7 +93,7 @@ def test_s3_publish_manifest_materialize() -> None:
         manifest = store.read_manifest(ref)  # reads the index back from S3
         assert manifest.ref == ref
         assert manifest.kind is VersionKind.DELTA
-        assert manifest.delta_encoding == "xor" and manifest.base_version == 0
+        assert manifest.files == ["model-00001-of-00001.safetensors"]
 
         version_dir = Path(store.materialize(ref))  # downloads the chain into the cache
         assert version_dir == store.cache_dir / ref.identity

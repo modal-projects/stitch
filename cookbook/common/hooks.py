@@ -1,11 +1,11 @@
 """Shared framework-hook logic (miles and slime both write the same HF-delta layout to
 a Modal Volume and wake a Modal Flash pool, so the logic is one place).
 
-Each framework re-exports these from its own ``hooks.py`` under the dotted paths its run
-config points at; the only per-framework difference is that thin re-export. Every shim
-reads the run's coordinates off the trainer's ``args`` namespace (the framework
-``setattr``s its ``custom_config_path`` onto it) and calls the stitch core against a
-ModalVolumeStore + ModalFlashPool.
+Each run config points its hook paths straight at this module (e.g.
+``custom_delta_pre_push_path = "cookbook.common.hooks.commit_and_wake"``). Each hook reads
+the run's coordinates off the trainer's ``args`` namespace (the framework ``setattr``s its
+``custom_config_path`` onto it) and calls the stitch core against a ModalVolumeStore +
+ModalFlashPool.
 """
 
 from __future__ import annotations
@@ -118,7 +118,7 @@ def _store(args: Any) -> ModalVolumeStore:
 
 
 def _pool(args: Any) -> ModalFlashPool:
-    app = getattr(args, "rollout_modal_flash_app_name", None) or os.environ["DELTA_APP_NAME"]
+    app = getattr(args, "rollout_modal_flash_app_name", None) or os.environ.get("DELTA_APP_NAME")
     cls = getattr(args, "rollout_modal_flash_server_cls_name", None) or os.environ.get("DELTA_SERVER_CLS_NAME", "Server")
     return ModalFlashPool(app, cls)
 
