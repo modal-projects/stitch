@@ -58,7 +58,7 @@ class FakeEngine(Engine):
         self.staged.append(manifest.ref)
         self.calls.append(f"stage:{manifest.ref.version}")
 
-    async def commit(self, ref: VersionRef) -> None:
+    async def commit(self, ref: VersionRef, *, flush_cache: bool = False) -> None:
         self.committed.append(ref)
         self.calls.append(f"commit:{ref.version}")
 
@@ -92,9 +92,7 @@ def _full(run: str, version: int) -> VersionManifest:
 
 
 def _delta(run: str, version: int, *, files: list[str]) -> VersionManifest:
-    return VersionManifest(
-        VersionRef(run, version), VersionKind.DELTA, files, base_version=version - 1, delta_encoding="xor"
-    )
+    return VersionManifest(VersionRef(run, version), VersionKind.DELTA, files)
 
 
 def _run(coro) -> None:

@@ -17,7 +17,7 @@ LOCAL_CHECKPOINT_PATH = "/local-checkpoint"
 
 # in_place applies weights without draining in-flight rollouts; stale KV isolated per version.
 SIDECAR_COMMIT_MODE = "in_place"
-SIDECAR_DEBUG_REQUESTS = True
+SIDECAR_FLUSH_CACHE_ON_COMMIT = False  # flush sglang prefix/KV cache on the weight reload
 
 # mem-fraction-static is a STARTING POINT -- measure on a warm container and adjust.
 SGLANG_SERVER_ARGS = {

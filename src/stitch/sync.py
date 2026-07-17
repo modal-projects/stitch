@@ -169,12 +169,14 @@ class Reconciler(AdmissionGate):
         engine: Engine,
         run_id: str | None = None,
         commit_mode: CommitMode = "quiesce",
+        flush_cache_on_commit: bool = False,
         debug_requests: bool = False,
         reconcile_interval: float = 5.0,
     ) -> None:
         super().__init__(commit_mode=commit_mode)
         self.store = store
         self.engine = engine
+        self.flush_cache_on_commit = flush_cache_on_commit  # commit policy: evict the engine cache on reload
         self.run_id = run_id  # static replica label for server_info, not the active chain
         self.debug_requests = debug_requests
         self.reconcile_interval = reconcile_interval
@@ -339,7 +341,7 @@ class Reconciler(AdmissionGate):
                     await self.engine.flush()
                 self.sync_state = SyncState.COMMITTING
                 t2 = time.perf_counter()
-                await self.engine.commit(pointer)
+                await self.engine.commit(pointer, flush_cache=self.flush_cache_on_commit)
                 m["commit_s"] = round(time.perf_counter() - t2, 3)
 
             await self.commit(

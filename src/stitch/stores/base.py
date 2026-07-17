@@ -1,7 +1,8 @@
 """The ``Store`` port — where published versions and the ``latest`` pointer live.
 
-Instances subclass this base and override every method: ``stores/modal_volume.py``
-(Modal Volume). Add S3 / NFS as new subclasses.
+Instances subclass this base: ``stores/modal_volume.py`` (Modal Volume) and
+``stores/s3.py`` (S3); add NFS etc. as new subclasses. Subclasses override the version +
+pointer methods; ``commit`` has a no-op default.
 """
 
 from __future__ import annotations
@@ -41,3 +42,8 @@ class Store:
         """Ensure the version's files are locally readable and return their directory
         (hides mount vs download)."""
         raise NotImplementedError
+
+    def commit(self) -> None:
+        """Durably flush this host's pending writes (e.g. one trainer rank's shard of a
+        version). Default no-op — only a store whose writes aren't immediately durable
+        (a Volume) needs it; the publish hook calls it on every rank."""

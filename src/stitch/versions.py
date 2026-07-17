@@ -9,7 +9,6 @@ with their instances (``stores/base.py``, ``engines/base.py``, ``pools/base.py``
 from __future__ import annotations
 
 import json
-import time
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -56,47 +55,29 @@ class VersionKind(str, Enum):
 
 @dataclass(frozen=True)
 class VersionManifest:
-    """One published version, derived from its directory's HF index (never stored
-    separately). ``kind`` alone decides how a replica applies it: FULL seeds from
-    ``files``; DELTA decodes (``delta_encoding`` / ``compression`` / ``checksum``) against
-    ``base_version``, which chains back to the nearest FULL anchor.
+    """One published version, derived from its directory's HF index. ``kind`` is all a
+    replica needs to route the apply: FULL seeds from ``files``; DELTA is applied by the
+    engine, which reads the codec (``delta_encoding`` / ``compression_format`` /
+    ``checksum_format``) and lineage straight off the on-disk index — the codec is the
+    engine's concern, not part of this domain type.
     """
 
     ref: VersionRef
     kind: VersionKind
     files: list[str]
-    base_version: int | None = None   # required iff DELTA; always the same run as ref
-    delta_encoding: str | None = None
-    compression: str | None = None
-    checksum: str | None = None
-    base_model: str | None = None
-    created_at: float = 0.0
 
     @classmethod
-    def from_hf_index(
-        cls,
-        version_dir: str | Path,
-        *,
-        run_id: str | None = None,
-        base_model: str | None = None,
-    ) -> "VersionManifest":
-        # The dir's model.safetensors.index.json carries the lineage + codec under
-        # `metadata` and the files as `weight_map` values. A `diff` key => DELTA.
+    def from_hf_index(cls, version_dir: str | Path, *, run_id: str | None = None) -> "VersionManifest":
+        # model.safetensors.index.json holds the version number under `metadata` and the
+        # files as `weight_map` values; a `delta_encoding` key (the same one the engine's
+        # applier reads) marks a delta.
         index = json.loads((Path(version_dir) / "model.safetensors.index.json").read_text())
         meta = index.get("metadata") or {}
         weight_map = index.get("weight_map") or {}
-        diff = meta.get("diff") or None
-        base = meta.get("base_version")
         return cls(
             ref=VersionRef(run_id, int(meta["version"])),
-            kind=VersionKind.DELTA if diff else VersionKind.FULL,
+            kind=VersionKind.DELTA if meta.get("delta_encoding") else VersionKind.FULL,
             files=sorted({str(f) for f in weight_map.values()}),
-            base_version=int(base) if diff and base is not None else None,
-            delta_encoding=diff,
-            compression=meta.get("compression") or None,
-            checksum=meta.get("checksum") or None,
-            base_model=base_model,
-            created_at=float(meta.get("created_at", time.time())),
         )
 
 

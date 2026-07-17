@@ -46,7 +46,7 @@ def _version_dir(tmp: str, *, version: int, base: int | None = None, diff: str |
     d.mkdir()
     meta: dict = {"version": version}
     if diff:
-        meta.update({"diff": diff, "base_version": base, "compression": "zstd", "checksum": "xxh3-128"})
+        meta.update({"delta_encoding": diff, "base_version": base, "compression_format": "zstd", "checksum_format": "xxh3-128"})
     index = {"metadata": meta, "weight_map": {"w": "model-00001.safetensors"}}
     (d / "model.safetensors.index.json").write_text(json.dumps(index))
     return str(d)
@@ -59,7 +59,7 @@ def test_publish_full() -> None:
         assert ref == VersionRef("r1", 1)
         assert store._pointer == VersionRef("r1", 1)
         man = store.published[0]
-        assert man.kind.value == "full" and man.base_version is None
+        assert man.kind.value == "full"
         assert pool.woke == [VersionRef("r1", 1)]
 
 
@@ -68,7 +68,7 @@ def test_publish_delta() -> None:
         store = FakeStore(VersionRef("r1", 1))
         publish_version(store, None, _version_dir(tmp, version=2, base=1, diff="xor"), run_id="r1")
         man = store.published[0]
-        assert man.kind.value == "delta" and man.base_version == 1 and man.delta_encoding == "xor"
+        assert man.kind.value == "delta"
         assert store._pointer == VersionRef("r1", 2)
 
 

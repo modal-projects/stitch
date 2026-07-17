@@ -19,6 +19,7 @@ INT4_GROUP_SIZE = "32"
 
 # in_place applies weights without draining in-flight rollouts; stale KV isolated per version.
 SIDECAR_COMMIT_MODE = "in_place"
+SIDECAR_FLUSH_CACHE_ON_COMMIT = False  # flush sglang prefix/KV cache on the weight reload
 
 SGLANG_SERVER_ARGS = {
     "--weight-loader-prefetch-checkpoints": "",

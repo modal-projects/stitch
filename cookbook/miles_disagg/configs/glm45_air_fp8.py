@@ -11,6 +11,7 @@ DELTA_VOLUME_NAME = "stitch-delta-glm45-air-fp8"
 DELTA_BULLETIN_ROOT = "/delta-bulletin"
 LOCAL_CHECKPOINT_PATH = "/local-checkpoint"
 SIDECAR_COMMIT_MODE = "quiesce"  # fp8 reload is exact; draining buys clean per-version attribution
+SIDECAR_FLUSH_CACHE_ON_COMMIT = False  # flush sglang prefix/KV cache on the weight reload
 
 MODEL_TAG = "glm45-air-bf16"
 SOURCE_MODEL = "zai-org/GLM-4.5-Air"

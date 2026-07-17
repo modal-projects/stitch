@@ -26,15 +26,22 @@ class SGLangEngine(Engine):
         local_checkpoint_dir: str,
         *,
         control_timeout: float = 120.0,
-        flush_on_commit: bool = False,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self.local_checkpoint_dir = local_checkpoint_dir
         self._control_timeout = control_timeout
-        self._flush_on_commit = flush_on_commit
 
     def base_url(self) -> str:
         return self._base_url
+
+    def blocked_routes(self) -> frozenset[str]:
+        # sglang's weight-update + scheduler-control endpoints; the sidecar drives these
+        # directly, so external rollout traffic must never reach them.
+        return frozenset({
+            "update_weights_from_disk", "update_weights_from_distributed",
+            "update_weights_from_tensor", "pull_weights", "flush_cache",
+            "pause_generation", "continue_generation", "abort_request",
+        })
 
     async def stage(self, manifest: VersionManifest, source_dir: str) -> None:
         # source_dir is the target version's dir; its parent is the root of weight_v*
@@ -63,14 +70,13 @@ class SGLangEngine(Engine):
             action="base prefetch",
         )
 
-    async def commit(self, ref: VersionRef) -> None:
-        # flush_cache defaults off: the reconciler owns flushing — it calls flush()
-        # itself before a quiesce reload, and in_place deliberately keeps in-flight KV.
-        # flush_on_commit is the escape hatch for a setup that wants the reload to evict.
+    async def commit(self, ref: VersionRef, *, flush_cache: bool = False) -> None:
+        # flush_cache (the reconciler's commit-policy decision) evicts sglang's prefix/KV
+        # cache as part of the reload.
         await self._post(
             "/update_weights_from_disk",
             {"model_path": self.local_checkpoint_dir, "weight_version": str(ref.version),
-             "flush_cache": self._flush_on_commit},
+             "flush_cache": flush_cache},
             timeout=None,
             action="weight update",
         )
@@ -93,7 +99,7 @@ class SGLangEngine(Engine):
         await self._post(
             "/update_weights_from_disk",
             {"model_path": self.local_checkpoint_dir, "weight_version": "0",
-             "flush_cache": self._flush_on_commit},
+             "flush_cache": False},  # a run switch relies on run-namespaced KV, not a flush
             timeout=None,
             action="reset reload to base",
         )

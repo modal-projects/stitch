@@ -20,7 +20,7 @@ DISABLE_HF_XET = True       # the plain HF downloader is the path that finished 
 DISABLE_HF_TRANSFER = True
 
 SIDECAR_COMMIT_MODE = "in_place"
-SIDECAR_DEBUG_REQUESTS = True
+SIDECAR_FLUSH_CACHE_ON_COMMIT = False  # flush sglang prefix/KV cache on the weight reload
 MEGATRON_RUNTIME_PATCHES = ["/root/cookbook/miles_disagg/patches/megatron-r3-dispatch.patch"]
 
 

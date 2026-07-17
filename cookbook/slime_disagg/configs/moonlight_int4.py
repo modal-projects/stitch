@@ -20,7 +20,7 @@ LOCAL_CHECKPOINT_PATH = "/local-checkpoint"
 INT4_GROUP_SIZE = "128"
 
 SIDECAR_COMMIT_MODE = "in_place"
-SIDECAR_DEBUG_REQUESTS = True
+SIDECAR_FLUSH_CACHE_ON_COMMIT = False  # flush sglang prefix/KV cache on the weight reload
 
 # The pool reuses the trainer image (its SGLang serves native INT4; no Blackwell fork).
 SGLANG_SERVER_ARGS = {
