@@ -27,7 +27,7 @@ def serve_startup(
     local_checkpoint_dir: str,
     volume_name: str,
     commit_mode: str,
-    flush_on_commit: bool = False,
+    flush_cache_on_commit: bool = False,
     startup_timeout: int,
     sglang_env: dict[str, str] | None = None,
 ) -> None:
@@ -55,7 +55,7 @@ def serve_startup(
     replica.sidecar = process.start_sidecar(
         sidecar_port=SIDECAR_PORT, sglang_port=SGLANG_PORT, bulletin_root=bulletin_root,
         local_checkpoint_dir=local_checkpoint_dir, volume_name=volume_name, commit_mode=commit_mode,
-        flush_on_commit=flush_on_commit,
+        flush_cache_on_commit=flush_cache_on_commit,
     )
     process.wait_http(f"http://127.0.0.1:{SIDECAR_PORT}/health", replica.sidecar, startup_timeout)
     print(f"Rollout server ready: model={model_name}, target_inputs={concurrency}")

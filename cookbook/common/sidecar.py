@@ -25,7 +25,7 @@ def main() -> None:
     p.add_argument("--volume-name", default=os.environ.get("DELTA_VOLUME_NAME", ""))
     p.add_argument("--local-checkpoint-dir", default=os.environ.get("STITCH_LOCAL_CHECKPOINT_DIR", "/local-checkpoint"))
     p.add_argument("--commit-mode", choices=["quiesce", "in_place"], default=os.environ.get("SIDECAR_COMMIT_MODE", "quiesce"))
-    p.add_argument("--flush-on-commit", action="store_true")  # evict sglang's prefix/KV cache on reload
+    p.add_argument("--flush-cache-on-commit", action="store_true")  # evict sglang's prefix/KV cache on reload
     p.add_argument("--run-id", default=os.environ.get("DISAGG_RUN_ID") or None)
     p.add_argument("--debug-requests", action="store_true")
     # Background convergence backstop: re-check latest every N seconds so a replica that
@@ -36,7 +36,7 @@ def main() -> None:
     args = p.parse_args()
 
     store = ModalVolumeStore(args.bulletin_root, volume_name=args.volume_name or None)
-    engine = SGLangEngine(args.upstream, args.local_checkpoint_dir, flush_on_commit=args.flush_on_commit)
+    engine = SGLangEngine(args.upstream, args.local_checkpoint_dir, flush_cache_on_commit=args.flush_cache_on_commit)
     serve(
         store, engine,
         run_id=args.run_id, commit_mode=args.commit_mode,
