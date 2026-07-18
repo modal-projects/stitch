@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from typing import Any
 
-# Fields that are launcher instructions, not miles CLI args.
 _MILES_SKIP = {"environment", "async_mode", "miles_model_script"}
 # Fields miles reads as YAML files; inline dicts are materialized before launch.
 # (te_precision_config_file is handled separately in app.py — it needs an identical

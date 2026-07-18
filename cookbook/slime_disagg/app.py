@@ -34,7 +34,6 @@ from cookbook.slime_disagg import trainer_image
 from cookbook.slime_disagg.config import SlimeConfig, YAML_CONFIG_FIELDS
 from cookbook.slime_disagg.trainer_image import SLIME_ROOT
 
-# Deploy-time environment (selection + dev overlay, NOT experiment config).
 EXPERIMENT = os.environ["EXPERIMENT_CONFIG"]  # required; a default would silently serve the wrong experiment
 SLIME_LOCAL_DIR = os.environ.get("SLIME_LOCAL_DIR")  # optional dev overlay of a local slime checkout
 
@@ -42,8 +41,7 @@ exp = importlib.import_module(f"cookbook.slime_disagg.configs.{EXPERIMENT}")
 modal_cfg = exp.modal
 slime_cfg = exp.slime
 
-# The Flash autoscaler target (and sglang concurrency cap): the experiment's explicit
-# target_inputs, else the engine's configured concurrency.
+# Flash autoscaler target / sglang concurrency cap: explicit target_inputs, else engine concurrency.
 ROLLOUT_CONCURRENCY = modal_cfg.rollout_target_inputs or slime_cfg.sglang_server_concurrency
 
 # EXPERIMENT_CONFIG is baked into both images (inside build_*_image) so the container's
@@ -140,7 +138,7 @@ class Trainer:
 
         rank, master_addr, my_ip = ray_cluster.get_modal_cluster_context(slime_cfg.n_train_nodes)
         self.rank = rank
-        process.start_host_mem_monitor()  # per-node host-RAM trace (publish gather is the OOM peak)
+        process.start_host_mem_monitor()  # per-node host-RAM trace
         os.environ.update({
             "SLIME_HOST_IP": my_ip, "SGLANG_HOST_IP": my_ip, "HOST_IP": my_ip,
             "MASTER_ADDR": master_addr, "RAY_ADDRESS": f"{master_addr}:{RAY_PORT}",
@@ -157,7 +155,7 @@ class Trainer:
         """Run one training job from a SlimeConfig payload (see SlimeConfig.to_payload)."""
         for volume in train_volumes.values():
             volume.reload()
-        if self.rank != 0:  # rank 0 drives; other ranks only need their Ray workers (started in enter)
+        if self.rank != 0:
             return
 
         cfg = SlimeConfig.from_payload(payload)

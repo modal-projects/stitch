@@ -48,7 +48,7 @@ def create_app(
     import httpx
 
     engine_url = engine.base_url().rstrip("/")
-    blocked = engine.blocked_routes()  # engine-owned: control routes external traffic must not reach
+    blocked = engine.blocked_routes()
     timeout = httpx.Timeout(upstream_timeout, connect=10.0)
     versioned = {r.strip("/") for r in versioned_routes}
     pooled: dict[str, Any] = {}
@@ -109,8 +109,7 @@ def create_app(
         is_versioned = route in versioned
         constraint = VersionConstraint.from_payload(payload) if is_versioned else VersionConstraint()
 
-        # A request id lets us abort the upstream generation on client disconnect —
-        # otherwise an abandoned request keeps generating, holding the quiesce point.
+        # rid lets us abort the upstream generation on client disconnect, else it holds the quiesce point.
         rid = None
         if is_versioned and payload is not None:
             payload.pop("weight_version", None)
@@ -146,7 +145,7 @@ def create_app(
                     return Response(content=resp.content, status_code=resp.status_code,
                                     media_type=resp.headers.get("content-type") or None)
                 data = resp.json()
-                current = reconciler.applied  # captured while still pinned, before any commit advances it
+                current = reconciler.applied  # capture while still pinned, before a commit advances it
         except ConstraintUnmet as exc:
             return JSONResponse(exc.error, status_code=409)
 

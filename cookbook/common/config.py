@@ -21,8 +21,8 @@ class ModalConfig:
     region: str | None = None
     rollout_min_containers: int = 2
     rollout_max_containers: int | None = None
-    # Flash autoscaler target: keep well below the sglang engine concurrency so Flash
-    # adds containers instead of packing requests until KV saturates and they stall.
+    # Flash autoscaler target: keep well below sglang engine concurrency so Flash adds
+    # containers instead of packing requests until KV saturates.
     rollout_target_inputs: int | None = None
     proxy_regions: list[str] = ["us-west"]
     rollout_ephemeral_disk_mib: int | None = None

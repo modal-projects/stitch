@@ -43,8 +43,7 @@ exp = importlib.import_module(f"cookbook.miles_disagg.configs.{EXPERIMENT}")
 modal_cfg = exp.modal
 miles_cfg = exp.miles
 
-# The Flash autoscaler target (and sglang concurrency cap): the experiment's explicit
-# target_inputs, else the engine's configured concurrency.
+# Flash autoscaler target / sglang concurrency cap: explicit target_inputs, else engine concurrency.
 ROLLOUT_CONCURRENCY = modal_cfg.rollout_target_inputs or miles_cfg.sglang_server_concurrency
 
 # EXPERIMENT_CONFIG is baked into both images (inside build_*_image) so the container's
@@ -76,8 +75,7 @@ SGLANG_SERVER_ARGS = {
     "--cuda-graph-max-bs-decode": str(ROLLOUT_CONCURRENCY),
     "--max-running-requests": str(ROLLOUT_CONCURRENCY),
     "--trust-remote-code": "",
-    # The engine reads published versions off the Modal Volume; this hook reloads it
-    # first (object stores lack cross-host read-after-write consistency).
+    # Volume writes aren't cross-host visible until a reload; this hook reloads before the pull.
     "--custom-pull-weights-pre-read-hook": "stitch.stores.modal_volume.pull_weights_pre_read_hook",
     **exp.SGLANG_SERVER_ARGS,
 }
@@ -151,7 +149,7 @@ class Trainer:
         rank, master_addr, my_ip = ray_cluster.get_modal_cluster_context(miles_cfg.n_train_nodes)
         process.apply_git_patches(list(getattr(exp, "MEGATRON_RUNTIME_PATCHES", [])), MEGATRON_PATH, "Megatron patch")
         self.rank = rank
-        process.start_host_mem_monitor()  # per-node host-RAM trace (publish gather is the OOM peak)
+        process.start_host_mem_monitor()  # per-node host-RAM trace
         os.environ.update({
             "MILES_HOST_IP": my_ip, "SGLANG_HOST_IP": my_ip, "HOST_IP": my_ip,
             "MASTER_ADDR": master_addr, "RAY_ADDRESS": f"{master_addr}:{RAY_PORT}",
@@ -171,7 +169,7 @@ class Trainer:
             volume.reload()
 
         cfg = MilesConfig.from_payload(payload)
-        _materialize_node_local_yaml(cfg, "te_precision_config_file")  # re-read per Ray actor; needs identical local path
+        _materialize_node_local_yaml(cfg, "te_precision_config_file")
         if self.rank != 0:
             return
 
@@ -182,8 +180,7 @@ class Trainer:
             cfg.load = cfg.save = cfg.save_hf = None
         else:
             cfg.load = cfg.save = f"{CHECKPOINTS_PATH}/{run_id}/checkpoints"
-        # Merge the run's bulletin identity into custom_config_path (already carrying the
-        # request-gating knobs); miles setattr's every key onto args for the hooks.
+        # miles setattr's every key onto args for the hooks.
         custom_config = {
             **(cfg.custom_config_path or {}),
             "update_weight_delta_volume_name": exp.DELTA_VOLUME_NAME,

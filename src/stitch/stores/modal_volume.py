@@ -37,7 +37,6 @@ class ModalVolumeStore(Store):
         return VersionRef.parse(text) if text else None
 
     def advance_pointer(self, ref: VersionRef) -> None:
-        # The caller has already run decide_pointer_move; this is the durable write.
         self.root.mkdir(parents=True, exist_ok=True)
         _atomic_write(self.root / _POINTER, ref.identity)
         if self.volume_name:
@@ -52,9 +51,8 @@ class ModalVolumeStore(Store):
         return VersionManifest.from_hf_index(self._version_dir(ref), run_id=ref.run_id)
 
     def publish(self, manifest: VersionManifest, files_dir: str) -> None:
-        # The framework usually writes straight into the mounted volume, so files_dir
-        # is already the version dir; copy only when it isn't. Commit so the bytes are
-        # durable and visible on every host before the pointer moves to them.
+        # The framework usually writes straight into the volume, so copy only when files_dir
+        # isn't the version dir already.
         target = self._version_dir(manifest.ref)
         source = Path(files_dir)
         if source.resolve() != target.resolve():
@@ -65,7 +63,7 @@ class ModalVolumeStore(Store):
             _volume(self.volume_name).commit()
 
     def materialize(self, ref: VersionRef) -> str:
-        self.refresh()  # materialize this host's view before the files are read
+        self.refresh()
         return str(self._version_dir(ref))
 
     def commit(self) -> None:
@@ -76,8 +74,6 @@ class ModalVolumeStore(Store):
             _volume(self.volume_name).commit()
 
     def _version_dir(self, ref: VersionRef) -> Path:
-        # ref.identity is exactly the run-partitioned dir name (<run_id>/weight_vNNNNNN),
-        # so the pointer spelling and the on-disk layout share one source of truth.
         return self.root / ref.identity
 
 
@@ -85,13 +81,11 @@ def pull_weights_pre_read_hook(source_dir: str, target_version: int) -> None:
     """Engine-side ``--custom-pull-weights-pre-read-hook``: reload the delta Volume onto
     THIS host exactly once so the engine's pull can read the published version.
 
-    One reload, not a loop: the sidecar only pulls after seeing ``target_version`` at the
-    pointer, and a reload loop thrashes the Modal-v2 mount (turned ~3s delta pulls into
-    100-500s ones and tripped the engine's 300s watchdog). Completeness is handled
-    downstream — the engine size-verifies each staged delta, and a not-yet-materialized
-    blob fails fast so the sidecar retries with a fresh single reload. The volume name
-    travels via ``DELTA_VOLUME_NAME`` (set on the serving container)."""
-    del source_dir  # the engine passes it; the reload is by volume name, not path
+    One reload, not a loop: looping thrashes the Modal-v2 mount (turned ~3s delta pulls into
+    100-500s and tripped the engine's 300s watchdog). Completeness is verified downstream —
+    the engine size-checks each staged delta and fails fast so the sidecar retries with a
+    fresh reload. Volume name comes from ``DELTA_VOLUME_NAME`` (set on the serving container)."""
+    del source_dir  # unused: the reload is by volume name, not path
     volume_name = os.environ.get("DELTA_VOLUME_NAME", "")
     if not volume_name or target_version <= 0:
         return

@@ -28,7 +28,7 @@ def publish_version(
     then wake the pool. Files land before the pointer moves, so a replica never sees a
     pointer to incomplete bytes."""
     manifest = VersionManifest.from_hf_index(version_dir, run_id=run_id)
-    decide_pointer_move(store.read_pointer(), manifest.ref)  # raises PointerRewind on a rewind
+    decide_pointer_move(store.read_pointer(), manifest.ref)  # rewind guard
     store.publish(manifest, version_dir)
     store.advance_pointer(manifest.ref)
     _wake(pool, manifest.ref)
@@ -40,7 +40,7 @@ def claim_run(store: Store, pool: Pool | None, run_id: str) -> None:
     pool, so every replica (cold or warm on a finished run) resets to base up front. A
     reused ``run_id`` (the run's per-launch fence token) is a rewind — rejected here so a
     restart can't leave the pool pinned to a dead incarnation's high-water mark."""
-    decide_pointer_move(store.read_pointer(), VersionRef(run_id, 0))  # raises PointerRewind on a reused run_id
+    decide_pointer_move(store.read_pointer(), VersionRef(run_id, 0))  # rewind guard (a reused run_id)
     store.claim(run_id)
     _wake(pool, VersionRef(run_id, 0))
 

@@ -20,14 +20,14 @@ SOURCE_MODEL = "moonshotai/Kimi-K2.6"
 MODEL_TAG = "kimi-k2-6-nvfp4"
 
 SIDECAR_COMMIT_MODE = "in_place"
-SIDECAR_FLUSH_CACHE_ON_COMMIT = False  # flush sglang prefix/KV cache on the weight reload
+SIDECAR_FLUSH_CACHE_ON_COMMIT = False
 # R3 routing-replay needs the dropless Megatron dispatch fix at startup.
 MEGATRON_RUNTIME_PATCHES = [
     "/root/cookbook/miles_disagg/patches/megatron-r3-dispatch.patch",
 ]
 
 
-# mem-fraction / context-length are STARTING POINTS — measure on a warm B200:4 and adjust.
+# mem-fraction / context-length are starting points — measure on a warm B200:4.
 SGLANG_SERVER_ARGS = {
     "--weight-loader-prefetch-checkpoints": "",
     "--weight-loader-prefetch-num-threads": "8",
@@ -54,27 +54,22 @@ SGLANG_ENV = {"SGLANG_ENABLE_RELOAD_LOAD_PLAN": "1"}  # NVFP4: load-plan replay 
 
 modal = ModalConfig(
     gpu="B200",
-    # Request Modal's max (nodes are 1.79 TiB): the CPU-offloaded 1T optimizer + publish
-    # snapshot peak ~1.2 TiB, and a smaller *request* got OOM-killed (excess is best-effort).
+    # ~1.2 TiB peak (CPU-offloaded 1T optimizer + publish snapshot); nodes are 1.79 TiB.
     memory=1_650_688,
-    # Keep the rollout pool small (2x B200:4 = 8 GPUs) so the 64-GPU trainer gang can
-    # co-schedule; min==max pins it, else it autoscales up and re-competes for B200.
+    # Small pool (2x B200:4) so the 64-GPU trainer gang can co-schedule; min==max pins it.
     rollout_min_containers=2,
     rollout_max_containers=2,
     rollout_target_inputs=32,
     proxy_regions=["us-west"],
-    rollout_ephemeral_disk_mib=819_200,  # ~591 GB base copy + in-place delta-apply headroom
-    # Ray logs + object spill fill the default disk (ENOSPC'd); 2 TiB gives headroom.
-    trainer_ephemeral_disk_mib=2_097_152,
-    # 4x8=32-way: EP32 shards 384 experts to ~90 GB/rank so distcp writes finish inside the
-    # 900s heartbeat (EP16 raced it); torch_dist reshards on load into the EP16 trainer.
+    rollout_ephemeral_disk_mib=819_200,  # ~591 GB base copy + delta-apply headroom
+    trainer_ephemeral_disk_mib=2_097_152,  # Ray logs + object spill need the headroom
+    # 4x8=32-way: EP32 shards 384 experts to ~90 GB/rank so distcp finishes inside the 900s heartbeat.
     torch_dist_prep_nodes=4,
     torch_dist_prep_gpus_per_node=8,
     torch_dist_convert_extra_args=(
         "--tensor-model-parallel-size 1 --pipeline-model-parallel-size 1 --expert-model-parallel-size 32"
     ),
-    # ~700 GB of distcp shards buffer before commit; 2 TB gives headroom.
-    torch_dist_prep_ephemeral_disk_mib=2_097_152,
+    torch_dist_prep_ephemeral_disk_mib=2_097_152,  # ~700 GB of distcp shards buffer before commit
 )
 
 
@@ -84,12 +79,9 @@ class _Miles(MilesConfig):
 
     hf_checkpoint = f"{PREP_PATH}/{MODEL_TAG}/nvfp4"
     ref_load = f"{PREP_PATH}/{MODEL_TAG}/torch_dist"
-    # "raw" (not "bridge"): K2.6's HF arch is the KimiK25 VLM wrapper, which AutoBridge
-    # can't build. Export still routes via model_name below.
+    # "raw": K2.6's HF arch is a VLM wrapper AutoBridge can't build; export routes via model_name.
     megatron_to_hf_mode = "raw"
-    model_name = (
-        "kimi_k25"  # megatron_to_hf export dispatch (convert_kimi_k25_to_hf + NVFP4)
-    )
+    model_name = "kimi_k25"  # megatron_to_hf export dispatch (convert_kimi_k25_to_hf + NVFP4)
 
     actor_num_nodes = 8  # 8x8 B200 = 64 GPUs (trainer only; pool is elastic on top)
     actor_num_gpus_per_node = 8
@@ -107,11 +99,11 @@ class _Miles(MilesConfig):
     custom_config_path = {
         "rollout_request_weight_version_mode": "min",
         "rollout_request_weight_version_lag": 1,
-        # 1200×1s=20 min outlasts a full ~16 min cold-load (240s was too short, rollout 503'd).
+        # 1200x1s = 20 min, outlasts a ~16 min cold-load.
         "rollout_request_retry_attempts": 1200,
         "rollout_request_retry_sleep": 1.0,
         "rollout_session_affinity_header": "Modal-Session-ID",
-        # finite read timeout; without it a request to a scaled-down Flash container hangs forever.
+        # finite read timeout, else a request to a scaled-down container hangs forever.
         "rollout_request_timeout_secs": 300,
     }
 
@@ -121,8 +113,7 @@ class _Miles(MilesConfig):
     # NVFP4 QAT — miles' canonical NVFP4 RL recipe.
     fp4_format = "e2m1"
     fp4_recipe = "nvfp4"
-    # False: with it True, TE NVFP4Tensor params crash Megatron DDP's param-buffer repoint.
-    fp4_param_gather = False
+    fp4_param_gather = False  # True crashes Megatron DDP's param-buffer repoint (TE NVFP4Tensor)
     # NVFP4 only on the routed expert GEMMs, everything else bf16 — matches the served base.
     te_precision_config_file = {
         "configs": {
@@ -156,9 +147,9 @@ class _Miles(MilesConfig):
             },
         },
     }
-    # bf16 carve-out for the dense first layer; END stays 0 (reload-safe): SGLang's fused-MoE
-    # reload loader allocates NVFP4 for every expert layer, so a bf16 last layer can't reload.
     num_layers_at_start_in_bf16 = 1
+    # END must stay 0: SGLang's fused-MoE reload allocates NVFP4 for every expert layer,
+    # so a bf16 last layer can't reload.
     num_layers_at_end_in_bf16 = 0
 
     update_weight_transfer_mode = "disk-delta"
@@ -188,8 +179,7 @@ class _Miles(MilesConfig):
 
     use_rollout_routing_replay = True
 
-    # Trainer parallelism for 8x8=64 GPUs: TP8*PP2*CP4=64, EP32 over the experts — the
-    # proven kimi_k25_lora_8nodes topology. EP32 keeps expert weights+grads ~63GB/rank.
+    # 8x8=64: TP8*PP2*CP4=64, EP32 over the experts (proven kimi_k25_lora_8nodes topology).
     tensor_model_parallel_size = 8
     sequence_parallel = True
     pipeline_model_parallel_size = 2

@@ -27,16 +27,14 @@ logger = logging.getLogger(__name__)
 
 # ── publish ────────────────────────────────────────────────────────────────────
 def commit_and_wake(args: Any, published_dir: str, rollout_engines: Any = None) -> None:
-    """Bridge the framework's disk-delta publish to the stitch store. The framework fires
-    this at each shared-store durability boundary (a dir to flush to the volume): an actual
-    version dir (``weight_vNNNNNN``, holding the HF index) and — at baseline / pointer
-    commit — the run dir. Every rank flushes its own writes; rank 0 publishes (manifest +
-    pointer advance + pool wake) ONLY when handed a version dir. Keying on the dir the
-    framework names, not on reading an index, is what makes the run-dir calls (no index yet)
-    a clean no-op instead of a missing-file crash."""
+    """Bridge the framework's disk-delta publish to the stitch store. The framework fires this
+    at each durability boundary: a version dir (``weight_vNNNNNN``, holding the HF index) and —
+    at baseline/pointer commit — the run dir. Every rank flushes its writes; rank 0 publishes
+    only when handed a version dir. Keying on the dir name (not on reading an index) keeps the
+    run-dir calls a clean no-op, not a missing-file crash."""
     del rollout_engines
     store = _store(args)
-    store.commit()  # flush this rank's local writes (shards / index / pointer) to the volume
+    store.commit()
     if _rank() not in (None, 0) or not Path(published_dir).name.startswith("weight_v"):
         return
     try:
@@ -51,7 +49,7 @@ def claim_pool(args: Any) -> None:
     cold or finished-run-warm pool starts this run clean."""
     if _rank() not in (None, 0):
         return
-    claim_run(_store(args), _pool(args), _run_id(args))  # raises PointerRewind on a reused run_id
+    claim_run(_store(args), _pool(args), _run_id(args))
 
 
 # ── staleness-gated rollout requests ────────────────────────────────────────────

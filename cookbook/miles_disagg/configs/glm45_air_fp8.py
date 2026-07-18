@@ -11,24 +11,22 @@ DELTA_VOLUME_NAME = "stitch-delta-glm45-air-fp8"
 DELTA_BULLETIN_ROOT = "/delta-bulletin"
 LOCAL_CHECKPOINT_PATH = "/local-checkpoint"
 SIDECAR_COMMIT_MODE = "quiesce"  # fp8 reload is exact; draining buys clean per-version attribution
-SIDECAR_FLUSH_CACHE_ON_COMMIT = False  # flush sglang prefix/KV cache on the weight reload
+SIDECAR_FLUSH_CACHE_ON_COMMIT = False
 
 MODEL_TAG = "glm45-air-bf16"
 SOURCE_MODEL = "zai-org/GLM-4.5-Air"
 ROLLOUT_SOURCE_MODEL = "zai-org/GLM-4.5-Air-FP8"
 SERVED_CHECKPOINT_FORMAT = "fp8"
 USE_MODAL_TORCH_DIST_WRAPPER = True
-DISABLE_HF_XET = True       # the plain HF downloader is the path that finished reliably here
+DISABLE_HF_XET = True
 DISABLE_HF_TRANSFER = True
 
 MEGATRON_RUNTIME_PATCHES = ["/root/cookbook/miles_disagg/patches/megatron-r3-dispatch.patch"]
 
 SGLANG_SERVER_ARGS = {
-    # Dense FP8 delta => no partial reload => every step reloads the full checkpoint. Under
-    # gVisor the read is bound by the Sentry's single-thread byte-copy (~5 GB/s), so the win
-    # is fewer BYTES: fastsafetensors splits files across TP ranks (each reads 1/N), ~408 ->
-    # ~102 GB/node => reload ~130s -> ~23s. nogds is forced via SGLANG_FASTSAFETENSORS_NOGDS
-    # in the serving image (GDS/nvidia-fs is absent under gVisor).
+    # Dense FP8 reloads the full checkpoint each step; fastsafetensors splits files across TP
+    # ranks (each reads 1/N) to cut bytes under gVisor's byte-copy-bound read. nogds is forced
+    # via SGLANG_FASTSAFETENSORS_NOGDS in the serving image (GDS/nvidia-fs is absent under gVisor).
     "--load-format": "fastsafetensors",
     "--dtype": "auto",
     "--reasoning-parser": "glm45",
@@ -88,7 +86,7 @@ class _Miles(MilesConfig):
     eval_interval = None
 
     num_rollout = 10
-    save_interval = None  # miles forces a final save when set, regardless of interval; leave off
+    save_interval = None  # miles forces a final save when set, regardless of interval
     rollout_batch_size = 16
     rollout_max_response_len = 4096
     rollout_temperature = 0.8

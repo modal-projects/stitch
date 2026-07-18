@@ -21,7 +21,6 @@ class _Slime(_base._Slime):
     num_rollout = 120
     eval_interval = 20
     log_passrate = True
-    # update_weight_disk_dir is inherited from the base; only DELTA_VOLUME_NAME differs.
 
 
 slime = _Slime()

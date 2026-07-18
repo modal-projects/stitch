@@ -36,10 +36,8 @@ class VersionRef:
 
     @classmethod
     def parse(cls, text: str) -> "VersionRef":
-        # ``[<run_id>/]weight_vNNNNNN`` (or a legacy bare ``NNNNNN``). A missing pointer
-        # is handled by callers (they pass "" -> None before this); non-empty content
-        # that doesn't parse is corrupt control state -> raise, never a silent fall back
-        # to base (which would serve the wrong weights). Ref: stitch#31.
+        # ``[<run_id>/]weight_vNNNNNN`` (or legacy bare ``NNNNNN``). Non-empty unparseable content
+        # raises — never fall back to base and serve the wrong weights (stitch#31).
         text = (text or "").strip()
         run_id, _, tail = text.rpartition("/")
         digits = tail[len(_WEIGHT_PREFIX):] if tail.startswith(_WEIGHT_PREFIX) else tail
@@ -128,7 +126,7 @@ class ReplicaState:
     ready: bool
     applied: VersionRef | None = None
     sync_state: SyncState | None = None
-    reason: str | None = None  # why not ready, surfaced to the readiness poll
+    reason: str | None = None  # why not ready
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ReplicaState":
@@ -181,7 +179,7 @@ class PointerRewind(Exception):
 @dataclass(frozen=True)
 class PointerMove:
     ref: VersionRef
-    reset: bool  # crossed to a new run -> re-materialize base and restart the version space
+    reset: bool  # crossed to a new run -> reset to base
 
 
 def decide_pointer_move(current: VersionRef | None, proposed: VersionRef) -> PointerMove:

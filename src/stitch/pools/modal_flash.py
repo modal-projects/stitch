@@ -26,7 +26,7 @@ class ModalFlashPool(Pool):
 
         try:
             return modal.Cls.from_name(self.app_name, self.cls_name)
-        except Exception as exc:  # NotFoundError etc. — pool not deployed, or wrong app/cls name
+        except Exception as exc:  # NotFoundError etc.
             raise RuntimeError(
                 f"cannot resolve {self.app_name}.{self.cls_name} — is the Server pool deployed?"
             ) from exc
@@ -42,14 +42,12 @@ class ModalFlashPool(Pool):
     def discover_replicas(self) -> list[str]:
         import modal.experimental
 
-        self._cls()  # client-side resolve side effect (raises a clear error if not deployed)
+        self._cls()  # resolve first: clear error if not deployed
         containers = modal.experimental.flash_get_containers(self.app_name, self.cls_name)
         return [_normalize_url(h) for c in containers if (h := _host(c))]
 
     def wake(self, replicas: list[str], ref: VersionRef) -> None:
-        # Kick each replica to reconcile now; it re-reads the authoritative pointer,
-        # so no target version travels in the body. Runs in the trainer's publish hot
-        # path, so fan out over one shared client instead of a serial round-trip each.
+        # Fan out (this is on the publish hot path); each replica re-reads the pointer, so no version in the body.
         if not replicas:
             return
         import httpx

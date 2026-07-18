@@ -13,7 +13,7 @@ import time
 import urllib.error
 import urllib.request
 
-SIDECAR_MODULE = "cookbook.common.sidecar"  # the one shared serve() entrypoint
+SIDECAR_MODULE = "cookbook.common.sidecar"
 
 
 def start_sidecar(
@@ -88,9 +88,8 @@ def apply_git_patches(patch_paths: list[str], repo_dir: str, label: str) -> None
 
 
 def start_host_mem_monitor(interval_s: int = 20) -> None:
-    """Trace this node's host-RAM from a daemon thread. Host-RAM exhaustion OOM-kills the
-    trainer (the peak is the publish weight-gather) and Modal exposes no host-RAM metric, so
-    this log line is the only signal. Best-effort."""
+    """Trace this node's host-RAM from a daemon thread. Modal exposes no host-RAM metric, so
+    this log line is the only signal for the OOM peak (the publish weight-gather). Best-effort."""
     host = socket.gethostname()
 
     def _meminfo() -> tuple[float, float]:
