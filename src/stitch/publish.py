@@ -11,7 +11,7 @@ from typing import Any
 
 from stitch.pools.base import Pool
 from stitch.stores.base import Store
-from stitch.versions import VersionConstraint, VersionManifest, VersionRef, decide_pointer_move
+from stitch.types import VersionConstraint, VersionManifest, VersionRef, decide_pointer_move
 
 logger = logging.getLogger(__name__)
 

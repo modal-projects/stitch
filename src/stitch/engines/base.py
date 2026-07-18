@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from stitch.versions import VersionManifest, VersionRef
+from stitch.types import VersionManifest, VersionRef
 
 
 class Engine:
@@ -27,8 +27,9 @@ class Engine:
         prefix/KV cache as part of the reload."""
         raise NotImplementedError
 
-    async def flush(self) -> None:
-        """Evict cached state (KV / radix tree). Called before commit in quiesce mode."""
+    async def flush_cache(self) -> None:
+        """Evict the engine's prefix/KV cache — the standalone ``/flush_cache`` primitive.
+        Not on the reconcile path: flushing on a reload goes through ``commit(flush_cache=…)``."""
         raise NotImplementedError
 
     async def pause(self) -> None:

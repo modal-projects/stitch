@@ -20,7 +20,7 @@ from typing import Any
 from stitch.pools.modal_flash import ModalFlashPool
 from stitch.publish import claim_run, constrain_request, publish_version
 from stitch.stores.modal_volume import ModalVolumeStore
-from stitch.versions import PointerRewind
+from stitch.types import PointerRewind
 
 logger = logging.getLogger(__name__)
 

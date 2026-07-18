@@ -13,16 +13,26 @@ import logging
 import time
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager, contextmanager, suppress
 from typing import Any, Literal
 
 from stitch.engines.base import Engine
 from stitch.stores.base import Store
-from stitch.versions import SyncState, VersionConstraint, VersionKind, VersionRef
+from stitch.types import SyncState, VersionConstraint, VersionKind, VersionRef
 
 logger = logging.getLogger(__name__)
 
 CommitMode = Literal["quiesce", "in_place"]
+
+
+@contextmanager
+def _timed(metrics: dict[str, Any], key: str):
+    """Record the block's wall-clock into ``metrics[key]`` (seconds, 3 dp)."""
+    start = time.perf_counter()
+    try:
+        yield
+    finally:
+        metrics[key] = round(time.perf_counter() - start, 3)
 
 
 class ConstraintUnmet(Exception):
@@ -45,7 +55,7 @@ class AdmissionGate:
     on new weights.
     """
 
-    def __init__(self, *, commit_mode: CommitMode = "quiesce") -> None:
+    def __init__(self, *, commit_mode: CommitMode = "in_place") -> None:
         self.commit_mode = commit_mode
         self.applied: VersionRef | None = None
         self._cond = asyncio.Condition()
@@ -168,7 +178,7 @@ class Reconciler(AdmissionGate):
         store: Store,
         engine: Engine,
         run_id: str | None = None,
-        commit_mode: CommitMode = "quiesce",
+        commit_mode: CommitMode = "in_place",
         flush_cache_on_commit: bool = False,
         debug_requests: bool = False,
         reconcile_interval: float = 5.0,
@@ -323,9 +333,8 @@ class Reconciler(AdmissionGate):
         # Stage (host-side apply — the engine walks back to the nearest anchor and
         # replays the whole tail) runs while serving; the gate covers only the reload.
         self.sync_state = SyncState.PREPARING
-        t = time.perf_counter()
-        await self.engine.stage(target, source_dir)
-        m["stage_s"] = round(time.perf_counter() - t, 3)
+        with _timed(m, "stage_s"):
+            await self.engine.stage(target, source_dir)
 
         def on_applied() -> None:
             self.applied = pointer
@@ -337,12 +346,9 @@ class Reconciler(AdmissionGate):
             m["skipped_reload"] = True
         else:
             async def apply() -> None:
-                if self.commit_mode != "in_place":
-                    await self.engine.flush()
                 self.sync_state = SyncState.COMMITTING
-                t2 = time.perf_counter()
-                await self.engine.commit(pointer, flush_cache=self.flush_cache_on_commit)
-                m["commit_s"] = round(time.perf_counter() - t2, 3)
+                with _timed(m, "commit_s"):
+                    await self.engine.commit(pointer, flush_cache=self.flush_cache_on_commit)
 
             await self.commit(
                 apply=apply,

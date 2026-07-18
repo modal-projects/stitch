@@ -24,7 +24,7 @@ def main() -> None:
     p.add_argument("--bulletin-root", default=os.environ.get("DELTA_BULLETIN_ROOT", "/delta-bulletin"))
     p.add_argument("--volume-name", default=os.environ.get("DELTA_VOLUME_NAME", ""))
     p.add_argument("--local-checkpoint-dir", default=os.environ.get("STITCH_LOCAL_CHECKPOINT_DIR", "/local-checkpoint"))
-    p.add_argument("--commit-mode", choices=["quiesce", "in_place"], default=os.environ.get("SIDECAR_COMMIT_MODE", "quiesce"))
+    p.add_argument("--commit-mode", choices=["quiesce", "in_place"], default=os.environ.get("SIDECAR_COMMIT_MODE", "in_place"))
     p.add_argument("--flush-cache-on-commit", action="store_true")  # evict sglang's prefix/KV cache on reload
     p.add_argument("--run-id", default=os.environ.get("DISAGG_RUN_ID") or None)
     p.add_argument("--debug-requests", action="store_true")

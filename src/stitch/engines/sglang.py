@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from stitch.engines.base import Engine
-from stitch.versions import VersionManifest, VersionRef
+from stitch.types import VersionManifest, VersionRef
 
 
 class SGLangEngine(Engine):
@@ -81,7 +81,7 @@ class SGLangEngine(Engine):
             action="weight update",
         )
 
-    async def flush(self) -> None:
+    async def flush_cache(self) -> None:
         await self._get("/flush_cache", ok=(200, 404))
 
     async def pause(self) -> None:

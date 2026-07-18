@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 from cookbook.common import hooks
 from stitch.stores.modal_volume import ModalVolumeStore
-from stitch.versions import VersionRef
+from stitch.types import VersionRef
 
 
 class _FakePool:

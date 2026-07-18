@@ -57,6 +57,14 @@ A joiner pays a one-time catch-up (materialize the base, replay from the newest 
 which periodic full anchors bound. While it is behind, version-pinned requests it cannot
 serve yet get a retryable `409` and route to caught-up replicas.
 
+## Pinning the rollout region
+
+Pin the rollout pool to the region nearest the trainer — or the one required by data
+residency — e.g. `us-west`, `eu-west`, `ap-south`. It is a per-deployment setting on the
+Server: the config's `proxy_regions` (the Flash edge the front door consistent-hashes to)
+and `region` (where the GPU replicas run). Set them explicitly rather than relying on
+Modal's default placement, so the trainer↔rollout hop stays in-region.
+
 ## The sglang fork
 
 Rollout engines run a patched sglang: the disaggregated `/pull_weights`, correct quantized

@@ -11,7 +11,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 
 from stitch.pools.base import Pool
-from stitch.versions import VersionRef
+from stitch.types import VersionRef
 
 logger = logging.getLogger(__name__)
 
@@ -21,11 +21,18 @@ class ModalFlashPool(Pool):
         self.app_name = app_name
         self.cls_name = cls_name
 
-    def gateway_url(self) -> str:
+    def _cls(self):
         import modal
 
-        cls = modal.Cls.from_name(self.app_name, self.cls_name)
-        urls = cls._experimental_get_flash_urls()
+        try:
+            return modal.Cls.from_name(self.app_name, self.cls_name)
+        except Exception as exc:  # NotFoundError etc. — pool not deployed, or wrong app/cls name
+            raise RuntimeError(
+                f"cannot resolve {self.app_name}.{self.cls_name} — is the Server pool deployed?"
+            ) from exc
+
+    def gateway_url(self) -> str:
+        urls = self._cls()._experimental_get_flash_urls()
         if not urls:
             raise RuntimeError(
                 f"no Flash gateway URL for {self.app_name}.{self.cls_name} — deploy the app first"
@@ -33,10 +40,9 @@ class ModalFlashPool(Pool):
         return str(urls[0]).rstrip("/")
 
     def discover_replicas(self) -> list[str]:
-        import modal
         import modal.experimental
 
-        modal.Cls.from_name(self.app_name, self.cls_name)  # client-side resolve side effect
+        self._cls()  # client-side resolve side effect (raises a clear error if not deployed)
         containers = modal.experimental.flash_get_containers(self.app_name, self.cls_name)
         return [_normalize_url(h) for c in containers if (h := _host(c))]
 
@@ -60,9 +66,7 @@ class ModalFlashPool(Pool):
                 list(pool.map(wake_one, replicas))
 
     def scale(self, *, min: int | None = None, max: int | None = None) -> None:
-        import modal
-
-        fn = modal.Cls.from_name(self.app_name, self.cls_name)._get_class_service_function()
+        fn = self._cls()._get_class_service_function()
         kwargs: dict[str, int] = {}
         if min is not None:
             kwargs["min_containers"] = min

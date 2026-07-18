@@ -11,7 +11,7 @@ import threading
 from stitch.engines.base import Engine
 from stitch.stores.base import Store
 from stitch.sync import ConstraintUnmet, Reconciler
-from stitch.versions import (
+from stitch.types import (
     VersionConstraint,
     VersionKind,
     VersionManifest,
@@ -62,8 +62,8 @@ class FakeEngine(Engine):
         self.committed.append(ref)
         self.calls.append(f"commit:{ref.version}")
 
-    async def flush(self) -> None:
-        self.calls.append("flush")
+    async def flush_cache(self) -> None:
+        self.calls.append("flush_cache")
 
     async def pause(self) -> None:
         self.calls.append("pause")
@@ -103,13 +103,13 @@ def _run(coro) -> None:
 def test_fresh_reconcile() -> None:
     async def go() -> None:
         engine = FakeEngine()
-        r = Reconciler(store=FakeStore(VersionRef("r1", 3), _full("r1", 3)), engine=engine)
+        r = Reconciler(store=FakeStore(VersionRef("r1", 3), _full("r1", 3)), engine=engine, commit_mode="quiesce")
         await r.startup()
         assert r.applied == VersionRef("r1", 3)
         assert engine.staged[-1] == VersionRef("r1", 3)
         assert VersionRef("r1", 3) in engine.committed
         assert r.sync_state is SyncState.IDLE
-        assert engine.calls.index("flush") < engine.calls.index("commit:3")  # quiesce flushes first
+        assert "flush_cache" not in engine.calls  # flushing is not automatic; it rides commit(flush_cache=…)
 
     _run(go())
 

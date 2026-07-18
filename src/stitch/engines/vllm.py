@@ -14,7 +14,7 @@ from __future__ import annotations
 from typing import Any
 
 from stitch.engines.base import Engine
-from stitch.versions import VersionManifest, VersionRef
+from stitch.types import VersionManifest, VersionRef
 
 
 class VLLMEngine(Engine):

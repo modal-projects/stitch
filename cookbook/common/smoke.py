@@ -8,7 +8,7 @@ import time
 import urllib.request
 
 from stitch.pools.modal_flash import ModalFlashPool
-from stitch.versions import VersionRef
+from stitch.types import VersionRef
 
 
 class VersionAheadError(RuntimeError):

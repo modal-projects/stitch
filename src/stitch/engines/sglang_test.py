@@ -6,7 +6,7 @@ are validated e2e; the request/response stamping is the provable-without-sglang 
 from __future__ import annotations
 
 from stitch.engines.sglang import SGLangEngine
-from stitch.versions import VersionRef
+from stitch.types import VersionRef
 
 
 def test_stamp_request_namespaces_by_version() -> None:

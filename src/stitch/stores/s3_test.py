@@ -13,7 +13,7 @@ import tempfile
 from pathlib import Path
 
 from stitch.stores.s3 import S3Store
-from stitch.versions import VersionKind, VersionManifest, VersionRef
+from stitch.types import VersionKind, VersionManifest, VersionRef
 
 
 class _FakeS3:

@@ -19,7 +19,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from stitch.stores.base import Store
-from stitch.versions import VersionManifest, VersionRef
+from stitch.types import VersionManifest, VersionRef
 
 _POINTER = "latest"
 _INDEX = "model.safetensors.index.json"

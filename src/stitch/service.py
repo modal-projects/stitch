@@ -22,7 +22,7 @@ from stitch.engines.base import Engine
 from stitch.pools.base import Pool
 from stitch.stores.base import Store
 from stitch.sync import CommitMode, ConstraintUnmet, Reconciler
-from stitch.versions import PoolState, ReplicaState, VersionConstraint
+from stitch.types import PoolState, ReplicaState, VersionConstraint
 
 logger = logging.getLogger(__name__)
 
@@ -169,7 +169,7 @@ def serve(
     engine: Engine,
     *,
     run_id: str | None = None,
-    commit_mode: CommitMode = "quiesce",
+    commit_mode: CommitMode = "in_place",
     flush_cache_on_commit: bool = False,
     host: str = "0.0.0.0",
     port: int = 8000,

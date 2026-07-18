@@ -15,7 +15,7 @@ import tempfile
 from pathlib import Path
 
 from stitch.stores.base import Store
-from stitch.versions import VersionManifest, VersionRef
+from stitch.types import VersionManifest, VersionRef
 
 _POINTER = "latest"
 
