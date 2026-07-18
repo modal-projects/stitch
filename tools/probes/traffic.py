@@ -164,7 +164,7 @@ class _VersionFloor:
         self._task: asyncio.Task[None] | None = None
 
     async def start(self, client) -> None:  # noqa: ANN001
-        from stitch.versions import VersionRef
+        from stitch.types import VersionRef
 
         async def loop() -> None:
             while True:

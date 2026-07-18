@@ -8,12 +8,10 @@ times reading each back via (a) mmap page-faults (touch every byte) and (b) sequ
 direct-IO `dd`, both COLD (page cache evicted via posix_fadvise) and WARM.
 
 To keep the "cold" numbers honest, every cold read runs in its OWN fresh, single-use
-container (`single_use_containers=True`): the volume file is written in one throwaway
-container, then each read mode (mmap / dd direct / dd buffered) is measured in a separate
-brand-new container that has never touched the file — cold read first, warm read right after
-in the same container. A new container is launched for the next mode. This prevents one
-mode's read from leaving the file resident in disk/page cache and poisoning the next mode's
-"cold" number.
+container (`single_use_containers=True`): the file is written in a throwaway container, and
+each read mode (mmap / dd direct / dd buffered) is measured in a separate brand-new container
+that never touched the file (cold read, then a warm re-read in the same container). Otherwise
+one mode's read would leave the file cached and poison the next mode's "cold" number.
 
 Each mode is repeated over `--trials` fresh containers, and the printed table reports the
 mean / std / min / max / median (plus the raw per-trial samples) for every metric.
@@ -37,10 +35,9 @@ import modal
 # depend on the host class and the ephemeral size, so match your real workload's shape.
 _GPU = os.environ.get("REPRO_GPU") or None
 _EPHEMERAL_GB = int(os.environ.get("REPRO_EPHEMERAL_GB", "512"))
-# Pin the container memory (request == limit) so BOTH the volume and ephemeral sides get the
-# identical memory budget -- this is what bounds how much of the file can stay in page cache
-# for the "warm" read, so it must be held equal to compare the two fairly. Default comfortably
-# exceeds the 32 GB file so a warm read can be fully cached.
+# Pin container memory (request == limit) so both the volume and ephemeral sides get an equal
+# budget: memory bounds how much of the file stays in page cache for the "warm" read, so it
+# must be held equal to compare fairly. Default exceeds the 32 GB file so a warm read caches.
 _MEMORY_MB = int(os.environ.get("REPRO_MEMORY_MB", str(64 * 1024)))
 
 app = modal.App("disk-repro")
@@ -134,9 +131,7 @@ def _env_info(name: str, d: str) -> dict:
     return R
 
 
-# The read modes we benchmark. Each runs in its OWN fresh container so its "cold" number is
-# genuinely cold (the container has never touched the file), immediately followed by a "warm"
-# read in the same container to show the cache-hit speed.
+# Each mode runs in its own fresh container (genuinely cold), then a warm re-read there.
 READ_MODES = ("mmap", "dd_direct", "dd_buffered")
 
 
@@ -253,9 +248,8 @@ def main(size_gb: int = 32, trials: int = 3) -> None:
             else:
                 meta.setdefault(k, v)  # host_ram / df_* -- keep first seen (workers may differ)
 
-    # Write the volume file once. Every read (and every ephemeral write+read) runs in its OWN
-    # fresh single-use container, and we repeat the whole sweep `trials` times so each trial's
-    # "cold" number is genuinely cold. Modes are interleaved across trials to spread any drift.
+    # Write the volume file once; every read runs in its own fresh single-use container. Repeat
+    # the whole sweep `trials` times so each trial's "cold" number is genuinely cold.
     write_volume.remote(size_gb=size_gb)
     for t in range(trials):
         for i, mode in enumerate(READ_MODES):

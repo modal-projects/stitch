@@ -53,7 +53,7 @@ def disk_profile(write_gb: int = 32) -> dict:
         "placement": {k: v for k, v in os.environ.items() if k.startswith("MODAL_") and len(v) < 80},
     }
 
-    # What is /local actually backed by? (local NVMe vs network scratch is the whole question)
+    # What is /local actually backed by? (local NVMe vs network scratch)
     for label, path in [("root_/", "/"), ("local_scratch", local)]:
         try:
             df = subprocess.run(["df", "-hT", path], capture_output=True, text=True).stdout.strip().splitlines()

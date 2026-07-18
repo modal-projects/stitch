@@ -7,8 +7,8 @@ from stitch.pools.modal_flash import _host, _normalize_url
 
 
 def test_normalize_url_adds_scheme_and_strips_slash() -> None:
-    assert _normalize_url("host:8000") == "https://host:8000"       # bare host -> https
-    assert _normalize_url("http://host:8000/") == "http://host:8000"  # scheme kept, slash stripped
+    assert _normalize_url("host:8000") == "https://host:8000"
+    assert _normalize_url("http://host:8000/") == "http://host:8000"
     assert _normalize_url("https://host/") == "https://host"
 
 
@@ -20,7 +20,7 @@ def test_host_reads_dict_or_attr() -> None:
         host = "h2"
 
     assert _host(_Container()) == "h2"
-    assert _host(object()) is None  # no host attr -> None
+    assert _host(object()) is None
 
 
 if __name__ == "__main__":

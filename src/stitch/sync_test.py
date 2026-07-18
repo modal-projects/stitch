@@ -50,7 +50,7 @@ class FakeStore(Store):
 
 class FakeEngine(Engine):
     def __init__(self) -> None:
-        self.calls: list[str] = []          # ordered pause/flush/commit/reset/resume + stage
+        self.calls: list[str] = []
         self.staged: list[VersionRef] = []
         self.committed: list[VersionRef] = []
 
@@ -152,8 +152,7 @@ def test_run_switch_resets_in_place() -> None:
 
 
 def test_run_switch_drains_rolling_requests() -> None:
-    # A base reset is an incompatible transition: even in in_place mode no rolling request
-    # is admitted during, or decodes across, the wipe (drain_all; stitch#32 / review P0-B).
+    # Base reset is incompatible: even in in_place, no rolling request crosses the wipe (drain_all; stitch#32).
     async def go() -> None:
         engine = FakeEngine()
         r = Reconciler(store=FakeStore(VersionRef("r2", 1), _full("r2", 1)), engine=engine, commit_mode="in_place")
@@ -189,8 +188,7 @@ def test_run_switch_drains_rolling_requests() -> None:
 
 
 def test_rolling_requests_cross_in_place_commit() -> None:
-    # The counterpart: a *compatible* in_place commit never waits on rolling traffic —
-    # the update applies while the request keeps decoding; only a base reset drains.
+    # Counterpart: a compatible in_place commit applies while rolling traffic keeps decoding; only a base reset drains.
     async def go() -> None:
         engine = FakeEngine()
         r = Reconciler(store=FakeStore(VersionRef("r1", 4), _full("r1", 4)), engine=engine, commit_mode="in_place")
@@ -232,8 +230,7 @@ def test_periodic_reconcile_recovers_missed_wake() -> None:
         r = Reconciler(store=store, engine=engine, reconcile_interval=0.02)
         await r.startup()
         assert r.applied == VersionRef("r1", 3)
-        # A publish advances latest, but its wake never lands (cold start raced it, or the
-        # best-effort wake was lost). No wake() call, no request — only the background loop.
+        # Publish advances latest but its wake never lands; only the background loop catches up.
         store.advance_pointer(VersionRef("r1", 5))
         await asyncio.sleep(0.1)
         assert r.applied == VersionRef("r1", 5)  # the backstop caught up on its own
@@ -257,8 +254,7 @@ def test_reconcile_interval_zero_disables_backstop() -> None:
 
 
 def test_stage_waits_for_prefetch() -> None:
-    # The base prefetch and a stage both write /local; the stage must wait for the prefetch
-    # (serialized in the reconciler, not left to the engine's file lock) so they never race.
+    # Prefetch and stage both write the checkpoint; the stage must wait for the prefetch so they never race.
     async def go() -> None:
         engine = FakeEngine()
         release = asyncio.Event()
@@ -276,15 +272,14 @@ def test_stage_waits_for_prefetch() -> None:
         assert "stage:2" not in engine.calls  # blocked on the (still-running) prefetch
         release.set()
         await task
-        assert engine.calls.index("prefetch") < engine.calls.index("stage:2")  # prefetch, then stage
+        assert engine.calls.index("prefetch") < engine.calls.index("stage:2")
         await r.shutdown()
 
     _run(go())
 
 
 # ── convergence liveness ─────────────────────────────────────────────────────
-# The backstop self-heals what wake-driven-only cannot (the red tests behind
-# stitch#45): each scenario converges with the backstop and never with interval=0.
+# Backstop self-heals what wake-only cannot (stitch#45): each converges with it, never with interval=0.
 
 
 async def _converged(r: Reconciler, target: VersionRef, timeout: float = 1.0) -> bool:

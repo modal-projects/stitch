@@ -6,11 +6,9 @@ requires-python = ">=3.11"
 dependencies = []
 
 [project.optional-dependencies]
-# The Modal instances (stores/modal_volume.py, pools/modal_flash.py) use the Modal
-# SDK and httpx (the pool wake).
+# httpx is the pool wake (pools/modal_flash.py).
 modal = ["modal>=1.5.1.dev9", "httpx"]
-# The sidecar runs the versioned proxy under uvicorn (Modal images install it
-# explicitly); the packaged service code needs only fastapi + httpx.
+# fastapi + httpx only; Modal images install uvicorn separately.
 sglang = ["fastapi", "httpx"]
 
 [dependency-groups]

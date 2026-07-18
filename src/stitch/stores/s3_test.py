@@ -87,15 +87,15 @@ def test_s3_publish_manifest_materialize() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         store = _store(tmp)
         ref = VersionRef("run-x", 1)
-        local = _write_local_version(Path(tmp) / "trainer", ref)  # trainer's local write
+        local = _write_local_version(Path(tmp) / "trainer", ref)
         store.publish(VersionManifest.from_hf_index(local, run_id="run-x"), local)
 
-        manifest = store.read_manifest(ref)  # reads the index back from S3
+        manifest = store.read_manifest(ref)
         assert manifest.ref == ref
         assert manifest.kind is VersionKind.DELTA
         assert manifest.files == ["model-00001-of-00001.safetensors"]
 
-        version_dir = Path(store.materialize(ref))  # downloads the chain into the cache
+        version_dir = Path(store.materialize(ref))
         assert version_dir == store.cache_dir / ref.identity
         assert (version_dir / "model-00001-of-00001.safetensors").read_bytes() == b"\x00\x11\x22\x33"
 
