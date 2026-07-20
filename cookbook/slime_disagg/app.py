@@ -53,7 +53,10 @@ server_image = serving_image.build_serving_image(hf_cache_path=str(HF_CACHE_PATH
 if SLIME_LOCAL_DIR:
     server_image = server_image.add_local_dir(SLIME_LOCAL_DIR, remote_path=SLIME_ROOT, ignore=[".git", "**/__pycache__", "**/*.pyc"])
 
-hf_cache_volume = modal.Volume.from_name("huggingface-cache", create_if_missing=True, version=2)
+# Overridable: environments that predate v2 Volumes may hold a v1 "huggingface-cache"
+# under the default name; point at a fresh v2 name there (models re-download once).
+HF_CACHE_VOLUME_NAME = os.environ.get("HF_CACHE_VOLUME_NAME", "huggingface-cache")
+hf_cache_volume = modal.Volume.from_name(HF_CACHE_VOLUME_NAME, create_if_missing=True, version=2)
 data_volume = modal.Volume.from_name("slime-data", create_if_missing=True, version=2)
 checkpoints_volume = modal.Volume.from_name("slime-checkpoints", create_if_missing=True, version=2)
 delta_volume = modal.Volume.from_name(exp.DELTA_VOLUME_NAME, create_if_missing=True, version=2)

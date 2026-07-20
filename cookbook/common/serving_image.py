@@ -26,6 +26,14 @@ SGLANG_FORK_COMMIT = "fd86c9155dfb651019a13f7229cd83bd0577752d"
 
 _COOKBOOK_DIR = Path(__file__).resolve().parent.parent  # .../cookbook
 
+
+def deploy_env_passthrough() -> dict[str, str]:
+    """Deploy-time env vars that must ride the images: containers re-import the
+    app module, so shell-only overrides would silently resolve defaults there."""
+    import os
+
+    return {k: os.environ[k] for k in ("HF_CACHE_VOLUME_NAME",) if k in os.environ}
+
 _SERVING_ENV = {
     "HF_XET_HIGH_PERFORMANCE": "1",
     "HF_HUB_ENABLE_HF_TRANSFER": "1",
@@ -52,7 +60,7 @@ def build_router_image(*, experiment: str) -> modal.Image:
             "modal",  # Pool.discover_replicas inside the container
             "transformers", "jinja2",  # prompt tokenization (chat templates)
         )
-        .env({"EXPERIMENT_CONFIG": experiment})
+        .env({"EXPERIMENT_CONFIG": experiment, **deploy_env_passthrough()})
         .add_local_python_source("stitch", "gorgo")
         .add_local_dir(str(_COOKBOOK_DIR), remote_path="/root/cookbook", ignore=["**/__pycache__"])
     )
@@ -76,7 +84,8 @@ def build_serving_image(*, hf_cache_path: str, delta_volume_name: str, experimen
             "zstandard", "xxhash", "blake3",  # engine-side /pull_weights receiver's codecs
             "fastsafetensors",  # --load-format fastsafetensors: per-rank read (nogds, see env below)
         )
-        .env({**_SERVING_ENV, "DELTA_VOLUME_NAME": delta_volume_name, "EXPERIMENT_CONFIG": experiment})
+        .env({**_SERVING_ENV, "DELTA_VOLUME_NAME": delta_volume_name, "EXPERIMENT_CONFIG": experiment,
+              **deploy_env_passthrough()})
         # The kernel-cache volume mounts at /root/.cache/sglang, which can't mount over a
         # non-empty path — clear it as the final filesystem step (repopulated on boot).
         .run_commands("rm -rf /root/.cache/sglang")

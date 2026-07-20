@@ -10,6 +10,8 @@ from pathlib import Path
 
 import modal
 
+from cookbook.common import serving_image
+
 SLIME_IMAGE_TAG = "slimerl/slime:nightly-dev-20260527a"
 SLIME_REPO_URL = "https://github.com/modal-projects/slime.git"
 # Pin to an exact commit, not the branch tip (the fetch+checkout is a cached layer).
@@ -38,7 +40,8 @@ def build_trainer_image(*, hf_cache_path: str, experiment: str, slime_local: str
         .run_commands("cd /root/Megatron-LM && python3 -m pip install --no-deps -e . --config-settings editable_mode=compat")
         # The trainer-side delta ENCODER (slime.utils.disk_delta) needs the codecs even under --no-deps.
         .pip_install("fastapi", "httpx", "uvicorn", "zstandard", "xxhash", "blake3")
-        .env({"HF_XET_HIGH_PERFORMANCE": "1", "HF_HUB_ENABLE_HF_TRANSFER": "1", "EXPERIMENT_CONFIG": experiment})
+        .env({"HF_XET_HIGH_PERFORMANCE": "1", "HF_HUB_ENABLE_HF_TRANSFER": "1", "EXPERIMENT_CONFIG": experiment,
+              **serving_image.deploy_env_passthrough()})
         .add_local_python_source("stitch")
         .add_local_dir(str(_COOKBOOK_DIR), remote_path="/root/cookbook", ignore=["**/__pycache__"])
     )
