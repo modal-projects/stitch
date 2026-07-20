@@ -292,11 +292,11 @@ class Reconciler(AdmissionGate):
         if applied is None or applied.run_id != ref.run_id or ref.version <= applied.version:
             return None
         names: set[str] = set()
-        # Walk back from the target toward the served version. The stage seeds from the newest
-        # FULL at or below the target, so a FULL above `applied` means a reseed => full reload.
         for v in range(ref.version, applied.version, -1):
             m = target if v == ref.version else self.store.read_manifest(VersionRef(ref.run_id, v))
-            if m.kind is not VersionKind.DELTA:
+            # full reload (None) for either: a FULL anchor in range (the stage reseeds from it), or a
+            # non-empty delta with no recorded touched names (an empty union would skip it → stale)
+            if m.kind is not VersionKind.DELTA or (m.files and not m.tensor_names):
                 return None
             names.update(m.tensor_names)
         return sorted(names)
