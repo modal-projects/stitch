@@ -219,9 +219,6 @@ class _Miles(MilesConfig):
     use_tis = True
 
     environment = {
-        # Cap the disk-delta encoder's in-flight (new+diff) host buffers: default 2*min(32,cpu) peaks
-        # at hundreds of GB during the publish gather and OOMs the 1T-optimizer node. 4 -> ~8 buffers.
-        "MILES_DISK_DELTA_WORKERS": "4",
         "CUDA_DEVICE_MAX_CONNECTIONS": "1",
         "NCCL_NVLS_ENABLE": "1",
         "NVSHMEM_DISABLE_NCCL": "1",
