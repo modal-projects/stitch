@@ -99,6 +99,38 @@ A dense config where partial reload can't apply (fp8) instead uses `--load-forma
 fastsafetensors` (patch 7) for a fast *full* reload and leaves the load plan off (see
 `cookbook/miles_disagg/configs/glm45_air_fp8.py`).
 
+## Variant branches
+
+- **`stitch-sglang-v0.5.15-post1-dflash`** (@ `0114538468b56df32a522f6dede85d1def34b45c`):
+  the branch above + two upstream cherry-picks that missed the `v0.5.15` release branch,
+  enabling DFlash speculative decoding on pure-MLA fp8-KV targets (Kimi-K2.x-NVFP4):
+  sgl-project/sglang#29218 (fa4 draft gets its own bf16 KV; mamba verify-commit guard for
+  pure-MLA) and sgl-project/sglang#30680 (its `_need_mamba_verify_commit` init-ordering
+  fix — the two go together). Both are upstream commits (`git cherry-pick -x`), so they
+  drop out on a rebase past their merge. Plus three fork-local loader-compat commits
+  (`c85b9409f` + `54324ba7c` + `3e8ab94f6`, tested tip `3e8ab94f6d59…`) for the
+  F4-serialized Kimi-family NVFP4 re-quants: view
+  `float4_e2m1fn_x2` safetensors tensors as packed uint8 across all three loader
+  iterators (post-fp4-dtype torch/safetensors otherwise dies at
+  `expert_data.copy_(loaded_weight)`; the pre-fp4 v0.5.12 image read the same bytes as
+  uint8), and map the fp8-style expert scale names (`weight_scale_inv` /
+  `weight_scale_global`) onto the modelopt NVFP4 params (`weight_scale` /
+  `weight_scale_2`), plus `101a9de7e` extending the fp4 view to
+  `load_plan.partial_weights_iterator` (its direct `safe_open` reads bypass the
+  iterator-level view — without it every partial reload of an F4-serialized checkpoint
+  demotes to a full reload). Upstreaming candidates.
+
+- **`stitch-sglang-minkai-dflash`** (@ `28a554ccddd035b6d592b49f32163b812384287d`): the
+  full RL patch stack ported onto the PROD serving base —
+  `minkai/nvfp4-w13-global-requant-fp32bias` @ `7175bbd4f` (v0.5.12 base + the
+  jamesliu dflash-fa4-fp8 stack + the w13 global-requant fix). 11 commits: the seven
+  RL patches (patch 5 rewritten per the doctrine below — per-expert fast paths for
+  flashinfer_trtllm and CUTLASS, declining cutedsl/padded layouts, and preserving the
+  base's w13 requant per touched expert via `_fold_w13_global_scales`) + the four
+  loader-compat commits above. GPU byte-identity validation (`/weights_checker`,
+  partial vs full) pending — the doctrine's step 4. Pinned by the private provider
+  repo's Kimi-K2.6 NVFP4 serving config.
+
 ## Re-porting to a newer sglang release (`stitch-sglang-vX`)
 
 When bumping the base (e.g. to `v0.5.16`):
