@@ -30,8 +30,8 @@ MEGATRON_RUNTIME_PATCHES = [
 # No --quantization flag — NVFP4 comes from the served checkpoint's quant config.
 # mem-fraction / context-length are starting points; measure.
 SGLANG_SERVER_ARGS = {
-    "--weight-loader-prefetch-checkpoints": "",
-    "--weight-loader-prefetch-num-threads": "8",
+    # fastsafetensors: per-rank O_DIRECT read (~1/tp bytes/rank), no gVisor mmap tax; reload inherits it. nogds set in image.
+    "--load-format": "fastsafetensors",
     "--attention-backend": "tokenspeed_mla",
     "--kv-cache-dtype": "fp8_e4m3",  # tokenspeed_mla requires this
     "--context-length": "8192",  # Moonlight's max_position_embeddings

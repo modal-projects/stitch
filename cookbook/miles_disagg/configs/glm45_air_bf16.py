@@ -25,8 +25,8 @@ MEGATRON_RUNTIME_PATCHES = ["/root/cookbook/miles_disagg/patches/megatron-r3-dis
 
 
 SGLANG_SERVER_ARGS = {
-    "--weight-loader-prefetch-checkpoints": "",
-    "--weight-loader-prefetch-num-threads": "8",
+    # fastsafetensors: per-rank O_DIRECT read (~1/tp bytes/rank), no gVisor mmap tax; reload inherits it. nogds set in image.
+    "--load-format": "fastsafetensors",
     "--reasoning-parser": "glm45",
     "--tool-call-parser": "glm45",
     "--dist-timeout": "3600",
