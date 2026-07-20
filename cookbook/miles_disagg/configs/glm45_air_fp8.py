@@ -152,7 +152,7 @@ class _Miles(MilesConfig):
 
 modal = ModalConfig(
     gpu="H200",
-    memory=1_048_576,
+    memory=(1024, int(2 * 1024 * 1024)),
     rollout_min_containers=2,
     rollout_max_containers=4,   # start at 2; scale to 4 mid-run to exercise elastic join
     rollout_target_inputs=32,

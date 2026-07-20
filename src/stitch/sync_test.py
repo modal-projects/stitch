@@ -53,13 +53,17 @@ class FakeEngine(Engine):
         self.calls: list[str] = []
         self.staged: list[VersionRef] = []
         self.committed: list[VersionRef] = []
+        self.commit_weight_names: list[list[str] | None] = []
 
     async def stage(self, manifest: VersionManifest, source_dir: str) -> None:
         self.staged.append(manifest.ref)
         self.calls.append(f"stage:{manifest.ref.version}")
 
-    async def commit(self, ref: VersionRef, *, flush_cache: bool = False) -> None:
+    async def commit(
+        self, ref: VersionRef, *, flush_cache: bool = False, weight_names: list[str] | None = None
+    ) -> None:
         self.committed.append(ref)
+        self.commit_weight_names.append(weight_names)
         self.calls.append(f"commit:{ref.version}")
 
     async def flush_cache(self) -> None:
@@ -91,8 +95,10 @@ def _full(run: str, version: int) -> VersionManifest:
     return VersionManifest(VersionRef(run, version), VersionKind.FULL, ["model.safetensors"])
 
 
-def _delta(run: str, version: int, *, files: list[str]) -> VersionManifest:
-    return VersionManifest(VersionRef(run, version), VersionKind.DELTA, files)
+def _delta(
+    run: str, version: int, *, files: list[str], tensor_names: list[str] | None = None
+) -> VersionManifest:
+    return VersionManifest(VersionRef(run, version), VersionKind.DELTA, files, tensor_names or [])
 
 
 def _run(coro) -> None:
@@ -133,6 +139,7 @@ def test_catch_up() -> None:
         await r.reconcile()
         assert r.applied == VersionRef("r1", 5)
         assert engine.committed == [VersionRef("r1", 5)]  # one composed stage+reload, not per-version
+        assert engine.commit_weight_names == [None]  # FULL target reseeds -> full reload, not partial
 
     _run(go())
 
@@ -219,6 +226,28 @@ def test_empty_delta_skips_reload() -> None:
         assert engine.staged == [VersionRef("r1", 4)]
         assert engine.committed == []  # no reload for a zero-file delta
         assert r.metrics.get("skipped_reload") is True
+
+    _run(go())
+
+
+def test_touched_names_union_reaches_commit() -> None:
+    # A multi-version catch-up hands the engine the UNION of touched tensor names across the
+    # applied→target range, so an O(delta) reload refreshes every tensor any delta changed —
+    # not just the target's. (This is the plumbing a partial reload needs; without it the
+    # engine names no tensors and pays a full reload.)
+    async def go() -> None:
+        engine = FakeEngine()
+        store = FakeStore(
+            VersionRef("r1", 5),
+            _delta("r1", 4, files=["f1"], tensor_names=["a", "b"]),
+            _delta("r1", 5, files=["f1", "f2"], tensor_names=["b", "c"]),
+        )
+        r = Reconciler(store=store, engine=engine)
+        r.applied = VersionRef("r1", 3)
+        await r.reconcile()
+        assert r.applied == VersionRef("r1", 5)
+        assert engine.commit_weight_names == [["a", "b", "c"]]  # union of v4 + v5, deduped + sorted
+        assert r.metrics.get("reload_names") == 3
 
     _run(go())
 
@@ -405,6 +434,21 @@ def test_admit_rejected_triggers_wake() -> None:
             assert e.error["type"] == "WeightVersionNotReady"
             assert e.error["target_version"] == 5
         assert r._task is not None  # the 409 kicked off a catch-up reconcile
+
+    _run(go())
+
+
+def test_unapplied_replica_rejects() -> None:
+    # Non-blocking startup serves /health before the first sync lands a version; a request in
+    # that window has no served version to stamp, so it must 409 (retryable), not serve unversioned.
+    async def go() -> None:
+        r = Reconciler(store=FakeStore(), engine=FakeEngine())
+        assert r.applied is None
+        try:
+            async with r.admit(None):
+                raise AssertionError("should have rejected")
+        except ConstraintUnmet as e:
+            assert e.error["type"] == "WeightVersionNotReady"
 
     _run(go())
 

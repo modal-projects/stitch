@@ -62,10 +62,17 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        await reconciler.startup()
+        # Serve /health before the first sync finishes: on a cold replica the reconcile pays the
+        # base-seed copy + reload (tens of minutes for a large checkpoint), and gating liveness on
+        # that overruns the platform's container-startup deadline. The engine serves its boot base
+        # until the background sync lands the pointer version.
+        syncing = asyncio.create_task(reconciler.startup())
         try:
             yield
         finally:
+            syncing.cancel()
+            with contextlib.suppress(BaseException):
+                await syncing
             await reconciler.shutdown()
             c = pooled.pop("client", None)
             if c is not None:

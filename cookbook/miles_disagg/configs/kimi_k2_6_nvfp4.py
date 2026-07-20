@@ -54,21 +54,17 @@ SGLANG_ENV = {"SGLANG_ENABLE_RELOAD_LOAD_PLAN": "1"}  # NVFP4: load-plan replay 
 
 modal = ModalConfig(
     gpu="B200",
-    # ~1.2 TiB peak (CPU-offloaded 1T optimizer + publish snapshot); nodes are 1.79 TiB.
-    memory=1_650_688,
+    region="us",
+    memory=(1024, int(2 * 1024 * 1024)),
     # Small pool (2x B200:4) so the 64-GPU trainer gang can co-schedule; min==max pins it.
-    rollout_min_containers=2,
-    rollout_max_containers=2,
+    rollout_min_containers=4,  # 4 B200:4 engines is enough for this rollout load
+    rollout_max_containers=4,
     rollout_target_inputs=32,
     proxy_regions=["us-west"],
     rollout_ephemeral_disk_mib=819_200,  # ~591 GB base copy + delta-apply headroom
     trainer_ephemeral_disk_mib=2_097_152,  # Ray logs + object spill need the headroom
-    # 4x8=32-way: EP32 shards 384 experts to ~90 GB/rank so distcp finishes inside the 900s heartbeat.
-    torch_dist_prep_nodes=4,
+    torch_dist_prep_nodes=8,
     torch_dist_prep_gpus_per_node=8,
-    torch_dist_convert_extra_args=(
-        "--tensor-model-parallel-size 1 --pipeline-model-parallel-size 1 --expert-model-parallel-size 32"
-    ),
     torch_dist_prep_ephemeral_disk_mib=2_097_152,  # ~700 GB of distcp shards buffer before commit
 )
 
@@ -83,7 +79,7 @@ class _Miles(MilesConfig):
     megatron_to_hf_mode = "raw"
     model_name = "kimi_k25"  # megatron_to_hf export dispatch (convert_kimi_k25_to_hf + NVFP4)
 
-    actor_num_nodes = 8  # 8x8 B200 = 64 GPUs (trainer only; pool is elastic on top)
+    actor_num_nodes = 16  # 16x8 B200 = 128 GPUs; TP8*PP8*CP2=128 (DP=1) — debug the actor_train backward deadlock cheaper (same PP8 path as 32 nodes; both hang identically)
     actor_num_gpus_per_node = 8
     num_gpus_per_node = 8
     colocate = False
@@ -167,8 +163,11 @@ class _Miles(MilesConfig):
     rm_type = "deepscaler"
     eval_interval = None
 
-    num_rollout = 10  # 10 GRPO steps; each publishes a delta to inspect for tensor-sparsity
-    save_interval = 20  # megatron requires it; > num_rollout so this run skips saves
+    num_rollout = 10  # 10 GRPO steps; each publishes a delta
+    # None => should_run_periodic_action returns False => skip the Megatron ckpt save. That forced final
+    # save crashes on a MoE/EP dist-ckpt common-state validation (validation.py:397) BEFORE the v1 publish;
+    # we only need the weight_v1 delta, not a Megatron checkpoint. (Fix the save separately for long runs.)
+    save_interval = None
     rollout_batch_size = 32
     rollout_max_response_len = 4096
     rollout_temperature = 0.8
@@ -179,14 +178,16 @@ class _Miles(MilesConfig):
 
     use_rollout_routing_replay = True
 
-    # 8x8=64: TP8*PP2*CP4=64, EP32 over the experts (proven kimi_k25_lora_8nodes topology).
+    # 16x8=128: TP8*PP8*CP2=128 (DP=1), EP16=TP*CP, decoder_last=5. This is Jason's PROVEN 16-node
+    # kimi config (stitch b86183e — closed the loop, async+disagg). Replicating it on the CURRENT miles
+    # to isolate: does it still work (=> deadlock was our 32-node CP4/EP32) or deadlock (=> miles regressed)?
     tensor_model_parallel_size = 8
     sequence_parallel = True
-    pipeline_model_parallel_size = 2
-    context_parallel_size = 4
-    expert_model_parallel_size = 32
+    pipeline_model_parallel_size = 8
+    context_parallel_size = 2
+    expert_model_parallel_size = 16
     expert_tensor_parallel_size = 1
-    decoder_last_pipeline_num_layers = 30
+    decoder_last_pipeline_num_layers = 5
     use_dynamic_batch_size = True
     max_tokens_per_gpu = 16384
     recompute_granularity = "full"
@@ -205,7 +206,9 @@ class _Miles(MilesConfig):
     adam_beta1 = 0.9
     adam_beta2 = 0.98
     optimizer_cpu_offload = True
-    overlap_cpu_optimizer_d2h_h2d = True
+    # False to cut the host-RAM peak at the optimizer step: overlap double-buffers the D2H/H2D
+    # optimizer transfers, which OOM-kills a rank on this ~1.88 TiB node (the crash point). Slower.
+    overlap_cpu_optimizer_d2h_h2d = False
     use_precision_aware_optimizer = True
 
     advantage_estimator = "grpo"
@@ -218,6 +221,9 @@ class _Miles(MilesConfig):
     use_tis = True
 
     environment = {
+        # Cap the disk-delta encoder's in-flight (new+diff) host buffers: default 2*min(32,cpu) peaks
+        # at hundreds of GB during the publish gather and OOMs the 1T-optimizer node. 4 -> ~8 buffers.
+        "MILES_DISK_DELTA_WORKERS": "4",
         "CUDA_DEVICE_MAX_CONNECTIONS": "1",
         "NCCL_NVLS_ENABLE": "1",
         "NVSHMEM_DISABLE_NCCL": "1",

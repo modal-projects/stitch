@@ -57,7 +57,7 @@ modal = ModalConfig(
     region="us",
     # TODO(glm5.2): size to the actual model. These are Kimi's (~1T) numbers — scale
     # down for a smaller GLM 5.2 (memory, ephemeral disk, node count).
-    memory=1_650_688,
+    memory=(1024, int(3 * 1024 * 1024)),
     rollout_min_containers=8,  # warm floor; Flash scales above under load
     rollout_target_inputs=32,
     proxy_regions=["us-west"],

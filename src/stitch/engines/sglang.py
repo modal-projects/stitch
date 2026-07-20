@@ -11,6 +11,7 @@ host-side decoder and imports no trainer package.
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
 from pathlib import Path
 from typing import Any
@@ -63,14 +64,20 @@ class SGLangEngine(Engine):
             action="base prefetch",
         )
 
-    async def commit(self, ref: VersionRef, *, flush_cache: bool = False) -> None:
-        await self._post(
-            "/update_weights_from_disk",
-            {"model_path": self.local_checkpoint_dir, "weight_version": str(ref.version),
-             "flush_cache": flush_cache},
-            timeout=None,
-            action="weight update",
-        )
+    async def commit(
+        self, ref: VersionRef, *, flush_cache: bool = False, weight_names: list[str] | None = None
+    ) -> None:
+        payload: dict[str, Any] = {
+            "model_path": self.local_checkpoint_dir,
+            "weight_version": str(ref.version),
+            "flush_cache": flush_cache,
+        }
+        # O(delta) partial reload: naming the touched tensors makes the fork reload only those
+        # (+ their fused/expert closures) instead of the whole checkpoint. STITCH_PARTIAL_RELOAD=0
+        # forces the full reload (kill switch); an engine without the load-plan patch ignores it.
+        if weight_names and os.environ.get("STITCH_PARTIAL_RELOAD", "1") == "1":
+            payload["weight_names"] = list(weight_names)
+        await self._post("/update_weights_from_disk", payload, timeout=None, action="weight update")
 
     async def flush_cache(self) -> None:
         await self._get("/flush_cache", ok=(200, 404))

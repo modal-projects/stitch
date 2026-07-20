@@ -18,7 +18,7 @@ from typing import Any, Literal
 
 from stitch.engines.base import Engine
 from stitch.stores.base import Store
-from stitch.types import SyncState, VersionConstraint, VersionKind, VersionRef
+from stitch.types import SyncState, VersionConstraint, VersionKind, VersionManifest, VersionRef
 
 logger = logging.getLogger(__name__)
 
@@ -78,15 +78,17 @@ class AdmissionGate:
 
     def _rejection(self, c: VersionConstraint) -> dict[str, Any] | None:
         applied = self.applied.version if self.applied else None
-        if c.satisfied_by(applied):
-            return None
-        target = c.exact_version if c.exact_version is not None else c.min_version
-        return {
-            "type": "WeightVersionNotReady",
-            "target_version": target,
-            "applied": applied,
-            "message": f"served version {applied} does not satisfy {c}",
-        }
+        # Until the first sync lands (applied is None) there is no served version to stamp, so
+        # reject as retryable rather than serve unversioned; the background reconcile sets it shortly.
+        if applied is None or not c.satisfied_by(applied):
+            target = c.exact_version if c.exact_version is not None else c.min_version
+            return {
+                "type": "WeightVersionNotReady",
+                "target_version": target,
+                "applied": applied,
+                "message": f"served version {applied} does not satisfy {c}",
+            }
+        return None
 
     def _on_reject(self, error: dict[str, Any]) -> None:
         """Hook, run under the lock, when a request is rejected."""
@@ -279,6 +281,26 @@ class Reconciler(AdmissionGate):
             return True
         return pointer.version > self.applied.version
 
+    def _touched_names(self, target: VersionManifest) -> list[str] | None:
+        """Union of the tensor names touched across the versions this pass applies
+        (``applied``+1 .. ``target``), for an engine that can reload only those (O(delta)).
+        Returns None — reload everything — when the applied→target range reseeds from a FULL
+        anchor or the baseline is unknown: a full reload is always correct, a partial one only
+        when the served weights already hold every tensor the deltas didn't touch."""
+        applied = self.applied
+        ref = target.ref
+        if applied is None or applied.run_id != ref.run_id or ref.version <= applied.version:
+            return None
+        names: set[str] = set()
+        # Walk back from the target toward the served version. The stage seeds from the newest
+        # FULL at or below the target, so a FULL above `applied` means a reseed => full reload.
+        for v in range(ref.version, applied.version, -1):
+            m = target if v == ref.version else self.store.read_manifest(VersionRef(ref.run_id, v))
+            if m.kind is not VersionKind.DELTA:
+                return None
+            names.update(m.tensor_names)
+        return sorted(names)
+
     async def _reconcile_once(self) -> bool:
         async with self._lock:
             m: dict[str, Any] = {}
@@ -309,6 +331,11 @@ class Reconciler(AdmissionGate):
         source_dir = await asyncio.to_thread(self.store.materialize, pointer)
         m["target_version"] = pointer.version
 
+        # Touched tensor names for an O(delta) reload: the union across the versions this pass
+        # applies (applied+1 .. target). None => the range reseeds from a FULL anchor, so the
+        # engine must reload everything. Computed under the pre-flip `applied` (on_applied moves it).
+        weight_names = await asyncio.to_thread(self._touched_names, target)
+
         # Both prefetch and stage write the host checkpoint; wait for the prefetch so they're ordered.
         # If it failed, this stage seeds the full base itself.
         if self._prefetch_task is not None and not self._prefetch_task.done():
@@ -324,15 +351,20 @@ class Reconciler(AdmissionGate):
         def on_applied() -> None:
             self.applied = pointer
 
-        if target.kind is VersionKind.DELTA and not target.files:
-            # Empty delta: advance the version, no reload — weights are byte-identical, KV stays valid.
+        if weight_names is not None and not weight_names:
+            # Nothing changed across the applied→target range: advance the version, no reload —
+            # the weights are byte-identical, so the KV cache stays valid.
             await self.commit(apply=self._commit_noop, on_applied=on_applied)
             m["skipped_reload"] = True
         else:
+            m["reload_names"] = "full" if weight_names is None else len(weight_names)
+
             async def apply() -> None:
                 self.sync_state = SyncState.COMMITTING
                 with _timed(m, "commit_s"):
-                    await self.engine.commit(pointer, flush_cache=self.flush_cache_on_commit)
+                    await self.engine.commit(
+                        pointer, flush_cache=self.flush_cache_on_commit, weight_names=weight_names
+                    )
 
             await self.commit(
                 apply=apply,
