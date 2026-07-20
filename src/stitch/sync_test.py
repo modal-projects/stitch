@@ -255,7 +255,7 @@ def test_touched_names_union_reaches_commit() -> None:
 def test_delta_without_touched_names_full_reloads_not_skips() -> None:
     # A store that records a non-empty delta but NOT its touched tensor names must full-reload,
     # never skip: an empty touched-set reads as "nothing changed" and would advance the version
-    # onto stale weights (the cognition DeltaStore regression). weight_names=None => full reload.
+    # onto stale weights (a downstream DeltaStore regression). weight_names=None => full reload.
     async def go() -> None:
         engine = FakeEngine()
         store = FakeStore(VersionRef("r1", 5), _delta("r1", 5, files=["f1"], tensor_names=[]))
