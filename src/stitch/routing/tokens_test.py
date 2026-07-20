@@ -5,9 +5,10 @@ class FakeTokenizer:
     def encode(self, text):
         return [ord(c) % 1000 for c in text]
 
-    def apply_chat_template(self, messages, *, add_generation_prompt, tokenize):
+    def apply_chat_template(self, messages, *, add_generation_prompt, tokenize, tools=None):
         assert add_generation_prompt and not tokenize
-        return "|".join(m["content"] for m in messages) + "<gen>"
+        prefix = f"<tools:{len(tools)}>" if tools else ""
+        return prefix + "|".join(m["content"] for m in messages) + "<gen>"
 
 
 def test_generate_input_ids_passthrough():
@@ -41,6 +42,18 @@ def test_chat_completions_uses_chat_template():
     payload = {"messages": [{"role": "user", "content": "hello"}]}
     ids, total = extract_token_ids("v1/chat/completions", payload, FakeTokenizer())
     assert total == len("hello<gen>")
+
+
+def test_chat_completions_passes_tools_to_template():
+    payload = {
+        "messages": [{"role": "user", "content": "go"}],
+        "tools": [{"type": "function", "function": {"name": "ls"}}],
+    }
+    _, with_tools = extract_token_ids("v1/chat/completions", payload, FakeTokenizer())
+    _, without = extract_token_ids(
+        "v1/chat/completions", {"messages": payload["messages"]}, FakeTokenizer()
+    )
+    assert with_tools == without + len("<tools:1>")  # schema block reached the template
 
 
 def test_chat_completions_byte_fallback_with_blocks():

@@ -100,6 +100,54 @@ def rl_replay(
     print(json.dumps(summary, indent=2))
 
 
+@app.function(image=image, volumes={RESULTS_ROOT: results_volume}, timeout=180 * MINUTES)
+def bfcl_replay(
+    pool_app: str,
+    pool_cls: str = "Router",
+    model: str = "default",
+    trajectories: str = f"{RESULTS_ROOT}/bfcl/bfcl_replay.jsonl",
+    concurrency: int = 48,
+    max_tokens: int = 256,
+    duration: float = 600.0,
+    seed: int = 0,
+    tag: str = "run",
+) -> None:
+    """Teacher-forced BFCL multi-turn replay (see traffic.run_bfcl_replay). The
+    trajectories file comes from bfcl_prep.py, uploaded to the results volume."""
+    from stitch.pools.modal_flash import ModalFlashPool
+    from tools.probes import traffic as traffic_mod
+
+    gateway = ModalFlashPool(pool_app, pool_cls).gateway_url()
+    out = f"{RESULTS_ROOT}/{tag}/bfcl_replay.jsonl"
+    summary = asyncio.run(traffic_mod.run_bfcl_replay(
+        gateway, model, trajectories_path=trajectories, concurrency=concurrency,
+        max_tokens=max_tokens, duration=duration, seed=seed, out_path=out,
+    ))
+    results_volume.commit()
+    print(json.dumps(summary, indent=2))
+
+
+@app.function(image=image, volumes={DELTA_ROOT: delta_volume}, timeout=10 * MINUTES)
+def claim(pool_app: str, pool_cls: str = "Server", run_id: str = "") -> None:
+    """Claim the pool at base (weight_v0) without a trainer — a serving-only bench
+    needs replicas 'ready', which requires an applied version. ``pool_cls`` accepts
+    a comma-separated list for multi-class (geo) pools. Deploy this app with
+    PROBE_DELTA_VOLUME set to the target recipe's delta volume."""
+    import uuid
+
+    from stitch.pools.modal_flash import ModalFlashPool
+    from stitch.pools.union import UnionPool
+    from stitch.publish import claim_run
+    from stitch.stores.modal_volume import ModalVolumeStore
+
+    members = [ModalFlashPool(pool_app, c.strip()) for c in pool_cls.split(",") if c.strip()]
+    pool = members[0] if len(members) == 1 else UnionPool(members)
+    store = ModalVolumeStore(DELTA_ROOT, volume_name=delta_volume_name)
+    rid = run_id or f"bench-{uuid.uuid4().hex[:8]}"
+    claim_run(store, pool, rid)
+    print(f"claimed run_id={rid} on {pool_app}.{pool_cls} (volume={delta_volume_name})")
+
+
 @app.function(image=image, volumes={DELTA_ROOT: delta_volume, RESULTS_ROOT: results_volume}, timeout=240 * MINUTES)
 def replay(pool_app: str, source_run: str, pool_cls: str = "Server", cadence_s: float = 30.0, limit: int | None = None, tag: str = "run") -> None:
     from tools.probes.replay_publisher import replay as replay_chain

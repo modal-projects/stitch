@@ -121,10 +121,17 @@ def extract_token_ids(
         if tokenizer is not None and isinstance(messages, list) and messages:
             # apply_chat_template(..., add_generation_prompt=True) matches
             # SGLang's server-side rendering, so counts and ids line up
-            # with what its KV cache actually holds.
+            # with what its KV cache actually holds. ``tools`` must ride
+            # along: templates render tool schemas into the prefix, and for
+            # tool-calling workloads that block is a large shared prefix the
+            # trie would otherwise not see.
+            tools = payload.get("tools")
             try:
                 rendered = tokenizer.apply_chat_template(
-                    messages, add_generation_prompt=True, tokenize=False
+                    messages,
+                    add_generation_prompt=True,
+                    tokenize=False,
+                    **({"tools": tools} if isinstance(tools, list) and tools else {}),
                 )
                 ids = list(tokenizer.encode(rendered))
                 return ids, len(ids)

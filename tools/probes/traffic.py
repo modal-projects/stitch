@@ -222,6 +222,88 @@ async def run_rl_replay(
     return {"steps": step, **summarize(rows)}
 
 
+async def run_bfcl_replay(
+    gateway: str,
+    model: str,
+    *,
+    trajectories_path: str,      # bfcl_prep.py output: {episode_id, tools, steps[]} per line
+    concurrency: int = 48,       # episodes in flight (each runs its steps sequentially)
+    max_tokens: int = 256,       # one tool call per step; bounded, TTFT-dominated
+    temperature: float = 0.0,
+    duration: float = 600.0,
+    out_path: str | None = None,
+    seed: int = 0,
+) -> dict[str, Any]:
+    """Teacher-forced BFCL multi-turn replay: workers run episodes end-to-end,
+    sending each step's ground-truth prefix (+ OpenAI ``tools``) and advancing on
+    ground truth regardless of the model's reply. Steps within an episode are
+    strictly sequential, so trajectory wall time = sum of per-step latencies —
+    the compounding quantity a routing policy can shrink. The workload is
+    deterministic, so episodes pair exactly across routing-policy arms.
+    """
+    import httpx
+
+    episodes = [json.loads(line) for line in Path(trajectories_path).read_text().splitlines() if line]
+    rng = random.Random(seed)
+    rows: list[dict[str, Any]] = []
+    deadline = time.time() + duration
+    counter = {"instance": 0}
+
+    async def worker(worker_id: int, client: httpx.AsyncClient) -> None:
+        while time.time() < deadline:
+            ep = episodes[rng.randrange(len(episodes))]
+            counter["instance"] += 1
+            instance = counter["instance"]
+            session = f"ep-{ep['episode_id']}-{instance}"
+            t_start = time.time()
+            completed = 0
+            for k, messages in enumerate(ep["steps"]):
+                if time.time() > deadline:
+                    break
+                payload = {
+                    "model": model, "messages": messages, "tools": ep["tools"],
+                    "max_tokens": max_tokens, "temperature": temperature,
+                }
+                row = {"t": time.time(), "shape": "bfcl", "episode": ep["episode_id"],
+                       "instance": instance, "step": k, "total_steps": len(ep["steps"]),
+                       "session": session, "retries_409": 0}
+                data = await _post_with_retry(
+                    client, f"{gateway}/v1/chat/completions", payload, {AFFINITY_HEADER: session}, row
+                )
+                rows.append(row)
+                if data is None:
+                    break  # trajectory dies with its failed step
+                completed += 1
+                row.update(
+                    wv_start=data.get("weight_version_start"),
+                    wv_end=data.get("weight_version_end"),
+                )
+            rows.append({
+                "t": time.time(), "shape": "bfcl_trajectory", "episode": ep["episode_id"],
+                "instance": instance, "steps_completed": completed,
+                "total_steps": len(ep["steps"]),
+                "trajectory_seconds": time.time() - t_start,
+                "complete": completed == len(ep["steps"]),
+            })
+
+    limits = httpx.Limits(max_connections=concurrency + 16)
+    async with httpx.AsyncClient(timeout=3600.0, trust_env=False, limits=limits) as client:
+        await asyncio.gather(*(worker(i, client) for i in range(concurrency)))
+    if out_path:
+        p = Path(out_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    trajectories = [r for r in rows if r["shape"] == "bfcl_trajectory" and r["complete"]]
+    lat = sorted(r["trajectory_seconds"] for r in trajectories)
+    return {
+        "steps": sum(1 for r in rows if r["shape"] == "bfcl"),
+        "trajectories_complete": len(trajectories),
+        "trajectory_p50": lat[len(lat) // 2] if lat else None,
+        "trajectory_p95": lat[int(len(lat) * 0.95)] if lat else None,
+        **summarize([r for r in rows if r["shape"] == "bfcl"]),
+    }
+
+
 class _VersionFloor:
     """Track the pool's applied version via the gateway's /server_info (answers from an
     arbitrary replica — probe-grade, not exact)."""
