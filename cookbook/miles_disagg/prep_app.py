@@ -6,9 +6,9 @@ runs once before serving. It lives in its own app so invoking it never instantia
 (``rollout_min_containers``), a serving concern with no place in preparation. Run prep first,
 then deploy the rollout app:
 
-    EXPERIMENT_CONFIG=<cfg> uv run --extra modal modal run -m cookbook.miles_disagg.prep_app::prepare_checkpoints
-    EXPERIMENT_CONFIG=<cfg> uv run --extra modal modal run -m cookbook.miles_disagg.prep_app::prepare_torch_dist
-    EXPERIMENT_CONFIG=<cfg> uv run --extra modal modal run -m cookbook.miles_disagg.prep_app::prepare_dataset
+    EXPERIMENT_CONFIG=<cfg> uv run --extra modal modal run -d -m cookbook.miles_disagg.prep_app::prepare_checkpoints
+    EXPERIMENT_CONFIG=<cfg> uv run --extra modal modal run -d -m cookbook.miles_disagg.prep_app::prepare_torch_dist
+    EXPERIMENT_CONFIG=<cfg> uv run --extra modal modal run -d -m cookbook.miles_disagg.prep_app::prepare_dataset
 """
 
 from __future__ import annotations
