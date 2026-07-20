@@ -8,6 +8,10 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 from cookbook.common.constants import PREP_PATH
 from cookbook.miles_disagg.trainer_image import MEGATRON_PATH, MILES_ROOT, TORCH_DIST_CONVERT_WRAPPER
@@ -40,9 +44,10 @@ def prepare_checkpoints(exp, prep_volume) -> None:
 
     def _build_bf16(out: str) -> None:
         if is_int4:
+            print("dequantizing INT4 source -> bf16 masters (GPU)...", flush=True)
             subprocess.run(["python", f"{tools}/convert_kimi_int4_to_bf16.py", "--model-dir", src, "--output-dir", out], check=True)
         else:
-            subprocess.run(f"cp -aL {src}/. {out}/", shell=True, check=True)  # -L: real files, not cache symlinks
+            _copy_tree("bf16 masters", src, out)
         _strip_stale_quant_config(os.path.join(out, "config.json"))
 
     _staged(bf16_dir, _build_bf16)
@@ -56,7 +61,7 @@ def prepare_checkpoints(exp, prep_volume) -> None:
         fp8_source = getattr(exp, "ROLLOUT_SOURCE_MODEL", None)
         if not fp8_source:
             raise SystemExit("SERVED_CHECKPOINT_FORMAT='fp8' requires ROLLOUT_SOURCE_MODEL")
-        _staged(fp8_dir, lambda out: subprocess.run(f"cp -aL {snapshot_download(fp8_source)}/. {out}/", shell=True, check=True))
+        _staged(fp8_dir, lambda out: _copy_tree("fp8 served base", snapshot_download(fp8_source), out))
         prep_volume.commit()
         print(f"Prepared masters={bf16_dir} served_base={fp8_dir}")
         return
@@ -68,8 +73,11 @@ def prepare_checkpoints(exp, prep_volume) -> None:
         carveouts += ["--num-layers-at-start-in-bf16", str(n)]
     if (n := getattr(exp.miles, "num_layers_at_end_in_bf16", None)) is not None:
         carveouts += ["--num-layers-at-end-in-bf16", str(n)]
-    _staged(nvfp4_dir, lambda out: subprocess.run(
-        ["python", f"{tools}/convert_hf_to_nvfp4.py", "--model-dir", bf16_dir, "--save-dir", out, *carveouts], check=True))
+    def _build_nvfp4(out: str) -> None:
+        print("building nvfp4 served base from bf16 masters (GPU conversion)...", flush=True)
+        subprocess.run(["python", f"{tools}/convert_hf_to_nvfp4.py", "--model-dir", bf16_dir, "--save-dir", out, *carveouts], check=True)
+
+    _staged(nvfp4_dir, _build_nvfp4)
     prep_volume.commit()
     print(f"Prepared masters={bf16_dir} served_base={nvfp4_dir}")
 
@@ -100,12 +108,49 @@ def prepare_torch_dist(exp, prep_volume, *, rank: int, master_addr: str) -> None
     env = {**os.environ}
     if use_wrapper:
         env["SKIP_RELEASE_RENAME"] = "1"
+    print(f"converting bf16 masters -> torch_dist ref_load ({nodes}-node torchrun, rank {rank})...", flush=True)
     subprocess.run(["bash", "-c", inner], check=True, env=env)
     # Every node commits its own distcp shards (disjoint files merge on the Volume);
     # a rank-0-only commit would drop the other nodes' shards.
     prep_volume.commit()
     if rank == 0:
         print(f"Prepared torch_dist={torch_dist_dir}")
+
+
+# A single Volume->Volume stream is backend-fetch bound; ~8 parallel streams recover ~5x (the
+# sglang base-seed's profiled knee). 16 MiB reads run at full mount speed while bounding memory.
+_COPY_WORKERS = int(os.environ.get("PREP_COPY_WORKERS", "8"))
+_COPY_CHUNK = 16 << 20
+_COPY_LOG_STEP_GB = 50  # one progress line per this many GB, so a multi-TB copy isn't a silent stall
+
+
+def _copy_tree(label: str, src: str, dst: str) -> None:
+    """Copy a checkpoint dir, dereferencing the HF cache's blob symlinks into real files (the old
+    ``cp -aL``), but across a thread pool for the ~5x and with throttled GB/GB + rate progress."""
+    src_files = [p for p in Path(src).rglob("*") if p.is_file()]  # is_file() follows symlinks
+    total_gb = sum(p.stat().st_size for p in src_files) / 1e9
+    progress = {"done_gb": 0.0, "next_log_gb": _COPY_LOG_STEP_GB}
+    lock = threading.Lock()
+    start = time.monotonic()
+
+    def copy_one(p: Path) -> None:
+        out = Path(dst) / p.relative_to(src)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "rb") as fsrc, open(out, "wb") as fdst:  # open() follows the symlink to the real blob
+            while chunk := fsrc.read(_COPY_CHUNK):
+                fdst.write(chunk)
+        with lock:
+            progress["done_gb"] += p.stat().st_size / 1e9
+            done = progress["done_gb"]
+            if done >= progress["next_log_gb"] or done >= total_gb:
+                rate = done / max(time.monotonic() - start, 1e-3)
+                print(f"copying {label}: {done:.0f}/{total_gb:.0f} GB ({100 * done / max(total_gb, 1e-9):.0f}%), {rate:.1f} GB/s", flush=True)
+                progress["next_log_gb"] += _COPY_LOG_STEP_GB
+
+    os.makedirs(dst, exist_ok=True)
+    with ThreadPoolExecutor(max_workers=min(_COPY_WORKERS, len(src_files) or 1)) as pool:
+        list(pool.map(copy_one, src_files))
+    print(f"copied {label}: {total_gb:.0f} GB", flush=True)
 
 
 def _staged(final_dir: str, build) -> None:
