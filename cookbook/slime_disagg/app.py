@@ -26,7 +26,7 @@ import modal.experimental
 
 from stitch.pools.modal_flash import ModalFlashPool
 
-from cookbook.common import launch, ray_cluster, serving_image, server, smoke
+from cookbook.common import launch, ray_cluster, router, serving_image, server, smoke
 from cookbook.common.constants import (
     CHECKPOINTS_PATH, DATA_PATH, HF_CACHE_PATH, MINUTES, RAY_PORT, SERVER_STARTUP_TIMEOUT, SIDECAR_PORT,
 )
@@ -74,6 +74,9 @@ SGLANG_SERVER_ARGS = {
     "--max-running-requests": str(ROLLOUT_CONCURRENCY),
     "--trust-remote-code": "",
     "--custom-pull-weights-pre-read-hook": "stitch.stores.modal_volume.pull_weights_pre_read_hook",
+    # Prometheus gauges (num_running_reqs, num_used_tokens, ...) — scraped by the
+    # rollout Router's load-aware policies through the sidecar's catch-all proxy.
+    "--enable-metrics": "",
     **exp.SGLANG_SERVER_ARGS,
 }
 
@@ -110,6 +113,43 @@ class Server:
     @modal.exit()
     def stop(self) -> None:
         server.serve_stop(self)
+
+
+# The rollout Router (optional, modal_cfg.router_enabled): one always-on CPU container
+# running the stitch routing service in front of the Server pool. min=max=1 is required —
+# the radix trie, load counters, and online tuner are in-process state. @modal.concurrent
+# sizes it for the whole pool's traffic (it fans out to every Server replica).
+if modal_cfg.router_enabled:
+    router_image = serving_image.build_router_image(experiment=EXPERIMENT)
+
+    @app.cls(
+        image=router_image, cpu=4, memory=8192,
+        cloud=modal_cfg.cloud, region=modal_cfg.region,
+        volumes={str(HF_CACHE_PATH): hf_cache_volume},
+        min_containers=1, max_containers=1,
+        timeout=40 * MINUTES, scaledown_window=15 * MINUTES,
+        include_source=False,
+    )
+    @modal.experimental.http_server(
+        port=SIDECAR_PORT, proxy_regions=modal_cfg.proxy_regions,
+        exit_grace_period=25, startup_timeout=SERVER_STARTUP_TIMEOUT,
+    )
+    @modal.concurrent(target_inputs=ROLLOUT_CONCURRENCY * modal_cfg.rollout_min_containers)
+    class Router:
+        @modal.enter()
+        def startup(self) -> None:
+            router.serve_router_startup(
+                self, app_name=exp.APP_NAME, server_cls="Server",
+                model_name=slime_cfg.hf_checkpoint if modal_cfg.router_tokenizer else None,
+                policy=modal_cfg.router_policy,
+                hyperparameters=modal_cfg.router_hyperparameters,
+                tuner=modal_cfg.router_tuner,
+                startup_timeout=SERVER_STARTUP_TIMEOUT,
+            )
+
+        @modal.exit()
+        def stop(self) -> None:
+            router.serve_router_stop(self)
 
 
 # ── Trainer (slime on Ray) ────────────────────────────────────────────────────
@@ -161,7 +201,11 @@ class Trainer:
             return
 
         cfg = SlimeConfig.from_payload(payload)
-        cfg.rollout_endpoint_url = ModalFlashPool(exp.APP_NAME, "Server").gateway_url()
+        # With the router enabled, rollout traffic goes trainer -> Router (policy
+        # dispatch) -> Server sidecars; publish/wake/claim still target Server directly.
+        cfg.rollout_endpoint_url = ModalFlashPool(
+            exp.APP_NAME, "Router" if modal_cfg.router_enabled else "Server"
+        ).gateway_url()
         run_id = uuid.uuid4().hex[:12]  # per-launch fence token; forks a fresh chain
         cfg.update_weight_disk_dir = f"{exp.DELTA_BULLETIN_ROOT}/{run_id}"
         hook_knobs = {

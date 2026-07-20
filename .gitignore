@@ -200,3 +200,6 @@ docgen_tmp/
 
 
 AGENTS.md
+# Nested checkout of the GORGO repo (github.com/atoniolo76/GORGO) — its own git repo,
+# resolved as the local `gorgo` package by [tool.uv.sources] until published to PyPI.
+/GORGO/

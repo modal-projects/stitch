@@ -12,6 +12,13 @@ modal = ["modal>=1.5.1.dev9", "httpx"]
 # The sidecar runs the versioned proxy under uvicorn (Modal images install it
 # explicitly); the packaged service code needs only fastapi + httpx.
 sglang = ["fastapi", "httpx"]
+# The rollout router (src/stitch/routing/) embeds the GORGO policy core.
+# gorgo resolves from the in-tree GORGO/ checkout via [tool.uv.sources] until
+# it is published; swap the source for a PyPI pin (or a git source) then.
+router = ["fastapi", "httpx", "gorgo>=0.2.0"]
+
+[tool.uv.sources]
+gorgo = { path = "GORGO", editable = true }
 
 [dependency-groups]
 dev = ["pytest"]

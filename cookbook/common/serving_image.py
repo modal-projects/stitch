@@ -39,6 +39,25 @@ _SERVING_ENV = {
 }
 
 
+def build_router_image(*, experiment: str) -> modal.Image:
+    """The rollout-Router image: CPU-only, no engine — just the stitch routing
+    service, the gorgo policy core, and a tokenizer for prompt token extraction
+    (the tokenizer reads the mounted HF cache volume at the default cache path).
+    gorgo mounts from the local GORGO/ checkout (editable dev install) until it
+    is published; swap add_local_python_source("gorgo") for a pip_install then."""
+    return (
+        modal.Image.debian_slim(python_version="3.12")
+        .pip_install(
+            "fastapi", "httpx[http2]", "uvicorn",  # the routing service
+            "modal",  # Pool.discover_replicas inside the container
+            "transformers", "jinja2",  # prompt tokenization (chat templates)
+        )
+        .env({"EXPERIMENT_CONFIG": experiment})
+        .add_local_python_source("stitch", "gorgo")
+        .add_local_dir(str(_COOKBOOK_DIR), remote_path="/root/cookbook", ignore=["**/__pycache__"])
+    )
+
+
 def build_serving_image(*, hf_cache_path: str, delta_volume_name: str, experiment: str) -> modal.Image:
     """The rollout-pool image. ``DELTA_VOLUME_NAME`` is read by the engine's pre-read hook
     and the sidecar's Store; ``EXPERIMENT_CONFIG`` so the container's re-import resolves the

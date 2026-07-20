@@ -386,6 +386,32 @@ wheels = [
 ]
 
 [[package]]
+name = "gorgo"
+version = "0.2.0"
+source = { editable = "GORGO" }
+
+[package.metadata]
+requires-dist = [
+    { name = "duckdb", marker = "extra == 'analysis'", specifier = ">=1.5.2" },
+    { name = "guidellm", marker = "extra == 'analysis'", specifier = ">=0.6.0" },
+    { name = "httpx", marker = "extra == 'proxy'", specifier = ">=0.28.1" },
+    { name = "matplotlib", marker = "extra == 'analysis'", specifier = ">=3.9.0" },
+    { name = "modal", marker = "extra == 'proxy'", specifier = ">=1.4.0" },
+    { name = "numpy", marker = "extra == 'analysis'", specifier = ">=2.4.4" },
+    { name = "seaborn", marker = "extra == 'analysis'", specifier = ">=0.13.0" },
+    { name = "tiktoken", marker = "extra == 'analysis'", specifier = ">=0.12.0" },
+    { name = "transformers", marker = "extra == 'proxy'", specifier = ">=4.48.0" },
+    { name = "uvicorn", marker = "extra == 'proxy'", specifier = ">=0.44.0" },
+]
+provides-extras = ["proxy", "analysis"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=8.0" },
+    { name = "ruff", specifier = ">=0.9.0" },
+]
+
+[[package]]
 name = "grpclib"
 version = "0.4.9"
 source = { registry = "https://pypi.org/simple" }
@@ -968,6 +994,11 @@ modal = [
     { name = "httpx" },
     { name = "modal" },
 ]
+router = [
+    { name = "fastapi" },
+    { name = "gorgo" },
+    { name = "httpx" },
+]
 sglang = [
     { name = "fastapi" },
     { name = "httpx" },
@@ -980,12 +1011,15 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "fastapi", marker = "extra == 'router'" },
     { name = "fastapi", marker = "extra == 'sglang'" },
+    { name = "gorgo", marker = "extra == 'router'", editable = "GORGO" },
     { name = "httpx", marker = "extra == 'modal'" },
+    { name = "httpx", marker = "extra == 'router'" },
     { name = "httpx", marker = "extra == 'sglang'" },
     { name = "modal", marker = "extra == 'modal'", specifier = ">=1.5.1.dev9" },
 ]
-provides-extras = ["modal", "sglang"]
+provides-extras = ["modal", "sglang", "router"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "pytest" }]

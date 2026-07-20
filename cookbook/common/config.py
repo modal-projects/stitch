@@ -27,6 +27,16 @@ class ModalConfig:
     proxy_regions: list[str] = ["us-west"]
     rollout_ephemeral_disk_mib: int | None = None
     rollout_memory_mib: int | None = None
+    # Rollout router (stitch.routing): when enabled, a single always-on Router
+    # container fronts the pool and the trainer's rollout_endpoint_url points at
+    # it instead of the Flash gateway. The policy names come from the gorgo
+    # package's registry ("session-affinity" reproduces the gateway's pinning;
+    # "gorgo" adds prefix-cache/load/RTT-aware scoring).
+    router_enabled: bool = False
+    router_policy: str = "session-affinity"
+    router_hyperparameters: dict[str, float] | None = None  # gorgo weight overrides
+    router_tuner: dict[str, Any] | None = None  # POST /router/tune-shaped startup config
+    router_tokenizer: bool = True  # tokenize prompts with the served model's HF tokenizer
     torch_dist_prep_nodes: int = 2
     torch_dist_prep_gpus_per_node: int = 8
     torch_dist_convert_extra_args: str = ""
