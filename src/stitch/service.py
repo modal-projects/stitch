@@ -62,10 +62,8 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        # Serve /health before the first sync finishes: on a cold replica the reconcile pays the
-        # base-seed copy + reload (tens of minutes for a large checkpoint), and gating liveness on
-        # that overruns the platform's container-startup deadline. The engine serves its boot base
-        # until the background sync lands the pointer version.
+        # Reconcile in the background so uvicorn can answer /health (which gates routing on sync);
+        # a v0 deploy latches synced fast — the base-seed copy is a separate background task, not here.
         syncing = asyncio.create_task(reconciler.startup())
         try:
             yield
@@ -81,8 +79,12 @@ def create_app(
     app = FastAPI(lifespan=lifespan)
 
     @app.get("/health")
-    async def health() -> dict[str, Any]:
-        return {"ok": True}
+    async def health() -> Response:
+        # Flash has no readiness gate distinct from this probe, so gate routing on sync: an unsynced
+        # joiner would otherwise be routed to and 409 every request until it caught up.
+        if not reconciler.synced:
+            return JSONResponse({"synced": False}, status_code=503)
+        return JSONResponse({"synced": True})
 
     @app.get("/server_info")
     async def server_info() -> dict[str, Any]:
@@ -204,7 +206,7 @@ async def readiness(pool: Pool, *, timeout: float = 15.0) -> PoolState:
             resp = await c.get(f"{url.rstrip('/')}/server_info", timeout=timeout)
             return ReplicaState.from_dict(resp.json())
         except Exception as exc:  # noqa: BLE001
-            return ReplicaState(ready=False, reason=str(exc)[:80])
+            return ReplicaState(reason=str(exc)[:80])  # applied=None => counts as not at any version
 
     async with httpx.AsyncClient(trust_env=False) as c:
         states = await asyncio.gather(*(probe(c, url) for url in pool.discover_replicas()))

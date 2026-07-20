@@ -10,7 +10,7 @@ APP_NAME = "stitch-glm45-air-fp8"
 DELTA_VOLUME_NAME = "stitch-delta-glm45-air-fp8"
 DELTA_BULLETIN_ROOT = "/delta-bulletin"
 LOCAL_CHECKPOINT_PATH = "/local-checkpoint"
-SIDECAR_COMMIT_MODE = "quiesce"  # fp8 reload is exact; draining buys clean per-version attribution
+SIDECAR_COMMIT_MODE = "in_place"  # reload without pausing generation — no serving gap; weights shift under in-flight decodes, RL-tolerated
 SIDECAR_FLUSH_CACHE_ON_COMMIT = False
 
 MODEL_TAG = "glm45-air-bf16"

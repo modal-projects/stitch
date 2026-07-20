@@ -127,25 +127,28 @@ _SYNC_STATES = {s.value for s in SyncState}
 
 @dataclass(frozen=True)
 class ReplicaState:
-    """One replica's readiness report — the body of its ``server_info``."""
+    """One replica's ``server_info``: the version it has applied + its reconcile lifecycle."""
 
-    ready: bool
     applied: VersionRef | None = None
     sync_state: SyncState | None = None
-    reason: str | None = None  # why not ready
+    reason: str | None = None
+
+    def at(self, target: VersionRef) -> bool:
+        """This replica has ``target`` on the GPU and its reconcile isn't errored — i.e. it counts
+        toward ``target`` being live on the pool."""
+        return self.applied == target and self.sync_state is not SyncState.ERROR
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ReplicaState":
         applied, state = data.get("applied"), data.get("sync_state")
         return cls(
-            ready=bool(data.get("ready", False)),
             applied=VersionRef.parse(applied) if applied else None,
             sync_state=SyncState(state) if state in _SYNC_STATES else None,
             reason=data.get("reason"),
         )
 
     def to_dict(self) -> dict[str, Any]:
-        data: dict[str, Any] = {"ready": self.ready}
+        data: dict[str, Any] = {}
         if self.applied is not None:
             data["applied"] = self.applied.identity
         if self.sync_state is not None:
@@ -157,17 +160,11 @@ class ReplicaState:
 
 @dataclass(frozen=True)
 class PoolState:
-    """Aggregate readiness across a pool's replicas; drives the readiness poll."""
+    """Every replica's ``server_info``, gathered by ``service.readiness()``. Consumers apply their
+    own threshold over ``replicas`` — each ``ReplicaState.at(target)`` says whether it has that
+    version live."""
 
     replicas: list[ReplicaState]
-
-    def ready_fraction(self, target: VersionRef) -> float:
-        if not self.replicas:
-            return 0.0
-        return sum(r.ready and r.applied == target for r in self.replicas) / len(self.replicas)
-
-    def is_ready(self, target: VersionRef, *, threshold: float = 1.0) -> bool:
-        return bool(self.replicas) and self.ready_fraction(target) >= threshold
 
 
 class PointerRewind(Exception):
