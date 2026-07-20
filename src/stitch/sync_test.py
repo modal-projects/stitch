@@ -252,6 +252,24 @@ def test_touched_names_union_reaches_commit() -> None:
     _run(go())
 
 
+def test_delta_without_touched_names_full_reloads_not_skips() -> None:
+    # A store that records a non-empty delta but NOT its touched tensor names must full-reload,
+    # never skip: an empty touched-set reads as "nothing changed" and would advance the version
+    # onto stale weights (the cognition DeltaStore regression). weight_names=None => full reload.
+    async def go() -> None:
+        engine = FakeEngine()
+        store = FakeStore(VersionRef("r1", 5), _delta("r1", 5, files=["f1"], tensor_names=[]))
+        r = Reconciler(store=store, engine=engine)
+        r.applied = VersionRef("r1", 4)
+        await r.reconcile()
+        assert r.applied == VersionRef("r1", 5)
+        assert engine.committed == [VersionRef("r1", 5)]  # reloaded, not skipped
+        assert engine.commit_weight_names == [None]       # full reload (touched names unknown)
+        assert r.metrics.get("skipped_reload") is not True
+
+    _run(go())
+
+
 def test_periodic_reconcile_recovers_missed_wake() -> None:
     async def go() -> None:
         engine = FakeEngine()
