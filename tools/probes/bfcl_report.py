@@ -46,7 +46,11 @@ def main() -> None:
     arm_a, arm_b = [a.strip() for a in args.arms.split(",")]
 
     blocks = json.loads((Path(args.dir) / "blocks.json").read_text())
-    rows = [json.loads(line) for line in Path(args.rows).read_text().splitlines() if line]
+    if "*" in args.rows:  # preempted runs leave multiple uniquely-named row files
+        paths = sorted(Path(args.rows).parent.glob(Path(args.rows).name))
+    else:
+        paths = [Path(args.rows)]
+    rows = [json.loads(line) for p in paths for line in p.read_text().splitlines() if line]
     steps = [r for r in rows if r["shape"] == "bfcl"]
     trajs = [r for r in rows if r["shape"] == "bfcl_trajectory" and r["complete"]]
 

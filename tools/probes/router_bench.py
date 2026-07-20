@@ -36,10 +36,28 @@ import httpx
 POLL_INTERVAL = 5.0
 
 
+def _retrying(fn, what: str, attempts: int = 12, sleep_s: float = 5.0):
+    """Admin calls must survive transient gateway blips (502s during Flash
+    rescheduling killed a run's block transition once) — retry hard; a lost
+    boundary invalidates the whole schedule."""
+    last: Exception | None = None
+    for _ in range(attempts):
+        try:
+            return fn()
+        except Exception as exc:  # noqa: BLE001
+            last = exc
+            print(f"[bench] {what} failed ({exc}); retrying in {sleep_s}s")
+            time.sleep(sleep_s)
+    raise RuntimeError(f"{what} failed after {attempts} attempts") from last
+
+
 def _post(client: httpx.Client, url: str, body: dict) -> dict:
-    r = client.post(url, json=body)
-    r.raise_for_status()
-    return r.json()
+    def once() -> dict:
+        r = client.post(url, json=body)
+        r.raise_for_status()
+        return r.json()
+
+    return _retrying(once, f"POST {url.rsplit('/', 1)[-1]}")
 
 
 def _get(client: httpx.Client, url: str) -> dict:
@@ -61,11 +79,17 @@ def _enter_block(client: httpx.Client, base: str, label: str) -> None:
 
 def _leave_tune(client: httpx.Client, base: str) -> dict:
     """Disable the tuner and reset weights to defaults; return the tuned snapshot."""
-    tuned = _get(client, f"{base}/router/hyperparameters")["hyperparameters"]
-    tune_state = _get(client, f"{base}/router/tune")["auto_tune"]
+    tuned = _retrying(
+        lambda: _get(client, f"{base}/router/hyperparameters")["hyperparameters"], "GET hyperparameters"
+    )
+    tune_state = _retrying(lambda: _get(client, f"{base}/router/tune")["auto_tune"], "GET tune")
     _post(client, f"{base}/router/tune", {"enabled": False})
-    r = client.put(f"{base}/router/hyperparameters", json={})
-    r.raise_for_status()
+
+    def reset() -> None:
+        r = client.put(f"{base}/router/hyperparameters", json={})
+        r.raise_for_status()
+
+    _retrying(reset, "PUT hyperparameters")
     print(f"[bench] tuner OFF; weights reset. tuned={tuned.get('defaults')} "
           f"applied_count={tune_state.get('applied_count')} last_score={tune_state.get('last_score')}")
     return {"tuned_hyperparameters": tuned, "tune_state": tune_state}

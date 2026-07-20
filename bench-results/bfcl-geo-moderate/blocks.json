@@ -1,0 +1,71 @@
+[
+  {
+    "index": 0,
+    "label": "tune",
+    "start": 1784581000.6731727,
+    "planned_seconds": 600.0,
+    "tune_result": {
+      "tuned_hyperparameters": {
+        "defaults": {
+          "rtt_weight": 1e-05,
+          "prefill_weight": 5.0,
+          "load_weight": 1.0,
+          "queue_weight": 1.0,
+          "prefill_rate": 1.0,
+          "queue_rate": 1.0
+        },
+        "per_target": {}
+      },
+      "tune_state": {
+        "enabled": false,
+        "window_size": 100,
+        "hop_size": 50,
+        "apply": true,
+        "mode": "online-es",
+        "objective_metric": "neg_p95_e2e",
+        "online_tuner_state": {
+          "name": "gaussian-es-1plus1-1over5",
+          "best_score": -1.822218053,
+          "best_params": {
+            "prefill_weight": 5.0,
+            "rtt_weight": 1e-05
+          },
+          "evaluated_after_baseline": 69,
+          "sigma": 0.04422162350197842,
+          "recent_success_rate": 0.0,
+          "recent_window_filled": 8
+        },
+        "pending_candidate": null,
+        "last_score": -1.932843465,
+        "buffered_samples": 1000,
+        "samples_since_last_apply": 50,
+        "samples_until_next_apply": null,
+        "applied_count": 69,
+        "last_applied_at_monotonic": 369.384570151,
+        "last_recommendation": {
+          "defaults": {
+            "prefill_weight": 5.0,
+            "rtt_weight": 1e-05
+          },
+          "per_target": {}
+        },
+        "enabled_at_monotonic": 226.787177499
+      }
+    },
+    "end": 1784581601.1551976
+  },
+  {
+    "index": 1,
+    "label": "gorgo",
+    "start": 1784581601.2362597,
+    "planned_seconds": 600.0,
+    "end": 1784582201.2363367
+  },
+  {
+    "index": 2,
+    "label": "session-affinity",
+    "start": 1784582201.3166919,
+    "planned_seconds": 600.0,
+    "end": 1784582801.3167782
+  }
+]

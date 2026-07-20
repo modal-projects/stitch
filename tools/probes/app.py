@@ -114,11 +114,15 @@ def bfcl_replay(
 ) -> None:
     """Teacher-forced BFCL multi-turn replay (see traffic.run_bfcl_replay). The
     trajectories file comes from bfcl_prep.py, uploaded to the results volume."""
+    import uuid
+
     from stitch.pools.modal_flash import ModalFlashPool
     from tools.probes import traffic as traffic_mod
 
     gateway = ModalFlashPool(pool_app, pool_cls).gateway_url()
-    out = f"{RESULTS_ROOT}/{tag}/bfcl_replay.jsonl"
+    # Unique per container: a preempted-and-restarted run writes a second file
+    # instead of clobbering the first; the report globs bfcl_replay-*.jsonl.
+    out = f"{RESULTS_ROOT}/{tag}/bfcl_replay-{uuid.uuid4().hex[:8]}.jsonl"
     summary = asyncio.run(traffic_mod.run_bfcl_replay(
         gateway, model, trajectories_path=trajectories, concurrency=concurrency,
         max_tokens=max_tokens, duration=duration, seed=seed, out_path=out,

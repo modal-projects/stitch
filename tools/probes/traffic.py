@@ -286,13 +286,23 @@ async def run_bfcl_replay(
                 "complete": completed == len(ep["steps"]),
             })
 
+    def flush() -> None:
+        if out_path:
+            p = Path(out_path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("".join(json.dumps(r) + "\n" for r in rows))
+
+    async def flusher() -> None:
+        # Periodic flush so a preempted container loses ≤2 min of rows (the
+        # restarted container writes a fresh uniquely-named file; see app.py).
+        while time.time() < deadline:
+            await asyncio.sleep(120)
+            flush()
+
     limits = httpx.Limits(max_connections=concurrency + 16)
     async with httpx.AsyncClient(timeout=3600.0, trust_env=False, limits=limits) as client:
-        await asyncio.gather(*(worker(i, client) for i in range(concurrency)))
-    if out_path:
-        p = Path(out_path)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text("".join(json.dumps(r) + "\n" for r in rows))
+        await asyncio.gather(flusher(), *(worker(i, client) for i in range(concurrency)))
+    flush()
     trajectories = [r for r in rows if r["shape"] == "bfcl_trajectory" and r["complete"]]
     lat = sorted(r["trajectory_seconds"] for r in trajectories)
     return {
