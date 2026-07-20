@@ -4,6 +4,9 @@
 Server (sglang + stitch sidecar) is the shared common one; the Trainer runs slime on Ray
 and publishes XOR deltas through a Modal Volume the pool syncs from.
 
+Prepare the model + dataset once first (a separate app, so prep never spins up the rollout
+Server floor — see ``cookbook.slime_disagg.prep_app``), then deploy this rollout + trainer app:
+
     EXPERIMENT_CONFIG=kimi_k2_6_int4 uv run --extra modal modal deploy -m cookbook.slime_disagg.app
 
 Config access is uniform: the experiment module ``exp`` is the single source of truth —
@@ -182,29 +185,7 @@ class Trainer:
         subprocess.run(["bash", "-lc", cmd], check=True)
 
 
-# ── Preparation + entrypoints ──────────────────────────────────────────────────
-@app.function(
-    image=image, volumes={str(HF_CACHE_PATH): hf_cache_volume},
-    timeout=2 * 60 * MINUTES, secrets=[modal.Secret.from_name("huggingface-secret")], include_source=False,
-)
-def download_model() -> None:
-    """Snapshot the served model into the HF cache (sglang serves it by repo id)."""
-    from huggingface_hub import snapshot_download
-
-    snapshot_download(repo_id=slime_cfg.hf_checkpoint)
-    hf_cache_volume.commit()
-
-
-@app.function(
-    image=image, volumes={str(DATA_PATH): data_volume},
-    timeout=2 * 60 * MINUTES, secrets=[modal.Secret.from_name("huggingface-secret")], include_source=False,
-)
-def prepare_dataset() -> None:
-    data_volume.reload()
-    slime_cfg.prepare_data()
-    data_volume.commit()
-
-
+# ── Entrypoints (preparation lives in a separate app: cookbook.slime_disagg.prep_app) ──
 @app.local_entrypoint()
 def launch_train() -> None:
     """Spawn training on the deployed app. Config ships as data, so edits run without a

@@ -4,6 +4,9 @@
 Server (sglang + stitch sidecar) is the shared common one; the Trainer runs miles on Ray
 and publishes XOR deltas through a Modal Volume the pool syncs from.
 
+Prepare the checkpoints once first (a separate app, so prep never spins up the rollout Server
+floor — see ``cookbook.miles_disagg.prep_app``), then deploy this rollout + trainer app:
+
     EXPERIMENT_CONFIG=glm45_air_fp8 uv run --extra modal modal deploy -m cookbook.miles_disagg.app
 
 Config access is uniform: the experiment module ``exp`` is the single source of truth —
@@ -32,7 +35,7 @@ from cookbook.common.constants import (
     CHECKPOINTS_PATH, DATA_PATH, HF_CACHE_PATH, MINUTES, PREP_PATH, RAY_PORT,
     SERVER_STARTUP_TIMEOUT, SGLANG_CACHE_PATH, SIDECAR_PORT,
 )
-from cookbook.miles_disagg import prep, trainer_image
+from cookbook.miles_disagg import trainer_image
 from cookbook.miles_disagg.config import MilesConfig, YAML_CONFIG_FIELDS
 from cookbook.miles_disagg.trainer_image import MEGATRON_PATH, MILES_ROOT
 
@@ -227,44 +230,7 @@ def _materialize_node_local_yaml(cfg: Any, field: str, dest_dir: str = "/root/.m
         setattr(cfg, field, path)
 
 
-# ── Preparation + entrypoints ──────────────────────────────────────────────────
-@app.function(
-    image=image, gpu=f"{modal_cfg.gpu}:1",
-    volumes={str(HF_CACHE_PATH): hf_cache_volume, str(PREP_PATH): prep_volume},
-    timeout=6 * 60 * MINUTES, secrets=[modal.Secret.from_name("huggingface-secret")], include_source=False,
-)
-def prepare_checkpoints() -> None:
-    prep.prepare_checkpoints(exp, prep_volume)
-
-
-# torch_dist conversion is clustered across nodes (a large MoE won't fit an 8-way split).
-_TORCH_DIST_MULTINODE = modal_cfg.torch_dist_prep_nodes > 1
-
-
-@app.function(
-    image=image, gpu=f"{modal_cfg.gpu}:{modal_cfg.torch_dist_prep_gpus_per_node}",
-    volumes={str(HF_CACHE_PATH): hf_cache_volume, str(PREP_PATH): prep_volume},
-    timeout=6 * 60 * MINUTES,
-    ephemeral_disk=(modal_cfg.torch_dist_prep_ephemeral_disk_mib or modal_cfg.rollout_ephemeral_disk_mib),
-    secrets=[modal.Secret.from_name("huggingface-secret")], include_source=False,
-    **({"experimental_options": {"efa_enabled": True}} if _TORCH_DIST_MULTINODE else {}),
-)
-@(modal.experimental.clustered(modal_cfg.torch_dist_prep_nodes, rdma=True) if _TORCH_DIST_MULTINODE else lambda fn: fn)
-def prepare_torch_dist() -> None:
-    rank, master_addr, _ = ray_cluster.get_modal_cluster_context(modal_cfg.torch_dist_prep_nodes)
-    prep.prepare_torch_dist(exp, prep_volume, rank=rank, master_addr=master_addr)
-
-
-@app.function(
-    image=image, volumes={str(DATA_PATH): data_volume},
-    timeout=2 * 60 * MINUTES, secrets=[modal.Secret.from_name("huggingface-secret")], include_source=False,
-)
-def prepare_dataset() -> None:
-    data_volume.reload()
-    miles_cfg.prepare_data()
-    data_volume.commit()
-
-
+# ── Entrypoints (preparation lives in a separate app: cookbook.miles_disagg.prep_app) ──
 @app.local_entrypoint()
 def launch_train() -> None:
     """Spawn training on the deployed app. Config ships as data, so edits run without a
