@@ -6,8 +6,8 @@ in ``app.py`` — and therefore never brings up the rollout autoscaler floor
 (``rollout_min_containers``), a serving concern with no place in preparation. Run prep first, then
 deploy the rollout app:
 
-    EXPERIMENT_CONFIG=<cfg> uv run --extra modal modal run -m cookbook.slime_disagg.prep_app::download_model
-    EXPERIMENT_CONFIG=<cfg> uv run --extra modal modal run -m cookbook.slime_disagg.prep_app::prepare_dataset
+    EXPERIMENT_CONFIG=<cfg> uv run --extra modal modal run -d -m cookbook.slime_disagg.prep_app::download_model
+    EXPERIMENT_CONFIG=<cfg> uv run --extra modal modal run -d -m cookbook.slime_disagg.prep_app::prepare_dataset
 """
 
 from __future__ import annotations
