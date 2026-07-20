@@ -77,13 +77,15 @@ def main() -> None:
     import argparse
 
     from stitch.pools.modal_flash import ModalFlashPool
+    from stitch.pools.union import UnionPool
     from stitch.routing import serve_router
 
     p = argparse.ArgumentParser()
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--port", type=int, default=SIDECAR_PORT)
     p.add_argument("--app-name", required=True)
-    p.add_argument("--server-cls", default="Server")
+    p.add_argument("--server-cls", default="Server",
+                   help="comma-separated for a multi-class (e.g. per-region) pool")
     p.add_argument("--policy", default="session-affinity")
     p.add_argument("--model", default=None, help="HF id for prompt tokenization (omit for byte fallback)")
     p.add_argument("--hyperparameters", default=None, help="JSON dict of gorgo weight overrides")
@@ -97,8 +99,10 @@ def main() -> None:
 
             return AutoTokenizer.from_pretrained(args.model)
 
+    members = [ModalFlashPool(args.app_name, cls.strip()) for cls in args.server_cls.split(",") if cls.strip()]
+    pool = members[0] if len(members) == 1 else UnionPool(members)
     serve_router(
-        ModalFlashPool(args.app_name, args.server_cls),
+        pool,
         host=args.host, port=args.port,
         policy=args.policy,
         tokenizer_factory=tokenizer_factory,

@@ -154,6 +154,74 @@ async def _post_with_retry(client, url, payload, headers, row) -> dict[str, Any]
     return None
 
 
+async def run_rl_replay(
+    gateway: str,
+    model: str,
+    *,
+    dataset: str = "zhuzilin/gsm8k",
+    split: str = "train",
+    messages_key: str = "messages",
+    batch_size: int = 64,          # prompts per step (slime rollout_batch_size)
+    group_size: int = 8,           # GRPO samples per prompt (n_samples_per_prompt)
+    max_tokens: int = 16,          # small on purpose: E2E ≈ RTT+queue+prefill ≈ TTFT
+    temperature: float = 1.0,
+    duration: float = 600.0,
+    out_path: str | None = None,
+    seed: int = 0,
+) -> dict[str, Any]:
+    """Replay the RL rollout workload without a trainer: GRPO-shaped bursts of the
+    training dataset's own prompts.
+
+    Each "step" mirrors slime's rollout phase — ``batch_size`` prompts sampled from
+    the dataset, ``group_size`` concurrent requests per prompt (identical messages,
+    one affinity session per group), all ``batch_size*group_size`` fired at once,
+    then a barrier before the next step (slime is step-synchronous). With a small
+    ``max_tokens`` the measured latency isolates the routing-sensitive path (network
+    + queue + prefill); the group structure supplies the natural GRPO prefix reuse.
+    """
+    import httpx
+    from datasets import load_dataset
+
+    ds = load_dataset(dataset, split=split)
+    rng = random.Random(seed)
+    rows: list[dict[str, Any]] = []
+    deadline = time.time() + duration
+    step = 0
+    # The whole burst must be genuinely concurrent — the default 100-connection
+    # pool would serialize a 512-request step client-side and pollute latency.
+    limits = httpx.Limits(max_connections=batch_size * group_size + 32)
+    async with httpx.AsyncClient(timeout=3600.0, trust_env=False, limits=limits) as client:
+        while time.time() < deadline:
+            prompt_rows = [ds[i] for i in rng.sample(range(len(ds)), batch_size)]
+
+            async def one(step: int, pidx: int, sample: int, messages: list[dict]) -> None:
+                payload = {"model": model, "messages": messages,
+                           "max_tokens": max_tokens, "temperature": temperature}
+                headers = {AFFINITY_HEADER: f"s{step}-g{pidx}"}
+                row = {"t": time.time(), "shape": "rl_replay", "step": step,
+                       "session": f"s{step}-g{pidx}", "turn": sample, "retries_409": 0}
+                data = await _post_with_retry(client, f"{gateway}/v1/chat/completions", payload, headers, row)
+                if data is not None:
+                    row.update(
+                        wv_start=data.get("weight_version_start"),
+                        wv_end=data.get("weight_version_end"),
+                        straddled=data.get("weight_version_start") != data.get("weight_version_end"),
+                    )
+                rows.append(row)
+
+            await asyncio.gather(*(
+                one(step, pidx, sample, list(pr[messages_key]))
+                for pidx, pr in enumerate(prompt_rows)
+                for sample in range(group_size)
+            ))
+            step += 1
+    if out_path:
+        p = Path(out_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    return {"steps": step, **summarize(rows)}
+
+
 class _VersionFloor:
     """Track the pool's applied version via the gateway's /server_info (answers from an
     arbitrary replica — probe-grade, not exact)."""

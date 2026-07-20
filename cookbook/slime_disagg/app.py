@@ -81,12 +81,22 @@ SGLANG_SERVER_ARGS = {
 }
 
 
+# Geo split: with rollout_regions set, "Server" pins to regions[0] and a second
+# identical class "ServerB" (below) pins to regions[1] — one Modal class can't place
+# containers in distinct regions deterministically. The Router unions both for discovery.
+_GEO = modal_cfg.rollout_regions or []
+if _GEO and not modal_cfg.router_enabled:
+    raise RuntimeError("rollout_regions requires router_enabled: one class's Flash gateway can't front the other region")
+_SERVER_REGION = _GEO[0] if _GEO else modal_cfg.region
+ROLLOUT_SERVER_CLASSES = ["Server", "ServerB"] if len(_GEO) > 1 else ["Server"]
+
+
 # The rollout Server: a thin module-level class (Modal requires @app.cls at global scope)
 # whose enter/exit delegate to the shared common.server logic. sglang + the stitch sidecar.
 @app.cls(
     image=server_image,
     gpu=f"{modal_cfg.gpu}:{slime_cfg.rollout_num_gpus_per_engine}",
-    cloud=modal_cfg.cloud, region=modal_cfg.region,
+    cloud=modal_cfg.cloud, region=_SERVER_REGION,
     volumes={str(HF_CACHE_PATH): hf_cache_volume, exp.DELTA_BULLETIN_ROOT: delta_volume},
     min_containers=modal_cfg.rollout_min_containers, max_containers=modal_cfg.rollout_max_containers,
     timeout=40 * MINUTES, scaledown_window=15 * MINUTES,
@@ -115,6 +125,41 @@ class Server:
         server.serve_stop(self)
 
 
+if len(_GEO) > 1:
+    # Second-region twin of Server (geo split). Same image/args/lifecycle; only the
+    # region differs. min/max containers apply per region class.
+    @app.cls(
+        image=server_image,
+        gpu=f"{modal_cfg.gpu}:{slime_cfg.rollout_num_gpus_per_engine}",
+        cloud=modal_cfg.cloud, region=_GEO[1],
+        volumes={str(HF_CACHE_PATH): hf_cache_volume, exp.DELTA_BULLETIN_ROOT: delta_volume},
+        min_containers=modal_cfg.rollout_min_containers, max_containers=modal_cfg.rollout_max_containers,
+        timeout=40 * MINUTES, scaledown_window=15 * MINUTES,
+        ephemeral_disk=modal_cfg.rollout_ephemeral_disk_mib, memory=modal_cfg.rollout_memory_mib,
+        include_source=False,
+    )
+    @modal.experimental.http_server(
+        port=SIDECAR_PORT, proxy_regions=modal_cfg.proxy_regions,
+        exit_grace_period=25, startup_timeout=SERVER_STARTUP_TIMEOUT,
+    )
+    @modal.concurrent(target_inputs=ROLLOUT_CONCURRENCY)
+    class ServerB:
+        @modal.enter()
+        def startup(self) -> None:
+            server.serve_startup(
+                self, model_name=slime_cfg.hf_checkpoint, sglang_args=SGLANG_SERVER_ARGS,
+                tp=slime_cfg.rollout_num_gpus_per_engine, concurrency=ROLLOUT_CONCURRENCY,
+                bulletin_root=exp.DELTA_BULLETIN_ROOT, local_checkpoint_dir=exp.LOCAL_CHECKPOINT_PATH,
+                volume_name=exp.DELTA_VOLUME_NAME, commit_mode=exp.SIDECAR_COMMIT_MODE,
+                flush_cache_on_commit=exp.SIDECAR_FLUSH_CACHE_ON_COMMIT,
+                startup_timeout=SERVER_STARTUP_TIMEOUT, sglang_env=getattr(exp, "SGLANG_ENV", {}),
+            )
+
+        @modal.exit()
+        def stop(self) -> None:
+            server.serve_stop(self)
+
+
 # The rollout Router (optional, modal_cfg.router_enabled): one always-on CPU container
 # running the stitch routing service in front of the Server pool. min=max=1 is required —
 # the radix trie, load counters, and online tuner are in-process state. @modal.concurrent
@@ -124,7 +169,7 @@ if modal_cfg.router_enabled:
 
     @app.cls(
         image=router_image, cpu=4, memory=8192,
-        cloud=modal_cfg.cloud, region=modal_cfg.region,
+        cloud=modal_cfg.cloud, region=_SERVER_REGION,  # geo: co-located with regions[0]
         volumes={str(HF_CACHE_PATH): hf_cache_volume},
         min_containers=1, max_containers=1,
         timeout=40 * MINUTES, scaledown_window=15 * MINUTES,
@@ -134,12 +179,12 @@ if modal_cfg.router_enabled:
         port=SIDECAR_PORT, proxy_regions=modal_cfg.proxy_regions,
         exit_grace_period=25, startup_timeout=SERVER_STARTUP_TIMEOUT,
     )
-    @modal.concurrent(target_inputs=ROLLOUT_CONCURRENCY * modal_cfg.rollout_min_containers)
+    @modal.concurrent(target_inputs=ROLLOUT_CONCURRENCY * modal_cfg.rollout_min_containers * len(ROLLOUT_SERVER_CLASSES))
     class Router:
         @modal.enter()
         def startup(self) -> None:
             router.serve_router_startup(
-                self, app_name=exp.APP_NAME, server_cls="Server",
+                self, app_name=exp.APP_NAME, server_cls=",".join(ROLLOUT_SERVER_CLASSES),
                 model_name=slime_cfg.hf_checkpoint if modal_cfg.router_tokenizer else None,
                 policy=modal_cfg.router_policy,
                 hyperparameters=modal_cfg.router_hyperparameters,

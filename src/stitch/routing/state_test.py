@@ -177,6 +177,18 @@ def test_record_success_inserts_trie_and_buffers_sample():
     assert len(s.samples) == 1
     sample = s.samples[0]
     assert sample["target"] == A and sample["ttft_seconds"] == pytest.approx(0.05)
+    assert sample["policy"] == "gorgo"  # dispatch-time policy, not completion-time
+
+
+def test_sample_policy_survives_live_flip():
+    s = make_state(policy="gorgo")
+    h = s.dispatch(A, token_ids=[1], request_tokens=1)
+    s.policy = "session-affinity"  # A/B driver flips mid-flight
+    s.record_success(
+        h, token_ids=[1], ttft_ns=1_000_000, total_ns=2_000_000, prompt_tokens=1, completion_tokens=1
+    )
+    h.release()
+    assert s.samples[-1]["policy"] == "gorgo"
 
 
 def test_record_success_skips_sample_without_usage():

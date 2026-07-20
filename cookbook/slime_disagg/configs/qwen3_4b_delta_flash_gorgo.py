@@ -22,10 +22,23 @@ SGLANG_SERVER_ARGS = _base.SGLANG_SERVER_ARGS
 
 modal = ModalConfig(
     gpu="H200",
+    # Pinned fleet: the A/B benchmark must not have Flash autoscaling change the
+    # replica count mid-run.
+    rollout_min_containers=2,
+    rollout_max_containers=2,
     router_enabled=True,
-    router_policy="gorgo",
-    # The sidecar buffers responses, so router-observed TTFT == E2E; tune on E2E.
-    router_tuner={"enabled": True, "objective_metric": "neg_p95_e2e"},
+    # The bench driver (tools/probes/router_bench.py) owns the policy schedule and
+    # the tuner segment; start deterministic. (Tune on E2E when enabling: the
+    # sidecar buffers responses, so router-observed TTFT == E2E.)
+    router_policy="session-affinity",
+    router_tuner=None,
 )
 
-slime = _base.slime
+
+class _Slime(_base._Slime):
+    # The base recipe is a 3-step smoke; the benchmark needs rollouts flowing for
+    # the whole ~50-min block schedule.
+    num_rollout = 30
+
+
+slime = _Slime()

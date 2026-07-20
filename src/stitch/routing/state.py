@@ -76,6 +76,7 @@ class ReleaseHandle:
         "request_tokens",
         "uncached_tokens",
         "queued_at_dispatch",
+        "policy",
         "_released",
     )
 
@@ -86,12 +87,17 @@ class ReleaseHandle:
         request_tokens: int,
         uncached: int,
         queued_at_dispatch: int,
+        policy: str,
     ):
         self._state = state
         self.target = target
         self.request_tokens = request_tokens
         self.uncached_tokens = uncached
         self.queued_at_dispatch = queued_at_dispatch
+        # The policy active at dispatch — samples carry it so post-hoc analysis
+        # attributes a request to the policy that actually routed it, even when
+        # the policy is switched live mid-flight (A/B benchmarking).
+        self.policy = policy
         self._released = False
 
     def release(self) -> None:
@@ -314,7 +320,7 @@ class RouterState:
             self.endpoints_queued_uncached_tokens[target] += uncached
             self.endpoints_inflight_requests[target] += 1
         self.total_requests += 1
-        return ReleaseHandle(self, target, request_tokens, uncached, queued_at_dispatch)
+        return ReleaseHandle(self, target, request_tokens, uncached, queued_at_dispatch, self.policy)
 
     def record_success(
         self,
@@ -364,6 +370,7 @@ class RouterState:
                 "uncached_tokens": uncached,
                 "completion_tokens": completion_tokens,
                 "target": handle.target,
+                "policy": handle.policy,
                 "recorded_at_monotonic": time.monotonic(),
             }
         )

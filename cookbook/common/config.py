@@ -27,6 +27,13 @@ class ModalConfig:
     proxy_regions: list[str] = ["us-west"]
     rollout_ephemeral_disk_mib: int | None = None
     rollout_memory_mib: int | None = None
+    # Geo-distributed rollout pool: when set (e.g. ["us-east", "us-west"]), the app
+    # deploys one Server class per region ("Server" in regions[0], "ServerB" in
+    # regions[1]) because a single Modal class can't pin containers to distinct
+    # regions. rollout_min/max_containers apply PER REGION CLASS. Requires
+    # router_enabled (the Flash gateway of one class can't front the other).
+    # Currently supports exactly 2 regions; slime_disagg only.
+    rollout_regions: list[str] | None = None
     # Rollout router (stitch.routing): when enabled, a single always-on Router
     # container fronts the pool and the trainer's rollout_endpoint_url points at
     # it instead of the Flash gateway. The policy names come from the gorgo

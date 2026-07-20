@@ -252,10 +252,13 @@ def create_router_app(
         return {"auto_tune": state.tuner.status(buffered_samples=len(state.samples))}
 
     @app.get("/router/samples")
-    async def get_samples() -> dict[str, Any]:
+    async def get_samples(limit: int = 50) -> dict[str, Any]:
+        # limit is capped at the buffer size; benchmark pollers pass the full
+        # buffer (bursty rollout steps can complete >50 requests between polls).
+        limit = max(1, min(limit, state.samples.maxlen or len(state.samples)))
         return {
             "buffered_samples": len(state.samples),
-            "recent": list(state.samples)[-50:],
+            "recent": list(state.samples)[-limit:],
         }
 
     @app.get("/router/calibrated_rates")

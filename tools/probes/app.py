@@ -30,7 +30,7 @@ results_volume = modal.Volume.from_name("stitch-probe-results", version=2, creat
 
 image = (
     modal.Image.debian_slim(python_version="3.12")
-    .pip_install("httpx")
+    .pip_install("httpx", "datasets")  # datasets: the rl_replay probe loads the RL dataset's prompts
     # Bake the deploy-time volume choice: containers re-import this module, where the
     # shell's PROBE_DELTA_VOLUME doesn't exist — without this the store would resolve
     # (and commit) a different volume than the one mounted.
@@ -67,6 +67,34 @@ def traffic(
     out = f"{RESULTS_ROOT}/{tag}/traffic-{shape}.jsonl"
     summary = asyncio.run(traffic_mod.run(
         gateway, model, shape=shape, concurrency=concurrency, duration=duration, lag=lag, out_path=out,
+    ))
+    results_volume.commit()
+    print(json.dumps(summary, indent=2))
+
+
+@app.function(image=image, volumes={RESULTS_ROOT: results_volume}, timeout=120 * MINUTES, region=os.environ.get("PROBE_REGION") or None)
+def rl_replay(
+    pool_app: str,
+    pool_cls: str = "Router",
+    model: str = "default",
+    dataset: str = "zhuzilin/gsm8k",
+    batch_size: int = 64,
+    group_size: int = 8,
+    max_tokens: int = 16,
+    duration: float = 600.0,
+    seed: int = 0,
+    tag: str = "run",
+) -> None:
+    """GRPO-shaped replay of the RL dataset's prompts (see traffic.run_rl_replay).
+    Deploy with PROBE_REGION set to the router's region so the client leg is constant."""
+    from stitch.pools.modal_flash import ModalFlashPool
+    from tools.probes import traffic as traffic_mod
+
+    gateway = ModalFlashPool(pool_app, pool_cls).gateway_url()
+    out = f"{RESULTS_ROOT}/{tag}/rl_replay.jsonl"
+    summary = asyncio.run(traffic_mod.run_rl_replay(
+        gateway, model, dataset=dataset, batch_size=batch_size, group_size=group_size,
+        max_tokens=max_tokens, duration=duration, seed=seed, out_path=out,
     ))
     results_volume.commit()
     print(json.dumps(summary, indent=2))
