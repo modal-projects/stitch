@@ -22,8 +22,8 @@ SIDECAR_COMMIT_MODE = "in_place"
 SIDECAR_FLUSH_CACHE_ON_COMMIT = False
 
 SGLANG_SERVER_ARGS = {
-    "--weight-loader-prefetch-checkpoints": "",
-    "--weight-loader-prefetch-num-threads": "8",
+    # fastsafetensors: per-rank O_DIRECT read (~1/tp bytes/rank), no gVisor mmap tax; reload inherits it. nogds set in image.
+    "--load-format": "fastsafetensors",
     "--tool-call-parser": "kimi_k2",
     "--reasoning-parser": "kimi_k2",
     "--dist-timeout": "3600",

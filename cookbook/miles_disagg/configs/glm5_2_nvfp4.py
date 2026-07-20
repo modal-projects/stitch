@@ -28,8 +28,8 @@ MEGATRON_RUNTIME_PATCHES = [
 
 
 SGLANG_SERVER_ARGS = {
-    "--weight-loader-prefetch-checkpoints": "",
-    "--weight-loader-prefetch-num-threads": "8",
+    # fastsafetensors: per-rank O_DIRECT read (~1/tp bytes/rank), no gVisor mmap tax; reload inherits it. nogds set in image.
+    "--load-format": "fastsafetensors",
     # v0.5.15 has no glm5.2 parser; glm45/glm47 are closest. TODO(glm5.2): confirm 5.2's format.
     "--reasoning-parser": "glm45",
     "--tool-call-parser": "glm47",
