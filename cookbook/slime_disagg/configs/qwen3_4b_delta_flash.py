@@ -14,9 +14,7 @@ LOCAL_CHECKPOINT_PATH = "/local-checkpoint"
 
 # in_place applies weights without draining; stale KV isolated per version via extra_key.
 SIDECAR_COMMIT_MODE = "in_place"
-SIDECAR_FLUSH_CACHE_ON_COMMIT = False  # flush sglang prefix/KV cache on the weight reload
-
-# Log versioned sidecar proxy requests at INFO to trace a stuck rollout hop-by-hop.
+SIDECAR_FLUSH_CACHE_ON_COMMIT = False
 
 SGLANG_SERVER_ARGS = {
     "--weight-loader-prefetch-checkpoints": "",

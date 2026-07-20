@@ -36,9 +36,8 @@ from datetime import datetime, timezone
 
 import modal
 
-# Local: resolve the experiment's volumes/paths from EXPERIMENT_CONFIG, and
-# bake them into the image env so the in-container module re-import resolves
-# the SAME objects without needing the cookbook package.
+# Resolve the experiment's volumes/paths from EXPERIMENT_CONFIG and bake them into the
+# image env so the in-container re-import resolves the same objects without the cookbook.
 if modal.is_local():
     from cookbook.miles_disagg import modal_train as mt
 

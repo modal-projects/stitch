@@ -12,7 +12,7 @@ from pathlib import Path
 
 from stitch.publish import publish_version
 from stitch.stores.modal_volume import ModalVolumeStore
-from stitch.versions import VersionKind, VersionRef
+from stitch.types import VersionKind, VersionRef
 
 
 def _write_version(root: Path, ref: VersionRef, *, base: int | None = None, diff: str | None = None) -> str:

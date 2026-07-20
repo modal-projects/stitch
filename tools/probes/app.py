@@ -31,9 +31,9 @@ results_volume = modal.Volume.from_name("stitch-probe-results", version=2, creat
 image = (
     modal.Image.debian_slim(python_version="3.12")
     .pip_install("httpx")
-    # Bake the deploy-time volume choice: containers re-import this module, where the
-    # shell's PROBE_DELTA_VOLUME doesn't exist — without this the store would resolve
-    # (and commit) a different volume than the one mounted.
+    # Bake the deploy-time volume choice: the container re-imports this module without the
+    # shell's PROBE_DELTA_VOLUME, so without this the store would resolve (and commit) a
+    # different volume than the one mounted.
     .env({"PROBE_DELTA_VOLUME": delta_volume_name})
     .add_local_python_source("stitch", "tools")
 )

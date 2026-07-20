@@ -9,7 +9,7 @@ with their instances (``stores/base.py``, ``engines/base.py``, ``pools/base.py``
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -36,10 +36,8 @@ class VersionRef:
 
     @classmethod
     def parse(cls, text: str) -> "VersionRef":
-        # ``[<run_id>/]weight_vNNNNNN`` (or a legacy bare ``NNNNNN``). A missing pointer
-        # is handled by callers (they pass "" -> None before this); non-empty content
-        # that doesn't parse is corrupt control state -> raise, never a silent fall back
-        # to base (which would serve the wrong weights). Ref: stitch#31.
+        # ``[<run_id>/]weight_vNNNNNN`` (or legacy bare ``NNNNNN``). Non-empty unparseable content
+        # raises — never fall back to base and serve the wrong weights (stitch#31).
         text = (text or "").strip()
         run_id, _, tail = text.rpartition("/")
         digits = tail[len(_WEIGHT_PREFIX):] if tail.startswith(_WEIGHT_PREFIX) else tail
@@ -60,11 +58,16 @@ class VersionManifest:
     engine, which reads the codec (``delta_encoding`` / ``compression_format`` /
     ``checksum_format``) and lineage straight off the on-disk index — the codec is the
     engine's concern, not part of this domain type.
+
+    ``tensor_names`` are the version's touched tensor names (the index's ``weight_map``
+    keys); the reconciler unions them across a catch-up range and hands them to the engine
+    for an O(delta) partial reload (``files`` are the changed *file* names, for FULL seeding).
     """
 
     ref: VersionRef
     kind: VersionKind
     files: list[str]
+    tensor_names: list[str] = field(default_factory=list)
 
     @classmethod
     def from_hf_index(cls, version_dir: str | Path, *, run_id: str | None = None) -> "VersionManifest":
@@ -78,6 +81,7 @@ class VersionManifest:
             ref=VersionRef(run_id, int(meta["version"])),
             kind=VersionKind.DELTA if meta.get("delta_encoding") else VersionKind.FULL,
             files=sorted({str(f) for f in weight_map.values()}),
+            tensor_names=sorted(str(k) for k in weight_map),
         )
 
 
@@ -128,7 +132,7 @@ class ReplicaState:
     ready: bool
     applied: VersionRef | None = None
     sync_state: SyncState | None = None
-    reason: str | None = None  # why not ready, surfaced to the readiness poll
+    reason: str | None = None  # why not ready
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ReplicaState":
@@ -181,7 +185,7 @@ class PointerRewind(Exception):
 @dataclass(frozen=True)
 class PointerMove:
     ref: VersionRef
-    reset: bool  # crossed to a new run -> re-materialize base and restart the version space
+    reset: bool  # crossed to a new run -> reset to base
 
 
 def decide_pointer_move(current: VersionRef | None, proposed: VersionRef) -> PointerMove:

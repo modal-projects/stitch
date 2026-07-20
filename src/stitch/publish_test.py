@@ -9,7 +9,7 @@ from pathlib import Path
 from stitch.pools.base import Pool
 from stitch.publish import claim_run, constrain_request, publish_version
 from stitch.stores.base import Store
-from stitch.versions import PointerRewind, VersionRef
+from stitch.types import PointerRewind, VersionRef
 
 
 class FakeStore(Store):

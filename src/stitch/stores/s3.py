@@ -19,7 +19,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from stitch.stores.base import Store
-from stitch.versions import VersionManifest, VersionRef
+from stitch.types import VersionManifest, VersionRef
 
 _POINTER = "latest"
 _INDEX = "model.safetensors.index.json"
@@ -27,8 +27,6 @@ _INDEX = "model.safetensors.index.json"
 
 class S3Store(Store):
     def __init__(self, root: str, *, cache_dir: str | Path, endpoint_url: str | None = None) -> None:
-        # root is an ``s3://bucket/prefix`` URI (bare ``bucket/prefix`` is accepted too);
-        # cache_dir is the local directory materialize downloads into (what the engine reads).
         parsed = urlparse(root if "://" in root else f"s3://{root}")
         self.bucket = parsed.netloc
         self.prefix = parsed.path.strip("/")
@@ -44,8 +42,6 @@ class S3Store(Store):
         return VersionRef.parse(text) if text else None
 
     def advance_pointer(self, ref: VersionRef) -> None:
-        # The caller has already run decide_pointer_move; a single-object PUT is the atomic,
-        # immediately-visible durable write. Monotonicity is the single-writer caller's job.
         self._s3().put_object(Bucket=self.bucket, Key=self._key(_POINTER), Body=ref.identity.encode("utf-8"))
 
     def claim(self, run_id: str) -> None:
@@ -54,24 +50,19 @@ class S3Store(Store):
         self.advance_pointer(VersionRef(run_id, 0))
 
     def read_manifest(self, ref: VersionRef) -> VersionManifest:
-        # from_hf_index reads a local dir, so land just the small index where materialize
-        # would put the version and parse it (the heavy shards download in materialize).
+        # from_hf_index reads a local dir — land just the small index here; shards download in materialize.
         index_dir = self.cache_dir / ref.identity
         self._download(self._key(ref.identity, _INDEX), index_dir / _INDEX)
         return VersionManifest.from_hf_index(index_dir, run_id=ref.run_id)
 
     def publish(self, manifest: VersionManifest, files_dir: str) -> None:
-        # Upload every file the trainer wrote under files_dir to the version's key prefix.
-        # Objects land before the caller moves the pointer; read-after-write makes them visible.
         src = Path(files_dir)
         for path in sorted(p for p in src.rglob("*") if p.is_file()):
             key = self._key(manifest.ref.identity, path.relative_to(src).as_posix())
             self._s3().upload_file(str(path), self.bucket, key)
 
     def materialize(self, ref: VersionRef) -> str:
-        # No shared mount: sync the run's published versions (the delta chain back to the
-        # nearest anchor) into the local cache so the engine's pull can read them, then return
-        # the version dir. Its parent is the run dir the pull walks back over.
+        # No shared mount: sync the run's chain into the local cache; its parent is the run dir the pull walks.
         self._sync(self._key(ref.run_id), self.cache_dir / ref.run_id)
         return str(self.cache_dir / ref.identity)
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from stitch.versions import VersionManifest, VersionRef
+from stitch.types import VersionManifest, VersionRef
 
 
 class Engine:
@@ -21,14 +21,20 @@ class Engine:
         anchor, then replay deltas forward. May run while the engine serves."""
         raise NotImplementedError
 
-    async def commit(self, ref: VersionRef, *, flush_cache: bool = False) -> None:
+    async def commit(
+        self, ref: VersionRef, *, flush_cache: bool = False, weight_names: list[str] | None = None
+    ) -> None:
         """Reload the staged checkpoint into the serving weights — the gate covers only this.
         ``flush_cache`` (a commit-policy decision the reconciler passes) evicts the engine's
-        prefix/KV cache as part of the reload."""
+        prefix/KV cache as part of the reload. ``weight_names`` are the tensors the staged
+        deltas touched (union across the applied→target range); an engine that supports it
+        reloads only those (+ their fused/expert closures) instead of the full checkpoint.
+        None means reload everything."""
         raise NotImplementedError
 
-    async def flush(self) -> None:
-        """Evict cached state (KV / radix tree). Called before commit in quiesce mode."""
+    async def flush_cache(self) -> None:
+        """Evict the engine's prefix/KV cache — the standalone ``/flush_cache`` primitive.
+        Not on the reconcile path: flushing on a reload goes through ``commit(flush_cache=…)``."""
         raise NotImplementedError
 
     async def pause(self) -> None:

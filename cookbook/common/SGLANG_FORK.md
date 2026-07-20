@@ -14,7 +14,7 @@ sglang release*.
 ```python
 SGLANG_IMAGE_TAG   = "lmsysorg/sglang:v0.5.15.post1"    # base kernels/CUDA
 SGLANG_FORK_BRANCH = "stitch-sglang-v0.5.15-post1"      # modal-projects/sglang
-SGLANG_FORK_COMMIT = "fd86c9155dfb651019a13f7229cd83bd0577752d"
+SGLANG_FORK_COMMIT = "1c132287b9a426251512653182dbd2df1b652885"
 ```
 
 The branch is **`v0.5.15.post1` + the patch stack below, nothing else** — every commit
@@ -36,7 +36,9 @@ commit bodies for the details — this is the map.
    xxh3 checksum) into a host-local checkpoint that `/update_weights_from_disk` then
    reloads, while the engine keeps serving. Hardened for an eventually-consistent
    volume mount (whole-file in-memory read + size-verify before the xor, one reload
-   per host, reseed from the pristine boot checkpoint).
+   per host, reseed from the pristine boot checkpoint). The base-seed reseed copies shards
+   in parallel with a 16 MiB streaming read (the /prep read is Volume-backend-fetch bound —
+   ~8 streams is the profiled knee, ~5x over one) and logs per-shard progress (GB/GB).
    *Upstreaming:* https://github.com/sgl-project/sglang/pull/30367
 
 2. **`[RL] update_weights_from_disk: load quantized checkpoints like initial loading`**

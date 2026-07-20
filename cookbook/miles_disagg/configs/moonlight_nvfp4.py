@@ -16,11 +16,11 @@ DELTA_BULLETIN_ROOT = "/delta-bulletin"
 LOCAL_CHECKPOINT_PATH = "/local-checkpoint"
 
 SOURCE_MODEL = "moonshotai/Moonlight-16B-A3B-Instruct"
-MODEL_TAG = "moonlight-16b-nvfp4"  # names the prepared dirs under PREP_PATH
+MODEL_TAG = "moonlight-16b-nvfp4"
 
 # in_place applies weights without draining in-flight rollouts; stale KV isolated per version.
 SIDECAR_COMMIT_MODE = "in_place"
-SIDECAR_FLUSH_CACHE_ON_COMMIT = False  # flush sglang prefix/KV cache on the weight reload
+SIDECAR_FLUSH_CACHE_ON_COMMIT = False
 # R3 routing-replay needs the dropless Megatron dispatch fix at startup.
 MEGATRON_RUNTIME_PATCHES = [
     "/root/cookbook/miles_disagg/patches/megatron-r3-dispatch.patch",
@@ -28,7 +28,7 @@ MEGATRON_RUNTIME_PATCHES = [
 
 
 # No --quantization flag — NVFP4 comes from the served checkpoint's quant config.
-# mem-fraction / context-length are STARTING POINTS; measure.
+# mem-fraction / context-length are starting points; measure.
 SGLANG_SERVER_ARGS = {
     "--weight-loader-prefetch-checkpoints": "",
     "--weight-loader-prefetch-num-threads": "8",
@@ -47,8 +47,7 @@ SGLANG_ENV = {"SGLANG_ENABLE_RELOAD_LOAD_PLAN": "1"}  # NVFP4: load-plan replay 
 modal = ModalConfig(
     gpu="B200",
     region="us",
-    # warm floor of 1: the pool must be UP before the trainer sends rollouts (scale-from-0
-    # raced the retry budget). Flash still scales ABOVE this under load.
+    # warm floor of 1 so the pool is up before the trainer sends rollouts; Flash scales above under load.
     rollout_min_containers=1,
     proxy_regions=["us-west"],
 )
@@ -67,7 +66,7 @@ class _Miles(MilesConfig):
     actor_num_gpus_per_node = 4  # 1 node x 4 B200 trainer (matches the proven moonlight recipe)
     num_gpus_per_node = 4
     colocate = False  # disk-delta is incompatible with --colocate
-    rollout_num_gpus = 0  # publish-only forces this; set explicitly for clarity
+    rollout_num_gpus = 0  # publish-only forces this
     rollout_num_gpus_per_engine = 1  # B200:1 per rollout container (Moonlight NVFP4 is tiny)
     rollout_endpoint_url = None
     use_miles_router = True
@@ -76,20 +75,18 @@ class _Miles(MilesConfig):
     custom_rollout_request_hook_path = "cookbook.common.hooks.gated_rollout_request_hook"
     custom_config_path = {
         "rollout_request_weight_version_mode": "min",
-        "rollout_request_weight_version_lag": 1,  # bounded staleness window
+        "rollout_request_weight_version_lag": 1,
         "rollout_request_retry_attempts": 240,
         "rollout_request_retry_sleep": 1.0,
         "rollout_session_affinity_header": "Modal-Session-ID",
     }
 
-    # async-first: one-step off-policy; publish weights every step.
     async_mode = True
     update_weights_interval = 1
 
     # NVFP4 QAT (native Megatron FP4; Blackwell + TE >= 2.7.0.dev0).
-    # fp4_param_gather stays False: with it True, TE NVFP4Tensor params crash Megatron DDP.
     fp4_format = "e2m1"
-    fp4_param_gather = False
+    fp4_param_gather = False  # True crashes Megatron DDP (TE NVFP4Tensor params)
 
     update_weight_transfer_mode = "disk-delta"
     update_weight_delta_encoding = "xor"

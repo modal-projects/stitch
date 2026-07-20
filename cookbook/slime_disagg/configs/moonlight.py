@@ -17,9 +17,9 @@ LOCAL_CHECKPOINT_PATH = "/local-checkpoint"
 
 # in_place applies weights without draining in-flight rollouts; stale KV isolated per version.
 SIDECAR_COMMIT_MODE = "in_place"
-SIDECAR_FLUSH_CACHE_ON_COMMIT = False  # flush sglang prefix/KV cache on the weight reload
+SIDECAR_FLUSH_CACHE_ON_COMMIT = False
 
-# mem-fraction-static is a STARTING POINT -- measure on a warm container and adjust.
+# mem-fraction-static is a starting point -- measure on a warm container.
 SGLANG_SERVER_ARGS = {
     "--weight-loader-prefetch-checkpoints": "",
     "--weight-loader-prefetch-num-threads": "8",
@@ -49,12 +49,11 @@ class _Slime(SlimeConfig):
     # Staleness gate: pin each request to latest_published - lag; over-stale replicas 409 -> retry.
     custom_rollout_request_hook_path = "cookbook.common.hooks.gated_rollout_request_hook"
     rollout_request_weight_version_mode = "min"
-    rollout_request_weight_version_lag = 1  # k: bounded staleness window (tune up if 409 retries bubble)
+    rollout_request_weight_version_lag = 1
     rollout_request_retry_attempts = 240
     rollout_request_retry_sleep = 1.0
     rollout_session_affinity_header = "Modal-Session-ID"
 
-    # async-first: one-step off-policy; publish weights every step.
     async_mode = True
     update_weights_interval = 1
 
@@ -72,7 +71,7 @@ class _Slime(SlimeConfig):
     apply_chat_template = True
     rollout_shuffle = True
     rm_type = "math"
-    eval_interval = None  # skip eval during bring-up
+    eval_interval = None
 
     rollout_function_path = "slime.rollout.sglang_rollout.generate_rollout"
     num_rollout = 5

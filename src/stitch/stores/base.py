@@ -7,7 +7,7 @@ pointer methods; ``commit`` has a no-op default.
 
 from __future__ import annotations
 
-from stitch.versions import VersionManifest, VersionRef
+from stitch.types import VersionManifest, VersionRef
 
 
 class Store:
@@ -15,7 +15,9 @@ class Store:
     pointer / run-epoch coordination. Subclasses override every method."""
 
     def refresh(self) -> None:
-        """Make other hosts' writes visible (Volume reload; no-op if strongly consistent)."""
+        """Make other hosts' writes visible (Volume reload; no-op if strongly consistent).
+        Call sequentially — a Volume reload must not run concurrently with itself; the
+        reconciler serializes it under its lock (``commit`` writes, by contrast, may overlap)."""
         raise NotImplementedError
 
     def read_pointer(self) -> VersionRef | None:

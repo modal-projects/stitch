@@ -19,7 +19,7 @@ INT4_GROUP_SIZE = "32"
 
 # in_place applies weights without draining in-flight rollouts; stale KV isolated per version.
 SIDECAR_COMMIT_MODE = "in_place"
-SIDECAR_FLUSH_CACHE_ON_COMMIT = False  # flush sglang prefix/KV cache on the weight reload
+SIDECAR_FLUSH_CACHE_ON_COMMIT = False
 
 SGLANG_SERVER_ARGS = {
     "--weight-loader-prefetch-checkpoints": "",
@@ -73,7 +73,7 @@ class _Slime(SlimeConfig):
     custom_rollout_request_hook_path = "cookbook.common.hooks.gated_rollout_request_hook"
     custom_delta_pre_push_path = "cookbook.common.hooks.commit_and_wake"
     rollout_request_weight_version_mode = "min"
-    rollout_request_weight_version_lag = 1  # bounded staleness window
+    rollout_request_weight_version_lag = 1
     rollout_request_retry_attempts = 240
     rollout_request_retry_sleep = 1.0
     rollout_session_affinity_header = "Modal-Session-ID"
