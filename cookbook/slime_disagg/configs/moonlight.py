@@ -21,8 +21,8 @@ SIDECAR_FLUSH_CACHE_ON_COMMIT = False
 
 # mem-fraction-static is a starting point -- measure on a warm container.
 SGLANG_SERVER_ARGS = {
-    "--weight-loader-prefetch-checkpoints": "",
-    "--weight-loader-prefetch-num-threads": "8",
+    # fastsafetensors: per-rank O_DIRECT read (~1/tp bytes/rank), no gVisor mmap tax; reload inherits it. nogds set in image.
+    "--load-format": "fastsafetensors",
     "--context-length": "8192",
     "--mem-fraction-static": "0.85",
     # routing replay: set here since slime launches no engine in publish-only mode.
