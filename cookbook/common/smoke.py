@@ -8,7 +8,7 @@ import time
 import urllib.request
 
 from stitch.pools.modal_flash import ModalFlashPool
-from stitch.versions import VersionRef
+from stitch.types import VersionRef
 
 
 class VersionAheadError(RuntimeError):
@@ -16,9 +16,9 @@ class VersionAheadError(RuntimeError):
 
 
 def smoke_flash_pool(*, app_name: str, cls_name: str, model_name: str, weight_version: int, timeout_seconds: int) -> None:
-    """Poll until the pool serves completions at ``weight_version`` — through the gateway
-    (which also wakes a scaled-down pool; Flash holds the request through the cold start)
-    and then each live replica's ``/server_info``."""
+    """Poll until the pool serves completions at ``weight_version`` — through the gateway (Flash
+    holds the request through a scaled-down pool's cold start) and then each live replica's
+    ``/server_info``."""
     pool = ModalFlashPool(app_name, cls_name)
     deadline = time.time() + timeout_seconds
     last_error: str | None = None
@@ -26,9 +26,8 @@ def smoke_flash_pool(*, app_name: str, cls_name: str, model_name: str, weight_ve
         try:
             gateway = pool.gateway_url()
             print(f"Gateway URL: {gateway}")
-            # A fresh pool serves the base but has no claimed run, so version 0 (run-scoped)
-            # is unpinnable — an exact-version request would 409. Pre-claim, gate on plain
-            # serving; the version check only makes sense once a run has claimed the pool.
+            # A fresh pool has no claimed run, so version 0 is unpinnable — an exact-version
+            # request would 409. Gate on plain serving until a run has claimed the pool.
             if _get_json(f"{gateway}/server_info", timeout=60).get("run_id") is None:
                 data = _post_json(f"{gateway}/v1/chat/completions", _completion(model_name), timeout=900)
                 _check_serves(data)

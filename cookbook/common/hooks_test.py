@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 from cookbook.common import hooks
 from stitch.stores.modal_volume import ModalVolumeStore
-from stitch.versions import VersionRef
+from stitch.types import VersionRef
 
 
 class _FakePool:
@@ -55,9 +55,7 @@ def test_commit_and_wake_publishes() -> None:
 
 
 def test_commit_and_wake_baseline_is_noop() -> None:
-    # The framework fires the hook at baseline/pointer-commit with the RUN dir (name is the
-    # run_id, no version written). Keying on the dir name means we flush the volume but read
-    # no index and publish nothing — the regression was reading an index that wasn't there.
+    # Regression: baseline commit hands the run dir (no index); keying on the dir name must no-op, not crash on a missing index.
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         pool = _FakePool()

@@ -15,7 +15,7 @@ PREP_PATH = Path("/prep")  # <PREP>/<tag>/{bf16 masters, served base, torch_dist
 SGLANG_CACHE_PATH = "/root/.cache/sglang"  # sglang kernel/JIT cache; survives cold starts
 
 # Ports.
-SIDECAR_PORT = 8000  # the versioned rollout proxy — the container's public port
+SIDECAR_PORT = 8000  # the container's public port
 SGLANG_PORT = 8001   # the private sglang server behind the sidecar
 RAY_PORT = 6379
 

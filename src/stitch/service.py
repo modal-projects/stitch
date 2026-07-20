@@ -22,7 +22,7 @@ from stitch.engines.base import Engine
 from stitch.pools.base import Pool
 from stitch.stores.base import Store
 from stitch.sync import CommitMode, ConstraintUnmet, Reconciler
-from stitch.versions import PoolState, ReplicaState, VersionConstraint
+from stitch.types import PoolState, ReplicaState, VersionConstraint
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +48,7 @@ def create_app(
     import httpx
 
     engine_url = engine.base_url().rstrip("/")
-    blocked = engine.blocked_routes()  # engine-owned: control routes external traffic must not reach
+    blocked = engine.blocked_routes()
     timeout = httpx.Timeout(upstream_timeout, connect=10.0)
     versioned = {r.strip("/") for r in versioned_routes}
     pooled: dict[str, Any] = {}
@@ -62,10 +62,17 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        await reconciler.startup()
+        # Serve /health before the first sync finishes: on a cold replica the reconcile pays the
+        # base-seed copy + reload (tens of minutes for a large checkpoint), and gating liveness on
+        # that overruns the platform's container-startup deadline. The engine serves its boot base
+        # until the background sync lands the pointer version.
+        syncing = asyncio.create_task(reconciler.startup())
         try:
             yield
         finally:
+            syncing.cancel()
+            with contextlib.suppress(BaseException):
+                await syncing
             await reconciler.shutdown()
             c = pooled.pop("client", None)
             if c is not None:
@@ -109,8 +116,7 @@ def create_app(
         is_versioned = route in versioned
         constraint = VersionConstraint.from_payload(payload) if is_versioned else VersionConstraint()
 
-        # A request id lets us abort the upstream generation on client disconnect —
-        # otherwise an abandoned request keeps generating, holding the quiesce point.
+        # rid lets us abort the upstream generation on client disconnect, else it holds the quiesce point.
         rid = None
         if is_versioned and payload is not None:
             payload.pop("weight_version", None)
@@ -146,7 +152,7 @@ def create_app(
                     return Response(content=resp.content, status_code=resp.status_code,
                                     media_type=resp.headers.get("content-type") or None)
                 data = resp.json()
-                current = reconciler.applied  # captured while still pinned, before any commit advances it
+                current = reconciler.applied  # capture while still pinned, before a commit advances it
         except ConstraintUnmet as exc:
             return JSONResponse(exc.error, status_code=409)
 
@@ -169,7 +175,7 @@ def serve(
     engine: Engine,
     *,
     run_id: str | None = None,
-    commit_mode: CommitMode = "quiesce",
+    commit_mode: CommitMode = "in_place",
     flush_cache_on_commit: bool = False,
     host: str = "0.0.0.0",
     port: int = 8000,

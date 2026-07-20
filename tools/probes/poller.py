@@ -1,9 +1,8 @@
 """Scrape every replica's ``/server_info`` into JSONL, and summarize.
 
-The certification runs' observability spine: ``/server_info`` is point-in-time, so this
-turns it into a timeseries — applied-version timelines per replica, per-version
-convergence lag (first replica at vN -> last replica at vN), stage/commit timings, and
-not-ready windows.
+``/server_info`` is point-in-time, so this turns it into a timeseries: applied-version
+timelines per replica, per-version convergence lag (first replica at vN -> last replica at
+vN), stage/commit timings, and not-ready windows.
 """
 
 from __future__ import annotations
@@ -63,7 +62,7 @@ async def _probe(client: Any, url: str) -> dict[str, Any]:
 
 def summarize(path: str) -> dict[str, Any]:
     """Reduce a poll JSONL to the certification quantities."""
-    from stitch.versions import VersionRef
+    from stitch.types import VersionRef
 
     first_seen: dict[str, dict[int, float]] = defaultdict(dict)  # replica -> version -> t
     timings: dict[tuple[str, float], dict[str, Any]] = {}  # (replica, metrics.at) -> metrics

@@ -14,7 +14,7 @@ from __future__ import annotations
 from typing import Any
 
 from stitch.engines.base import Engine
-from stitch.versions import VersionManifest, VersionRef
+from stitch.types import VersionManifest, VersionRef
 
 
 class VLLMEngine(Engine):
@@ -38,7 +38,9 @@ class VLLMEngine(Engine):
         # this apply must be provided (worker extension or a sidecar copy+decode) before commit.
         raise NotImplementedError("VLLMEngine.stage: TODO")
 
-    async def commit(self, ref: VersionRef) -> None:
+    async def commit(
+        self, ref: VersionRef, *, flush_cache: bool = False, weight_names: list[str] | None = None
+    ) -> None:
         # TODO: reload the staged checkpoint into the serving weights (the gate covers only this)
         # — e.g. vLLM collective_rpc into a WorkerExtension that runs load_weights, or vLLM's
         # runtime weight-update API. Must reproduce an initial load for the served quant format.

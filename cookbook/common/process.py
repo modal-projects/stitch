@@ -13,7 +13,7 @@ import time
 import urllib.error
 import urllib.request
 
-SIDECAR_MODULE = "cookbook.common.sidecar"  # the one shared serve() entrypoint
+SIDECAR_MODULE = "cookbook.common.sidecar"
 
 
 def start_sidecar(
@@ -88,9 +88,8 @@ def apply_git_patches(patch_paths: list[str], repo_dir: str, label: str) -> None
 
 
 def start_host_mem_monitor(interval_s: int = 20) -> None:
-    """Trace this node's host-RAM from a daemon thread. Host-RAM exhaustion OOM-kills the
-    trainer (the peak is the publish weight-gather) and Modal exposes no host-RAM metric, so
-    this log line is the only signal. Best-effort."""
+    """Trace this node's host-RAM from a daemon thread. Modal exposes no host-RAM metric, so
+    this log line is the only signal for the OOM peak (the publish weight-gather). Best-effort."""
     host = socket.gethostname()
 
     def _meminfo() -> tuple[float, float]:
@@ -107,9 +106,16 @@ def start_host_mem_monitor(interval_s: int = 20) -> None:
         return total, avail
 
     def _loop() -> None:
+        # Multi-node runs emit one line per node per tick, which floods the aggregate log. Stay quiet
+        # unless host RAM is climbing toward a host-OOM (avail < 500 GiB) or a sparse 10-min heartbeat —
+        # the OOM danger zone is the only signal worth surfacing; normal operation is silent.
+        heartbeat = max(1, 600 // interval_s)
+        i = 0
         while True:
             total, avail = _meminfo()
-            print(f"[hostmem] {host} used={total - avail:.0f}GiB avail={avail:.0f}GiB total={total:.0f}GiB", flush=True)
+            if i == 0 or avail < 500 or i % heartbeat == 0:
+                print(f"[hostmem] {host} used={total - avail:.0f}GiB avail={avail:.0f}GiB total={total:.0f}GiB", flush=True)
+            i += 1
             time.sleep(interval_s)
 
     threading.Thread(target=_loop, daemon=True, name="host-mem-monitor").start()

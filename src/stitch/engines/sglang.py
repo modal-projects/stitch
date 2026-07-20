@@ -11,12 +11,13 @@ host-side decoder and imports no trainer package.
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
 from pathlib import Path
 from typing import Any
 
 from stitch.engines.base import Engine
-from stitch.versions import VersionManifest, VersionRef
+from stitch.types import VersionManifest, VersionRef
 
 
 class SGLangEngine(Engine):
@@ -35,8 +36,6 @@ class SGLangEngine(Engine):
         return self._base_url
 
     def blocked_routes(self) -> frozenset[str]:
-        # sglang's weight-update + scheduler-control endpoints; the sidecar drives these
-        # directly, so external rollout traffic must never reach them.
         return frozenset({
             "update_weights_from_disk", "update_weights_from_distributed",
             "update_weights_from_tensor", "pull_weights", "flush_cache",
@@ -44,8 +43,7 @@ class SGLangEngine(Engine):
         })
 
     async def stage(self, manifest: VersionManifest, source_dir: str) -> None:
-        # source_dir is the target version's dir; its parent is the root of weight_v*
-        # dirs the pull walks. Disk-only, so it runs while the engine serves.
+        # /pull_weights walks the weight_v* dirs under source_dir's parent.
         await self._post(
             "/pull_weights",
             {
@@ -58,11 +56,7 @@ class SGLangEngine(Engine):
         )
 
     async def prefetch(self) -> None:
-        # Seed the host-local checkpoint from the served base now (target_version=0): the
-        # receiver copies its own model_path into local_checkpoint_dir and applies no deltas,
-        # so the first real stage() only applies the delta rather than paying the full base
-        # copy. Disk-only (serves throughout) and flock-serialized + idempotent with a
-        # concurrent stage. source_dir is unused for the base seed (a placeholder here).
+        # target_version=0 seeds base with no deltas applied; source_dir is unused for the seed.
         await self._post(
             "/pull_weights",
             {"local_checkpoint_dir": self.local_checkpoint_dir, "source_dir": self.local_checkpoint_dir, "target_version": 0},
@@ -70,18 +64,22 @@ class SGLangEngine(Engine):
             action="base prefetch",
         )
 
-    async def commit(self, ref: VersionRef, *, flush_cache: bool = False) -> None:
-        # flush_cache (the reconciler's commit-policy decision) evicts sglang's prefix/KV
-        # cache as part of the reload.
-        await self._post(
-            "/update_weights_from_disk",
-            {"model_path": self.local_checkpoint_dir, "weight_version": str(ref.version),
-             "flush_cache": flush_cache},
-            timeout=None,
-            action="weight update",
-        )
+    async def commit(
+        self, ref: VersionRef, *, flush_cache: bool = False, weight_names: list[str] | None = None
+    ) -> None:
+        payload: dict[str, Any] = {
+            "model_path": self.local_checkpoint_dir,
+            "weight_version": str(ref.version),
+            "flush_cache": flush_cache,
+        }
+        # O(delta) partial reload: naming the touched tensors makes the fork reload only those
+        # (+ their fused/expert closures) instead of the whole checkpoint. STITCH_PARTIAL_RELOAD=0
+        # forces the full reload (kill switch); an engine without the load-plan patch ignores it.
+        if weight_names and os.environ.get("STITCH_PARTIAL_RELOAD", "1") == "1":
+            payload["weight_names"] = list(weight_names)
+        await self._post("/update_weights_from_disk", payload, timeout=None, action="weight update")
 
-    async def flush(self) -> None:
+    async def flush_cache(self) -> None:
         await self._get("/flush_cache", ok=(200, 404))
 
     async def pause(self) -> None:
@@ -91,15 +89,13 @@ class SGLangEngine(Engine):
         await self._post("/continue_generation", {}, timeout=self._control_timeout)
 
     async def reset(self) -> None:
-        # Re-materialize base and reload it into the engine, so a run switch that lands at
-        # v0 serves base on the GPU -- not the previous run's weights under the new
-        # (run, 0) identity. Runs under the commit gate (engine paused). Ref: stitch#32.
+        # Wipe + reseed base so a run switch to v0 serves base, not the prior run's weights
+        # under the new (run, 0) identity (stitch#32).
         await asyncio.to_thread(shutil.rmtree, self.local_checkpoint_dir, ignore_errors=True)
-        await self.prefetch()  # reseed base (target_version=0) into the wiped checkpoint
+        await self.prefetch()
         await self._post(
             "/update_weights_from_disk",
-            {"model_path": self.local_checkpoint_dir, "weight_version": "0",
-             "flush_cache": False},  # a run switch relies on run-namespaced KV, not a flush
+            {"model_path": self.local_checkpoint_dir, "weight_version": "0", "flush_cache": False},
             timeout=None,
             action="reset reload to base",
         )
@@ -122,8 +118,7 @@ class SGLangEngine(Engine):
             response["weight_version_end"] = current.version
 
     def _extra_key(self, served: VersionRef, user: str | None) -> str:
-        # Namespace the KV cache by version (and run, so two runs that both restart at
-        # v1 stay distinct): requests on different versions can't share radix prefixes.
+        # Namespace the KV cache by version+run so radix prefixes aren't shared across versions.
         run = f"{served.run_id}/" if served.run_id else ""
         return f"wv{served.version};{run}{user or ''}"
 
@@ -144,8 +139,7 @@ class SGLangEngine(Engine):
 
 
 def _raise_for_engine(resp: Any, action: str) -> None:
-    # A failed control call comes back as HTTP 4xx with the engine's traceback in the
-    # JSON body — read the body before the status so the real error isn't lost.
+    # sglang puts the real error in the JSON body on 4xx — read it before the status.
     try:
         data = resp.json()
         if not isinstance(data, dict):

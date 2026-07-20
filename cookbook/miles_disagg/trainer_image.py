@@ -3,6 +3,9 @@
 The base image bakes Megatron-LM (native --fp4-format NVFP4) + TransformerEngine; the
 miles fork is cloned over it at a pinned commit. The serving half is separate and shared
 (common/serving_image.py) — the pool installs no trainer package.
+
+The fork's commit stack (what we carry over upstream miles) and how to re-rebase live in
+MILES_FORK.md next to this file.
 """
 
 from __future__ import annotations
@@ -13,9 +16,9 @@ import modal
 
 # Dated tag, never `latest`: Modal caches from_registry per tag string and won't re-pull
 # a moved mutable tag, so `latest` silently serves whatever was first pulled.
-MILES_IMAGE_TAG = "radixark/miles:dev-202607090055"
+MILES_IMAGE_TAG = "radixark/miles:dev-202607182122"  # base Megatron/TE; match the upstream main stitch-miles is on
 MILES_REPO_URL = "https://github.com/modal-projects/miles.git"
-MILES_REPO_REF = "bdaf8d04bbc26981ff4bc95b8cfe679c3cd29013"
+MILES_REPO_REF = "15cf7ed0344850affa354b8b81ad3acbda11474b"  # branch stitch-miles; see MILES_FORK.md
 
 MILES_ROOT = "/root/miles"
 MEGATRON_PATH = "/root/Megatron-LM"  # source-only megatron.training must be on PYTHONPATH

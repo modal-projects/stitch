@@ -16,11 +16,11 @@ SOURCE_MODEL = "zai-org/GLM-4.5-Air"
 MODEL_TAG = "glm45-air-bf16"
 SERVED_CHECKPOINT_FORMAT = "bf16"
 USE_MODAL_TORCH_DIST_WRAPPER = True
-DISABLE_HF_XET = True       # the plain HF downloader is the path that finished reliably here
+DISABLE_HF_XET = True
 DISABLE_HF_TRANSFER = True
 
 SIDECAR_COMMIT_MODE = "in_place"
-SIDECAR_FLUSH_CACHE_ON_COMMIT = False  # flush sglang prefix/KV cache on the weight reload
+SIDECAR_FLUSH_CACHE_ON_COMMIT = False
 MEGATRON_RUNTIME_PATCHES = ["/root/cookbook/miles_disagg/patches/megatron-r3-dispatch.patch"]
 
 
@@ -39,7 +39,7 @@ SGLANG_SERVER_ARGS = {
 modal = ModalConfig(
     gpu="H200",
     region="us",
-    memory=1_048_576,
+    memory=(1024, int(2 * 1024 * 1024)),
     rollout_min_containers=1,
     rollout_target_inputs=32,
     proxy_regions=["us-west"],

@@ -20,7 +20,7 @@ SOURCE_MODEL = "zai-org/GLM-5.2"
 MODEL_TAG = "glm5-2-nvfp4"
 
 SIDECAR_COMMIT_MODE = "in_place"
-SIDECAR_FLUSH_CACHE_ON_COMMIT = False  # flush sglang prefix/KV cache on the weight reload
+SIDECAR_FLUSH_CACHE_ON_COMMIT = False
 # R3 routing-replay needs the dropless Megatron dispatch fix at startup.
 MEGATRON_RUNTIME_PATCHES = [
     "/root/cookbook/miles_disagg/patches/megatron-r3-dispatch.patch",
@@ -57,7 +57,7 @@ modal = ModalConfig(
     region="us",
     # TODO(glm5.2): size to the actual model. These are Kimi's (~1T) numbers — scale
     # down for a smaller GLM 5.2 (memory, ephemeral disk, node count).
-    memory=1_650_688,
+    memory=(1024, int(3 * 1024 * 1024)),
     rollout_min_containers=8,  # warm floor; Flash scales above under load
     rollout_target_inputs=32,
     proxy_regions=["us-west"],
@@ -143,9 +143,9 @@ class _Miles(MilesConfig):
             },
         },
     }
-    # Keep ALL routed experts NVFP4 (reload-safe: sglang's fused-MoE reload loader
-    # allocates NVFP4 for every expert layer; a bf16 carve-out can't reload).
     num_layers_at_start_in_bf16 = 3
+    # END must stay 0: sglang's fused-MoE reload allocates NVFP4 for every expert layer,
+    # so a bf16 last layer can't reload.
     num_layers_at_end_in_bf16 = 0
 
     update_weight_transfer_mode = "disk-delta"

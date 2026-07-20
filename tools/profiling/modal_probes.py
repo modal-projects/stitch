@@ -107,7 +107,7 @@ def profile_reload(delta_run_id: str = "", delta_version: int = 0, load_plan: in
     base = mt.MODEL_NAME  # the served base on /prep
     local = mt.LOCAL_CHECKPOINT_PATH  # /local-checkpoint (ephemeral)
     sglang_url = f"http://127.0.0.1:{mt.SGLANG_PORT}"
-    R: dict[str, object] = {}  # durable results, printed once at the end
+    R: dict[str, object] = {}
 
     def base_shards():
         return sorted(glob.glob(f"{base}/*.safetensors"))
@@ -153,7 +153,7 @@ def profile_reload(delta_run_id: str = "", delta_version: int = 0, load_plan: in
     if base_shards():
         R["dd_prep_gbps"] = round(_dd_read_gbps(base_shards()[0], "prep-volume base shard (cold)"), 2)
 
-    # 2. SGLang cold startup load (reads base from /prep Volume) — the cold-load path
+    # 2. SGLang cold startup load (reads base from /prep Volume)
     print("[phase] SGLang startup (cold load of base from /prep)...")
     t0 = time.perf_counter()
     endpoint = SGLangEndpoint(

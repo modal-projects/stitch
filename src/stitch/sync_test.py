@@ -11,7 +11,7 @@ import threading
 from stitch.engines.base import Engine
 from stitch.stores.base import Store
 from stitch.sync import ConstraintUnmet, Reconciler
-from stitch.versions import (
+from stitch.types import (
     VersionConstraint,
     VersionKind,
     VersionManifest,
@@ -50,20 +50,24 @@ class FakeStore(Store):
 
 class FakeEngine(Engine):
     def __init__(self) -> None:
-        self.calls: list[str] = []          # ordered pause/flush/commit/reset/resume + stage
+        self.calls: list[str] = []
         self.staged: list[VersionRef] = []
         self.committed: list[VersionRef] = []
+        self.commit_weight_names: list[list[str] | None] = []
 
     async def stage(self, manifest: VersionManifest, source_dir: str) -> None:
         self.staged.append(manifest.ref)
         self.calls.append(f"stage:{manifest.ref.version}")
 
-    async def commit(self, ref: VersionRef, *, flush_cache: bool = False) -> None:
+    async def commit(
+        self, ref: VersionRef, *, flush_cache: bool = False, weight_names: list[str] | None = None
+    ) -> None:
         self.committed.append(ref)
+        self.commit_weight_names.append(weight_names)
         self.calls.append(f"commit:{ref.version}")
 
-    async def flush(self) -> None:
-        self.calls.append("flush")
+    async def flush_cache(self) -> None:
+        self.calls.append("flush_cache")
 
     async def pause(self) -> None:
         self.calls.append("pause")
@@ -91,8 +95,10 @@ def _full(run: str, version: int) -> VersionManifest:
     return VersionManifest(VersionRef(run, version), VersionKind.FULL, ["model.safetensors"])
 
 
-def _delta(run: str, version: int, *, files: list[str]) -> VersionManifest:
-    return VersionManifest(VersionRef(run, version), VersionKind.DELTA, files)
+def _delta(
+    run: str, version: int, *, files: list[str], tensor_names: list[str] | None = None
+) -> VersionManifest:
+    return VersionManifest(VersionRef(run, version), VersionKind.DELTA, files, tensor_names or [])
 
 
 def _run(coro) -> None:
@@ -103,13 +109,13 @@ def _run(coro) -> None:
 def test_fresh_reconcile() -> None:
     async def go() -> None:
         engine = FakeEngine()
-        r = Reconciler(store=FakeStore(VersionRef("r1", 3), _full("r1", 3)), engine=engine)
+        r = Reconciler(store=FakeStore(VersionRef("r1", 3), _full("r1", 3)), engine=engine, commit_mode="quiesce")
         await r.startup()
         assert r.applied == VersionRef("r1", 3)
         assert engine.staged[-1] == VersionRef("r1", 3)
         assert VersionRef("r1", 3) in engine.committed
         assert r.sync_state is SyncState.IDLE
-        assert engine.calls.index("flush") < engine.calls.index("commit:3")  # quiesce flushes first
+        assert "flush_cache" not in engine.calls  # flushing is not automatic; it rides commit(flush_cache=…)
 
     _run(go())
 
@@ -133,6 +139,7 @@ def test_catch_up() -> None:
         await r.reconcile()
         assert r.applied == VersionRef("r1", 5)
         assert engine.committed == [VersionRef("r1", 5)]  # one composed stage+reload, not per-version
+        assert engine.commit_weight_names == [None]  # FULL target reseeds -> full reload, not partial
 
     _run(go())
 
@@ -152,8 +159,7 @@ def test_run_switch_resets_in_place() -> None:
 
 
 def test_run_switch_drains_rolling_requests() -> None:
-    # A base reset is an incompatible transition: even in in_place mode no rolling request
-    # is admitted during, or decodes across, the wipe (drain_all; stitch#32 / review P0-B).
+    # Base reset is incompatible: even in in_place, no rolling request crosses the wipe (drain_all; stitch#32).
     async def go() -> None:
         engine = FakeEngine()
         r = Reconciler(store=FakeStore(VersionRef("r2", 1), _full("r2", 1)), engine=engine, commit_mode="in_place")
@@ -189,8 +195,7 @@ def test_run_switch_drains_rolling_requests() -> None:
 
 
 def test_rolling_requests_cross_in_place_commit() -> None:
-    # The counterpart: a *compatible* in_place commit never waits on rolling traffic —
-    # the update applies while the request keeps decoding; only a base reset drains.
+    # Counterpart: a compatible in_place commit applies while rolling traffic keeps decoding; only a base reset drains.
     async def go() -> None:
         engine = FakeEngine()
         r = Reconciler(store=FakeStore(VersionRef("r1", 4), _full("r1", 4)), engine=engine, commit_mode="in_place")
@@ -225,6 +230,28 @@ def test_empty_delta_skips_reload() -> None:
     _run(go())
 
 
+def test_touched_names_union_reaches_commit() -> None:
+    # A multi-version catch-up hands the engine the UNION of touched tensor names across the
+    # applied→target range, so an O(delta) reload refreshes every tensor any delta changed —
+    # not just the target's. (This is the plumbing a partial reload needs; without it the
+    # engine names no tensors and pays a full reload.)
+    async def go() -> None:
+        engine = FakeEngine()
+        store = FakeStore(
+            VersionRef("r1", 5),
+            _delta("r1", 4, files=["f1"], tensor_names=["a", "b"]),
+            _delta("r1", 5, files=["f1", "f2"], tensor_names=["b", "c"]),
+        )
+        r = Reconciler(store=store, engine=engine)
+        r.applied = VersionRef("r1", 3)
+        await r.reconcile()
+        assert r.applied == VersionRef("r1", 5)
+        assert engine.commit_weight_names == [["a", "b", "c"]]  # union of v4 + v5, deduped + sorted
+        assert r.metrics.get("reload_names") == 3
+
+    _run(go())
+
+
 def test_periodic_reconcile_recovers_missed_wake() -> None:
     async def go() -> None:
         engine = FakeEngine()
@@ -232,8 +259,7 @@ def test_periodic_reconcile_recovers_missed_wake() -> None:
         r = Reconciler(store=store, engine=engine, reconcile_interval=0.02)
         await r.startup()
         assert r.applied == VersionRef("r1", 3)
-        # A publish advances latest, but its wake never lands (cold start raced it, or the
-        # best-effort wake was lost). No wake() call, no request — only the background loop.
+        # Publish advances latest but its wake never lands; only the background loop catches up.
         store.advance_pointer(VersionRef("r1", 5))
         await asyncio.sleep(0.1)
         assert r.applied == VersionRef("r1", 5)  # the backstop caught up on its own
@@ -257,8 +283,7 @@ def test_reconcile_interval_zero_disables_backstop() -> None:
 
 
 def test_stage_waits_for_prefetch() -> None:
-    # The base prefetch and a stage both write /local; the stage must wait for the prefetch
-    # (serialized in the reconciler, not left to the engine's file lock) so they never race.
+    # Prefetch and stage both write the checkpoint; the stage must wait for the prefetch so they never race.
     async def go() -> None:
         engine = FakeEngine()
         release = asyncio.Event()
@@ -276,15 +301,14 @@ def test_stage_waits_for_prefetch() -> None:
         assert "stage:2" not in engine.calls  # blocked on the (still-running) prefetch
         release.set()
         await task
-        assert engine.calls.index("prefetch") < engine.calls.index("stage:2")  # prefetch, then stage
+        assert engine.calls.index("prefetch") < engine.calls.index("stage:2")
         await r.shutdown()
 
     _run(go())
 
 
 # ── convergence liveness ─────────────────────────────────────────────────────
-# The backstop self-heals what wake-driven-only cannot (the red tests behind
-# stitch#45): each scenario converges with the backstop and never with interval=0.
+# Backstop self-heals what wake-only cannot (stitch#45): each converges with it, never with interval=0.
 
 
 async def _converged(r: Reconciler, target: VersionRef, timeout: float = 1.0) -> bool:
@@ -410,6 +434,21 @@ def test_admit_rejected_triggers_wake() -> None:
             assert e.error["type"] == "WeightVersionNotReady"
             assert e.error["target_version"] == 5
         assert r._task is not None  # the 409 kicked off a catch-up reconcile
+
+    _run(go())
+
+
+def test_unapplied_replica_rejects() -> None:
+    # Non-blocking startup serves /health before the first sync lands a version; a request in
+    # that window has no served version to stamp, so it must 409 (retryable), not serve unversioned.
+    async def go() -> None:
+        r = Reconciler(store=FakeStore(), engine=FakeEngine())
+        assert r.applied is None
+        try:
+            async with r.admit(None):
+                raise AssertionError("should have rejected")
+        except ConstraintUnmet as e:
+            assert e.error["type"] == "WeightVersionNotReady"
 
     _run(go())
 

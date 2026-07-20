@@ -13,16 +13,26 @@ import logging
 import time
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager, contextmanager, suppress
 from typing import Any, Literal
 
 from stitch.engines.base import Engine
 from stitch.stores.base import Store
-from stitch.versions import SyncState, VersionConstraint, VersionKind, VersionRef
+from stitch.types import SyncState, VersionConstraint, VersionKind, VersionManifest, VersionRef
 
 logger = logging.getLogger(__name__)
 
 CommitMode = Literal["quiesce", "in_place"]
+
+
+@contextmanager
+def _timed(metrics: dict[str, Any], key: str):
+    """Record the block's wall-clock into ``metrics[key]`` (seconds, 3 dp)."""
+    start = time.perf_counter()
+    try:
+        yield
+    finally:
+        metrics[key] = round(time.perf_counter() - start, 3)
 
 
 class ConstraintUnmet(Exception):
@@ -45,7 +55,7 @@ class AdmissionGate:
     on new weights.
     """
 
-    def __init__(self, *, commit_mode: CommitMode = "quiesce") -> None:
+    def __init__(self, *, commit_mode: CommitMode = "in_place") -> None:
         self.commit_mode = commit_mode
         self.applied: VersionRef | None = None
         self._cond = asyncio.Condition()
@@ -61,24 +71,24 @@ class AdmissionGate:
     def _gated(self, c: VersionConstraint) -> bool:
         if not self._committing:
             return False
-        # in_place lets non-exact requests cross a compatible commit — they were stamped
-        # with the admission version, so a mislabel is only old-era impurity. Exact pins
-        # can't cross, and nothing crosses an incompatible (drain_all) transition.
+        # in_place gates only exact pins across a compatible commit; drain_all / quiesce gate everything.
         if self._drain_all or self.commit_mode != "in_place":
             return True
         return c.exact_version is not None
 
     def _rejection(self, c: VersionConstraint) -> dict[str, Any] | None:
         applied = self.applied.version if self.applied else None
-        if c.satisfied_by(applied):
-            return None
-        target = c.exact_version if c.exact_version is not None else c.min_version
-        return {
-            "type": "WeightVersionNotReady",
-            "target_version": target,
-            "applied": applied,
-            "message": f"served version {applied} does not satisfy {c}",
-        }
+        # Until the first sync lands (applied is None) there is no served version to stamp, so
+        # reject as retryable rather than serve unversioned; the background reconcile sets it shortly.
+        if applied is None or not c.satisfied_by(applied):
+            target = c.exact_version if c.exact_version is not None else c.min_version
+            return {
+                "type": "WeightVersionNotReady",
+                "target_version": target,
+                "applied": applied,
+                "message": f"served version {applied} does not satisfy {c}",
+            }
+        return None
 
     def _on_reject(self, error: dict[str, Any]) -> None:
         """Hook, run under the lock, when a request is rejected."""
@@ -129,9 +139,7 @@ class AdmissionGate:
         ``drain_all`` marks an incompatible transition (a base reset): drain and gate
         every request regardless of mode — rolling requests may cross a compatible
         weight update, never a change of lineage (stitch#32)."""
-        # Close admission BEFORE draining (stitch#32): with the gate still open during
-        # the drain, new requests keep being admitted and an in_place non-exact request
-        # can straddle a base reset. Set _committing first, then wait for the drain.
+        # Close admission before draining (stitch#32), else a new in_place request can straddle a base reset.
         async with self._cond:
             self._committing = True
             self._drain_all = drain_all
@@ -168,7 +176,7 @@ class Reconciler(AdmissionGate):
         store: Store,
         engine: Engine,
         run_id: str | None = None,
-        commit_mode: CommitMode = "quiesce",
+        commit_mode: CommitMode = "in_place",
         flush_cache_on_commit: bool = False,
         debug_requests: bool = False,
         reconcile_interval: float = 5.0,
@@ -176,8 +184,8 @@ class Reconciler(AdmissionGate):
         super().__init__(commit_mode=commit_mode)
         self.store = store
         self.engine = engine
-        self.flush_cache_on_commit = flush_cache_on_commit  # commit policy: evict the engine cache on reload
-        self.run_id = run_id  # static replica label for server_info, not the active chain
+        self.flush_cache_on_commit = flush_cache_on_commit
+        self.run_id = run_id  # static label for server_info, not the active chain's run
         self.debug_requests = debug_requests
         self.reconcile_interval = reconcile_interval
         self.sync_state = SyncState.IDLE
@@ -191,10 +199,8 @@ class Reconciler(AdmissionGate):
         self._lock = asyncio.Lock()
 
     async def startup(self) -> None:
-        # Seed the base into the host-local checkpoint in the background so the first real
-        # stage() is delta-only, not a full base copy on the trainer's critical path. The
-        # replica serves throughout (this is disk-only); a stage() waits for this to finish
-        # before writing the same dir (see _reconcile_once_measured), so the two never race.
+        # Background base seed so the first real stage() is delta-only; a later stage waits on it (see
+        # _reconcile_once_measured), so the two writes to the checkpoint never race.
         self._prefetch_task = asyncio.create_task(self._prefetch_base())
         await self.reconcile()
         if self.reconcile_interval > 0:
@@ -208,11 +214,8 @@ class Reconciler(AdmissionGate):
                     await task
 
     async def _periodic_reconcile(self) -> None:
-        # Convergence backstop: re-check the pointer every interval so a replica that never
-        # got a wake still catches up — a cold start that raced the last publish/wake, or a
-        # best-effort wake that was lost, would otherwise sit stale until the NEXT publish.
-        # wake() is idempotent and non-cancelling, so an already-caught-up tick is a cheap
-        # pointer read and an in-flight reconcile is left to finish.
+        # Convergence backstop: re-check the pointer so a replica that missed its wake (raced the
+        # publish, or a lost best-effort wake) still catches up before the next publish.
         while True:
             await asyncio.sleep(self.reconcile_interval)
             self.wake()
@@ -221,16 +224,13 @@ class Reconciler(AdmissionGate):
         try:
             await self.engine.prefetch()
             self._prefetch_done = True
-        except Exception as exc:  # noqa: BLE001 — best-effort; the first real pull falls back to a full copy
+        except Exception as exc:  # noqa: BLE001 — best-effort; first pull falls back to a full copy
             self._prefetch_error = str(exc)
             logger.exception("base prefetch failed; first sync will pay the full base copy")
 
     def server_info(self) -> dict[str, Any]:
-        # Superset of ReplicaState's wire keys (ready/applied/sync_state/reason) plus
-        # diagnostics; the readiness poll reads the first four. Two-level readiness: `ready`
-        # means serveable (weights on the GPU, version applied) and does NOT wait on the base
-        # prefetch — the replica serves while the prefetch runs. `prefetch_done`/`prefetch_error`
-        # expose whether the O(delta) fast path is primed, so a slow/failed seed is observable.
+        # ready = serveable (version applied on the GPU); does NOT wait on the base prefetch.
+        # prefetch_* expose whether the O(delta) fast path is primed.
         return {
             "ready": self.applied is not None and self.sync_state is not SyncState.ERROR,
             "applied": self.applied.identity if self.applied else None,
@@ -245,7 +245,7 @@ class Reconciler(AdmissionGate):
         }
 
     def _on_reject(self, error: dict[str, Any]) -> None:
-        self.wake()  # a version-not-ready 409 is our cue to catch up
+        self.wake()  # a 409 is our cue to catch up
 
     def wake(self) -> None:
         """Nudge a reconcile now (a publish wake or a 409). Non-cancelling: starts a
@@ -281,6 +281,26 @@ class Reconciler(AdmissionGate):
             return True
         return pointer.version > self.applied.version
 
+    def _touched_names(self, target: VersionManifest) -> list[str] | None:
+        """Union of the tensor names touched across the versions this pass applies
+        (``applied``+1 .. ``target``), for an engine that can reload only those (O(delta)).
+        Returns None — reload everything — when the applied→target range reseeds from a FULL
+        anchor or the baseline is unknown: a full reload is always correct, a partial one only
+        when the served weights already hold every tensor the deltas didn't touch."""
+        applied = self.applied
+        ref = target.ref
+        if applied is None or applied.run_id != ref.run_id or ref.version <= applied.version:
+            return None
+        names: set[str] = set()
+        # Walk back from the target toward the served version. The stage seeds from the newest
+        # FULL at or below the target, so a FULL above `applied` means a reseed => full reload.
+        for v in range(ref.version, applied.version, -1):
+            m = target if v == ref.version else self.store.read_manifest(VersionRef(ref.run_id, v))
+            if m.kind is not VersionKind.DELTA:
+                return None
+            names.update(m.tensor_names)
+        return sorted(names)
+
     async def _reconcile_once(self) -> bool:
         async with self._lock:
             m: dict[str, Any] = {}
@@ -295,7 +315,7 @@ class Reconciler(AdmissionGate):
                     self.metrics = m
 
     async def _reconcile_once_measured(self, m: dict[str, Any]) -> bool:
-        # refresh() may block on I/O; offload it so it never stalls the serving loop.
+        # offload: refresh() may block on I/O.
         await asyncio.to_thread(self.store.refresh)
         pointer = self.store.read_pointer()
         if pointer is None:
@@ -311,38 +331,40 @@ class Reconciler(AdmissionGate):
         source_dir = await asyncio.to_thread(self.store.materialize, pointer)
         m["target_version"] = pointer.version
 
-        # Serialize the base prefetch with this stage: both write the host-local checkpoint,
-        # so wait for the prefetch here rather than rely on the engine's file lock — prefetch
-        # then stage is strictly ordered. If the prefetch failed, this stage seeds the full
-        # base itself (recorded so the slow fallback is visible, not silent).
+        # Touched tensor names for an O(delta) reload: the union across the versions this pass
+        # applies (applied+1 .. target). None => the range reseeds from a FULL anchor, so the
+        # engine must reload everything. Computed under the pre-flip `applied` (on_applied moves it).
+        weight_names = await asyncio.to_thread(self._touched_names, target)
+
+        # Both prefetch and stage write the host checkpoint; wait for the prefetch so they're ordered.
+        # If it failed, this stage seeds the full base itself.
         if self._prefetch_task is not None and not self._prefetch_task.done():
             await self._prefetch_task
         if self._prefetch_error is not None:
             m["paid_base_copy"] = True
 
-        # Stage (host-side apply — the engine walks back to the nearest anchor and
-        # replays the whole tail) runs while serving; the gate covers only the reload.
+        # Stage (host-side apply) runs while serving; the gate covers only the reload.
         self.sync_state = SyncState.PREPARING
-        t = time.perf_counter()
-        await self.engine.stage(target, source_dir)
-        m["stage_s"] = round(time.perf_counter() - t, 3)
+        with _timed(m, "stage_s"):
+            await self.engine.stage(target, source_dir)
 
         def on_applied() -> None:
             self.applied = pointer
 
-        if target.kind is VersionKind.DELTA and not target.files:
-            # An empty delta advances the version but needs no reload — stale KV stays
-            # valid on byte-identical weights.
+        if weight_names is not None and not weight_names:
+            # Nothing changed across the applied→target range: advance the version, no reload —
+            # the weights are byte-identical, so the KV cache stays valid.
             await self.commit(apply=self._commit_noop, on_applied=on_applied)
             m["skipped_reload"] = True
         else:
+            m["reload_names"] = "full" if weight_names is None else len(weight_names)
+
             async def apply() -> None:
-                if self.commit_mode != "in_place":
-                    await self.engine.flush()
                 self.sync_state = SyncState.COMMITTING
-                t2 = time.perf_counter()
-                await self.engine.commit(pointer, flush_cache=self.flush_cache_on_commit)
-                m["commit_s"] = round(time.perf_counter() - t2, 3)
+                with _timed(m, "commit_s"):
+                    await self.engine.commit(
+                        pointer, flush_cache=self.flush_cache_on_commit, weight_names=weight_names
+                    )
 
             await self.commit(
                 apply=apply,
@@ -363,8 +385,7 @@ class Reconciler(AdmissionGate):
         the wipe."""
         old_run = self.applied.run_id if self.applied else None
         logger.info("run change %r -> %r: resetting to base", old_run, new_run)
-        # Reset when the engine holds patched weights (v>0), or a prior pass errored and
-        # may have left the local checkpoint dirty even at v0 (stitch#32).
+        # Reset if weights are patched (v>0), or a prior error may have left the checkpoint dirty (stitch#32).
         was_patched = self.applied is not None and (
             self.applied.version > 0 or self.last_error is not None
         )

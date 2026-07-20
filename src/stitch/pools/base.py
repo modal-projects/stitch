@@ -7,7 +7,7 @@ optional (their no-op defaults fall back to the replicas' own polling / load-aut
 
 from __future__ import annotations
 
-from stitch.versions import VersionRef
+from stitch.types import VersionRef
 
 
 class Pool:
@@ -19,7 +19,10 @@ class Pool:
         raise NotImplementedError
 
     def discover_replicas(self) -> list[str]:
-        """Base URLs of the currently-live replicas."""
+        """Base URLs of the currently-live replicas — a point-in-time snapshot of a *dynamic*
+        pool (replicas join and leave as it autoscales), so the list can already be stale when
+        it returns. Callers must tolerate that: ``wake`` is best-effort per URL, and a replica
+        appearing or disappearing between discovery and use is expected, not an error."""
         raise NotImplementedError
 
     def wake(self, replicas: list[str], ref: VersionRef) -> None:
