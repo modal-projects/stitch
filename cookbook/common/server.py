@@ -36,7 +36,11 @@ def serve_startup(
     ``local_checkpoint_dir`` itself via /pull_weights; the sidecar drives the sync.
     ``sglang_env`` is a per-config override of the sglang process env (over the image's
     baked defaults) — set before launch so the engine subprocess inherits it."""
-    from autoinference_utils.endpoint import SGLangEndpoint, warmup_chat_completions
+    from autoinference_utils.endpoint import (
+        SGLangEndpoint,
+        start_heartbeat_thread,
+        warmup_chat_completions,
+    )
 
     if sglang_env:
         os.environ.update(sglang_env)
@@ -58,6 +62,38 @@ def serve_startup(
         flush_cache_on_commit=flush_cache_on_commit,
     )
     process.wait_http(f"http://127.0.0.1:{SIDECAR_PORT}/health", replica.sidecar, startup_timeout)
+
+    def engine_health() -> str | None:
+        # The engine-side weight pull (base seed + delta applies, up to a full-checkpoint
+        # copy) starves sglang's event loop enough that its detokenizer heartbeat goes
+        # stale and /health 503s. That stall is EXPECTED while the sidecar's reconciler
+        # is mid-sync — only report failures when it is idle, or replicas crash-cycle
+        # through every sync. A dead engine process still raises regardless.
+        error = replica.endpoint.health_check()
+        if error is None:
+            return None
+        try:
+            import json
+            import urllib.request
+
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{SIDECAR_PORT}/server_info", timeout=5
+            ) as response:
+                if json.loads(response.read()).get("sync_state") in (
+                    "QUEUED", "PREFETCHING", "PREPARING", "COMMITTING",
+                ):
+                    return None
+        except Exception:  # noqa: BLE001 — sidecar unreachable: report the engine error
+            pass
+        return error
+
+    import modal.experimental
+
+    start_heartbeat_thread(
+        engine_health,
+        on_failure=lambda: modal.experimental.stop_fetching_inputs(),
+        max_consecutive_failures=12,  # ~1 min of sustained idle-state failures
+    )
     print(f"Rollout server ready: model={model_name}, target_inputs={concurrency}")
 
 

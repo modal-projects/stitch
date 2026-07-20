@@ -49,7 +49,7 @@ def build_serving_image(*, hf_cache_path: str, delta_volume_name: str, experimen
         )
         .run_commands(f"rm -rf {hf_cache_path}")  # baked HF cache must not shadow the mounted volume
         .pip_install(
-            "autoinference-utils==0.2.0",  # sglang server lifecycle
+            "autoinference-utils==0.2.3",  # sglang server lifecycle
             "fastapi", "httpx", "uvicorn",  # the stitch sidecar
             "zstandard", "xxhash", "blake3",  # engine-side /pull_weights receiver's codecs
             "fastsafetensors",  # --load-format fastsafetensors: per-rank read (nogds, see env below)
