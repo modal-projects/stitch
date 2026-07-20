@@ -206,9 +206,7 @@ class _Miles(MilesConfig):
     adam_beta1 = 0.9
     adam_beta2 = 0.98
     optimizer_cpu_offload = True
-    # False to cut the host-RAM peak at the optimizer step: overlap double-buffers the D2H/H2D
-    # optimizer transfers, which OOM-kills a rank on this ~1.88 TiB node (the crash point). Slower.
-    overlap_cpu_optimizer_d2h_h2d = False
+    overlap_cpu_optimizer_d2h_h2d = True
     use_precision_aware_optimizer = True
 
     advantage_estimator = "grpo"
