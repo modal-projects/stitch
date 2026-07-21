@@ -44,7 +44,7 @@ def _await_pool_ready(run, timeout: float = 20 * 60) -> None:
                 return
         except Exception:  # noqa: BLE001
             pass
-        time.sleep(20)
+        time.sleep(30)
     print(f"WARNING: {run.APP_NAME} pool not ready after {timeout:.0f}s; spawning trainer anyway")
 
 
