@@ -9,7 +9,7 @@ floor — see ``cookbook.miles_disagg.prep_app``), then launch a run with one co
 unique run id, stands up that run's pool, and starts training. Each launch is its own run,
 isolated even from an identical-config relaunch (see ``cookbook.miles_disagg.launch``):
 
-    EXPERIMENT_CONFIG=glm45_air_fp8 uv run --extra modal modal run -m cookbook.miles_disagg.launch
+    EXPERIMENT_CONFIG=glm45_air_fp8 uv run --extra modal python -m cookbook.miles_disagg.launch
 
 Config access is uniform: the experiment module ``exp`` is the single source of truth —
 its ``exp.modal`` (infra), ``exp.miles`` (training), and ``exp.<CONST>`` are read directly;
@@ -59,8 +59,8 @@ ROLLOUT_CONCURRENCY = modal_cfg.rollout_target_inputs or miles_cfg.sglang_server
 
 # EXPERIMENT_CONFIG + RUN are baked into both images so a container's re-import rebuilds the same
 # app name and transport paths as the deploy, not the defaults.
-image = trainer_image.build_trainer_image(hf_cache_path=str(HF_CACHE_PATH), experiment=EXPERIMENT, miles_local=MILES_LOCAL_DIR).env({"RUN_ID": RUN_ID})
-server_image = serving_image.build_serving_image(hf_cache_path=str(HF_CACHE_PATH), delta_volume_name=exp.DELTA_VOLUME_NAME, experiment=EXPERIMENT).env({"RUN_ID": RUN_ID})
+image = trainer_image.build_trainer_image(hf_cache_path=str(HF_CACHE_PATH), experiment=EXPERIMENT, run_id=RUN_ID, miles_local=MILES_LOCAL_DIR)
+server_image = serving_image.build_serving_image(hf_cache_path=str(HF_CACHE_PATH), delta_volume_name=exp.DELTA_VOLUME_NAME, experiment=EXPERIMENT, run_id=RUN_ID)
 if MILES_LOCAL_DIR:
     server_image = server_image.add_local_dir(MILES_LOCAL_DIR, remote_path=MILES_ROOT, ignore=[".git", "**/__pycache__", "**/*.pyc"])
 
@@ -259,7 +259,7 @@ def launch_train() -> None:
     except NotFoundError:
         raise SystemExit(
             f"App {APP_NAME!r} is not deployed. Launch a fresh run with:\n"
-            f"  EXPERIMENT_CONFIG={EXPERIMENT} uv run --extra modal modal run -m cookbook.miles_disagg.launch"
+            f"  EXPERIMENT_CONFIG={EXPERIMENT} uv run --extra modal python -m cookbook.miles_disagg.launch"
         )
     print(f"stop this run when done: modal app stop {APP_NAME}")
 
