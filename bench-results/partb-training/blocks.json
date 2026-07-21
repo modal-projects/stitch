@@ -1,0 +1,88 @@
+[
+  {
+    "index": 0,
+    "label": "tune",
+    "start": 1784593834.9124227,
+    "planned_seconds": 600.0,
+    "tune_result": {
+      "tuned_hyperparameters": {
+        "defaults": {
+          "rtt_weight": 0.8985606649219766,
+          "prefill_weight": 1.7232118298654275,
+          "load_weight": 1.0,
+          "queue_weight": 1.0,
+          "prefill_rate": 1.0,
+          "queue_rate": 1.0
+        },
+        "per_target": {}
+      },
+      "tune_state": {
+        "enabled": true,
+        "window_size": 100,
+        "hop_size": 50,
+        "apply": true,
+        "mode": "online-es",
+        "objective_metric": "neg_p95_e2e",
+        "online_tuner_state": {
+          "name": "gaussian-es-1plus1-1over5",
+          "best_score": -21.334989585,
+          "best_params": {
+            "prefill_weight": 1.6772621545104605,
+            "rtt_weight": 1.2006016098554142
+          },
+          "evaluated_after_baseline": 1,
+          "sigma": 0.5,
+          "recent_success_rate": 1.0,
+          "recent_window_filled": 1
+        },
+        "pending_candidate": {
+          "prefill_weight": 1.7232118298654275,
+          "rtt_weight": 0.8985606649219766
+        },
+        "last_score": -21.334989585,
+        "buffered_samples": 575,
+        "samples_since_last_apply": 40,
+        "samples_until_next_apply": 10,
+        "applied_count": 2,
+        "last_applied_at_monotonic": 482.654960328,
+        "last_recommendation": {
+          "defaults": {
+            "prefill_weight": 1.7232118298654275,
+            "rtt_weight": 0.8985606649219766
+          },
+          "per_target": {}
+        },
+        "enabled_at_monotonic": 375.185295505
+      }
+    },
+    "end": 1784594435.8101938
+  },
+  {
+    "index": 1,
+    "label": "gorgo",
+    "start": 1784594435.9613366,
+    "planned_seconds": 600.0,
+    "end": 1784595035.9903007
+  },
+  {
+    "index": 2,
+    "label": "session-affinity",
+    "start": 1784595036.141698,
+    "planned_seconds": 600.0,
+    "end": 1784595636.1417692
+  },
+  {
+    "index": 3,
+    "label": "session-affinity",
+    "start": 1784595636.2804112,
+    "planned_seconds": 600.0,
+    "end": 1784596236.6095982
+  },
+  {
+    "index": 4,
+    "label": "gorgo",
+    "start": 1784596236.7596626,
+    "planned_seconds": 600.0,
+    "end": 1784596836.7597363
+  }
+]

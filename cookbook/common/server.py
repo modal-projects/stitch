@@ -40,8 +40,23 @@ def serve_startup(
 
     if sglang_env:
         os.environ.update(sglang_env)
+    # The engine's weight-sync base seed (fork weight_updater._reseed_base_dir) uses
+    # model_path as a *filesystem directory* — a raw hub id like "Qwen/Qwen3-4B" makes
+    # the first /pull_weights fail (os.scandir on the repo id) and wedges every publish.
+    # Resolve to the mounted HF-cache snapshot dir; --served-model-name (in sglang_args)
+    # keeps the API model id.
+    model_path = model_name
+    if not os.path.isdir(model_path):
+        try:
+            from huggingface_hub import snapshot_download
+
+            model_path = snapshot_download(model_name, local_files_only=True)
+            print(f"Resolved {model_name} -> {model_path} for weight-sync base seeding")
+        except Exception as exc:  # noqa: BLE001 — serve by repo id; publishes would need the dir
+            print(f"WARNING: could not resolve {model_name} to a local snapshot dir ({exc}); "
+                  "weight publishes will fail at the base seed")
     replica.endpoint = SGLangEndpoint(
-        model_path=model_name, worker_port=SGLANG_PORT, tp=tp,
+        model_path=model_path, worker_port=SGLANG_PORT, tp=tp,
         extra_server_args=sglang_args, health_timeout=startup_timeout, health_poll_interval=10.0,
     )
     replica.endpoint.start()
