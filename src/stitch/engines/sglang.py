@@ -27,10 +27,12 @@ class SGLangEngine(Engine):
         local_checkpoint_dir: str,
         *,
         control_timeout: float = 120.0,
+        reload_timeout: float = 600.0,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self.local_checkpoint_dir = local_checkpoint_dir
         self._control_timeout = control_timeout
+        self._reload_timeout = reload_timeout
 
     def base_url(self) -> str:
         return self._base_url
@@ -51,7 +53,7 @@ class SGLangEngine(Engine):
                 "source_dir": str(Path(source_dir).parent),
                 "target_version": manifest.ref.version,
             },
-            timeout=None,
+            timeout=self._reload_timeout,
             action="weight pull",
         )
 
@@ -60,7 +62,7 @@ class SGLangEngine(Engine):
         await self._post(
             "/pull_weights",
             {"local_checkpoint_dir": self.local_checkpoint_dir, "source_dir": self.local_checkpoint_dir, "target_version": 0},
-            timeout=None,
+            timeout=self._reload_timeout,
             action="base prefetch",
         )
 
@@ -77,7 +79,7 @@ class SGLangEngine(Engine):
         # forces the full reload (kill switch); an engine without the load-plan patch ignores it.
         if weight_names and os.environ.get("STITCH_PARTIAL_RELOAD", "1") == "1":
             payload["weight_names"] = list(weight_names)
-        await self._post("/update_weights_from_disk", payload, timeout=None, action="weight update")
+        await self._post("/update_weights_from_disk", payload, timeout=self._reload_timeout, action="weight update")
 
     async def flush_cache(self) -> None:
         await self._get("/flush_cache", ok=(200, 404))
@@ -96,7 +98,7 @@ class SGLangEngine(Engine):
         await self._post(
             "/update_weights_from_disk",
             {"model_path": self.local_checkpoint_dir, "weight_version": "0", "flush_cache": False},
-            timeout=None,
+            timeout=self._reload_timeout,
             action="reset reload to base",
         )
 

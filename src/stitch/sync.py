@@ -245,6 +245,17 @@ class Reconciler(AdmissionGate):
             "metrics": self.metrics,
         }
 
+    def readiness_reason(self) -> str:
+        """Why /health is still 503, so a not-yet-admitted replica reads as 'catching up', not broken."""
+        if self._prefetch_error:
+            return f"base seed failed: {self._prefetch_error}"
+        if not self._prefetch_done:
+            return "seeding base checkpoint"
+        if self.last_error:
+            return f"sync error: {self.last_error}"
+        applied = self.applied.identity if self.applied else "base"
+        return f"catching up to live version (applied={applied}, state={self.sync_state.value})"
+
     def _on_reject(self, error: dict[str, Any]) -> None:
         self.wake()  # a 409 is our cue to catch up
 
@@ -272,6 +283,8 @@ class Reconciler(AdmissionGate):
                 return
             if caught_up:
                 self.sync_state = SyncState.IDLE
+                if not self.ready:
+                    logger.info("caught up to v%d, entering rotation", self.applied.version if self.applied else 0)
                 self.ready = True
                 return
             await asyncio.sleep(1.0)
@@ -315,10 +328,15 @@ class Reconciler(AdmissionGate):
                 if len(m) > 1 or "error" in m:  # a no-work pass leaves the last breakdown alone
                     m["at"] = time.time()
                     self.metrics = m
+                    timings = {k: v for k, v in m.items() if k.endswith("_s")}
+                    if timings:
+                        logger.info("catch-up pass v%s->v%s timing(s): %s",
+                                    m.get("applied_version"), m.get("target_version"), timings)
 
     async def _reconcile_once_measured(self, m: dict[str, Any]) -> bool:
         # offload: refresh() may block on I/O.
-        await asyncio.to_thread(self.store.refresh)
+        with _timed(m, "refresh_s"):
+            await asyncio.to_thread(self.store.refresh)
         pointer = self.store.read_pointer()
         if pointer is None:
             return True
@@ -329,19 +347,29 @@ class Reconciler(AdmissionGate):
 
         self.sync_state = SyncState.PREFETCHING
         self.last_error = None
-        target = self.store.read_manifest(pointer)
-        source_dir = await asyncio.to_thread(self.store.materialize, pointer)
         m["target_version"] = pointer.version
+        m["applied_version"] = self.applied.version if self.applied else -1
+        with _timed(m, "read_manifest_s"):
+            target = self.store.read_manifest(pointer)
+        with _timed(m, "materialize_s"):
+            source_dir = await asyncio.to_thread(self.store.materialize, pointer)
+        logger.info(
+            "catch-up: %s -> v%d, staging deltas",
+            "base" if self.applied is None else f"v{self.applied.version}",
+            pointer.version,
+        )
 
         # Touched tensor names for an O(delta) reload: the union across the versions this pass
         # applies (applied+1 .. target). None => the range reseeds from a FULL anchor, so the
         # engine must reload everything. Computed under the pre-flip `applied` (on_applied moves it).
-        weight_names = await asyncio.to_thread(self._touched_names, target)
+        with _timed(m, "touched_names_s"):
+            weight_names = await asyncio.to_thread(self._touched_names, target)
 
         # Both prefetch and stage write the host checkpoint; wait for the prefetch so they're ordered.
         # If it failed, this stage seeds the full base itself.
         if self._prefetch_task is not None and not self._prefetch_task.done():
-            await self._prefetch_task
+            with _timed(m, "prefetch_wait_s"):
+                await self._prefetch_task
         if self._prefetch_error is not None:
             m["paid_base_copy"] = True
 
@@ -360,6 +388,11 @@ class Reconciler(AdmissionGate):
             m["skipped_reload"] = True
         else:
             m["reload_names"] = "full" if weight_names is None else len(weight_names)
+            logger.info(
+                "catch-up: reloading v%d (%s)",
+                pointer.version,
+                "all tensors" if weight_names is None else f"{len(weight_names)} tensors",
+            )
 
             async def apply() -> None:
                 self.sync_state = SyncState.COMMITTING
