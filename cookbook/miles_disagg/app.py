@@ -5,13 +5,11 @@ Server (sglang + stitch sidecar) is the shared common one; the Trainer runs mile
 and publishes XOR deltas through a Modal Volume the pool syncs from.
 
 Prepare the checkpoints once first (a separate app, so prep never spins up the rollout Server
-floor — see ``cookbook.miles_disagg.prep_app``), then launch a run. ``RUN`` is the per-run
-signature (like ``EXPERIMENT_CONFIG``): export it once so the deploy and the trainer share it —
-a fresh value gives a fully isolated run that can't collide with another:
+floor — see ``cookbook.miles_disagg.prep_app``), then launch a run with one command — it mints a
+unique run id, stands up that run's pool, and starts training. Each launch is its own run,
+isolated even from an identical-config relaunch (see ``cookbook.miles_disagg.launch``):
 
-    export RUN=$(python3 -c 'import uuid; print(uuid.uuid4().hex[:8])')
-    EXPERIMENT_CONFIG=glm45_air_fp8 uv run --extra modal modal deploy -m cookbook.miles_disagg.app
-    EXPERIMENT_CONFIG=glm45_air_fp8 uv run --extra modal modal run -m cookbook.miles_disagg.app::launch_train
+    EXPERIMENT_CONFIG=glm45_air_fp8 uv run --extra modal modal run -m cookbook.miles_disagg.launch
 
 Config access is uniform: the experiment module ``exp`` is the single source of truth —
 its ``exp.modal`` (infra), ``exp.miles`` (training), and ``exp.<CONST>`` are read directly;
@@ -50,8 +48,8 @@ exp = importlib.import_module(f"cookbook.miles_disagg.configs.{EXPERIMENT}")
 modal_cfg = exp.modal
 miles_cfg = exp.miles
 
-# Per-run signature (an env var, like EXPERIMENT_CONFIG): gives each run its own pool app + delta
-# transport root, so two runs of one config never share a pool or clobber each other's pointer.
+# Per-run signature, minted fresh per launch by cookbook.miles_disagg.launch: names the pool app +
+# delta transport root, so each run — even an identical-config relaunch — is its own isolated pool.
 RUN = os.environ["RUN"]
 APP_NAME = f"{exp.APP_NAME}-{RUN}"
 BULLETIN_ROOT = f"{exp.DELTA_BULLETIN_ROOT}/{RUN}"
@@ -241,21 +239,28 @@ def _materialize_node_local_yaml(cfg: Any, field: str, dest_dir: str = "/root/.m
 
 
 # ── Entrypoints (preparation lives in a separate app: cookbook.miles_disagg.prep_app) ──
+def spawn_train() -> Any:
+    """Spawn the trainer on this run's already-deployed pool (config ships as data, so config
+    edits run without a redeploy; infra changes still require one)."""
+    trainer = modal.Cls.from_name(APP_NAME, "Trainer")()
+    call = trainer.train.spawn(miles_cfg.to_payload())
+    print(f"Spawned train on {APP_NAME}: {call.object_id}")
+    return call
+
+
 @app.local_entrypoint()
 def launch_train() -> None:
-    """Spawn training on the deployed app. Config ships as data, so edits run without a
-    redeploy; infrastructure changes still require one."""
+    """Spawn training on a pool that's already up for this RUN. ``cookbook.miles_disagg.launch``
+    deploys + spawns in one command; use this only to re-spawn against a running pool."""
     from modal.exception import NotFoundError
 
     try:
-        trainer = modal.Cls.from_name(APP_NAME, "Trainer")()
-        call = trainer.train.spawn(miles_cfg.to_payload())
+        spawn_train()
     except NotFoundError:
         raise SystemExit(
-            f"App {APP_NAME!r} is not deployed. Deploy it first with the same RUN:\n"
-            f"  EXPERIMENT_CONFIG={EXPERIMENT} uv run --extra modal modal deploy -m cookbook.miles_disagg.app"
+            f"App {APP_NAME!r} is not deployed. Launch a fresh run with:\n"
+            f"  EXPERIMENT_CONFIG={EXPERIMENT} uv run --extra modal modal run -m cookbook.miles_disagg.launch"
         )
-    print(f"Spawned train on {APP_NAME}: {call.object_id}")
     print(f"stop this run when done: modal app stop {APP_NAME}")
 
 
