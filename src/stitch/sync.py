@@ -190,6 +190,7 @@ class Reconciler(AdmissionGate):
         self.reconcile_interval = reconcile_interval
         self.sync_state = SyncState.IDLE
         self.last_error: str | None = None
+        self.ready = False  # latches on first catch-up, stays set even when later stale; the /health routing gate
         self.metrics: dict[str, Any] = {}
         self._task: asyncio.Task[None] | None = None
         self._prefetch_task: asyncio.Task[None] | None = None
@@ -229,10 +230,10 @@ class Reconciler(AdmissionGate):
             logger.exception("base prefetch failed; first sync will pay the full base copy")
 
     def server_info(self) -> dict[str, Any]:
-        # ready = serveable (version applied on the GPU); does NOT wait on the base prefetch.
-        # prefetch_* expose whether the O(delta) fast path is primed.
+        # applied = version on the GPU (the pool reads it to see which version each replica has);
+        # ready = has caught up to the live pointer at least once, latched — the routing gate (/health).
         return {
-            "ready": self.applied is not None and self.sync_state is not SyncState.ERROR,
+            "ready": self.ready,
             "applied": self.applied.identity if self.applied else None,
             "sync_state": self.sync_state.value,
             "reason": self.last_error,
@@ -271,6 +272,7 @@ class Reconciler(AdmissionGate):
                 return
             if caught_up:
                 self.sync_state = SyncState.IDLE
+                self.ready = True
                 return
             await asyncio.sleep(1.0)
 

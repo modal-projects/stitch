@@ -115,7 +115,18 @@ def test_fresh_reconcile() -> None:
         assert engine.staged[-1] == VersionRef("r1", 3)
         assert VersionRef("r1", 3) in engine.committed
         assert r.sync_state is SyncState.IDLE
+        assert r.ready
         assert "flush_cache" not in engine.calls  # flushing is not automatic; it rides commit(flush_cache=…)
+
+    _run(go())
+
+
+def test_reconcile_latches_ready() -> None:
+    async def go() -> None:
+        r = Reconciler(store=FakeStore(VersionRef("r1", 2), _full("r1", 2)), engine=FakeEngine())
+        assert not r.ready  # /health keeps a replica out of Flash rotation until it has caught up
+        await r.reconcile()
+        assert r.ready
 
     _run(go())
 

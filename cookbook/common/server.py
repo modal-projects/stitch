@@ -61,14 +61,16 @@ def serve_startup(
         local_checkpoint_dir=local_checkpoint_dir, volume_name=volume_name, commit_mode=commit_mode,
         flush_cache_on_commit=flush_cache_on_commit,
     )
-    process.wait_http(f"http://127.0.0.1:{SIDECAR_PORT}/health", replica.sidecar, startup_timeout)
+    # /server_info, not /health: /health stays 503 until catch-up, which would spin here and time out.
+    process.wait_http(f"http://127.0.0.1:{SIDECAR_PORT}/server_info", replica.sidecar, startup_timeout)
 
     def engine_health() -> str | None:
-        # The engine-side weight pull (base seed + delta applies, up to a full-checkpoint
-        # copy) starves sglang's event loop enough that its detokenizer heartbeat goes
-        # stale and /health 503s. That stall is EXPECTED while the sidecar's reconciler
-        # is mid-sync — only report failures when it is idle, or replicas crash-cycle
-        # through every sync. A dead engine process still raises regardless.
+        # The base seed (engine.prefetch) and every delta apply drive the fork's /pull_weights,
+        # which starves sglang's event loop enough that its detokenizer heartbeat goes stale and
+        # /health 503s. That stall is EXPECTED while the sidecar is seeding or mid-sync — report
+        # failures only when it is genuinely idle, or replicas crash-cycle through every sync (the
+        # base seed runs with sync_state=IDLE, so it needs the prefetch_done check, not just sync_state).
+        # A dead engine process still raises once the seed/sync is done (or errored).
         error = replica.endpoint.health_check()
         if error is None:
             return None
@@ -79,7 +81,9 @@ def serve_startup(
             with urllib.request.urlopen(
                 f"http://127.0.0.1:{SIDECAR_PORT}/server_info", timeout=5
             ) as response:
-                if json.loads(response.read()).get("sync_state") in (
+                info = json.loads(response.read())
+                seeding = not info.get("prefetch_done", True) and not info.get("prefetch_error")
+                if seeding or info.get("sync_state") in (
                     "QUEUED", "PREFETCHING", "PREPARING", "COMMITTING",
                 ):
                     return None
