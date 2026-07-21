@@ -79,9 +79,10 @@ def create_app(
 
     @app.get("/health")
     async def health() -> Response:
-        # 503 until the reconciler's first catch-up. Modal has no readiness probe and admits a container to
-        # Flash routing on @enter return, so serve_startup blocks @enter on this to hold a not-yet-synced
-        # joiner out of rotation (else it's routed to and 409s the whole catch-up). Liveness/boot use /server_info.
+        # 503 until the reconciler's first catch-up, so a deployment that gates routing on readiness
+        # keeps a not-yet-synced replica out of rotation (else it's routed to and 409s the whole
+        # catch-up). A fresh boot clears at once; a mid-run joiner waits until it has replayed to the
+        # live version. Liveness/boot checks use /server_info instead.
         if not reconciler.ready:
             return JSONResponse({"ready": False, "reason": reconciler.readiness_reason()}, status_code=503)
         return JSONResponse({"ready": True})
