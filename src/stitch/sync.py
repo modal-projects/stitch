@@ -192,6 +192,8 @@ class Reconciler(AdmissionGate):
         self.last_error: str | None = None
         self.ready = False  # latches on first catch-up, stays set even when later stale; the /health routing gate
         self.metrics: dict[str, Any] = {}
+        self._boot_monotonic = time.monotonic()  # for the "caught up in Ns" join summary
+        self._catchup_passes = 0  # reload passes a fresh joiner pays before first ready (it chases the live version)
         self._task: asyncio.Task[None] | None = None
         self._prefetch_task: asyncio.Task[None] | None = None
         self._prefetch_done = False
@@ -284,7 +286,12 @@ class Reconciler(AdmissionGate):
             if caught_up:
                 self.sync_state = SyncState.IDLE
                 if not self.ready:
-                    logger.info("caught up to v%d, entering rotation", self.applied.version if self.applied else 0)
+                    logger.info(
+                        "caught up to v%d after %d catch-up pass(es) in %.0fs — entering rotation",
+                        self.applied.version if self.applied else 0,
+                        self._catchup_passes,
+                        time.monotonic() - self._boot_monotonic,
+                    )
                 self.ready = True
                 return
             await asyncio.sleep(1.0)
@@ -330,6 +337,8 @@ class Reconciler(AdmissionGate):
                     self.metrics = m
                     timings = {k: v for k, v in m.items() if k.endswith("_s")}
                     if timings:
+                        if not self.ready:
+                            self._catchup_passes += 1
                         logger.info("catch-up pass v%s->v%s timing(s): %s",
                                     m.get("applied_version"), m.get("target_version"), timings)
 
