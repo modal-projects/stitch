@@ -14,7 +14,7 @@ sglang release*.
 ```python
 SGLANG_IMAGE_TAG   = "lmsysorg/sglang:v0.5.15.post1"    # base kernels/CUDA
 SGLANG_FORK_BRANCH = "stitch-sglang-v0.5.15-post1"      # modal-projects/sglang
-SGLANG_FORK_COMMIT = "eed0b1dd02d5e7d167004eda51ed38d7be5291c8"
+SGLANG_FORK_COMMIT = "557e19e1b6fdceeea46d8674f6e3ae3428d1d102"
 ```
 
 The branch is **`v0.5.15.post1` + the patch stack below, nothing else** — every commit
@@ -34,7 +34,10 @@ commit bodies for the details — this is the map.
    The disaggregated receiver: `POST /pull_weights` walks the published
    `weight_v{N}/` chain from the nearest full anchor, replays deltas (xor + zstd,
    xxh3 checksum) into a host-local checkpoint that `/update_weights_from_disk` then
-   reloads, while the engine keeps serving. Hardened for an eventually-consistent
+   reloads, while the engine keeps serving. A steady-state host applies the one new
+   delta in place; a host several versions behind (a fresh joiner catching up) folds
+   the whole delta range in one pass per tensor — one buffered read + XOR the range in
+   RAM + one write — instead of N mmap read-modify-writes. Hardened for an eventually-consistent
    volume mount (whole-file in-memory read + size-verify before the xor, one reload
    per host, reseed from the pristine boot checkpoint). The base-seed reseed copies shards
    in parallel with a 16 MiB streaming read (the /prep read is Volume-backend-fetch bound —
