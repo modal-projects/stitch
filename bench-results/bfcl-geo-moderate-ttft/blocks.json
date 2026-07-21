@@ -1,0 +1,85 @@
+[
+  {
+    "index": 0,
+    "label": "tune",
+    "start": 1784589740.4690132,
+    "planned_seconds": 600.0,
+    "tune_result": {
+      "tuned_hyperparameters": {
+        "defaults": {
+          "rtt_weight": 3.1507641092733762,
+          "prefill_weight": 3.4484805575692885,
+          "load_weight": 1.0,
+          "queue_weight": 1.0,
+          "prefill_rate": 1.0,
+          "queue_rate": 1.0
+        },
+        "per_target": {}
+      },
+      "tune_state": {
+        "enabled": false,
+        "window_size": 100,
+        "hop_size": 50,
+        "apply": true,
+        "mode": "online-es",
+        "objective_metric": "neg_p95_e2e",
+        "online_tuner_state": {
+          "name": "gaussian-es-1plus1-1over5",
+          "best_score": -0.976217693,
+          "best_params": {
+            "prefill_weight": 3.4484805575692885,
+            "rtt_weight": 3.1507641092733762
+          },
+          "evaluated_after_baseline": 23,
+          "sigma": 0.0442216235019784,
+          "recent_success_rate": 0.125,
+          "recent_window_filled": 8
+        },
+        "pending_candidate": null,
+        "last_score": -1.064671733,
+        "buffered_samples": 1000,
+        "samples_since_last_apply": 50,
+        "samples_until_next_apply": null,
+        "applied_count": 156,
+        "last_applied_at_monotonic": 8990.666930078,
+        "last_recommendation": {
+          "defaults": {
+            "prefill_weight": 3.45428705503273,
+            "rtt_weight": 3.094386479388774
+          },
+          "per_target": {}
+        },
+        "enabled_at_monotonic": 8966.583824067
+      }
+    },
+    "end": 1784590340.9618812
+  },
+  {
+    "index": 1,
+    "label": "gorgo",
+    "start": 1784590341.0422654,
+    "planned_seconds": 600.0,
+    "end": 1784590941.042342
+  },
+  {
+    "index": 2,
+    "label": "session-affinity",
+    "start": 1784590941.131632,
+    "planned_seconds": 600.0,
+    "end": 1784591541.1317065
+  },
+  {
+    "index": 3,
+    "label": "session-affinity",
+    "start": 1784591541.2137837,
+    "planned_seconds": 600.0,
+    "end": 1784592141.2138584
+  },
+  {
+    "index": 4,
+    "label": "gorgo",
+    "start": 1784592141.4938524,
+    "planned_seconds": 600.0,
+    "end": 1784592742.323548
+  }
+]
