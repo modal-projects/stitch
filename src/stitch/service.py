@@ -62,8 +62,7 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        # Reconcile in the background so uvicorn can answer /health (which gates routing on sync);
-        # a v0 deploy latches synced fast — the base-seed copy is a separate background task, not here.
+        # Background reconcile so uvicorn answers /health (503 until the first catch-up) while it runs.
         syncing = asyncio.create_task(reconciler.startup())
         try:
             yield
@@ -80,11 +79,11 @@ def create_app(
 
     @app.get("/health")
     async def health() -> Response:
-        # Flash has no readiness gate distinct from this probe, so gate routing on sync: an unsynced
-        # joiner would otherwise be routed to and 409 every request until it caught up.
-        if not reconciler.synced:
-            return JSONResponse({"synced": False}, status_code=503)
-        return JSONResponse({"synced": True})
+        # Flash has no readiness probe distinct from this one, so /health IS the routing gate: 503 until
+        # caught up, else a joiner is routed to and 409s until it does. (Liveness/boot use /server_info.)
+        if not reconciler.ready:
+            return JSONResponse({"ready": False}, status_code=503)
+        return JSONResponse({"ready": True})
 
     @app.get("/server_info")
     async def server_info() -> dict[str, Any]:

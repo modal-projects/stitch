@@ -190,7 +190,7 @@ class Reconciler(AdmissionGate):
         self.reconcile_interval = reconcile_interval
         self.sync_state = SyncState.IDLE
         self.last_error: str | None = None
-        self.synced = False  # latched once caught up to the live pointer; gates routing (service.py /health)
+        self.ready = False  # latches on first catch-up, stays set even when later stale; the /health routing gate
         self.metrics: dict[str, Any] = {}
         self._task: asyncio.Task[None] | None = None
         self._prefetch_task: asyncio.Task[None] | None = None
@@ -231,9 +231,9 @@ class Reconciler(AdmissionGate):
 
     def server_info(self) -> dict[str, Any]:
         # applied = version on the GPU (the pool reads it to see which version each replica has);
-        # synced = caught up to the live pointer, latched — the routing gate (/health).
+        # ready = has caught up to the live pointer at least once, latched — the routing gate (/health).
         return {
-            "synced": self.synced,
+            "ready": self.ready,
             "applied": self.applied.identity if self.applied else None,
             "sync_state": self.sync_state.value,
             "reason": self.last_error,
@@ -272,7 +272,7 @@ class Reconciler(AdmissionGate):
                 return
             if caught_up:
                 self.sync_state = SyncState.IDLE
-                self.synced = True
+                self.ready = True
                 return
             await asyncio.sleep(1.0)
 

@@ -61,7 +61,8 @@ def serve_startup(
         local_checkpoint_dir=local_checkpoint_dir, volume_name=volume_name, commit_mode=commit_mode,
         flush_cache_on_commit=flush_cache_on_commit,
     )
-    process.wait_http(f"http://127.0.0.1:{SIDECAR_PORT}/health", replica.sidecar, startup_timeout)
+    # /server_info, not /health: /health stays 503 until catch-up, which would spin here and time out.
+    process.wait_http(f"http://127.0.0.1:{SIDECAR_PORT}/server_info", replica.sidecar, startup_timeout)
 
     def engine_health() -> str | None:
         # The engine-side weight pull (base seed + delta applies, up to a full-checkpoint
