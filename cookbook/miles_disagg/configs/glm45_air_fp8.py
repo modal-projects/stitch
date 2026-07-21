@@ -38,9 +38,6 @@ SGLANG_SERVER_ARGS = {
     "--max-prefill-tokens": "16384",
     "--cuda-graph-max-bs-prefill": "2048",  # avoid H200 cold-start graph-compile hangs
     "--skip-server-warmup": "",
-    # autoinference's SGLangEndpoint enables log_requests; turn it back off so the liveness
-    # heartbeat's HEALTH_CHECK probes (and every rollout request) don't flood the logs.
-    "--no-log-requests": "",
 }
 
 
