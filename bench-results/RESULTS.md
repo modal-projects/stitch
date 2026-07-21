@@ -30,6 +30,16 @@ exactly across arms). Per-run details in each directory's RUN.md / report.md.
   steps); under near-idle load it walks weights to the range rails — enable it only with
   representative traffic flowing.
 
+## Part B — live training composition (partb-training-3)
+
+Real slime GRPO training drove rollouts through the router while policies flipped live:
+**ten delta publishes (v1..v10) applied cleanly on both replicas** (IDLE→PREPARING→IDLE,
+zero ERROR, no 409 storms), training unaffected. Routing delta on this workload:
+**null after length normalization** (5.35 vs 5.37 ms/completion-token) — single-turn,
+decode-dominated, symmetric single-region fleet is the predicted null case. The first
+attempt exposed a real weight-sync bug (base seed used the raw hub id as a directory;
+first publish wedged the pool) — fixed in stitch `5ff61c0` and validated by the retry.
+
 ## Known limitations
 
 - E2E ≡ TTFT everywhere (the stitch sidecar buffers responses); TTFT/decode split is
