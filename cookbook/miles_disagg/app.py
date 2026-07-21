@@ -48,19 +48,19 @@ exp = importlib.import_module(f"cookbook.miles_disagg.configs.{EXPERIMENT}")
 modal_cfg = exp.modal
 miles_cfg = exp.miles
 
-# Per-run signature, minted fresh per launch by cookbook.miles_disagg.launch: names the pool app +
-# delta transport root, so each run — even an identical-config relaunch — is its own isolated pool.
-RUN = os.environ["RUN"]
-APP_NAME = f"{exp.APP_NAME}-{RUN}"
-BULLETIN_ROOT = f"{exp.DELTA_BULLETIN_ROOT}/{RUN}"
+# Per-run id, minted fresh per launch by cookbook.miles_disagg.launch: names the pool app + delta
+# transport root, so each run — even an identical-config relaunch — is its own isolated pool.
+RUN_ID = os.environ["RUN_ID"]
+APP_NAME = f"{exp.APP_NAME}-{RUN_ID}"
+BULLETIN_ROOT = f"{exp.DELTA_BULLETIN_ROOT}/{RUN_ID}"
 
 # Flash autoscaler target / sglang concurrency cap: explicit target_inputs, else engine concurrency.
 ROLLOUT_CONCURRENCY = modal_cfg.rollout_target_inputs or miles_cfg.sglang_server_concurrency
 
 # EXPERIMENT_CONFIG + RUN are baked into both images so a container's re-import rebuilds the same
 # app name and transport paths as the deploy, not the defaults.
-image = trainer_image.build_trainer_image(hf_cache_path=str(HF_CACHE_PATH), experiment=EXPERIMENT, miles_local=MILES_LOCAL_DIR).env({"RUN": RUN})
-server_image = serving_image.build_serving_image(hf_cache_path=str(HF_CACHE_PATH), delta_volume_name=exp.DELTA_VOLUME_NAME, experiment=EXPERIMENT).env({"RUN": RUN})
+image = trainer_image.build_trainer_image(hf_cache_path=str(HF_CACHE_PATH), experiment=EXPERIMENT, miles_local=MILES_LOCAL_DIR).env({"RUN_ID": RUN_ID})
+server_image = serving_image.build_serving_image(hf_cache_path=str(HF_CACHE_PATH), delta_volume_name=exp.DELTA_VOLUME_NAME, experiment=EXPERIMENT).env({"RUN_ID": RUN_ID})
 if MILES_LOCAL_DIR:
     server_image = server_image.add_local_dir(MILES_LOCAL_DIR, remote_path=MILES_ROOT, ignore=[".git", "**/__pycache__", "**/*.pyc"])
 

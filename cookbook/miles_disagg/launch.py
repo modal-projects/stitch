@@ -24,9 +24,9 @@ app = modal.App("miles-disagg-launch")
 
 @app.local_entrypoint()
 def main() -> None:
-    os.environ["RUN"] = uuid.uuid4().hex[:8]
+    os.environ["RUN_ID"] = uuid.uuid4().hex[:8]
     from cookbook.miles_disagg import app as run
 
     run.app.deploy()
     run.spawn_train()
-    print(f"run {os.environ['RUN']} up on {run.APP_NAME}; stop it with: modal app stop {run.APP_NAME}")
+    print(f"run {os.environ['RUN_ID']} up on {run.APP_NAME}; stop it with: modal app stop {run.APP_NAME}")
