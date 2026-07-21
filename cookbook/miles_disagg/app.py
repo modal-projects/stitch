@@ -5,11 +5,13 @@ Server (sglang + stitch sidecar) is the shared common one; the Trainer runs mile
 and publishes XOR deltas through a Modal Volume the pool syncs from.
 
 Prepare the checkpoints once first (a separate app, so prep never spins up the rollout Server
-floor — see ``cookbook.miles_disagg.prep_app``), then launch a run. The wrapper auto-mints a run
-signature that scopes the pool app + delta transport, so runs never collide — concurrent runs of
-one config are fully isolated:
+floor — see ``cookbook.miles_disagg.prep_app``), then launch a run. ``RUN`` is the per-run
+signature (like ``EXPERIMENT_CONFIG``): export it once so the deploy and the trainer share it —
+a fresh value gives a fully isolated run that can't collide with another:
 
-    EXPERIMENT_CONFIG=glm45_air_fp8 ./cookbook/miles_disagg/launch.sh
+    export RUN=$(python3 -c 'import uuid; print(uuid.uuid4().hex[:8])')
+    EXPERIMENT_CONFIG=glm45_air_fp8 uv run --extra modal modal deploy -m cookbook.miles_disagg.app
+    EXPERIMENT_CONFIG=glm45_air_fp8 uv run --extra modal modal run -m cookbook.miles_disagg.app::launch_train
 
 Config access is uniform: the experiment module ``exp`` is the single source of truth —
 its ``exp.modal`` (infra), ``exp.miles`` (training), and ``exp.<CONST>`` are read directly;
@@ -48,7 +50,7 @@ exp = importlib.import_module(f"cookbook.miles_disagg.configs.{EXPERIMENT}")
 modal_cfg = exp.modal
 miles_cfg = exp.miles
 
-# Per-run signature, auto-minted by the launch wrapper: gives each run its own pool app + delta
+# Per-run signature (an env var, like EXPERIMENT_CONFIG): gives each run its own pool app + delta
 # transport root, so two runs of one config never share a pool or clobber each other's pointer.
 RUN = os.environ["RUN"]
 APP_NAME = f"{exp.APP_NAME}-{RUN}"
@@ -250,8 +252,8 @@ def launch_train() -> None:
         call = trainer.train.spawn(miles_cfg.to_payload())
     except NotFoundError:
         raise SystemExit(
-            f"App {APP_NAME!r} is not deployed. Launch a run with:\n"
-            f"  EXPERIMENT_CONFIG={EXPERIMENT} ./cookbook/miles_disagg/launch.sh"
+            f"App {APP_NAME!r} is not deployed. Deploy it first with the same RUN:\n"
+            f"  EXPERIMENT_CONFIG={EXPERIMENT} uv run --extra modal modal deploy -m cookbook.miles_disagg.app"
         )
     print(f"Spawned train on {APP_NAME}: {call.object_id}")
     print(f"stop this run when done: modal app stop {APP_NAME}")
