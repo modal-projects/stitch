@@ -3,7 +3,12 @@
 
 from __future__ import annotations
 
-from stitch.pools.modal_flash import _host, _normalize_url
+from stitch.pools.modal_flash import _host, _normalize_url, _replica_urls
+
+
+def test_replica_urls_filters_hostless_and_normalizes() -> None:
+    containers = [{"host": "h1:8000"}, {}, {"host": "https://h2/"}]
+    assert _replica_urls(containers) == ["https://h1:8000", "https://h2"]
 
 
 def test_normalize_url_adds_scheme_and_strips_slash() -> None:

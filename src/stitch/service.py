@@ -213,7 +213,9 @@ async def readiness(pool: Pool, *, timeout: float = 15.0) -> PoolState:
             return ReplicaState(reason=str(exc)[:80])  # applied=None => counts as not at any version
 
     async with httpx.AsyncClient(trust_env=False) as c:
-        states = await asyncio.gather(*(probe(c, url) for url in pool.discover_replicas()))
+        # the async variant keeps pool-client I/O off this event loop (native or threaded per pool)
+        replicas = await pool.discover_replicas_async()
+        states = await asyncio.gather(*(probe(c, url) for url in replicas))
     return PoolState(list(states))
 
 
