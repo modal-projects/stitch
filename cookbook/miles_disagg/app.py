@@ -180,7 +180,7 @@ class Trainer:
             volume.reload()
 
         cfg = MilesConfig.from_payload(payload)
-        _materialize_node_local_yaml(cfg, "te_precision_config_file")
+        launch.materialize_node_local_yaml(cfg, "te_precision_config_file")
         if self.rank != 0:
             return
 
@@ -221,21 +221,6 @@ class Trainer:
                 print(f"Train log committed to miles-checkpoints at {run_id}/train.log")
             except Exception as exc:  # noqa: BLE001
                 print(f"WARNING: could not commit train log: {exc}")
-
-
-# ── miles launch helper (te_precision_config_file is miles-only) ──────────────────
-def _materialize_node_local_yaml(cfg: Any, field: str, dest_dir: str = "/root/.miles_node_yaml") -> None:
-    """Write an inline YAML config to a deterministic node-local path on EVERY node.
-    Fields like te_precision_config_file are re-read on each Ray actor, so they must
-    resolve to identical content at an identical path on all nodes."""
-    import yaml
-
-    if isinstance(val := getattr(cfg, field, None), dict):
-        os.makedirs(dest_dir, exist_ok=True)
-        path = os.path.join(dest_dir, f"{field}.yaml")
-        with open(path, "w") as f:
-            yaml.dump(val, f)
-        setattr(cfg, field, path)
 
 
 # ── Entrypoints (preparation lives in a separate app: cookbook.miles_disagg.prep_app) ──

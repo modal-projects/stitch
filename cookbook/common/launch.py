@@ -39,3 +39,18 @@ def resolve_config(cfg: Any, tmpdir: str, yaml_fields: tuple[str, ...]) -> None:
             with open(path, "w") as f:
                 yaml.dump(val, f)
             setattr(cfg, field, path)
+
+
+def materialize_node_local_yaml(cfg: Any, field: str, dest_dir: str = "/root/.node_yaml") -> None:
+    """Write an inline-dict config field to a deterministic node-local YAML path, so every Ray
+    actor across nodes re-reads identical content at an identical path — unlike ``resolve_config``'s
+    per-launch tmpdir. Call on every node (before the rank gate). No-op unless the field is a dict;
+    mutates ``cfg`` in place. (e.g. miles' ``te_precision_config_file``.)"""
+    import yaml
+
+    if isinstance(val := getattr(cfg, field, None), dict):
+        os.makedirs(dest_dir, exist_ok=True)
+        path = os.path.join(dest_dir, f"{field}.yaml")
+        with open(path, "w") as f:
+            yaml.dump(val, f)
+        setattr(cfg, field, path)

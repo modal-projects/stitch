@@ -6,17 +6,15 @@ trainer package, so slime and miles serve on the identical weight-sync sglang im
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import modal
+
+from cookbook.common import trainer_image as common_trainer_image
 
 SLIME_IMAGE_TAG = "slimerl/slime:nightly-dev-20260527a"
 SLIME_REPO_URL = "https://github.com/modal-projects/slime.git"
 # Pin to an exact commit, not the branch tip (the fetch+checkout is a cached layer).
 SLIME_REPO_REF = "11bb0fa48aa37d5c54fe297143c6bc1d40f311bf"
 SLIME_ROOT = "/root/slime"
-
-_COOKBOOK_DIR = Path(__file__).resolve().parent.parent  # .../cookbook
 
 
 def build_trainer_image(*, hf_cache_path: str, experiment: str, run_id: str | None = None, slime_local: str | None = None) -> modal.Image:
@@ -36,13 +34,8 @@ def build_trainer_image(*, hf_cache_path: str, experiment: str, run_id: str | No
         # The base installs megatron-core as a strict editable that hides
         # megatron.training; reinstall in compat mode so the whole source tree is importable.
         .run_commands("cd /root/Megatron-LM && python3 -m pip install --no-deps -e . --config-settings editable_mode=compat")
-        # The trainer-side delta ENCODER (slime.utils.disk_delta) needs the codecs even under --no-deps.
-        .pip_install("fastapi", "httpx", "uvicorn", "zstandard", "xxhash", "blake3")
-        .env({"HF_XET_HIGH_PERFORMANCE": "1", "HF_HUB_ENABLE_HF_TRANSFER": "1", "EXPERIMENT_CONFIG": experiment,
-              **({"RUN_ID": run_id} if run_id else {})})
-        .add_local_python_source("stitch")
-        .add_local_dir(str(_COOKBOOK_DIR), remote_path="/root/cookbook", ignore=["**/__pycache__"])
     )
+    image = common_trainer_image.add_common_layers(image, experiment=experiment, run_id=run_id)
     if slime_local:  # dev overlay: replace the cloned fork with a local checkout (no rebuild)
         image = image.add_local_dir(slime_local, remote_path=SLIME_ROOT, ignore=[".git", "**/__pycache__", "**/*.pyc"])
     return image
