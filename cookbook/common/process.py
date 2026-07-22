@@ -119,3 +119,23 @@ def start_host_mem_monitor(interval_s: int = 20) -> None:
             time.sleep(interval_s)
 
     threading.Thread(target=_loop, daemon=True, name="host-mem-monitor").start()
+
+
+def dist_rank() -> int | None:
+    """This process's torch.distributed rank, or None off the distributed path (single-process dev)."""
+    try:
+        import torch.distributed as dist
+
+        if dist.is_available() and dist.is_initialized():
+            return int(dist.get_rank())
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
+def dist_barrier() -> None:
+    """Wait for all ranks; a no-op off the distributed path."""
+    import torch.distributed as dist
+
+    if dist.is_available() and dist.is_initialized():
+        dist.barrier()

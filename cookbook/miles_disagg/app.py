@@ -161,17 +161,14 @@ class Trainer:
         process.apply_git_patches(list(getattr(exp, "MEGATRON_RUNTIME_PATCHES", [])), MEGATRON_PATH, "Megatron patch")
         self.rank = rank
         process.start_host_mem_monitor()  # per-node host-RAM trace
-        os.environ.update({
-            "MILES_HOST_IP": my_ip, "SGLANG_HOST_IP": my_ip, "HOST_IP": my_ip,
-            "MASTER_ADDR": master_addr, "RAY_ADDRESS": f"{master_addr}:{RAY_PORT}",
-            "no_proxy": f"127.0.0.1,{master_addr},{my_ip}", "NO_PROXY": f"127.0.0.1,{master_addr},{my_ip}",
-            "PYTHONPATH": f"{MEGATRON_PATH}:{os.environ.get('PYTHONPATH', '')}",  # source-only megatron.training
-            **miles_cfg.environment,
-        })
-        if rank == 0:
-            ray_cluster.start_ray_head(my_ip, miles_cfg.n_train_nodes, ray_port=RAY_PORT)
-        else:
-            ray_cluster.start_ray_worker(my_ip, master_addr, ray_port=RAY_PORT)
+        ray_cluster.start_ray_node(
+            rank, master_addr, my_ip, n_nodes=miles_cfg.n_train_nodes, ray_port=RAY_PORT,
+            extra_env={
+                "MILES_HOST_IP": my_ip,
+                "PYTHONPATH": f"{MEGATRON_PATH}:{os.environ.get('PYTHONPATH', '')}",  # source-only megatron.training
+                **miles_cfg.environment,
+            },
+        )
 
     @modal.method()
     def train(self, payload: dict) -> None:
