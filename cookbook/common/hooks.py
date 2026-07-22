@@ -22,6 +22,8 @@ from stitch.publish import claim_run, constrain_request, publish_version
 from stitch.stores.modal_volume import ModalVolumeStore
 from stitch.types import PointerRewind
 
+from . import process
+
 logger = logging.getLogger(__name__)
 
 
@@ -35,7 +37,7 @@ def commit_and_wake(args: Any, published_dir: str, rollout_engines: Any = None) 
     del rollout_engines
     store = _store(args)
     store.commit()
-    if _rank() not in (None, 0) or not Path(published_dir).name.startswith("weight_v"):
+    if process.dist_rank() not in (None, 0) or not Path(published_dir).name.startswith("weight_v"):
         return
     try:
         publish_version(store, _pool(args), published_dir, run_id=_run_id(args))
@@ -47,7 +49,7 @@ def commit_and_wake(args: Any, published_dir: str, rollout_engines: Any = None) 
 def claim_pool(args: Any) -> None:
     """Launch hook (rank 0): reset every replica to base before the first publish, so a
     cold or finished-run-warm pool starts this run clean."""
-    if _rank() not in (None, 0):
+    if process.dist_rank() not in (None, 0):
         return
     claim_run(_store(args), _pool(args), _run_id(args))
 
@@ -134,12 +136,3 @@ def _run_id(args: Any) -> str:
     return str(run_id)
 
 
-def _rank() -> int | None:
-    try:
-        import torch.distributed as dist
-
-        if dist.is_available() and dist.is_initialized():
-            return int(dist.get_rank())
-    except Exception:  # noqa: BLE001
-        return None
-    return None

@@ -12,7 +12,10 @@ demotes ``request`` to a required query param, 422-ing every call.
 
 import asyncio
 import contextlib
+import json
 import logging
+import time
+import urllib.request
 import uuid
 from collections.abc import Iterable
 from contextlib import asynccontextmanager
@@ -22,7 +25,7 @@ from stitch.engines.base import Engine
 from stitch.pools.base import Pool
 from stitch.stores.base import Store
 from stitch.sync import CommitMode, ConstraintUnmet, Reconciler
-from stitch.types import PoolState, ReplicaState, VersionConstraint
+from stitch.types import PoolState, ReplicaState, SyncState, VersionConstraint
 
 logger = logging.getLogger(__name__)
 
@@ -212,3 +215,44 @@ async def readiness(pool: Pool, *, timeout: float = 15.0) -> PoolState:
     async with httpx.AsyncClient(trust_env=False) as c:
         states = await asyncio.gather(*(probe(c, url) for url in pool.discover_replicas()))
     return PoolState(list(states))
+
+
+# The reconciler states in which the engine is legitimately unresponsive: it is pulling or
+# reloading weights, which starves its event loop, so a stale health heartbeat is EXPECTED.
+_SYNCING_STATES = {SyncState.QUEUED.value, SyncState.PREFETCHING.value,
+                   SyncState.PREPARING.value, SyncState.COMMITTING.value}
+
+
+def sync_in_progress(server_info_url: str, *, timeout: float = 5.0) -> bool:
+    """Whether the replica's reconciler is mid weight-sync (seeding the base or reloading a
+    version). A deployment's engine-health probe calls this to SUPPRESS a health blip during a
+    sync: the reload starves the engine's event loop, so an unresponsive detokenizer is expected,
+    not a crash. A boot base-seed runs with sync_state IDLE, so ``prefetch_done`` is its separate
+    signal. Best-effort: an unreachable sidecar returns False, so the caller reports the error."""
+    try:
+        with urllib.request.urlopen(server_info_url, timeout=timeout) as resp:
+            info = json.loads(resp.read())
+    except Exception:  # noqa: BLE001
+        return False
+    seeding = not info.get("prefetch_done", True) and not info.get("prefetch_error")
+    return bool(seeding or info.get("sync_state") in _SYNCING_STATES)
+
+
+def await_pool_ready(pool: Pool, *, timeout: float = 20 * 60, interval: float = 30.0) -> bool:
+    """Block until the pool's gateway answers /health 200 — Flash holds requests through a
+    cold-starting pool, so the first rollout/hot-load meets a ready pool instead of a 5xx storm
+    while engines load. Returns True when ready; on timeout, warns and returns False (the caller
+    proceeds anyway — the trainer retries). A launch-script helper: synchronous, unlike ``readiness``."""
+    import httpx
+
+    gateway = pool.gateway_url().rstrip("/")
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            if httpx.get(f"{gateway}/health", timeout=10).status_code == 200:
+                return True
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(interval)
+    print(f"WARNING: pool at {gateway} not ready after {timeout:.0f}s; proceeding (the trainer retries)")
+    return False

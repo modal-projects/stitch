@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import socket
 import subprocess
 import time
@@ -81,6 +82,23 @@ def start_ray_worker(my_ip: str, master_addr: str, *, ray_port: int) -> None:
          "--disable-usage-stats"],
         check=True, timeout=RAY_START_TIMEOUT,
     )
+
+
+def start_ray_node(rank: int, master_addr: str, my_ip: str, *, n_nodes: int, ray_port: int,
+                   extra_env: dict[str, str] | None = None) -> None:
+    """Set this node's Ray/NCCL env, then bring Ray up (head on rank 0, worker otherwise).
+    ``extra_env`` overlays the framework-specific vars a recipe adds — its own HOST_IP alias, a
+    PYTHONPATH, its training ``environment``."""
+    os.environ.update({
+        "SGLANG_HOST_IP": my_ip, "HOST_IP": my_ip,
+        "MASTER_ADDR": master_addr, "RAY_ADDRESS": f"{master_addr}:{ray_port}",
+        "no_proxy": f"127.0.0.1,{master_addr},{my_ip}", "NO_PROXY": f"127.0.0.1,{master_addr},{my_ip}",
+        **(extra_env or {}),
+    })
+    if rank == 0:
+        start_ray_head(my_ip, n_nodes, ray_port=ray_port)
+    else:
+        start_ray_worker(my_ip, master_addr, ray_port=ray_port)
 
 
 def _print_ray_logs() -> None:

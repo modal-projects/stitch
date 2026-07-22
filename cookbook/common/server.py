@@ -12,6 +12,8 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from stitch.service import sync_in_progress
+
 from . import process
 from .constants import SGLANG_PORT, SIDECAR_PORT
 
@@ -68,31 +70,14 @@ def serve_startup(
     process.wait_http(f"http://127.0.0.1:{SIDECAR_PORT}/health", replica.sidecar, startup_timeout)
 
     def engine_health() -> str | None:
-        # The base seed (engine.prefetch) and every delta apply drive the fork's /pull_weights,
-        # which starves sglang's event loop enough that its detokenizer heartbeat goes stale and
-        # /health 503s. That stall is EXPECTED while the sidecar is seeding or mid-sync — report
-        # failures only when it is genuinely idle, or replicas crash-cycle through every sync (the
-        # base seed runs with sync_state=IDLE, so it needs the prefetch_done check, not just sync_state).
-        # A dead engine process still raises once the seed/sync is done (or errored).
+        # The base seed and every delta apply drive the fork's /pull_weights, which starves
+        # sglang's event loop enough that its detokenizer heartbeat goes stale and /health 503s.
+        # That stall is EXPECTED mid-sync — suppress it unless the reconciler is idle (a dead
+        # engine process still raises once the sync is done or errored).
         error = replica.endpoint.health_check()
         if error is None:
             return None
-        try:
-            import json
-            import urllib.request
-
-            with urllib.request.urlopen(
-                f"http://127.0.0.1:{SIDECAR_PORT}/server_info", timeout=5
-            ) as response:
-                info = json.loads(response.read())
-                seeding = not info.get("prefetch_done", True) and not info.get("prefetch_error")
-                if seeding or info.get("sync_state") in (
-                    "QUEUED", "PREFETCHING", "PREPARING", "COMMITTING",
-                ):
-                    return None
-        except Exception:  # noqa: BLE001 — sidecar unreachable: report the engine error
-            pass
-        return error
+        return None if sync_in_progress(f"http://127.0.0.1:{SIDECAR_PORT}/server_info") else error
 
     import modal.experimental
 
