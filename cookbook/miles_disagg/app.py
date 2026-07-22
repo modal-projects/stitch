@@ -5,9 +5,11 @@ Server (sglang + stitch sidecar) is the shared common one; the Trainer runs mile
 and publishes XOR deltas through a Modal Volume the pool syncs from.
 
 Prepare the checkpoints once first (a separate app, so prep never spins up the rollout Server
-floor — see ``cookbook.miles_disagg.prep_app``), then deploy this rollout + trainer app:
+floor — see ``cookbook.miles_disagg.prep_app``), then launch a run with one command — it mints a
+unique run id, stands up that run's pool, and starts training. Each launch is its own run,
+isolated even from an identical-config relaunch (see ``cookbook.miles_disagg.launch``):
 
-    EXPERIMENT_CONFIG=glm45_air_fp8 uv run --extra modal modal deploy -m cookbook.miles_disagg.app
+    EXPERIMENT_CONFIG=glm45_air_fp8 uv run --extra modal python -m cookbook.miles_disagg.launch
 
 Config access is uniform: the experiment module ``exp`` is the single source of truth —
 its ``exp.modal`` (infra), ``exp.miles`` (training), and ``exp.<CONST>`` are read directly;
@@ -46,13 +48,19 @@ exp = importlib.import_module(f"cookbook.miles_disagg.configs.{EXPERIMENT}")
 modal_cfg = exp.modal
 miles_cfg = exp.miles
 
+# Per-run id, minted fresh per launch by cookbook.miles_disagg.launch: names the pool app + delta
+# transport root, so each run — even an identical-config relaunch — is its own isolated pool.
+RUN_ID = os.environ["RUN_ID"]
+APP_NAME = f"{exp.APP_NAME}-{RUN_ID}"
+BULLETIN_ROOT = f"{exp.DELTA_BULLETIN_ROOT}/{RUN_ID}"
+
 # Flash autoscaler target / sglang concurrency cap: explicit target_inputs, else engine concurrency.
 ROLLOUT_CONCURRENCY = modal_cfg.rollout_target_inputs or miles_cfg.sglang_server_concurrency
 
-# EXPERIMENT_CONFIG is baked into both images (inside build_*_image) so the container's
-# re-import resolves the same experiment as the deploy, not the default.
-image = trainer_image.build_trainer_image(hf_cache_path=str(HF_CACHE_PATH), experiment=EXPERIMENT, miles_local=MILES_LOCAL_DIR)
-server_image = serving_image.build_serving_image(hf_cache_path=str(HF_CACHE_PATH), delta_volume_name=exp.DELTA_VOLUME_NAME, experiment=EXPERIMENT)
+# EXPERIMENT_CONFIG + RUN are baked into both images so a container's re-import rebuilds the same
+# app name and transport paths as the deploy, not the defaults.
+image = trainer_image.build_trainer_image(hf_cache_path=str(HF_CACHE_PATH), experiment=EXPERIMENT, run_id=RUN_ID, miles_local=MILES_LOCAL_DIR)
+server_image = serving_image.build_serving_image(hf_cache_path=str(HF_CACHE_PATH), delta_volume_name=exp.DELTA_VOLUME_NAME, experiment=EXPERIMENT, run_id=RUN_ID)
 if MILES_LOCAL_DIR:
     server_image = server_image.add_local_dir(MILES_LOCAL_DIR, remote_path=MILES_ROOT, ignore=[".git", "**/__pycache__", "**/*.pyc"])
 
@@ -71,7 +79,7 @@ train_volumes = {
     exp.DELTA_BULLETIN_ROOT: delta_volume,
 }
 
-app = modal.App(exp.APP_NAME)
+app = modal.App(APP_NAME)
 
 SGLANG_SERVER_ARGS = {
     "--served-model-name": miles_cfg.hf_checkpoint,
@@ -112,7 +120,7 @@ class Server:
         server.serve_startup(
             self, model_name=miles_cfg.hf_checkpoint, sglang_args=SGLANG_SERVER_ARGS,
             tp=miles_cfg.rollout_num_gpus_per_engine, concurrency=ROLLOUT_CONCURRENCY,
-            bulletin_root=exp.DELTA_BULLETIN_ROOT, local_checkpoint_dir=exp.LOCAL_CHECKPOINT_PATH,
+            bulletin_root=BULLETIN_ROOT, local_checkpoint_dir=exp.LOCAL_CHECKPOINT_PATH,
             volume_name=exp.DELTA_VOLUME_NAME, commit_mode=exp.SIDECAR_COMMIT_MODE,
             flush_cache_on_commit=exp.SIDECAR_FLUSH_CACHE_ON_COMMIT,
             startup_timeout=SERVER_STARTUP_TIMEOUT, sglang_env=getattr(exp, "SGLANG_ENV", {}),
@@ -176,9 +184,9 @@ class Trainer:
         if self.rank != 0:
             return
 
-        cfg.rollout_endpoint_url = ModalFlashPool(exp.APP_NAME, "Server").gateway_url()
+        cfg.rollout_endpoint_url = ModalFlashPool(APP_NAME, "Server").gateway_url()
         run_id = uuid.uuid4().hex[:12]  # per-launch fence token; forks a fresh chain
-        cfg.update_weight_disk_dir = f"{exp.DELTA_BULLETIN_ROOT}/{run_id}"
+        cfg.update_weight_disk_dir = f"{BULLETIN_ROOT}/{run_id}"
         if getattr(cfg, "save_interval", None) is None:
             cfg.load = cfg.save = cfg.save_hf = None
         else:
@@ -187,7 +195,7 @@ class Trainer:
         custom_config = {
             **(cfg.custom_config_path or {}),
             "update_weight_delta_volume_name": exp.DELTA_VOLUME_NAME,
-            "rollout_modal_flash_app_name": exp.APP_NAME,
+            "rollout_modal_flash_app_name": APP_NAME,
             "rollout_modal_flash_server_cls_name": "Server",
             "run_id": run_id,
         }
@@ -231,27 +239,35 @@ def _materialize_node_local_yaml(cfg: Any, field: str, dest_dir: str = "/root/.m
 
 
 # ── Entrypoints (preparation lives in a separate app: cookbook.miles_disagg.prep_app) ──
+def spawn_train() -> Any:
+    """Spawn the trainer on this run's already-deployed pool (config ships as data, so config
+    edits run without a redeploy; infra changes still require one)."""
+    trainer = modal.Cls.from_name(APP_NAME, "Trainer")()
+    call = trainer.train.spawn(miles_cfg.to_payload())
+    print(f"Spawned train on {APP_NAME}: {call.object_id}")
+    return call
+
+
 @app.local_entrypoint()
 def launch_train() -> None:
-    """Spawn training on the deployed app. Config ships as data, so edits run without a
-    redeploy; infrastructure changes still require one."""
+    """Spawn training on a pool that's already up for this RUN. ``cookbook.miles_disagg.launch``
+    deploys + spawns in one command; use this only to re-spawn against a running pool."""
     from modal.exception import NotFoundError
 
     try:
-        trainer = modal.Cls.from_name(exp.APP_NAME, "Trainer")()
-        call = trainer.train.spawn(miles_cfg.to_payload())
+        spawn_train()
     except NotFoundError:
         raise SystemExit(
-            f"App {exp.APP_NAME!r} is not deployed. Run:\n"
-            f"  EXPERIMENT_CONFIG={EXPERIMENT} uv run --extra modal modal deploy -m cookbook.miles_disagg.app"
+            f"App {APP_NAME!r} is not deployed. Launch a fresh run with:\n"
+            f"  EXPERIMENT_CONFIG={EXPERIMENT} uv run --extra modal python -m cookbook.miles_disagg.launch"
         )
-    print(f"Spawned train on {exp.APP_NAME}: {call.object_id}")
+    print(f"stop this run when done: modal app stop {APP_NAME}")
 
 
 @app.local_entrypoint()
 def smoke_flash_pool(weight_version: int = 0, timeout_seconds: int = 30 * MINUTES) -> None:
     """Check the deployed Flash pool serves completions at the expected weight version."""
     smoke.smoke_flash_pool(
-        app_name=exp.APP_NAME, cls_name="Server", model_name=miles_cfg.hf_checkpoint,
+        app_name=APP_NAME, cls_name="Server", model_name=miles_cfg.hf_checkpoint,
         weight_version=weight_version, timeout_seconds=timeout_seconds,
     )

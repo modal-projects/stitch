@@ -192,6 +192,8 @@ class Reconciler(AdmissionGate):
         self.last_error: str | None = None
         self.ready = False  # latches on first catch-up, stays set even when later stale; the /health routing gate
         self.metrics: dict[str, Any] = {}
+        self._boot_monotonic = time.monotonic()
+        self._catchup_passes = 0
         self._task: asyncio.Task[None] | None = None
         self._prefetch_task: asyncio.Task[None] | None = None
         self._prefetch_done = False
@@ -245,6 +247,17 @@ class Reconciler(AdmissionGate):
             "metrics": self.metrics,
         }
 
+    def readiness_reason(self) -> str:
+        """Why /health is still 503, so a not-yet-admitted replica reads as 'catching up', not broken."""
+        if self._prefetch_error:
+            return f"base seed failed: {self._prefetch_error}"
+        if not self._prefetch_done:
+            return "seeding base checkpoint"
+        if self.last_error:
+            return f"sync error: {self.last_error}"
+        applied = self.applied.identity if self.applied else "base"
+        return f"catching up to live version (applied={applied}, state={self.sync_state.value})"
+
     def _on_reject(self, error: dict[str, Any]) -> None:
         self.wake()  # a 409 is our cue to catch up
 
@@ -272,6 +285,13 @@ class Reconciler(AdmissionGate):
                 return
             if caught_up:
                 self.sync_state = SyncState.IDLE
+                if not self.ready:
+                    logger.info(
+                        "caught up to v%d in %d pass(es), %.0fs — entering rotation",
+                        self.applied.version if self.applied else 0,
+                        self._catchup_passes,
+                        time.monotonic() - self._boot_monotonic,
+                    )
                 self.ready = True
                 return
             await asyncio.sleep(1.0)
@@ -315,9 +335,14 @@ class Reconciler(AdmissionGate):
                 if len(m) > 1 or "error" in m:  # a no-work pass leaves the last breakdown alone
                     m["at"] = time.time()
                     self.metrics = m
+                    timings = {k: v for k, v in m.items() if k.endswith("_s")}
+                    if timings:
+                        if not self.ready:
+                            self._catchup_passes += 1
+                        logger.info("catch-up pass v%s->v%s timing(s): %s",
+                                    m.get("applied_version"), m.get("target_version"), timings)
 
     async def _reconcile_once_measured(self, m: dict[str, Any]) -> bool:
-        # offload: refresh() may block on I/O.
         await asyncio.to_thread(self.store.refresh)
         pointer = self.store.read_pointer()
         if pointer is None:
@@ -329,9 +354,15 @@ class Reconciler(AdmissionGate):
 
         self.sync_state = SyncState.PREFETCHING
         self.last_error = None
+        m["target_version"] = pointer.version
+        m["applied_version"] = self.applied.version if self.applied else -1
         target = self.store.read_manifest(pointer)
         source_dir = await asyncio.to_thread(self.store.materialize, pointer)
-        m["target_version"] = pointer.version
+        logger.info(
+            "catch-up: %s -> v%d, staging deltas",
+            "base" if self.applied is None else f"v{self.applied.version}",
+            pointer.version,
+        )
 
         # Touched tensor names for an O(delta) reload: the union across the versions this pass
         # applies (applied+1 .. target). None => the range reseeds from a FULL anchor, so the
@@ -341,7 +372,8 @@ class Reconciler(AdmissionGate):
         # Both prefetch and stage write the host checkpoint; wait for the prefetch so they're ordered.
         # If it failed, this stage seeds the full base itself.
         if self._prefetch_task is not None and not self._prefetch_task.done():
-            await self._prefetch_task
+            with _timed(m, "prefetch_wait_s"):
+                await self._prefetch_task
         if self._prefetch_error is not None:
             m["paid_base_copy"] = True
 
@@ -360,6 +392,11 @@ class Reconciler(AdmissionGate):
             m["skipped_reload"] = True
         else:
             m["reload_names"] = "full" if weight_names is None else len(weight_names)
+            logger.info(
+                "catch-up: reloading v%d (%s)",
+                pointer.version,
+                "all tensors" if weight_names is None else f"{len(weight_names)} tensors",
+            )
 
             async def apply() -> None:
                 self.sync_state = SyncState.COMMITTING

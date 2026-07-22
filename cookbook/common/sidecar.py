@@ -10,13 +10,25 @@ running the sidecar standalone in dev.
 from __future__ import annotations
 
 import argparse
+import logging
+import sys
 
 from stitch.engines.sglang import SGLangEngine
 from stitch.service import serve
 from stitch.stores.modal_volume import ModalVolumeStore
 
 
+def _configure_logging() -> None:
+    """Emit INFO logs to stdout (uvicorn configures only its own loggers)."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        stream=sys.stdout,
+    )
+
+
 def main() -> None:
+    _configure_logging()
     p = argparse.ArgumentParser()
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--port", type=int, default=8000)

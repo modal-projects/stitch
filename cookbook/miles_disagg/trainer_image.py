@@ -28,7 +28,7 @@ _COOKBOOK_DIR = Path(__file__).resolve().parent.parent  # .../cookbook
 _TORCH_DIST_WRAPPER_SRC = Path(__file__).resolve().parent / "convert_hf_to_torch_dist_modal.py"
 
 
-def build_trainer_image(*, hf_cache_path: str, experiment: str, miles_local: str | None = None) -> modal.Image:
+def build_trainer_image(*, hf_cache_path: str, experiment: str, run_id: str | None = None, miles_local: str | None = None) -> modal.Image:
     """The miles trainer image: RDMA/EFA userspace + the pinned miles fork + the
     trainer-side delta encoder's codecs. stitch + the cookbook package are mounted so the
     trainer, Ray actors, and the sidecar subprocess resolve their imports."""
@@ -46,7 +46,8 @@ def build_trainer_image(*, hf_cache_path: str, experiment: str, miles_local: str
         )
         # The trainer-side delta ENCODER (miles delta.py) needs the codecs even under --no-deps.
         .pip_install("fastapi", "httpx", "uvicorn", "zstandard", "xxhash", "blake3")
-        .env({"HF_XET_HIGH_PERFORMANCE": "1", "HF_HUB_ENABLE_HF_TRANSFER": "1", "EXPERIMENT_CONFIG": experiment})
+        .env({"HF_XET_HIGH_PERFORMANCE": "1", "HF_HUB_ENABLE_HF_TRANSFER": "1", "EXPERIMENT_CONFIG": experiment,
+              **({"RUN_ID": run_id} if run_id else {})})
         .add_local_file(str(_TORCH_DIST_WRAPPER_SRC), TORCH_DIST_CONVERT_WRAPPER, copy=True)
         .add_local_python_source("stitch")
         .add_local_dir(str(_COOKBOOK_DIR), remote_path="/root/cookbook", ignore=["**/__pycache__"])

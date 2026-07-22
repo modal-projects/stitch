@@ -79,10 +79,12 @@ def create_app(
 
     @app.get("/health")
     async def health() -> Response:
-        # Flash has no readiness probe distinct from this one, so /health IS the routing gate: 503 until
-        # caught up, else a joiner is routed to and 409s until it does. (Liveness/boot use /server_info.)
+        # 503 until the reconciler's first catch-up, so a deployment that gates routing on readiness
+        # keeps a not-yet-synced replica out of rotation (else it's routed to and 409s the whole
+        # catch-up). A fresh boot clears at once; a mid-run joiner waits until it has replayed to the
+        # live version. Liveness/boot checks use /server_info instead.
         if not reconciler.ready:
-            return JSONResponse({"ready": False}, status_code=503)
+            return JSONResponse({"ready": False, "reason": reconciler.readiness_reason()}, status_code=503)
         return JSONResponse({"ready": True})
 
     @app.get("/server_info")

@@ -19,7 +19,7 @@ SLIME_ROOT = "/root/slime"
 _COOKBOOK_DIR = Path(__file__).resolve().parent.parent  # .../cookbook
 
 
-def build_trainer_image(*, hf_cache_path: str, experiment: str, slime_local: str | None = None) -> modal.Image:
+def build_trainer_image(*, hf_cache_path: str, experiment: str, run_id: str | None = None, slime_local: str | None = None) -> modal.Image:
     """The slime trainer image: the pinned slime fork over the slime base, Megatron-LM
     reinstalled so ``megatron.training`` is importable, + the delta encoder's codecs.
     stitch + the cookbook package are mounted for the trainer, Ray actors, and sidecar."""
@@ -38,7 +38,8 @@ def build_trainer_image(*, hf_cache_path: str, experiment: str, slime_local: str
         .run_commands("cd /root/Megatron-LM && python3 -m pip install --no-deps -e . --config-settings editable_mode=compat")
         # The trainer-side delta ENCODER (slime.utils.disk_delta) needs the codecs even under --no-deps.
         .pip_install("fastapi", "httpx", "uvicorn", "zstandard", "xxhash", "blake3")
-        .env({"HF_XET_HIGH_PERFORMANCE": "1", "HF_HUB_ENABLE_HF_TRANSFER": "1", "EXPERIMENT_CONFIG": experiment})
+        .env({"HF_XET_HIGH_PERFORMANCE": "1", "HF_HUB_ENABLE_HF_TRANSFER": "1", "EXPERIMENT_CONFIG": experiment,
+              **({"RUN_ID": run_id} if run_id else {})})
         .add_local_python_source("stitch")
         .add_local_dir(str(_COOKBOOK_DIR), remote_path="/root/cookbook", ignore=["**/__pycache__"])
     )

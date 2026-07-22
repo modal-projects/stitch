@@ -61,8 +61,11 @@ def serve_startup(
         local_checkpoint_dir=local_checkpoint_dir, volume_name=volume_name, commit_mode=commit_mode,
         flush_cache_on_commit=flush_cache_on_commit,
     )
-    # /server_info, not /health: /health stays 503 until catch-up, which would spin here and time out.
-    process.wait_http(f"http://127.0.0.1:{SIDECAR_PORT}/server_info", replica.sidecar, startup_timeout)
+    # Modal admits the container to Flash routing when @enter returns and never re-polls /health, so
+    # blocking here on /health (503 until the reconciler's first catch-up) is the only thing that keeps a
+    # not-yet-synced replica out of rotation. Fresh boot (no pointer) clears at once; a mid-run joiner
+    # waits until it has replayed to the live version, bounded by startup_timeout.
+    process.wait_http(f"http://127.0.0.1:{SIDECAR_PORT}/health", replica.sidecar, startup_timeout)
 
     def engine_health() -> str | None:
         # The base seed (engine.prefetch) and every delta apply drive the fork's /pull_weights,
