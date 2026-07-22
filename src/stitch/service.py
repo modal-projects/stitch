@@ -14,6 +14,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import time
 import urllib.request
 import uuid
 from collections.abc import Iterable
@@ -235,3 +236,23 @@ def sync_in_progress(server_info_url: str, *, timeout: float = 5.0) -> bool:
         return False
     seeding = not info.get("prefetch_done", True) and not info.get("prefetch_error")
     return bool(seeding or info.get("sync_state") in _SYNCING_STATES)
+
+
+def await_pool_ready(pool: Pool, *, timeout: float = 20 * 60, interval: float = 30.0) -> bool:
+    """Block until the pool's gateway answers /health 200 — Flash holds requests through a
+    cold-starting pool, so the first rollout/hot-load meets a ready pool instead of a 5xx storm
+    while engines load. Returns True when ready; on timeout, warns and returns False (the caller
+    proceeds anyway — the trainer retries). A launch-script helper: synchronous, unlike ``readiness``."""
+    import httpx
+
+    gateway = pool.gateway_url().rstrip("/")
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            if httpx.get(f"{gateway}/health", timeout=10).status_code == 200:
+                return True
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(interval)
+    print(f"WARNING: pool at {gateway} not ready after {timeout:.0f}s; proceeding (the trainer retries)")
+    return False
