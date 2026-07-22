@@ -14,6 +14,8 @@ from pathlib import Path
 
 import modal
 
+from cookbook.common import trainer_image as common_trainer_image
+
 # Dated tag, never `latest`: Modal caches from_registry per tag string and won't re-pull
 # a moved mutable tag, so `latest` silently serves whatever was first pulled.
 MILES_IMAGE_TAG = "radixark/miles:dev-202607182122"  # base Megatron/TE; match the upstream main stitch-miles is on
@@ -24,7 +26,6 @@ MILES_ROOT = "/root/miles"
 MEGATRON_PATH = "/root/Megatron-LM"  # source-only megatron.training must be on PYTHONPATH
 TORCH_DIST_CONVERT_WRAPPER = "/root/convert_hf_to_torch_dist_modal.py"
 
-_COOKBOOK_DIR = Path(__file__).resolve().parent.parent  # .../cookbook
 _TORCH_DIST_WRAPPER_SRC = Path(__file__).resolve().parent / "convert_hf_to_torch_dist_modal.py"
 
 
@@ -44,14 +45,9 @@ def build_trainer_image(*, hf_cache_path: str, experiment: str, run_id: str | No
             f" && cd {MILES_ROOT} && git fetch origin {MILES_REPO_REF} && git checkout FETCH_HEAD"
             f" && python3 -m pip install --no-deps -e {MILES_ROOT}"
         )
-        # The trainer-side delta ENCODER (miles delta.py) needs the codecs even under --no-deps.
-        .pip_install("fastapi", "httpx", "uvicorn", "zstandard", "xxhash", "blake3")
-        .env({"HF_XET_HIGH_PERFORMANCE": "1", "HF_HUB_ENABLE_HF_TRANSFER": "1", "EXPERIMENT_CONFIG": experiment,
-              **({"RUN_ID": run_id} if run_id else {})})
         .add_local_file(str(_TORCH_DIST_WRAPPER_SRC), TORCH_DIST_CONVERT_WRAPPER, copy=True)
-        .add_local_python_source("stitch")
-        .add_local_dir(str(_COOKBOOK_DIR), remote_path="/root/cookbook", ignore=["**/__pycache__"])
     )
+    image = common_trainer_image.add_common_layers(image, experiment=experiment, run_id=run_id)
     if miles_local:  # dev overlay: replace the cloned fork with a local checkout (no rebuild)
         image = image.add_local_dir(miles_local, remote_path=MILES_ROOT, ignore=[".git", "**/__pycache__", "**/*.pyc"])
     return image
