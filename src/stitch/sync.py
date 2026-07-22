@@ -398,12 +398,12 @@ class Reconciler(AdmissionGate):
                 "all tensors" if weight_names is None else f"{len(weight_names)} tensors",
             )
 
+            flush = target.flush_cache if target.flush_cache is not None else self.flush_cache_on_commit
+
             async def apply() -> None:
                 self.sync_state = SyncState.COMMITTING
                 with _timed(m, "commit_s"):
-                    await self.engine.commit(
-                        pointer, flush_cache=self.flush_cache_on_commit, weight_names=weight_names
-                    )
+                    await self.engine.commit(pointer, flush_cache=flush, weight_names=weight_names)
 
             await self.commit(
                 apply=apply,

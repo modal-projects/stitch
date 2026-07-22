@@ -68,6 +68,7 @@ class VersionManifest:
     kind: VersionKind
     files: list[str]
     tensor_names: list[str] = field(default_factory=list)
+    flush_cache: bool | None = None
 
     @classmethod
     def from_hf_index(cls, version_dir: str | Path, *, run_id: str | None = None) -> "VersionManifest":
