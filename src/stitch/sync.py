@@ -343,9 +343,7 @@ class Reconciler(AdmissionGate):
                                     m.get("applied_version"), m.get("target_version"), timings)
 
     async def _reconcile_once_measured(self, m: dict[str, Any]) -> bool:
-        # offload: refresh() may block on I/O.
-        with _timed(m, "refresh_s"):
-            await asyncio.to_thread(self.store.refresh)
+        await asyncio.to_thread(self.store.refresh)
         pointer = self.store.read_pointer()
         if pointer is None:
             return True
@@ -358,10 +356,8 @@ class Reconciler(AdmissionGate):
         self.last_error = None
         m["target_version"] = pointer.version
         m["applied_version"] = self.applied.version if self.applied else -1
-        with _timed(m, "read_manifest_s"):
-            target = self.store.read_manifest(pointer)
-        with _timed(m, "materialize_s"):
-            source_dir = await asyncio.to_thread(self.store.materialize, pointer)
+        target = self.store.read_manifest(pointer)
+        source_dir = await asyncio.to_thread(self.store.materialize, pointer)
         logger.info(
             "catch-up: %s -> v%d, staging deltas",
             "base" if self.applied is None else f"v{self.applied.version}",
@@ -371,8 +367,7 @@ class Reconciler(AdmissionGate):
         # Touched tensor names for an O(delta) reload: the union across the versions this pass
         # applies (applied+1 .. target). None => the range reseeds from a FULL anchor, so the
         # engine must reload everything. Computed under the pre-flip `applied` (on_applied moves it).
-        with _timed(m, "touched_names_s"):
-            weight_names = await asyncio.to_thread(self._touched_names, target)
+        weight_names = await asyncio.to_thread(self._touched_names, target)
 
         # Both prefetch and stage write the host checkpoint; wait for the prefetch so they're ordered.
         # If it failed, this stage seeds the full base itself.
