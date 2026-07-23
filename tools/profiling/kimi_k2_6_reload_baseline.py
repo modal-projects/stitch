@@ -48,7 +48,7 @@ APP_NAME = "kimi-k2-6-reload-baseline"
 SGLANG_IMAGE_TAG = "lmsysorg/sglang:v0.5.15.post1"
 SGLANG_FORK_REPO = "https://github.com/modal-projects/sglang.git"
 SGLANG_FORK_BRANCH = "stitch-sglang-v0.5.15-post1-prepared-runtime"
-SGLANG_FORK_COMMIT = "db1f221a3b3a4c0b90f33dc07ef961e373ba44b2"
+SGLANG_FORK_COMMIT = "e65bddb74ee996b22571525cc122bebd14e382cf"
 
 HF_CACHE_VOLUME_NAME = "huggingface-cache"
 PREP_VOLUME_NAME = "miles-prep-checkpoints"
@@ -162,6 +162,7 @@ image = (
             "SGLANG_PREPARED_TAIL_CHUNK_MIB": "1024",
             "SGLANG_PREPARED_GPU_STAGING_GB": "30",
             "SGLANG_PREPARED_GPU_RESERVE_GB": "12",
+            "SGLANG_PREPARED_LOAD_PLAN_WORKERS": "16",
             "SGLANG_PROFILE_RUNTIME_STATE": "1",
             "SGLANG_PROFILE_WEIGHT_RELOAD": "1",
             "SGLANG_TIMEOUT_KEEP_ALIVE": "300",
