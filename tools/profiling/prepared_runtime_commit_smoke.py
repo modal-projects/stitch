@@ -10,7 +10,7 @@ import modal
 
 SGLANG_FORK_REPO = "https://github.com/modal-projects/sglang.git"
 SGLANG_FORK_BRANCH = "stitch-sglang-v0.5.15-post1-prepared-runtime"
-SGLANG_FORK_COMMIT = "20b19271725984006fe946237883630845595a41"
+SGLANG_FORK_COMMIT = "963f8ccbacf61677bd73097ad33ace9210dae3f4"
 GIB = 1 << 30
 
 
@@ -50,6 +50,7 @@ def smoke() -> dict:
 
     address_before = layer.weight.data_ptr()
     state = PreparedRuntimeState(model)
+    preallocate = state.preallocate_transfer_buffers()
     prepared = state.begin_preparation("smoke|1")
     prepared.bytes.fill_(0x5A)
     stage = state.stage_prepared()
@@ -106,6 +107,7 @@ def smoke() -> dict:
         "sglang_commit": SGLANG_FORK_COMMIT,
         "tensor_bytes": tensor_bytes,
         "image_bytes": state.image_nbytes,
+        "preallocate": preallocate,
         "stage": stage,
         "commit": commit,
         "address_preserved": layer.weight.data_ptr() == address_before,
