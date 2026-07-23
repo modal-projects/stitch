@@ -6,7 +6,6 @@ are validated e2e; the request/response stamping is the provable-without-sglang 
 from __future__ import annotations
 
 import asyncio
-import os
 
 from stitch.engines.sglang import SGLangEngine
 from stitch.types import VersionRef
@@ -33,7 +32,7 @@ def test_stamp_response_generate_vs_openai() -> None:
     assert "meta_info" not in openai and "weight_version" not in openai
 
 
-def _commit_payload(*, weight_names=None, partial_reload=None) -> dict:
+def _commit_payload(*, weight_names=None) -> dict:
     """Build the /update_weights_from_disk payload commit() would POST, without HTTP."""
     engine = SGLangEngine("http://engine", "/ckpt")
     captured: dict = {}
@@ -42,34 +41,19 @@ def _commit_payload(*, weight_names=None, partial_reload=None) -> dict:
         captured["path"], captured["payload"] = path, payload
 
     engine._post = fake_post  # type: ignore[method-assign]
-    prior = os.environ.get("STITCH_PARTIAL_RELOAD")
-    if partial_reload is not None:
-        os.environ["STITCH_PARTIAL_RELOAD"] = partial_reload
-    try:
-        asyncio.run(engine.commit(VersionRef("r1", 5), weight_names=weight_names))
-    finally:
-        if partial_reload is not None:
-            if prior is None:
-                del os.environ["STITCH_PARTIAL_RELOAD"]
-            else:
-                os.environ["STITCH_PARTIAL_RELOAD"] = prior
+    asyncio.run(engine.commit(VersionRef("r1", 5), weight_names=weight_names))
     assert captured["path"] == "/update_weights_from_disk"
     return captured["payload"]
 
 
-def test_commit_names_touched_tensors_for_partial_reload() -> None:
+def test_commit_ignores_touched_names_for_dense_reload() -> None:
     payload = _commit_payload(weight_names=["a", "b"])
-    assert payload["weight_names"] == ["a", "b"]  # O(delta): the fork reloads only these
+    assert "weight_names" not in payload
     assert payload["weight_version"] == "5"
 
 
 def test_commit_full_reload_when_no_names() -> None:
     assert "weight_names" not in _commit_payload(weight_names=None)  # full reload names nothing
-
-
-def test_commit_kill_switch_forces_full_reload() -> None:
-    # STITCH_PARTIAL_RELOAD=0 drops the names even when the reconciler supplies them.
-    assert "weight_names" not in _commit_payload(weight_names=["a", "b"], partial_reload="0")
 
 
 if __name__ == "__main__":
