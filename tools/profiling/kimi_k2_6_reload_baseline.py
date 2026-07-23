@@ -48,7 +48,7 @@ APP_NAME = "kimi-k2-6-reload-baseline"
 SGLANG_IMAGE_TAG = "lmsysorg/sglang:v0.5.15.post1"
 SGLANG_FORK_REPO = "https://github.com/modal-projects/sglang.git"
 SGLANG_FORK_BRANCH = "stitch-sglang-v0.5.15-post1-prepared-runtime"
-SGLANG_FORK_COMMIT = "1cb181c8886139c19e545ca6667645c7545f4f4b"
+SGLANG_FORK_COMMIT = "e7874e062412fd154d2fa6f946d82c0f8a157104"
 
 HF_CACHE_VOLUME_NAME = "huggingface-cache"
 PREP_VOLUME_NAME = "miles-prep-checkpoints"
@@ -65,6 +65,23 @@ SGLANG_PORT = 8001
 
 DEFAULT_RUN_ID = "520c51f61535"
 DEFAULT_TARGET_VERSION = 1
+PREPARE_TRANSPORTS = {
+    "batched_broadcast": {
+        "SGLANG_PREPARED_MMAP_CHECKPOINT": "0",
+        "SGLANG_PREPARED_BATCHED_MMAP_CHECKPOINT": "1",
+        "SGLANG_PREPARED_BROADCAST_CHECKPOINT": "1",
+    },
+    "batched_per_rank": {
+        "SGLANG_PREPARED_MMAP_CHECKPOINT": "0",
+        "SGLANG_PREPARED_BATCHED_MMAP_CHECKPOINT": "1",
+        "SGLANG_PREPARED_BROADCAST_CHECKPOINT": "0",
+    },
+    "mmap_direct": {
+        "SGLANG_PREPARED_MMAP_CHECKPOINT": "1",
+        "SGLANG_PREPARED_BATCHED_MMAP_CHECKPOINT": "0",
+        "SGLANG_PREPARED_BROADCAST_CHECKPOINT": "0",
+    },
+}
 
 MINUTES = 60
 STARTUP_TIMEOUT = 45 * MINUTES
@@ -453,10 +470,20 @@ def benchmark(
     run_id: str = DEFAULT_RUN_ID,
     target_version: int = DEFAULT_TARGET_VERSION,
     inventory_only: bool = False,
+    prepare_transport: str = "batched_broadcast",
 ) -> dict[str, Any]:
     """Run one clean v0 -> recorded-delta -> full-GPU-reload baseline."""
     import httpx
     from autoinference_utils.endpoint import SGLangEndpoint
+
+    try:
+        prepare_env = PREPARE_TRANSPORTS[prepare_transport]
+    except KeyError as exc:
+        raise ValueError(
+            f"unknown prepare_transport={prepare_transport!r}; "
+            f"expected one of {sorted(PREPARE_TRANSPORTS)}"
+        ) from exc
+    os.environ.update(prepare_env)
 
     # The benchmark is intentionally incompatible with every fork-side reload fast path.
     forbidden_env = (
@@ -485,6 +512,8 @@ def benchmark(
         "delta_volume": DELTA_VOLUME_NAME,
         "delta_run_id": run_id,
         "target_version": target_version,
+        "prepare_transport": prepare_transport,
+        "prepare_transport_env": prepare_env,
         "delta_tensors": len(index.get("weight_map") or {}),
         "delta_payload_gb": round(_tree_bytes(version_dir, "*.safetensors") / 1e9, 3),
         "load_format": "fastsafetensors (env-gated no-GDS host-bounce path)",
