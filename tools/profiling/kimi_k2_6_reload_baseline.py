@@ -48,7 +48,7 @@ APP_NAME = "kimi-k2-6-reload-baseline"
 SGLANG_IMAGE_TAG = "lmsysorg/sglang:v0.5.15.post1"
 SGLANG_FORK_REPO = "https://github.com/modal-projects/sglang.git"
 SGLANG_FORK_BRANCH = "stitch-sglang-v0.5.15-post1-prepared-runtime"
-SGLANG_FORK_COMMIT = "3217305fe1a25d6ec46daf1d8df654fbb9a1a516"
+SGLANG_FORK_COMMIT = "91f875bdb5e4c69d02195ac5571b8f669637e8e8"
 
 HF_CACHE_VOLUME_NAME = "huggingface-cache"
 PREP_VOLUME_NAME = "miles-prep-checkpoints"
@@ -103,6 +103,9 @@ PREPARE_TRANSPORTS = {
         "SGLANG_PREPARED_AUTO_MODULE_GROUPS": "1",
         "SGLANG_PREPARED_SINGLE_PASS_CPU_ASSEMBLY": "1",
         "SGLANG_PREPARED_SINGLE_IMAGE": "1",
+        # Four TP ranks share this host allocation. Partition the requested
+        # 64 CPU cores instead of oversubscribing them with 32 workers/rank.
+        "SGLANG_PREPARED_LOAD_PLAN_WORKERS": "16",
     },
     "mmap_single_pass_cpu_staged": {
         "SGLANG_PREPARED_MMAP_CHECKPOINT": "1",
@@ -494,6 +497,7 @@ def _fluent_completion(model: str) -> dict[str, Any]:
 @app.function(
     image=image,
     gpu="B300:4",
+    cpu=64,
     volumes={
         HF_CACHE_PATH: hf_cache_volume,
         PREP_PATH: prep_volume,
