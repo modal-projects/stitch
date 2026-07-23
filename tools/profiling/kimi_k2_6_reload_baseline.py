@@ -48,7 +48,7 @@ APP_NAME = "kimi-k2-6-reload-baseline"
 SGLANG_IMAGE_TAG = "lmsysorg/sglang:v0.5.15.post1"
 SGLANG_FORK_REPO = "https://github.com/modal-projects/sglang.git"
 SGLANG_FORK_BRANCH = "stitch-sglang-v0.5.15-post1-prepared-runtime"
-SGLANG_FORK_COMMIT = "392956ab322a8df32ec685a084e9d8a3898dfdc3"
+SGLANG_FORK_COMMIT = "3217305fe1a25d6ec46daf1d8df654fbb9a1a516"
 
 HF_CACHE_VOLUME_NAME = "huggingface-cache"
 PREP_VOLUME_NAME = "miles-prep-checkpoints"
@@ -112,7 +112,9 @@ PREPARE_TRANSPORTS = {
         "SGLANG_PREPARED_AUTO_MODULE_GROUPS": "1",
         "SGLANG_PREPARED_SINGLE_PASS_CPU_ASSEMBLY": "1",
         "SGLANG_PREPARED_SINGLE_IMAGE": "1",
-        "SGLANG_PREPARED_PINNED_GB": "96",
+        "SGLANG_PREPARED_PINNED_GB": "0",
+        "SGLANG_PREPARED_LOAD_PLAN_WORKERS": "32",
+        "SGLANG_PREPARED_PAGE_COPY_WORKERS": "16",
     },
 }
 
@@ -173,7 +175,8 @@ image = (
             "SGLANG_PREPARED_TAIL_CHUNK_MIB": "1024",
             "SGLANG_PREPARED_GPU_STAGING_GB": "30",
             "SGLANG_PREPARED_GPU_RESERVE_GB": "12",
-            "SGLANG_PREPARED_LOAD_PLAN_WORKERS": "16",
+            "SGLANG_PREPARED_LOAD_PLAN_WORKERS": "32",
+            "SGLANG_PREPARED_PAGE_COPY_WORKERS": "16",
             "SGLANG_PREPARED_GROUP_SCRATCH_GB": "9",
             "SGLANG_PROFILE_RUNTIME_STATE": "1",
             "SGLANG_PROFILE_WEIGHT_RELOAD": "1",
