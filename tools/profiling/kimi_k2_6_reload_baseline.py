@@ -48,7 +48,7 @@ APP_NAME = "kimi-k2-6-reload-baseline"
 SGLANG_IMAGE_TAG = "lmsysorg/sglang:v0.5.15.post1"
 SGLANG_FORK_REPO = "https://github.com/modal-projects/sglang.git"
 SGLANG_FORK_BRANCH = "stitch-sglang-v0.5.15-post1-prepared-runtime"
-SGLANG_FORK_COMMIT = "91f875bdb5e4c69d02195ac5571b8f669637e8e8"
+SGLANG_FORK_COMMIT = "01fd04b8322ac2569cb7e1105288dcd3e56cf3ac"
 
 HF_CACHE_VOLUME_NAME = "huggingface-cache"
 PREP_VOLUME_NAME = "miles-prep-checkpoints"
@@ -513,6 +513,7 @@ def benchmark(
     target_version: int = DEFAULT_TARGET_VERSION,
     inventory_only: bool = False,
     prepare_transport: str = "batched_broadcast",
+    repeat_prepare: bool = False,
 ) -> dict[str, Any]:
     """Run one clean v0 -> recorded-delta -> full-GPU-reload baseline."""
     import httpx
@@ -556,6 +557,7 @@ def benchmark(
         "target_version": target_version,
         "prepare_transport": prepare_transport,
         "prepare_transport_env": prepare_env,
+        "repeat_prepare": repeat_prepare,
         "delta_tensors": len(index.get("weight_map") or {}),
         "delta_payload_gb": round(_tree_bytes(version_dir, "*.safetensors") / 1e9, 3),
         "load_format": "fastsafetensors (env-gated no-GDS host-bounce path)",
@@ -662,8 +664,69 @@ def benchmark(
             results["full_loop_through_resume_s"] = round(
                 time.perf_counter() - loop_started, 3
             )
+            results["post_update_generation"] = _fluent_completion(BASE_PATH)
 
-        results["post_update_generation"] = _fluent_completion(BASE_PATH)
+            if repeat_prepare:
+                # Rebuild the same dense runtime image immediately after the
+                # correctness-checked commit. The local pull is now an idempotent
+                # no-op, so this isolates warm checkpoint iteration + loader replay
+                # from delta download/apply. Committing and generating again proves
+                # the diagnostic pass produced a complete usable image.
+                started = time.perf_counter()
+                with _ResourceSampler("warm_repeat_prepare") as repeat_resources:
+                    repeat_body = _post(
+                        client,
+                        url,
+                        "/pull_weights",
+                        {
+                            "local_checkpoint_dir": LOCAL_CHECKPOINT_PATH,
+                            "source_dir": str(run_dir),
+                            "target_version": target_version,
+                        },
+                        None,
+                    )
+                results["warm_repeat_prepare_s"] = round(
+                    time.perf_counter() - started, 3
+                )
+                results["warm_repeat_prepare_resources"] = (
+                    repeat_resources.summary()
+                )
+                results["warm_repeat_prepare_message"] = repeat_body.get("message")
+
+                started = time.perf_counter()
+                _post(client, url, "/pause_generation", {"mode": "in_place"}, 120.0)
+                results["warm_repeat_pause_s"] = round(
+                    time.perf_counter() - started, 3
+                )
+                try:
+                    started = time.perf_counter()
+                    repeat_update_body = _post(
+                        client,
+                        url,
+                        "/update_weights_from_disk",
+                        {
+                            "model_path": LOCAL_CHECKPOINT_PATH,
+                            "weight_version": str(target_version),
+                            "flush_cache": False,
+                        },
+                        None,
+                    )
+                    results["warm_repeat_update_s"] = round(
+                        time.perf_counter() - started, 3
+                    )
+                    results["warm_repeat_update_message"] = repeat_update_body.get(
+                        "message"
+                    )
+                finally:
+                    started = time.perf_counter()
+                    _post(client, url, "/continue_generation", {}, 120.0)
+                    results["warm_repeat_resume_s"] = round(
+                        time.perf_counter() - started, 3
+                    )
+                results["warm_repeat_post_update_generation"] = _fluent_completion(
+                    BASE_PATH
+                )
+
         results["local_checkpoint_gb"] = round(
             _tree_bytes(Path(LOCAL_CHECKPOINT_PATH)) / 1e9, 3
         )
