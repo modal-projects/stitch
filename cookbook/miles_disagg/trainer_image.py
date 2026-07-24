@@ -18,9 +18,9 @@ from cookbook.common import trainer_image as common_trainer_image
 
 # Dated tag, never `latest`: Modal caches from_registry per tag string and won't re-pull
 # a moved mutable tag, so `latest` silently serves whatever was first pulled.
-MILES_IMAGE_TAG = "radixark/miles:dev-202607182122"  # base Megatron/TE; match the upstream main stitch-miles is on
+MILES_IMAGE_TAG = "radixark/miles:dev-202607211240"
 MILES_REPO_URL = "https://github.com/modal-projects/miles.git"
-MILES_REPO_REF = "15cf7ed0344850affa354b8b81ad3acbda11474b"  # branch stitch-miles; see MILES_FORK.md
+MILES_REPO_REF = "6bfa80fef497cdcaba1e648ef17b0deda9d8c69e"
 
 MILES_ROOT = "/root/miles"
 MEGATRON_PATH = "/root/Megatron-LM"  # source-only megatron.training must be on PYTHONPATH

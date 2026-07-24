@@ -20,6 +20,7 @@ SOURCE_MODEL = "moonshotai/Kimi-K2.6"
 MODEL_TAG = "kimi-k2-6-nvfp4"
 
 SIDECAR_COMMIT_MODE = "in_place"
+SIDECAR_WEIGHT_UPDATE_MODE = "host_runtime"
 SIDECAR_FLUSH_CACHE_ON_COMMIT = False
 # R3 routing-replay needs the dropless Megatron dispatch fix at startup.
 MEGATRON_RUNTIME_PATCHES = [
@@ -41,16 +42,10 @@ SGLANG_SERVER_ARGS = {
     "--chunked-prefill-size": "16384",
     "--schedule-conservativeness": "0.5",
     "--schedule-policy": "lpm",
-    "--enable-hierarchical-cache": "",
-    "--hicache-ratio": "2",
-    "--hicache-io-backend": "kernel",
-    "--hicache-mem-layout": "page_first",
-    "--hicache-write-policy": "write_through",
+    "--enable-host-runtime-weight-update": "",
     "--skip-server-warmup": "",
     "--enable-return-routed-experts": "",
 }
-
-SGLANG_ENV = {"SGLANG_ENABLE_RELOAD_LOAD_PLAN": "1"}  # NVFP4: load-plan replay + O(delta) partial reload
 
 modal = ModalConfig(
     gpu="B200",
@@ -149,7 +144,7 @@ class _Miles(MilesConfig):
     num_layers_at_end_in_bf16 = 0
 
     update_weight_transfer_mode = "disk-delta"
-    update_weight_delta_encoding = "xor"
+    update_weight_delta_encoding = "xor_sparse"
     update_weight_delta_checksum = "xxh3-128"
     update_weight_disk_dir = DELTA_BULLETIN_ROOT
     custom_update_weight_post_write_path = "cookbook.common.hooks.commit_and_wake"

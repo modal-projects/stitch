@@ -1,10 +1,10 @@
 """``SGLangEngine`` — the ``Engine`` instance for a single sglang server.
 
-The weight apply lives inside sglang (``weight_sync/local_checkpoint``): ``stage``
-POSTs ``/pull_weights``, which chain-replays deltas from the applied checkpoint with
-per-tensor checksum verification (reseeding from base on corruption), and ``commit``
-reloads the materialized checkpoint via ``/update_weights_from_disk``. This client
-only drives those endpoints and translates the version protocol — it holds no
+``stage`` always asks sglang to reconstruct and checksum a canonical host-local
+checkpoint. In ``disk`` mode, ``commit`` reloads that checkpoint through the ordinary
+model loader. In ``host_runtime`` mode, staging also advances one persistent pinned
+CPU image in final runtime layout, and commit performs only its full CPU-to-GPU copy.
+This client drives those endpoints and translates the version protocol; it holds no
 host-side decoder and imports no trainer package.
 """
 
@@ -13,10 +13,12 @@ from __future__ import annotations
 import asyncio
 import shutil
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from stitch.engines.base import Engine
 from stitch.types import VersionManifest, VersionRef
+
+WeightUpdateMode = Literal["disk", "host_runtime"]
 
 
 class SGLangEngine(Engine):
@@ -25,11 +27,15 @@ class SGLangEngine(Engine):
         base_url: str,
         local_checkpoint_dir: str,
         *,
+        weight_update_mode: WeightUpdateMode = "disk",
         control_timeout: float = 120.0,
         reload_timeout: float = 600.0,
     ) -> None:
+        if weight_update_mode not in ("disk", "host_runtime"):
+            raise ValueError(f"unsupported SGLang weight update mode: {weight_update_mode!r}")
         self._base_url = base_url.rstrip("/")
         self.local_checkpoint_dir = local_checkpoint_dir
+        self.weight_update_mode = weight_update_mode
         self._control_timeout = control_timeout
         self._reload_timeout = reload_timeout
 
@@ -39,7 +45,8 @@ class SGLangEngine(Engine):
     def blocked_routes(self) -> frozenset[str]:
         return frozenset({
             "update_weights_from_disk", "update_weights_from_distributed",
-            "update_weights_from_tensor", "pull_weights", "flush_cache",
+            "update_weights_from_tensor", "update_weights_from_prepared",
+            "pull_weights", "flush_cache",
             "pause_generation", "continue_generation", "abort_request",
         })
 
@@ -51,6 +58,7 @@ class SGLangEngine(Engine):
                 "local_checkpoint_dir": self.local_checkpoint_dir,
                 "source_dir": str(Path(source_dir).parent),
                 "target_version": manifest.ref.version,
+                "prepare": "runtime" if self.weight_update_mode == "host_runtime" else "checkpoint",
             },
             timeout=self._reload_timeout,
             action="weight pull",
@@ -60,7 +68,15 @@ class SGLangEngine(Engine):
         # target_version=0 seeds base with no deltas applied; source_dir is unused for the seed.
         await self._post(
             "/pull_weights",
-            {"local_checkpoint_dir": self.local_checkpoint_dir, "source_dir": self.local_checkpoint_dir, "target_version": 0},
+            {
+                "local_checkpoint_dir": self.local_checkpoint_dir,
+                "source_dir": self.local_checkpoint_dir,
+                "target_version": 0,
+                # A base seed is a checkpoint operation. On cold start the host
+                # image was captured from the initial GPU model; on a run reset
+                # the disk reload below explicitly recaptures it.
+                "prepare": "checkpoint",
+            },
             timeout=self._reload_timeout,
             action="base prefetch",
         )
@@ -74,12 +90,25 @@ class SGLangEngine(Engine):
         # with checkpoint tensor names. Keep weight_names in the shared Engine
         # interface for other backends, but never narrow an SGLang commit with it.
         del weight_names
-        payload: dict[str, Any] = {
-            "model_path": self.local_checkpoint_dir,
-            "weight_version": str(ref.version),
-            "flush_cache": flush_cache,
-        }
-        await self._post("/update_weights_from_disk", payload, timeout=self._reload_timeout, action="weight update")
+        if self.weight_update_mode == "host_runtime":
+            await self._post(
+                "/update_weights_from_prepared",
+                {"weight_version": str(ref.version), "flush_cache": flush_cache},
+                timeout=self._reload_timeout,
+                action="prepared weight update",
+            )
+        else:
+            payload: dict[str, Any] = {
+                "model_path": self.local_checkpoint_dir,
+                "weight_version": str(ref.version),
+                "flush_cache": flush_cache,
+            }
+            await self._post(
+                "/update_weights_from_disk",
+                payload,
+                timeout=self._reload_timeout,
+                action="disk weight update",
+            )
 
     async def flush_cache(self) -> None:
         await self._get("/flush_cache", ok=(200, 404))
@@ -97,7 +126,12 @@ class SGLangEngine(Engine):
         await self.prefetch()
         await self._post(
             "/update_weights_from_disk",
-            {"model_path": self.local_checkpoint_dir, "weight_version": "0", "flush_cache": False},
+            {
+                "model_path": self.local_checkpoint_dir,
+                "weight_version": "0",
+                "flush_cache": False,
+                "refresh_host_runtime": self.weight_update_mode == "host_runtime",
+            },
             timeout=self._reload_timeout,
             action="reset reload to base",
         )

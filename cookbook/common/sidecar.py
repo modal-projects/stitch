@@ -37,6 +37,7 @@ def main() -> None:
     p.add_argument("--local-checkpoint-dir", required=True)
     p.add_argument("--volume-name", default="")
     p.add_argument("--commit-mode", choices=["in_place", "quiesce"], default="in_place")
+    p.add_argument("--weight-update-mode", choices=["disk", "host_runtime"], default="disk")
     p.add_argument("--flush-cache-on-commit", action="store_true")
     p.add_argument("--run-id", default=None)
     p.add_argument("--debug-requests", action="store_true")
@@ -44,7 +45,11 @@ def main() -> None:
     args = p.parse_args()
 
     store = ModalVolumeStore(args.bulletin_root, volume_name=args.volume_name or None)
-    engine = SGLangEngine(args.upstream, args.local_checkpoint_dir)
+    engine = SGLangEngine(
+        args.upstream,
+        args.local_checkpoint_dir,
+        weight_update_mode=args.weight_update_mode,
+    )
     serve(
         store, engine,
         run_id=args.run_id, commit_mode=args.commit_mode,

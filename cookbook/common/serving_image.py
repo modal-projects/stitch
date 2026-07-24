@@ -4,8 +4,8 @@ Trainer-agnostic: no trainer package is installed (the delta apply lives in the 
 ``/pull_weights``), so miles and slime serve on the identical image; precision comes from the
 served checkpoint, not a ``--quantization`` flag. The fork pin carries ``/pull_weights``, the
 hardened local_checkpoint receiver, the quantized-reload restore protocol (reload == init), and
-the O(delta) partial-reload load plan. See ``SGLANG_FORK.md`` for the patch stack and how to
-re-port onto a newer sglang release.
+the optional pinned host-runtime preparation/commit path. See ``SGLANG_FORK.md`` for the patch
+stack and how to re-port onto a newer sglang release.
 """
 
 from __future__ import annotations
@@ -18,8 +18,8 @@ import modal
 # baked kernels/CUDA must be ABI-compatible with it.
 SGLANG_IMAGE_TAG = "lmsysorg/sglang:v0.5.15.post1"
 SGLANG_FORK_REPO = "https://github.com/modal-projects/sglang.git"
-SGLANG_FORK_BRANCH = "stitch-sglang-v0.5.15-post1"
-SGLANG_FORK_COMMIT = "557e19e1b6fdceeea46d8674f6e3ae3428d1d102"
+SGLANG_FORK_BRANCH = "stitch-sglang-v0.5.15-post1-host-runtime"
+SGLANG_FORK_COMMIT = "678e812129bca7d94830dd6cf4af39bf4a259104"
 
 _COOKBOOK_DIR = Path(__file__).resolve().parent.parent
 

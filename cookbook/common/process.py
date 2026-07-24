@@ -18,7 +18,8 @@ SIDECAR_MODULE = "cookbook.common.sidecar"
 
 def start_sidecar(
     *, sidecar_port: int, sglang_port: int, bulletin_root: str, local_checkpoint_dir: str,
-    volume_name: str, commit_mode: str, flush_cache_on_commit: bool = False, debug_requests: bool = False,
+    volume_name: str, commit_mode: str, weight_update_mode: str = "disk",
+    flush_cache_on_commit: bool = False, debug_requests: bool = False,
 ) -> subprocess.Popen:
     """Launch the versioned rollout proxy (the shared sidecar) beside sglang."""
     cmd = [
@@ -29,6 +30,7 @@ def start_sidecar(
         "--local-checkpoint-dir", local_checkpoint_dir,
         "--volume-name", volume_name,
         "--commit-mode", commit_mode,
+        "--weight-update-mode", weight_update_mode,
     ]
     if flush_cache_on_commit:
         cmd.append("--flush-cache-on-commit")
