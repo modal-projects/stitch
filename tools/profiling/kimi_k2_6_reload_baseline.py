@@ -46,7 +46,7 @@ APP_NAME = "kimi-k2-6-reload-baseline"
 SGLANG_IMAGE_TAG = "lmsysorg/sglang:v0.5.15.post1"
 SGLANG_FORK_REPO = "https://github.com/modal-projects/sglang.git"
 SGLANG_FORK_BRANCH = "stitch-sglang-v0.5.15-post1-host-runtime"
-SGLANG_FORK_COMMIT = "35ed75b46e"
+SGLANG_FORK_COMMIT = "1d22906844"
 
 HF_CACHE_VOLUME_NAME = "huggingface-cache"
 BASE_VOLUME_NAME = "cognition-kimi-k2-6-nvfp4-base"
