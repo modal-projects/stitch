@@ -1,23 +1,16 @@
-"""Kimi-K2.6 NVFP4 benchmark for a general dense weight-update loop.
+"""Kimi-K2.6 NVFP4 benchmark for a host-prepared weight-update loop.
 
 This is deliberately narrower than an RL end-to-end run. It starts one real SGLang
 engine, then measures the same two operations the Stitch sidecar drives in
 production:
 
-1. ``POST /pull_weights``: read a recorded XOR delta from the Modal Volume and apply
-   it, checksum-verified, to the host-local checkpoint; then construct a full dense
-   host runtime image through the ordinary SGLang loaders and ModelOpt post-processing.
-2. ``POST /update_weights_from_disk``: overwrite every checkpoint-derived live CUDA
-   storage from the fully prepared image without rebinding parameters or recapturing
-   CUDA graphs.
+1. ``POST /pull_weights`` reconstructs and checksum-verifies the canonical local
+   checkpoint, then advances one persistent pinned CPU runtime image from XOR deltas.
+2. ``POST /update_weights_from_prepared`` performs only a complete CPU-to-GPU copy
+   into existing runtime storages and switches the serving weight version.
 
-The implementation never uses the delta's touched tensor names to choose runtime
-state: all 277,670 checkpoint entries are consumed and all 151 GB/rank of derived
-runtime storage is rebuilt. Initial loading and background preparation keep the
-fork's env-gated fastsafetensors no-GDS path for startup; preparation batches
-mmap-backed source tensors through pinned H2D staging, pipelines D2H staging, and
-commit uses bounded pinned/HBM staging. Base seeding is timed separately and excluded
-from the steady-state apply+reload total.
+Base seeding is timed separately and excluded from the steady-state loop. HiCache
+is not enabled. The same prompt is generated before and after the update.
 
 Run::
 
@@ -47,17 +40,16 @@ APP_NAME = "kimi-k2-6-reload-baseline"
 
 SGLANG_IMAGE_TAG = "lmsysorg/sglang:v0.5.15.post1"
 SGLANG_FORK_REPO = "https://github.com/modal-projects/sglang.git"
-SGLANG_FORK_BRANCH = "stitch-sglang-v0.5.15-post1-prepared-runtime"
-SGLANG_FORK_COMMIT = "6053ccb640f0e6fe7a191f458602a7ee60e2d29f"
+SGLANG_FORK_BRANCH = "stitch-sglang-v0.5.15-post1-host-runtime"
+SGLANG_FORK_COMMIT = "4480693ca3"
 
 HF_CACHE_VOLUME_NAME = "huggingface-cache"
-PREP_VOLUME_NAME = "miles-prep-checkpoints"
+BASE_VOLUME_NAME = "cognition-kimi-k2-6-nvfp4-base"
 DELTA_VOLUME_NAME = "stitch-delta-kimi-k2-6-nvfp4"
-SGLANG_CACHE_VOLUME_NAME = "miles-sglang-cache"
+SGLANG_CACHE_VOLUME_NAME = "cognition-sglang-cache"
 
 HF_CACHE_PATH = "/root/.cache/huggingface"
-PREP_PATH = "/prep"
-BASE_PATH = f"{PREP_PATH}/kimi-k2-6-nvfp4/nvfp4"
+BASE_PATH = "/model"
 DELTA_PATH = "/delta-bulletin"
 LOCAL_CHECKPOINT_PATH = "/local-checkpoint"
 SGLANG_CACHE_PATH = "/root/.cache/sglang"
@@ -65,61 +57,6 @@ SGLANG_PORT = 8001
 
 DEFAULT_RUN_ID = "520c51f61535"
 DEFAULT_TARGET_VERSION = 1
-PREPARE_TRANSPORTS = {
-    "batched_broadcast": {
-        "SGLANG_PREPARED_MMAP_CHECKPOINT": "0",
-        "SGLANG_PREPARED_BATCHED_MMAP_CHECKPOINT": "1",
-        "SGLANG_PREPARED_BROADCAST_CHECKPOINT": "1",
-    },
-    "batched_per_rank": {
-        "SGLANG_PREPARED_MMAP_CHECKPOINT": "0",
-        "SGLANG_PREPARED_BATCHED_MMAP_CHECKPOINT": "1",
-        "SGLANG_PREPARED_BROADCAST_CHECKPOINT": "0",
-    },
-    "mmap_direct": {
-        "SGLANG_PREPARED_MMAP_CHECKPOINT": "1",
-        "SGLANG_PREPARED_BATCHED_MMAP_CHECKPOINT": "0",
-        "SGLANG_PREPARED_BROADCAST_CHECKPOINT": "0",
-    },
-    "mmap_direct_full_pinned": {
-        "SGLANG_PREPARED_MMAP_CHECKPOINT": "1",
-        "SGLANG_PREPARED_BATCHED_MMAP_CHECKPOINT": "0",
-        "SGLANG_PREPARED_BROADCAST_CHECKPOINT": "0",
-        "SGLANG_PREPARED_FULL_PINNED_IMAGE": "1",
-    },
-    "mmap_cpu_assemble_full_pinned": {
-        "SGLANG_PREPARED_MMAP_CHECKPOINT": "1",
-        "SGLANG_PREPARED_BATCHED_MMAP_CHECKPOINT": "0",
-        "SGLANG_PREPARED_BROADCAST_CHECKPOINT": "0",
-        "SGLANG_PREPARED_FULL_PINNED_IMAGE": "1",
-        "SGLANG_PREPARED_CPU_ASSEMBLY": "1",
-    },
-    "mmap_single_pass_cpu_full_pinned": {
-        "SGLANG_PREPARED_MMAP_CHECKPOINT": "1",
-        "SGLANG_PREPARED_BATCHED_MMAP_CHECKPOINT": "0",
-        "SGLANG_PREPARED_BROADCAST_CHECKPOINT": "0",
-        "SGLANG_PREPARED_FULL_PINNED_IMAGE": "1",
-        "SGLANG_PREPARED_CPU_ASSEMBLY": "1",
-        "SGLANG_PREPARED_AUTO_MODULE_GROUPS": "1",
-        "SGLANG_PREPARED_SINGLE_PASS_CPU_ASSEMBLY": "1",
-        "SGLANG_PREPARED_SINGLE_IMAGE": "1",
-        # Four TP ranks share this host allocation. Partition the requested
-        # 64 CPU cores instead of oversubscribing them with 32 workers/rank.
-        "SGLANG_PREPARED_LOAD_PLAN_WORKERS": "16",
-    },
-    "mmap_single_pass_cpu_staged": {
-        "SGLANG_PREPARED_MMAP_CHECKPOINT": "1",
-        "SGLANG_PREPARED_BATCHED_MMAP_CHECKPOINT": "0",
-        "SGLANG_PREPARED_BROADCAST_CHECKPOINT": "0",
-        "SGLANG_PREPARED_CPU_ASSEMBLY": "1",
-        "SGLANG_PREPARED_AUTO_MODULE_GROUPS": "1",
-        "SGLANG_PREPARED_SINGLE_PASS_CPU_ASSEMBLY": "1",
-        "SGLANG_PREPARED_SINGLE_IMAGE": "1",
-        "SGLANG_PREPARED_PINNED_GB": "0",
-        "SGLANG_PREPARED_LOAD_PLAN_WORKERS": "32",
-        "SGLANG_PREPARED_PAGE_COPY_WORKERS": "16",
-    },
-}
 
 MINUTES = 60
 STARTUP_TIMEOUT = 45 * MINUTES
@@ -135,7 +72,7 @@ _LOCAL_STITCH_SOURCE = (
 app = modal.App(APP_NAME)
 
 hf_cache_volume = modal.Volume.from_name(HF_CACHE_VOLUME_NAME, version=2)
-prep_volume = modal.Volume.from_name(PREP_VOLUME_NAME, version=2)
+base_volume = modal.Volume.from_name(BASE_VOLUME_NAME, version=1)
 delta_volume = modal.Volume.from_name(DELTA_VOLUME_NAME, version=2)
 sglang_cache_volume = modal.Volume.from_name(SGLANG_CACHE_VOLUME_NAME, version=2)
 
@@ -165,22 +102,6 @@ image = (
             "SGLANG_DISABLE_CUDNN_CHECK": "1",
             "SGLANG_ENABLE_OVERLAP_PLAN_STREAM": "1",
             "SGLANG_FASTSAFETENSORS_NOGDS": "1",
-            "SGLANG_ENABLE_PREPARED_RUNTIME_RELOAD": "1",
-            # The CPU mmap iterator is useful for profiling but regresses Kimi:
-            # 277k small CPU->GPU loads dominate. Keep preparation on the
-            # pinned-batched mmap iterator for the production candidate.
-            "SGLANG_PREPARED_MMAP_CHECKPOINT": "0",
-            "SGLANG_PREPARED_BATCHED_MMAP_CHECKPOINT": "1",
-            "SGLANG_PREPARED_BROADCAST_CHECKPOINT": "1",
-            "SGLANG_PREPARED_PREALLOCATE_TRANSFER_BUFFERS": "1",
-            "SGLANG_PREPARED_PINNED_GB": "56",
-            "SGLANG_PREPARED_TAIL_BUFFER_COUNT": "8",
-            "SGLANG_PREPARED_TAIL_CHUNK_MIB": "1024",
-            "SGLANG_PREPARED_GPU_STAGING_GB": "30",
-            "SGLANG_PREPARED_GPU_RESERVE_GB": "12",
-            "SGLANG_PREPARED_LOAD_PLAN_WORKERS": "32",
-            "SGLANG_PREPARED_PAGE_COPY_WORKERS": "16",
-            "SGLANG_PREPARED_GROUP_SCRATCH_GB": "9",
             "SGLANG_PROFILE_RUNTIME_STATE": "1",
             "SGLANG_PROFILE_WEIGHT_RELOAD": "1",
             "SGLANG_TIMEOUT_KEEP_ALIVE": "300",
@@ -215,6 +136,7 @@ SGLANG_SERVER_ARGS = {
     "--schedule-policy": "lpm",
     "--skip-server-warmup": "",
     "--enable-return-routed-experts": "",
+    "--enable-host-runtime-weight-update": "",
 }
 
 
@@ -500,7 +422,7 @@ def _fluent_completion(model: str) -> dict[str, Any]:
     cpu=64,
     volumes={
         HF_CACHE_PATH: hf_cache_volume,
-        PREP_PATH: prep_volume,
+        BASE_PATH: base_volume,
         DELTA_PATH: delta_volume,
         SGLANG_CACHE_PATH: sglang_cache_volume,
     },
@@ -512,25 +434,16 @@ def benchmark(
     run_id: str = DEFAULT_RUN_ID,
     target_version: int = DEFAULT_TARGET_VERSION,
     inventory_only: bool = False,
-    prepare_transport: str = "batched_broadcast",
-    repeat_prepare: bool = False,
 ) -> dict[str, Any]:
-    """Run one clean v0 -> recorded-delta -> full-GPU-reload baseline."""
+    """Run one clean v0 -> verified XOR -> host-prepared commit benchmark."""
     import httpx
     from autoinference_utils.endpoint import SGLangEndpoint
 
-    try:
-        prepare_env = PREPARE_TRANSPORTS[prepare_transport]
-    except KeyError as exc:
-        raise ValueError(
-            f"unknown prepare_transport={prepare_transport!r}; "
-            f"expected one of {sorted(PREPARE_TRANSPORTS)}"
-        ) from exc
-    os.environ.update(prepare_env)
-
-    # The benchmark is intentionally incompatible with every fork-side reload fast path.
+    # The benchmark is intentionally incompatible with the removed partial
+    # reload and old prepared-reconstruction experiments.
     forbidden_env = (
         "SGLANG_ENABLE_RELOAD_LOAD_PLAN",
+        "SGLANG_ENABLE_PREPARED_RUNTIME_RELOAD",
         "STITCH_PARTIAL_RELOAD",
     )
     for name in forbidden_env:
@@ -548,16 +461,13 @@ def benchmark(
         "sglang_commit": SGLANG_FORK_COMMIT,
         "gpu": "B300:4",
         "hf_cache_volume": HF_CACHE_VOLUME_NAME,
-        "prep_volume": PREP_VOLUME_NAME,
+        "base_volume": BASE_VOLUME_NAME,
         "sglang_cache_volume": SGLANG_CACHE_VOLUME_NAME,
         "base_path": BASE_PATH,
         "base_gb": round(_tree_bytes(Path(BASE_PATH)) / 1e9, 3),
         "delta_volume": DELTA_VOLUME_NAME,
         "delta_run_id": run_id,
         "target_version": target_version,
-        "prepare_transport": prepare_transport,
-        "prepare_transport_env": prepare_env,
-        "repeat_prepare": repeat_prepare,
         "delta_tensors": len(index.get("weight_map") or {}),
         "delta_payload_gb": round(_tree_bytes(version_dir, "*.safetensors") / 1e9, 3),
         "load_format": "fastsafetensors (env-gated no-GDS host-bounce path)",
@@ -621,6 +531,7 @@ def benchmark(
                         "local_checkpoint_dir": LOCAL_CHECKPOINT_PATH,
                         "source_dir": str(run_dir),
                         "target_version": target_version,
+                        "prepare": "runtime",
                     },
                     None,
                 )
@@ -634,22 +545,23 @@ def benchmark(
 
             try:
                 started = time.perf_counter()
-                with _ResourceSampler("update_weights_from_disk") as update_resources:
+                with _ResourceSampler(
+                    "update_weights_from_prepared"
+                ) as update_resources:
                     update_body = _post(
                         client,
                         url,
-                        "/update_weights_from_disk",
+                        "/update_weights_from_prepared",
                         {
-                            "model_path": LOCAL_CHECKPOINT_PATH,
                             "weight_version": str(target_version),
                             "flush_cache": False,
                         },
                         None,
                     )
-                results["update_weights_from_disk_s"] = round(
+                results["update_weights_from_prepared_s"] = round(
                     time.perf_counter() - started, 3
                 )
-                results["update_weights_from_disk_resources"] = (
+                results["update_weights_from_prepared_resources"] = (
                     update_resources.summary()
                 )
                 results["update_message"] = update_body.get("message")
@@ -659,73 +571,14 @@ def benchmark(
                 results["resume_s"] = round(time.perf_counter() - started, 3)
 
             results["xor_plus_update_s"] = round(
-                results["xor_apply_s"] + results["update_weights_from_disk_s"], 3
+                results["xor_apply_s"]
+                + results["update_weights_from_prepared_s"],
+                3,
             )
             results["full_loop_through_resume_s"] = round(
                 time.perf_counter() - loop_started, 3
             )
             results["post_update_generation"] = _fluent_completion(BASE_PATH)
-
-            if repeat_prepare:
-                # Rebuild the same dense runtime image immediately after the
-                # correctness-checked commit. The local pull is now an idempotent
-                # no-op, so this isolates warm checkpoint iteration + loader replay
-                # from delta download/apply. Committing and generating again proves
-                # the diagnostic pass produced a complete usable image.
-                started = time.perf_counter()
-                with _ResourceSampler("warm_repeat_prepare") as repeat_resources:
-                    repeat_body = _post(
-                        client,
-                        url,
-                        "/pull_weights",
-                        {
-                            "local_checkpoint_dir": LOCAL_CHECKPOINT_PATH,
-                            "source_dir": str(run_dir),
-                            "target_version": target_version,
-                        },
-                        None,
-                    )
-                results["warm_repeat_prepare_s"] = round(
-                    time.perf_counter() - started, 3
-                )
-                results["warm_repeat_prepare_resources"] = (
-                    repeat_resources.summary()
-                )
-                results["warm_repeat_prepare_message"] = repeat_body.get("message")
-
-                started = time.perf_counter()
-                _post(client, url, "/pause_generation", {"mode": "in_place"}, 120.0)
-                results["warm_repeat_pause_s"] = round(
-                    time.perf_counter() - started, 3
-                )
-                try:
-                    started = time.perf_counter()
-                    repeat_update_body = _post(
-                        client,
-                        url,
-                        "/update_weights_from_disk",
-                        {
-                            "model_path": LOCAL_CHECKPOINT_PATH,
-                            "weight_version": str(target_version),
-                            "flush_cache": False,
-                        },
-                        None,
-                    )
-                    results["warm_repeat_update_s"] = round(
-                        time.perf_counter() - started, 3
-                    )
-                    results["warm_repeat_update_message"] = repeat_update_body.get(
-                        "message"
-                    )
-                finally:
-                    started = time.perf_counter()
-                    _post(client, url, "/continue_generation", {}, 120.0)
-                    results["warm_repeat_resume_s"] = round(
-                        time.perf_counter() - started, 3
-                    )
-                results["warm_repeat_post_update_generation"] = _fluent_completion(
-                    BASE_PATH
-                )
 
         results["local_checkpoint_gb"] = round(
             _tree_bytes(Path(LOCAL_CHECKPOINT_PATH)) / 1e9, 3
