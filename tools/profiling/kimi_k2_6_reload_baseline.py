@@ -30,8 +30,11 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import struct
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -43,7 +46,7 @@ APP_NAME = "kimi-k2-6-reload-baseline"
 SGLANG_IMAGE_TAG = "lmsysorg/sglang:v0.5.15.post1"
 SGLANG_FORK_REPO = "https://github.com/modal-projects/sglang.git"
 SGLANG_FORK_BRANCH = "stitch-sglang-v0.5.15-post1-host-runtime"
-SGLANG_FORK_COMMIT = "1a25ea54d0"
+SGLANG_FORK_COMMIT = "dc607d8cc2"
 
 HF_CACHE_VOLUME_NAME = "huggingface-cache"
 BASE_VOLUME_NAME = "cognition-kimi-k2-6-nvfp4-base"
@@ -54,6 +57,7 @@ HF_CACHE_PATH = "/root/.cache/huggingface"
 BASE_PATH = "/model"
 DELTA_PATH = "/delta-bulletin"
 LOCAL_CHECKPOINT_PATH = "/local-checkpoint"
+SYNTHETIC_DELTA_PATH = "/synthetic-delta-run"
 SGLANG_CACHE_PATH = "/root/.cache/sglang"
 SGLANG_PORT = 8001
 
@@ -366,6 +370,108 @@ def _assert_recorded_delta(
     return run_dir, index
 
 
+def _build_all_tensor_sparse_xor(
+    checkpoint_dir: Path,
+    source_dir: Path,
+) -> dict[str, Any]:
+    """Toggle one low byte in every checkpoint tensor and publish sparse XOR."""
+
+    import mmap
+
+    import numpy as np
+    import safetensors.numpy
+    import xxhash
+    import zstandard
+
+    index_path = checkpoint_dir / "model.safetensors.index.json"
+    index = json.loads(index_path.read_text())
+    base_weight_map = index.get("weight_map") or {}
+    if not base_weight_map:
+        raise RuntimeError(f"checkpoint index has no tensors: {index_path}")
+
+    version_dir = source_dir / "weight_v000001"
+    shutil.rmtree(source_dir, ignore_errors=True)
+    version_dir.mkdir(parents=True)
+    by_shard: dict[str, list[str]] = {}
+    for name, filename in base_weight_map.items():
+        by_shard.setdefault(filename, []).append(name)
+    shard_items = sorted(by_shard.items())
+    output_names = {
+        input_name: f"model-{index + 1:05d}-of-{len(shard_items):05d}.safetensors"
+        for index, (input_name, _) in enumerate(shard_items)
+    }
+    def process_shard(item: tuple[str, list[str]]) -> tuple[str, int, int]:
+        input_name, expected_names = item
+        input_path = checkpoint_dir / input_name
+        compressor = zstandard.ZstdCompressor(level=1)
+        with input_path.open("rb") as file:
+            (header_len,) = struct.unpack("<Q", file.read(8))
+            header = json.loads(file.read(header_len))
+            with mmap.mmap(file.fileno(), 0, access=mmap.ACCESS_READ) as mapped:
+                payloads: dict[str, np.ndarray] = {}
+                checksums: dict[str, str] = {}
+                logical_bytes = 0
+                for name in expected_names:
+                    info = header.get(name)
+                    if info is None:
+                        raise RuntimeError(
+                            f"{name!r} is indexed in {input_name} but absent from its header"
+                        )
+                    begin, end = info["data_offsets"]
+                    offset = 8 + header_len + begin
+                    nbytes = end - begin
+                    if nbytes <= 0:
+                        raise RuntimeError(
+                            f"cannot make a one-byte sparse delta for empty tensor {name!r}"
+                        )
+                    region = memoryview(mapped)[offset : offset + nbytes]
+                    hasher = xxhash.xxh3_128()
+                    hasher.update(bytes((region[0] ^ 1,)))
+                    hasher.update(region[1:])
+                    checksums[name] = hasher.hexdigest()
+                    encoded = struct.pack("<QQB", 1, 0, 1)
+                    compressed = compressor.compress(encoded)
+                    payloads[name] = np.frombuffer(compressed, dtype=np.uint8)
+                    logical_bytes += nbytes
+                    del region
+
+        output_name = output_names[input_name]
+        blob = safetensors.numpy.save(payloads, metadata=checksums)
+        output_path = version_dir / output_name
+        output_path.write_bytes(blob)
+        return output_name, logical_bytes, len(blob)
+
+    started = time.perf_counter()
+    workers = min(32, len(shard_items))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        shard_stats = list(pool.map(process_shard, shard_items))
+    weight_map = {
+        name: output_names[input_name]
+        for name, input_name in base_weight_map.items()
+    }
+    output_index = {
+        "metadata": {
+            "version": "000001",
+            "base_version": "000000",
+            "delta_encoding": "xor_sparse",
+            "compression_format": "zstd",
+            "checksum_format": "xxh3-128",
+        },
+        "weight_map": weight_map,
+    }
+    (version_dir / "model.safetensors.index.json").write_text(
+        json.dumps(output_index)
+    )
+    return {
+        "tensors": len(weight_map),
+        "shards": len(shard_stats),
+        "logical_bytes": sum(item[1] for item in shard_stats),
+        "payload_bytes": sum(item[2] for item in shard_stats),
+        "wall_s": round(time.perf_counter() - started, 3),
+        "workers": workers,
+    }
+
+
 def _fluent_completion(model: str) -> dict[str, Any]:
     import httpx
 
@@ -522,6 +628,7 @@ def benchmark(
     target_version: int = DEFAULT_TARGET_VERSION,
     inventory_only: bool = False,
     validate_against_disk: bool = False,
+    synthetic_all_tensor: bool = False,
 ) -> dict[str, Any]:
     """Run one clean v0 -> verified XOR -> host-prepared commit benchmark."""
     import httpx
@@ -538,12 +645,19 @@ def benchmark(
         os.environ.pop(name, None)
 
     delta_volume.reload()
-    run_dir, index = _assert_recorded_delta(run_id, target_version)
     base_index = Path(BASE_PATH) / "model.safetensors.index.json"
     if not base_index.is_file():
         raise FileNotFoundError(f"base checkpoint index not found: {base_index}")
+    if synthetic_all_tensor:
+        if target_version != 1:
+            raise ValueError("synthetic all-tensor benchmark has exactly target v1")
+        run_dir = Path(SYNTHETIC_DELTA_PATH)
+        index = json.loads(base_index.read_text())
+        version_dir = run_dir / "weight_v000001"
+    else:
+        run_dir, index = _assert_recorded_delta(run_id, target_version)
+        version_dir = run_dir / f"weight_v{target_version:06d}"
 
-    version_dir = run_dir / f"weight_v{target_version:06d}"
     results: dict[str, Any] = {
         "sglang_branch": SGLANG_FORK_BRANCH,
         "sglang_commit": SGLANG_FORK_COMMIT,
@@ -554,10 +668,15 @@ def benchmark(
         "base_path": BASE_PATH,
         "base_gb": round(_tree_bytes(Path(BASE_PATH)) / 1e9, 3),
         "delta_volume": DELTA_VOLUME_NAME,
-        "delta_run_id": run_id,
+        "delta_run_id": "synthetic-all-tensor" if synthetic_all_tensor else run_id,
         "target_version": target_version,
         "delta_tensors": len(index.get("weight_map") or {}),
-        "delta_payload_gb": round(_tree_bytes(version_dir, "*.safetensors") / 1e9, 3),
+        "delta_payload_gb": (
+            None
+            if synthetic_all_tensor
+            else round(_tree_bytes(version_dir, "*.safetensors") / 1e9, 3)
+        ),
+        "synthetic_all_tensor": synthetic_all_tensor,
         "load_format": "fastsafetensors (env-gated no-GDS host-bounce path)",
         "hicache": "disabled",
     }
@@ -605,6 +724,27 @@ def benchmark(
             results["base_seed_s"] = round(time.perf_counter() - started, 3)
             results["base_seed_resources"] = base_seed_resources.summary()
             results["base_seed_message"] = seed_body.get("message")
+
+            if synthetic_all_tensor:
+                with _ResourceSampler(
+                    "synthetic_delta_build"
+                ) as synthetic_build_resources:
+                    synthetic_stats = _build_all_tensor_sparse_xor(
+                        Path(LOCAL_CHECKPOINT_PATH),
+                        Path(SYNTHETIC_DELTA_PATH),
+                    )
+                results["synthetic_delta_build"] = synthetic_stats
+                results["synthetic_delta_build_resources"] = (
+                    synthetic_build_resources.summary()
+                )
+                results["delta_payload_gb"] = round(
+                    synthetic_stats["payload_bytes"] / 1e9,
+                    3,
+                )
+                results["delta_logical_gb"] = round(
+                    synthetic_stats["logical_bytes"] / 1e9,
+                    3,
+                )
 
             # Production-equivalent stage: the pre-read hook reloads the delta Volume,
             # then /pull_weights applies and checksum-verifies the real XOR delta.
