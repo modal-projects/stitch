@@ -19,9 +19,11 @@ Run::
 
 The defaults use the complete v1 chain currently selected by the delta Volume's
 top-level ``latest`` pointer. The mounts intentionally match the current Miles Kimi
-recipe: its shared prep, Hugging Face, and SGLang cache Volumes plus the recipe's
+recipe: its model, Hugging Face, and SGLang cache Volumes plus the recipe's
 model-specific delta Volume. Override ``run_id``/``target_version`` to replay another
-complete chain without modifying the source Volume.
+complete chain without modifying the source Volume. Set ``validate_against_disk`` to
+load the verified local checkpoint through SGLang's ordinary disk loader at the end
+and require deterministic token/logprob parity with the host-prepared result.
 """
 
 from __future__ import annotations
@@ -41,7 +43,7 @@ APP_NAME = "kimi-k2-6-reload-baseline"
 SGLANG_IMAGE_TAG = "lmsysorg/sglang:v0.5.15.post1"
 SGLANG_FORK_REPO = "https://github.com/modal-projects/sglang.git"
 SGLANG_FORK_BRANCH = "stitch-sglang-v0.5.15-post1-host-runtime"
-SGLANG_FORK_COMMIT = "410254c8b7"
+SGLANG_FORK_COMMIT = "1a25ea54d0"
 
 HF_CACHE_VOLUME_NAME = "huggingface-cache"
 BASE_VOLUME_NAME = "cognition-kimi-k2-6-nvfp4-base"
@@ -416,6 +418,91 @@ def _fluent_completion(model: str) -> dict[str, Any]:
     }
 
 
+def _generation_fingerprint(url: str) -> dict[str, Any]:
+    """Deterministic model fingerprint used for prepared-vs-disk parity."""
+
+    import httpx
+
+    response = httpx.post(
+        f"{url}/generate",
+        json={
+            "text": (
+                "Correctness probe 7f31c9: Explain in exactly three short clauses "
+                "why the Moon has phases."
+            ),
+            "sampling_params": {
+                "temperature": 0,
+                "max_new_tokens": 48,
+                "ignore_eos": True,
+            },
+            "return_logprob": True,
+            "return_text_in_logprobs": False,
+            "top_logprobs_num": 1,
+            "logprob_start_len": -1,
+            "stream": False,
+        },
+        timeout=300.0,
+        trust_env=False,
+    )
+    response.raise_for_status()
+    body = response.json()
+    meta = body.get("meta_info") or {}
+    raw_logprobs = meta.get("output_token_logprobs") or []
+    logprobs = [
+        float(item[0] if isinstance(item, (list, tuple)) else item)
+        for item in raw_logprobs
+    ]
+    output_ids = body.get("output_ids") or []
+    if not output_ids or len(logprobs) != len(output_ids):
+        raise RuntimeError(
+            "fingerprint generation did not return aligned token ids/logprobs: "
+            f"tokens={len(output_ids)} logprobs={len(logprobs)}"
+        )
+    return {
+        "text": body.get("text") or "",
+        "output_ids": output_ids,
+        "output_logprobs": logprobs,
+    }
+
+
+def _assert_generation_parity(
+    prepared: dict[str, Any],
+    disk: dict[str, Any],
+    *,
+    logprob_tolerance: float = 1e-6,
+) -> dict[str, Any]:
+    if prepared["output_ids"] != disk["output_ids"]:
+        raise RuntimeError(
+            "host-prepared and canonical-disk token ids differ: "
+            f"prepared={prepared['output_ids']} disk={disk['output_ids']}"
+        )
+    if prepared["text"] != disk["text"]:
+        raise RuntimeError(
+            "host-prepared and canonical-disk text differs despite equal token ids"
+        )
+    differences = [
+        abs(left - right)
+        for left, right in zip(
+            prepared["output_logprobs"],
+            disk["output_logprobs"],
+            strict=True,
+        )
+    ]
+    max_difference = max(differences, default=0.0)
+    if max_difference > logprob_tolerance:
+        raise RuntimeError(
+            "host-prepared and canonical-disk logprobs differ: "
+            f"max_abs_diff={max_difference} tolerance={logprob_tolerance}"
+        )
+    return {
+        "tokens": len(prepared["output_ids"]),
+        "max_logprob_abs_diff": max_difference,
+        "tolerance": logprob_tolerance,
+        "exact_token_ids": True,
+        "exact_text": True,
+    }
+
+
 @app.function(
     image=image,
     gpu="B300:4",
@@ -434,6 +521,7 @@ def benchmark(
     run_id: str = DEFAULT_RUN_ID,
     target_version: int = DEFAULT_TARGET_VERSION,
     inventory_only: bool = False,
+    validate_against_disk: bool = False,
 ) -> dict[str, Any]:
     """Run one clean v0 -> verified XOR -> host-prepared commit benchmark."""
     import httpx
@@ -579,6 +667,52 @@ def benchmark(
                 time.perf_counter() - loop_started, 3
             )
             results["post_update_generation"] = _fluent_completion(BASE_PATH)
+            if validate_against_disk:
+                results["prepared_fingerprint"] = _generation_fingerprint(url)
+                started = time.perf_counter()
+                _post(
+                    client,
+                    url,
+                    "/pause_generation",
+                    {"mode": "in_place"},
+                    120.0,
+                )
+                try:
+                    disk_started = time.perf_counter()
+                    disk_body = _post(
+                        client,
+                        url,
+                        "/update_weights_from_disk",
+                        {
+                            "model_path": LOCAL_CHECKPOINT_PATH,
+                            "load_format": "fastsafetensors",
+                            "weight_version": f"{target_version}-disk-reference",
+                            "flush_cache": True,
+                        },
+                        None,
+                    )
+                    results["disk_reference_reload_s"] = round(
+                        time.perf_counter() - disk_started,
+                        3,
+                    )
+                    results["disk_reference_message"] = disk_body.get("message")
+                finally:
+                    _post(
+                        client,
+                        url,
+                        "/continue_generation",
+                        {},
+                        120.0,
+                    )
+                results["disk_reference_validation_pause_s"] = round(
+                    time.perf_counter() - started,
+                    3,
+                )
+                results["disk_fingerprint"] = _generation_fingerprint(url)
+                results["prepared_disk_parity"] = _assert_generation_parity(
+                    results["prepared_fingerprint"],
+                    results["disk_fingerprint"],
+                )
 
         results["local_checkpoint_gb"] = round(
             _tree_bytes(Path(LOCAL_CHECKPOINT_PATH)) / 1e9, 3
