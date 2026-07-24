@@ -45,7 +45,8 @@ def create_app(
     """The versioned rollout proxy. Versioned routes are admitted through the gate
     (constraint enforced, serving version captured), stamped by the engine, forwarded,
     and the response stamped with the served version. A rejected constraint returns a
-    retryable 409; a client disconnect aborts the upstream generation."""
+    retryable 409; a client disconnect aborts the upstream generation. A local-engine
+    transport failure returns a retryable 503 instead of escaping as a sidecar 500."""
     import httpx
     from fastapi import FastAPI, Request
     from fastapi.responses import JSONResponse, Response
@@ -153,7 +154,30 @@ def create_app(
                     with contextlib.suppress(BaseException):
                         await disconnect_task
 
-                resp = upstream_task.result()
+                try:
+                    resp = upstream_task.result()
+                except httpx.RequestError as exc:
+                    # The sidecar is still healthy when its colocated engine exits, wedges, or
+                    # drops a connection. Surface that distinction to the pool so another replica
+                    # can take the retry. A failed read can leave generation alive upstream, so
+                    # retain the admission lease until the best-effort abort has completed.
+                    logger.warning(
+                        "local engine request failed method=%s route=/%s rid=%s error=%s: %s",
+                        request.method, route, rid, type(exc).__name__, exc,
+                    )
+                    if rid is not None:
+                        await _abort(client(), engine_url, rid)
+                    return JSONResponse(
+                        {
+                            "error": {
+                                "type": "EngineUnavailable",
+                                "message": "the local inference engine is unavailable",
+                                "retryable": True,
+                            }
+                        },
+                        status_code=503,
+                        headers={"Retry-After": "1"},
+                    )
                 if "application/json" not in resp.headers.get("content-type", ""):
                     return Response(content=resp.content, status_code=resp.status_code,
                                     media_type=resp.headers.get("content-type") or None)
@@ -172,8 +196,10 @@ def create_app(
 async def _abort(client: Any, engine_url: str, rid: str) -> None:
     try:
         await client.request("POST", f"{engine_url}/abort_request", json={"rid": rid}, timeout=10.0)
-    except Exception:  # noqa: BLE001
-        logger.warning("failed to abort upstream rid=%s", rid, exc_info=True)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "failed to abort upstream rid=%s error=%s: %s", rid, type(exc).__name__, exc,
+        )
 
 
 def serve(
