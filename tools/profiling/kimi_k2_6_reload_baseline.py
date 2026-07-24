@@ -370,11 +370,17 @@ def _assert_recorded_delta(
     return run_dir, index
 
 
-def _build_all_tensor_sparse_xor(
+def _build_all_tensor_dense_xor(
     checkpoint_dir: Path,
     source_dir: Path,
 ) -> dict[str, Any]:
-    """Toggle one low byte in every checkpoint tensor and publish sparse XOR."""
+    """Toggle one low byte in every tensor using the production dense-XOR format.
+
+    The logical XOR is almost entirely zero, but every tensor is present and its
+    zstd frame expands to the complete canonical tensor size. This matches the
+    external rollout contract and therefore exercises full-model decode traffic
+    without relying on tensor-level sparsity.
+    """
 
     import mmap
 
@@ -400,6 +406,25 @@ def _build_all_tensor_sparse_xor(
         input_name: f"model-{index + 1:05d}-of-{len(shard_items):05d}.safetensors"
         for index, (input_name, _) in enumerate(shard_items)
     }
+
+    zero_chunk = bytes(8 << 20)
+
+    def compressed_xor(nbytes: int, compressor: Any) -> bytes:
+        stream = compressor.compressobj()
+        parts = []
+        encoded = stream.compress(b"\x01")
+        if encoded:
+            parts.append(encoded)
+        remaining = nbytes - 1
+        while remaining:
+            take = min(remaining, len(zero_chunk))
+            encoded = stream.compress(zero_chunk[:take])
+            if encoded:
+                parts.append(encoded)
+            remaining -= take
+        parts.append(stream.flush())
+        return b"".join(parts)
+
     def process_shard(item: tuple[str, list[str]]) -> tuple[str, int, int]:
         input_name, expected_names = item
         input_path = checkpoint_dir / input_name
@@ -429,8 +454,7 @@ def _build_all_tensor_sparse_xor(
                     hasher.update(bytes((region[0] ^ 1,)))
                     hasher.update(region[1:])
                     checksums[name] = hasher.hexdigest()
-                    encoded = struct.pack("<QQB", 1, 0, 1)
-                    compressed = compressor.compress(encoded)
+                    compressed = compressed_xor(nbytes, compressor)
                     payloads[name] = np.frombuffer(compressed, dtype=np.uint8)
                     logical_bytes += nbytes
                     del region
@@ -453,7 +477,7 @@ def _build_all_tensor_sparse_xor(
         "metadata": {
             "version": "000001",
             "base_version": "000000",
-            "delta_encoding": "xor_sparse",
+            "delta_encoding": "xor",
             "compression_format": "zstd",
             "checksum_format": "xxh3-128",
         },
@@ -469,6 +493,7 @@ def _build_all_tensor_sparse_xor(
         "payload_bytes": sum(item[2] for item in shard_stats),
         "wall_s": round(time.perf_counter() - started, 3),
         "workers": workers,
+        "encoding": "xor",
     }
 
 
@@ -729,7 +754,7 @@ def benchmark(
                 with _ResourceSampler(
                     "synthetic_delta_build"
                 ) as synthetic_build_resources:
-                    synthetic_stats = _build_all_tensor_sparse_xor(
+                    synthetic_stats = _build_all_tensor_dense_xor(
                         Path(LOCAL_CHECKPOINT_PATH),
                         Path(SYNTHETIC_DELTA_PATH),
                     )
