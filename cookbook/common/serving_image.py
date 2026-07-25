@@ -51,8 +51,9 @@ def build_router_image(*, experiment: str) -> modal.Image:
     """The rollout-Router image: CPU-only, no engine — just the stitch routing
     service, the gorgo policy core, and a tokenizer for prompt token extraction
     (the tokenizer reads the mounted HF cache volume at the default cache path).
-    gorgo mounts from the local GORGO/ checkout (editable dev install) until it
-    is published; swap add_local_python_source("gorgo") for a pip_install then."""
+    gorgo mounts from the local GORGO/ checkout (editable dev install) until the
+    gorgo-lb distribution is published; swap add_local_python_source("gorgo")
+    for pip_install("gorgo-lb") then."""
     return (
         modal.Image.debian_slim(python_version="3.12")
         .pip_install(

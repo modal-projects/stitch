@@ -386,7 +386,7 @@ wheels = [
 ]
 
 [[package]]
-name = "gorgo"
+name = "gorgo-lb"
 version = "0.2.0"
 source = { editable = "GORGO" }
 
@@ -996,7 +996,7 @@ modal = [
 ]
 router = [
     { name = "fastapi" },
-    { name = "gorgo" },
+    { name = "gorgo-lb" },
     { name = "httpx" },
 ]
 sglang = [
@@ -1013,7 +1013,7 @@ dev = [
 requires-dist = [
     { name = "fastapi", marker = "extra == 'router'" },
     { name = "fastapi", marker = "extra == 'sglang'" },
-    { name = "gorgo", marker = "extra == 'router'", editable = "GORGO" },
+    { name = "gorgo-lb", marker = "extra == 'router'", editable = "GORGO" },
     { name = "httpx", marker = "extra == 'modal'" },
     { name = "httpx", marker = "extra == 'router'" },
     { name = "httpx", marker = "extra == 'sglang'" },
