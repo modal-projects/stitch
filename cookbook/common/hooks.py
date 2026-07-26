@@ -31,13 +31,19 @@ logger = logging.getLogger(__name__)
 def commit_and_wake(args: Any, published_dir: str, rollout_engines: Any = None) -> None:
     """Bridge the framework's disk-delta publish to the stitch store. The framework fires this
     at each durability boundary: a version dir (``weight_vNNNNNN``, holding the HF index) and —
-    at baseline/pointer commit — the run dir. Every rank flushes its writes; rank 0 publishes
-    only when handed a version dir. Keying on the dir name (not on reading an index) keeps the
-    run-dir calls a clean no-op, not a missing-file crash."""
+    at baseline/pointer commit — the run dir. Every rank flushes its writes, then version-dir
+    calls rendezvous before rank 0 advances the pointer. Keying on the dir name (not on reading
+    an index) keeps run-dir calls a clean no-op, not a missing-file crash."""
     del rollout_engines
     store = _store(args)
     store.commit()
-    if process.dist_rank() not in (None, 0) or not Path(published_dir).name.startswith("weight_v"):
+    if not Path(published_dir).name.startswith("weight_v"):
+        return
+    # A successful Volume commit makes only this trainer rank's writes durable.
+    # Do not expose an index that names another rank's shard until every rank's
+    # commit has returned.
+    process.dist_barrier()
+    if process.dist_rank() not in (None, 0):
         return
     try:
         publish_version(store, _pool(args), published_dir, run_id=_run_id(args))
@@ -94,8 +100,12 @@ class _CachedPointer:
 
     async def get(self, args: Any, ttl: float = 2.0) -> int:
         store = self._store
-        if store is None:
+        root = Path(_transport_root(args))
+        volume = getattr(args, "update_weight_delta_volume_name", None) or os.environ.get("DELTA_VOLUME_NAME")
+        if store is None or store.root != root or store.volume_name != (volume or None):
             store = self._store = _store(args)
+            self._version = 0
+            self._at = -1e9
         now = time.monotonic()
         if now - self._at >= ttl:
             self._at = now
@@ -134,5 +144,3 @@ def _run_id(args: Any) -> str:
     if not run_id:
         raise ValueError("run_id is required (pass it via custom_config_path) — it is the run's fence token")
     return str(run_id)
-
-
