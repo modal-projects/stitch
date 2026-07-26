@@ -153,6 +153,38 @@ def test_catch_up() -> None:
     _run(go())
 
 
+def test_latest_advance_during_stage_folds_next_pass() -> None:
+    async def go() -> None:
+        manifests = [_delta("r1", version, files=[f"v{version}"]) for version in range(7, 11)]
+        store = FakeStore(VersionRef("r1", 7), *manifests)
+        engine = FakeEngine()
+        stage_started = asyncio.Event()
+        finish_stage = asyncio.Event()
+        base_stage = engine.stage
+
+        async def slow_stage(manifest: VersionManifest, source_dir: str) -> None:
+            await base_stage(manifest, source_dir)
+            if manifest.ref.version == 7:
+                stage_started.set()
+                await finish_stage.wait()
+
+        engine.stage = slow_stage  # type: ignore[method-assign]
+        r = Reconciler(store=store, engine=engine)
+        r.applied = VersionRef("r1", 6)
+
+        syncing = asyncio.create_task(r.reconcile())
+        await stage_started.wait()
+        store.advance_pointer(VersionRef("r1", 10))
+        finish_stage.set()
+        await syncing
+
+        assert engine.staged == [VersionRef("r1", 7), VersionRef("r1", 10)]
+        assert engine.committed == [VersionRef("r1", 7), VersionRef("r1", 10)]
+        assert r.applied == VersionRef("r1", 10)
+
+    _run(go())
+
+
 def test_run_switch_resets_in_place() -> None:
     async def go() -> None:
         engine = FakeEngine()
