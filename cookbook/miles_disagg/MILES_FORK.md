@@ -7,11 +7,11 @@ executable source of truth:
 ```python
 MILES_IMAGE_TAG = "radixark/miles:dev-202607260602"
 MILES_REPO_URL = "https://github.com/modal-projects/miles.git"
-MILES_REPO_REF = "748f1724ae2ee62974623538f0054c362f02ccea"
+MILES_REPO_REF = "d814b87c32d3de528ec1536700e79406ee40bf20"
 ```
 
 The branch `stitch-weight-sync-v0516` is upstream `radixark/miles` main at
-`52403d0e3` plus four commits:
+`52403d0e3` plus five commits:
 
 | Commit | Responsibility |
 | --- | --- |
@@ -19,6 +19,7 @@ The branch `stitch-weight-sync-v0516` is upstream `radixark/miles` main at
 | `4572f97a6` | Emit canonical quantized checkpoint layouts for disk deltas, support GLM-Air channel FP8 and plain-language-model Kimi names, and preserve SGLang runtime layouts for P2P/broadcast. |
 | `cf56d32b0` | Encode zero-dimensional quantization scalars by flattening before their byte view. |
 | `748f1724a` | Use SGLang’s staged checkpoint API for Miles-managed disk-delta engines. |
+| `d814b87c3` | Replace the unused delta progress bar with an explicit baseline-snapshot log. |
 
 The dated base image supplies Megatron-LM, TransformerEngine, CUDA, and the
 other compiled dependencies. The fork is installed over it with `--no-deps`;
@@ -49,7 +50,7 @@ layouts as the base checkpoint.
 When updating Miles:
 
 1. create a new branch from the desired `radixark/miles` main;
-2. reapply the four responsibilities separately, dropping code already
+2. reapply the five responsibilities separately, dropping code already
    available upstream;
 3. keep canonical checkpoint layout changes scoped to `disk-delta`;
 4. use a dated Miles image whose Megatron and TransformerEngine match that
