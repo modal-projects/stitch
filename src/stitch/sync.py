@@ -18,7 +18,13 @@ from typing import Any, Literal
 
 from stitch.engines.base import Engine
 from stitch.stores.base import Store
-from stitch.types import SyncState, VersionConstraint, VersionKind, VersionManifest, VersionRef
+from stitch.types import (
+    SyncState,
+    VersionConstraint,
+    VersionKind,
+    VersionManifest,
+    VersionRef,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,13 +52,12 @@ class ConstraintUnmet(Exception):
 class AdmissionGate:
     """Request admission + the commit gate.
 
-    ``quiesce`` drains all in-flight requests and flushes before applying; ``in_place``
-    pauses the engine and lets non-exact requests keep decoding on stale KV (only exact
-    pins are drained) — but only across *compatible* commits: an incompatible transition
-    (a run switch's base reset) commits with ``drain_all=True``, which drains and gates
-    everything regardless of mode. Either way the committer holds the lock across the
-    apply and the version flip, so no request is ever admitted seeing the stale version
-    on new weights.
+    ``quiesce`` drains all in-flight requests before applying; ``in_place``
+    pauses the engine and lets non-exact requests already in flight continue on the new
+    weights (only exact pins are drained). Admission closes during either commit, so a
+    newly arriving request is attributed to the version it will actually run on. An
+    incompatible transition (a run switch's base reset) commits with ``drain_all=True``,
+    which also drains all in-flight requests. The version flips before admission reopens.
     """
 
     def __init__(self, *, commit_mode: CommitMode = "in_place") -> None:
@@ -67,14 +72,6 @@ class AdmissionGate:
     @property
     def active_requests(self) -> int:
         return self._active
-
-    def _gated(self, c: VersionConstraint) -> bool:
-        if not self._committing:
-            return False
-        # in_place gates only exact pins across a compatible commit; drain_all / quiesce gate everything.
-        if self._drain_all or self.commit_mode != "in_place":
-            return True
-        return c.exact_version is not None
 
     def _rejection(self, c: VersionConstraint) -> dict[str, Any] | None:
         applied = self.applied.version if self.applied else None
@@ -104,7 +101,7 @@ class AdmissionGate:
         is served on. Raises :class:`ConstraintUnmet` if the constraint can't be met."""
         c = constraint or VersionConstraint()
         async with self._cond:
-            await self._cond.wait_for(lambda: not self._gated(c))
+            await self._cond.wait_for(lambda: not self._committing)
             error = self._rejection(c)
             if error is not None:
                 self._on_reject(error)
@@ -167,7 +164,7 @@ class AdmissionGate:
 
 class Reconciler(AdmissionGate):
     """Converges one replica to the store's ``latest`` pointer: stage the chain,
-    reload once, flip the served version. A run change resets to base (the engine
+    commit once, flip the served version. A run change resets to base (the engine
     reseeds), so a run's chain is never mistaken for another's."""
 
     def __init__(
@@ -195,22 +192,24 @@ class Reconciler(AdmissionGate):
         self._boot_monotonic = time.monotonic()
         self._catchup_passes = 0
         self._task: asyncio.Task[None] | None = None
-        self._prefetch_task: asyncio.Task[None] | None = None
-        self._prefetch_done = False
-        self._prefetch_error: str | None = None
+        self._destination_init_task: asyncio.Task[None] | None = None
+        self._destination_ready = False
+        self._destination_init_error: str | None = None
         self._periodic_task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
 
     async def startup(self) -> None:
-        # Background base seed so the first real stage() is delta-only; a later stage waits on it (see
-        # _reconcile_once_measured), so the two writes to the checkpoint never race.
-        self._prefetch_task = asyncio.create_task(self._prefetch_base())
+        # Serving the boot weights does not depend on this one-time setup. A
+        # published update waits for the task before it can enter staging.
+        self._destination_init_task = asyncio.create_task(
+            self._initialize_update_destination()
+        )
         await self.reconcile()
         if self.reconcile_interval > 0:
             self._periodic_task = asyncio.create_task(self._periodic_reconcile())
 
     async def shutdown(self) -> None:
-        for task in (self._periodic_task, self._prefetch_task):
+        for task in (self._periodic_task, self._destination_init_task):
             if task is not None:
                 task.cancel()
                 with suppress(BaseException):
@@ -223,13 +222,13 @@ class Reconciler(AdmissionGate):
             await asyncio.sleep(self.reconcile_interval)
             self.wake()
 
-    async def _prefetch_base(self) -> None:
+    async def _initialize_update_destination(self) -> None:
         try:
-            await self.engine.prefetch()
-            self._prefetch_done = True
-        except Exception as exc:  # noqa: BLE001 — best-effort; first pull falls back to a full copy
-            self._prefetch_error = str(exc)
-            logger.exception("base prefetch failed; first sync will pay the full base copy")
+            await self.engine.initialize_update_destination()
+            self._destination_ready = True
+        except Exception as exc:  # noqa: BLE001
+            self._destination_init_error = str(exc)
+            logger.exception("weight update destination initialization failed")
 
     def server_info(self) -> dict[str, Any]:
         # applied = version on the GPU (the pool reads it to see which version each replica has);
@@ -242,17 +241,20 @@ class Reconciler(AdmissionGate):
             "run_id": self.run_id,
             "commit_mode": self.commit_mode,
             "active_requests": self._active,
-            "prefetch_done": self._prefetch_done,
-            "prefetch_error": self._prefetch_error,
+            "update_destination_ready": self._destination_ready,
+            "update_destination_error": self._destination_init_error,
             "metrics": self.metrics,
         }
 
     def readiness_reason(self) -> str:
         """Why /health is still 503, so a not-yet-admitted replica reads as 'catching up', not broken."""
-        if self._prefetch_error:
-            return f"base seed failed: {self._prefetch_error}"
-        if not self._prefetch_done:
-            return "seeding base checkpoint"
+        if self._destination_init_error:
+            return (
+                "weight update destination initialization failed: "
+                f"{self._destination_init_error}"
+            )
+        if not self._destination_ready:
+            return "initializing weight update destination"
         if self.last_error:
             return f"sync error: {self.last_error}"
         applied = self.applied.identity if self.applied else "base"
@@ -303,25 +305,29 @@ class Reconciler(AdmissionGate):
             return True
         return pointer.version > self.applied.version
 
-    def _touched_names(self, target: VersionManifest) -> list[str] | None:
-        """Union of the tensor names touched across the versions this pass applies
-        (``applied``+1 .. ``target``), for an engine that can reload only those (O(delta)).
-        Returns None — reload everything — when the applied→target range reseeds from a FULL
-        anchor or the baseline is unknown: a full reload is always correct, a partial one only
-        when the served weights already hold every tensor the deltas didn't touch."""
+    def _range_has_weight_changes(self, target: VersionManifest) -> bool:
+        """Return whether the catch-up range can change any checkpoint bytes.
+
+        An empty delta has no payload files. Skipping the GPU update is safe only
+        when every version since the applied checkpoint is an empty delta.
+        """
         applied = self.applied
         ref = target.ref
-        if applied is None or applied.run_id != ref.run_id or ref.version <= applied.version:
-            return None
-        names: set[str] = set()
+        if (
+            applied is None
+            or applied.run_id != ref.run_id
+            or ref.version <= applied.version
+        ):
+            return True
         for v in range(ref.version, applied.version, -1):
-            m = target if v == ref.version else self.store.read_manifest(VersionRef(ref.run_id, v))
-            # full reload (None) for either: a FULL anchor in range (the stage reseeds from it), or a
-            # non-empty delta with no recorded touched names (an empty union would skip it → stale)
-            if m.kind is not VersionKind.DELTA or (m.files and not m.tensor_names):
-                return None
-            names.update(m.tensor_names)
-        return sorted(names)
+            m = (
+                target
+                if v == ref.version
+                else self.store.read_manifest(VersionRef(ref.run_id, v))
+            )
+            if m.kind is not VersionKind.DELTA or m.files:
+                return True
+        return False
 
     async def _reconcile_once(self) -> bool:
         async with self._lock:
@@ -332,15 +338,21 @@ class Reconciler(AdmissionGate):
                 m["error"] = str(exc)
                 raise
             finally:
-                if len(m) > 1 or "error" in m:  # a no-work pass leaves the last breakdown alone
+                if (
+                    len(m) > 1 or "error" in m
+                ):  # a no-work pass leaves the last breakdown alone
                     m["at"] = time.time()
                     self.metrics = m
                     timings = {k: v for k, v in m.items() if k.endswith("_s")}
                     if timings:
                         if not self.ready:
                             self._catchup_passes += 1
-                        logger.info("catch-up pass v%s->v%s timing(s): %s",
-                                    m.get("applied_version"), m.get("target_version"), timings)
+                        logger.info(
+                            "catch-up pass v%s->v%s timing(s): %s",
+                            m.get("applied_version"),
+                            m.get("target_version"),
+                            timings,
+                        )
 
     async def _reconcile_once_measured(self, m: dict[str, Any]) -> bool:
         await asyncio.to_thread(self.store.refresh)
@@ -352,57 +364,55 @@ class Reconciler(AdmissionGate):
         if not self._behind(pointer):
             return True
 
-        self.sync_state = SyncState.PREFETCHING
+        self.sync_state = SyncState.FETCHING
         self.last_error = None
         m["target_version"] = pointer.version
         m["applied_version"] = self.applied.version if self.applied else -1
         target = self.store.read_manifest(pointer)
         source_dir = await asyncio.to_thread(self.store.materialize, pointer)
         logger.info(
-            "catch-up: %s -> v%d, staging deltas",
+            "catch-up: %s -> v%d, preparing weight update",
             "base" if self.applied is None else f"v{self.applied.version}",
             pointer.version,
         )
 
-        # Touched tensor names for an O(delta) reload: the union across the versions this pass
-        # applies (applied+1 .. target). None => the range reseeds from a FULL anchor, so the
-        # engine must reload everything. Computed under the pre-flip `applied` (on_applied moves it).
-        weight_names = await asyncio.to_thread(self._touched_names, target)
+        has_weight_changes = await asyncio.to_thread(
+            self._range_has_weight_changes, target
+        )
 
-        # Both prefetch and stage write the host checkpoint; wait for the prefetch so they're ordered.
-        # If it failed, this stage seeds the full base itself.
-        if self._prefetch_task is not None and not self._prefetch_task.done():
-            with _timed(m, "prefetch_wait_s"):
-                await self._prefetch_task
-        if self._prefetch_error is not None:
-            m["paid_base_copy"] = True
-
-        # Stage (host-side apply) runs while serving; the gate covers only the reload.
-        self.sync_state = SyncState.PREPARING
-        with _timed(m, "stage_s"):
-            await self.engine.stage(target, source_dir)
+        if self._destination_init_task is not None:
+            if self._destination_init_task.done():
+                await self._destination_init_task
+            else:
+                with _timed(m, "destination_init_wait_s"):
+                    await self._destination_init_task
+        if self._destination_init_error is not None:
+            raise RuntimeError(
+                "weight update destination initialization failed: "
+                f"{self._destination_init_error}"
+            )
 
         def on_applied() -> None:
             self.applied = pointer
 
-        if weight_names is not None and not weight_names:
-            # Nothing changed across the applied→target range: advance the version, no reload —
-            # the weights are byte-identical, so the KV cache stays valid.
+        if not has_weight_changes:
+            # Nothing changed across the applied→target range: advance the
+            # version without preparing or loading byte-identical weights.
             await self.commit(apply=self._commit_noop, on_applied=on_applied)
-            m["skipped_reload"] = True
+            m["skipped_weight_update"] = True
         else:
-            m["reload_names"] = "full" if weight_names is None else len(weight_names)
-            logger.info(
-                "catch-up: reloading v%d (%s)",
-                pointer.version,
-                "all tensors" if weight_names is None else f"{len(weight_names)} tensors",
-            )
+            # Preparation runs while serving; the gate covers only the load.
+            self.sync_state = SyncState.STAGING
+            with _timed(m, "stage_s"):
+                await self.engine.stage(target, source_dir)
+            logger.info("catch-up: loading v%d into the engine", pointer.version)
 
             async def apply() -> None:
                 self.sync_state = SyncState.COMMITTING
                 with _timed(m, "commit_s"):
                     await self.engine.commit(
-                        pointer, flush_cache=self.flush_cache_on_commit, weight_names=weight_names
+                        target,
+                        flush_cache=self.flush_cache_on_commit,
                     )
 
             await self.commit(
@@ -411,17 +421,21 @@ class Reconciler(AdmissionGate):
                 pause=self.engine.pause,
                 resume=self.engine.resume,
             )
-        self.sync_state = SyncState.PREFETCHING
-        return not self._behind(self.store.read_pointer())  # a mid-pass publish is next tick's work
+        self.sync_state = SyncState.FETCHING
+        return not self._behind(
+            self.store.read_pointer()
+        )  # a mid-pass publish is next tick's work
 
     async def _commit_noop(self) -> None:
         self.sync_state = SyncState.COMMITTING
 
     async def _switch_run(self, new_run: str | None) -> None:
-        """Rebase onto a new run: reset to base (the engine reseeds on the next stage).
-        Commits with ``drain_all`` — a base reset is an incompatible transition, so even
-        in ``in_place`` mode no rolling request is admitted during, or decodes across,
-        the wipe."""
+        """Select a new run at version 0, resetting patched weights to the boot base.
+
+        A reset commits with ``drain_all`` because it is incompatible with
+        in-flight requests. Selecting the boot run on an unpatched engine only
+        updates attribution and does not pause generation.
+        """
         old_run = self.applied.run_id if self.applied else None
         logger.info("run change %r -> %r: resetting to base", old_run, new_run)
         # Reset if weights are patched (v>0), or a prior error may have left the checkpoint dirty (stitch#32).
@@ -440,7 +454,7 @@ class Reconciler(AdmissionGate):
         await self.commit(
             apply=apply,
             on_applied=on_applied,
-            pause=self.engine.pause,
-            resume=self.engine.resume,
+            pause=self.engine.pause if was_patched else None,
+            resume=self.engine.resume if was_patched else None,
             drain_all=True,
         )

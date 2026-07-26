@@ -46,9 +46,9 @@ def create_app(
     (constraint enforced, serving version captured), stamped by the engine, forwarded,
     and the response stamped with the served version. A rejected constraint returns a
     retryable 409; a client disconnect aborts the upstream generation."""
+    import httpx
     from fastapi import FastAPI, Request
     from fastapi.responses import JSONResponse, Response
-    import httpx
 
     engine_url = engine.base_url().rstrip("/")
     blocked = engine.blocked_routes()
@@ -84,7 +84,7 @@ def create_app(
     async def health() -> Response:
         # 503 until the reconciler's first catch-up, so a deployment that gates routing on readiness
         # keeps a not-yet-synced replica out of rotation (else it's routed to and 409s the whole
-        # catch-up). A fresh boot clears at once; a mid-run joiner waits until it has replayed to the
+        # catch-up). A fresh boot clears at once; a mid-run joiner waits until it has applied the
         # live version. Liveness/boot checks use /server_info instead.
         if not reconciler.ready:
             return JSONResponse({"ready": False, "reason": reconciler.readiness_reason()}, status_code=503)
@@ -219,25 +219,30 @@ async def readiness(pool: Pool, *, timeout: float = 15.0) -> PoolState:
     return PoolState(list(states))
 
 
-# The reconciler states in which the engine is legitimately unresponsive: it is pulling or
-# reloading weights, which starves its event loop, so a stale health heartbeat is EXPECTED.
-_SYNCING_STATES = {SyncState.QUEUED.value, SyncState.PREFETCHING.value,
-                   SyncState.PREPARING.value, SyncState.COMMITTING.value}
+# The reconciler states in which the engine is legitimately unresponsive: it is
+# staging or loading weights, so a stale health heartbeat is expected.
+_SYNCING_STATES = {
+    SyncState.STAGING.value,
+    SyncState.COMMITTING.value,
+}
 
 
 def sync_in_progress(server_info_url: str, *, timeout: float = 5.0) -> bool:
-    """Whether the replica's reconciler is mid weight-sync (seeding the base or reloading a
-    version). A deployment's engine-health probe calls this to SUPPRESS a health blip during a
-    sync: the reload starves the engine's event loop, so an unresponsive detokenizer is expected,
-    not a crash. A boot base-seed runs with sync_state IDLE, so ``prefetch_done`` is its separate
-    signal. Best-effort: an unreachable sidecar returns False, so the caller reports the error."""
+    """Whether the replica is initializing, staging, or committing weights.
+
+    A deployment's engine-health probe uses this to suppress expected health
+    blips during weight work. An unreachable sidecar returns ``False`` so the
+    caller still reports an actual failure.
+    """
     try:
         with urllib.request.urlopen(server_info_url, timeout=timeout) as resp:
             info = json.loads(resp.read())
     except Exception:  # noqa: BLE001
         return False
-    seeding = not info.get("prefetch_done", True) and not info.get("prefetch_error")
-    return bool(seeding or info.get("sync_state") in _SYNCING_STATES)
+    initializing = not info.get(
+        "update_destination_ready", True
+    ) and not info.get("update_destination_error")
+    return bool(initializing or info.get("sync_state") in _SYNCING_STATES)
 
 
 def await_pool_ready(pool: Pool, *, timeout: float = 20 * 60, interval: float = 30.0) -> bool:

@@ -1,105 +1,171 @@
-"""``SGLangEngine`` — the ``Engine`` instance for a single sglang server.
-
-The weight apply lives inside sglang (``weight_sync/local_checkpoint``): ``stage``
-POSTs ``/pull_weights``, which chain-replays deltas from the applied checkpoint with
-per-tensor checksum verification (reseeding from base on corruption), and ``commit``
-reloads the materialized checkpoint via ``/update_weights_from_disk``. This client
-only drives those endpoints and translates the version protocol — it holds no
-host-side decoder and imports no trainer package.
-"""
+"""``Engine`` adapter for SGLang's staged checkpoint updates."""
 
 from __future__ import annotations
 
-import asyncio
-import os
-import shutil
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from stitch.engines.base import Engine
-from stitch.types import VersionManifest, VersionRef
+from stitch.types import VersionKind, VersionManifest, VersionRef
 
 
 class SGLangEngine(Engine):
     def __init__(
         self,
         base_url: str,
-        local_checkpoint_dir: str,
+        base_checkpoint_dir: str,
+        local_checkpoint_dir: str | None = None,
         *,
+        delta_update_mode: Literal["disk", "cpu"] = "disk",
+        disk_load_format: str = "auto",
         control_timeout: float = 120.0,
-        reload_timeout: float = 600.0,
+        weight_update_timeout: float = 600.0,
     ) -> None:
+        if delta_update_mode not in ("disk", "cpu"):
+            raise ValueError(
+                "delta_update_mode must be either 'disk' or 'cpu', "
+                f"got {delta_update_mode!r}"
+            )
+        if delta_update_mode == "disk" and not local_checkpoint_dir:
+            raise ValueError("disk delta update mode requires local_checkpoint_dir")
         self._base_url = base_url.rstrip("/")
+        self.base_checkpoint_dir = base_checkpoint_dir
         self.local_checkpoint_dir = local_checkpoint_dir
+        self.delta_update_mode = delta_update_mode
+        self.disk_load_format = disk_load_format
         self._control_timeout = control_timeout
-        self._reload_timeout = reload_timeout
+        self._weight_update_timeout = weight_update_timeout
 
     def base_url(self) -> str:
         return self._base_url
 
     def blocked_routes(self) -> frozenset[str]:
-        return frozenset({
-            "update_weights_from_disk", "update_weights_from_distributed",
-            "update_weights_from_tensor", "pull_weights", "flush_cache",
-            "pause_generation", "continue_generation", "abort_request",
-        })
-
-    async def stage(self, manifest: VersionManifest, source_dir: str) -> None:
-        # /pull_weights walks the weight_v* dirs under source_dir's parent.
-        await self._post(
-            "/pull_weights",
+        return frozenset(
             {
-                "local_checkpoint_dir": self.local_checkpoint_dir,
-                "source_dir": str(Path(source_dir).parent),
-                "target_version": manifest.ref.version,
-            },
-            timeout=self._reload_timeout,
-            action="weight pull",
+                "update_weights_from_disk",
+                "update_weights_from_cpu",
+                "update_weights_from_distributed",
+                "update_weights_from_tensor",
+                "stage_weight_update",
+                "flush_cache",
+                "pause_generation",
+                "continue_generation",
+                "abort_request",
+            }
         )
 
-    async def prefetch(self) -> None:
-        # target_version=0 seeds base with no deltas applied; source_dir is unused for the seed.
-        await self._post(
-            "/pull_weights",
-            {"local_checkpoint_dir": self.local_checkpoint_dir, "source_dir": self.local_checkpoint_dir, "target_version": 0},
-            timeout=self._reload_timeout,
-            action="base prefetch",
+    async def stage(self, manifest: VersionManifest, source_dir: str) -> None:
+        await self._stage_weight_update(
+            checkpoint_source_dir=str(Path(source_dir).parent),
+            target_version=manifest.ref.version,
+            destination=self._destination_for(manifest),
+        )
+
+    async def initialize_update_destination(self) -> None:
+        await self._stage_weight_update(
+            checkpoint_source_dir=None,
+            target_version=0,
+            destination=self.delta_update_mode,
         )
 
     async def commit(
-        self, ref: VersionRef, *, flush_cache: bool = False, weight_names: list[str] | None = None
+        self,
+        manifest: VersionManifest,
+        *,
+        flush_cache: bool = False,
     ) -> None:
-        payload: dict[str, Any] = {
-            "model_path": self.local_checkpoint_dir,
-            "weight_version": str(ref.version),
-            "flush_cache": flush_cache,
-        }
-        # O(delta) partial reload: naming the touched tensors makes the fork reload only those
-        # (+ their fused/expert closures) instead of the whole checkpoint. STITCH_PARTIAL_RELOAD=0
-        # forces the full reload (kill switch); an engine without the load-plan patch ignores it.
-        if weight_names and os.environ.get("STITCH_PARTIAL_RELOAD", "1") == "1":
-            payload["weight_names"] = list(weight_names)
-        await self._post("/update_weights_from_disk", payload, timeout=self._reload_timeout, action="weight update")
+        if self._destination_for(manifest) == "cpu":
+            path = "/update_weights_from_cpu"
+            payload: dict[str, Any] = {
+                "target_version": manifest.ref.version,
+                "flush_cache": flush_cache,
+            }
+        else:
+            assert self.local_checkpoint_dir is not None
+            path = "/update_weights_from_disk"
+            payload = {
+                "model_path": self.local_checkpoint_dir,
+                "load_format": self.disk_load_format,
+                "weight_version": str(manifest.ref.version),
+                "flush_cache": flush_cache,
+            }
+        await self._post(
+            path,
+            payload,
+            timeout=self._weight_update_timeout,
+            action="weight update",
+        )
 
     async def flush_cache(self) -> None:
         await self._get("/flush_cache", ok=(200, 404))
 
     async def pause(self) -> None:
-        await self._post("/pause_generation", {"mode": "in_place"}, timeout=self._control_timeout)
+        await self._post(
+            "/pause_generation", {"mode": "in_place"}, timeout=self._control_timeout
+        )
 
     async def resume(self) -> None:
         await self._post("/continue_generation", {}, timeout=self._control_timeout)
 
     async def reset(self) -> None:
-        # Wipe + reseed base so a run switch to v0 serves base, not the prior run's weights
-        # under the new (run, 0) identity (stitch#32).
-        await asyncio.to_thread(shutil.rmtree, self.local_checkpoint_dir, ignore_errors=True)
-        await self.prefetch()
+        if self.delta_update_mode == "cpu":
+            raise RuntimeError(
+                "CPU delta update mode cannot reset a live engine to version 0; "
+                "start a fresh rollout replica for a new run"
+            )
+        assert self.local_checkpoint_dir is not None
+        await self._stage_weight_update(
+            checkpoint_source_dir=None,
+            target_version=0,
+            destination="disk",
+        )
         await self._post(
             "/update_weights_from_disk",
-            {"model_path": self.local_checkpoint_dir, "weight_version": "0", "flush_cache": False},
-            timeout=self._reload_timeout,
-            action="reset reload to base",
+            {
+                "model_path": self.local_checkpoint_dir,
+                "load_format": self.disk_load_format,
+                "weight_version": "0",
+                "flush_cache": False,
+            },
+            timeout=self._weight_update_timeout,
+            action="reset weights to base",
+        )
+
+    def _destination_for(
+        self,
+        manifest: VersionManifest,
+    ) -> Literal["disk", "cpu"]:
+        if manifest.kind is VersionKind.FULL:
+            if self.delta_update_mode == "cpu":
+                raise ValueError(
+                    "CPU delta update mode accepts delta manifests only; "
+                    "use disk mode to publish full checkpoints"
+                )
+            return "disk"
+        return self.delta_update_mode
+
+    async def _stage_weight_update(
+        self,
+        *,
+        checkpoint_source_dir: str | None,
+        target_version: int,
+        destination: Literal["disk", "cpu"],
+    ) -> None:
+        payload: dict[str, Any] = {
+            "base_checkpoint_dir": self.base_checkpoint_dir,
+            "target_version": target_version,
+            "destination": destination,
+        }
+        if checkpoint_source_dir is not None:
+            payload["checkpoint_source_dir"] = checkpoint_source_dir
+        if destination == "disk":
+            assert self.local_checkpoint_dir is not None
+            payload["local_checkpoint_dir"] = self.local_checkpoint_dir
+        await self._post(
+            "/stage_weight_update",
+            payload,
+            timeout=self._weight_update_timeout,
+            action="weight staging",
         )
 
     def stamp_request(self, request: dict[str, Any], served: VersionRef) -> None:
@@ -109,7 +175,9 @@ class SGLangEngine(Engine):
         else:
             request["extra_key"] = self._extra_key(served, user)
 
-    def stamp_response(self, response: dict[str, Any], served: VersionRef, current: VersionRef) -> None:
+    def stamp_response(
+        self, response: dict[str, Any], served: VersionRef, current: VersionRef
+    ) -> None:
         meta = response.get("meta_info")
         if isinstance(meta, dict):  # sglang /generate carries attribution in meta_info
             meta["weight_version"] = str(served.version)
@@ -124,7 +192,14 @@ class SGLangEngine(Engine):
         run = f"{served.run_id}/" if served.run_id else ""
         return f"wv{served.version};{run}{user or ''}"
 
-    async def _post(self, path: str, payload: dict[str, Any], *, timeout: float | None, action: str | None = None) -> None:
+    async def _post(
+        self,
+        path: str,
+        payload: dict[str, Any],
+        *,
+        timeout: float | None,
+        action: str | None = None,
+    ) -> None:
         import httpx
 
         async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
@@ -134,7 +209,9 @@ class SGLangEngine(Engine):
     async def _get(self, path: str, *, ok: tuple[int, ...] = (200,)) -> None:
         import httpx
 
-        async with httpx.AsyncClient(timeout=self._control_timeout, trust_env=False) as client:
+        async with httpx.AsyncClient(
+            timeout=self._control_timeout, trust_env=False
+        ) as client:
             resp = await client.get(f"{self._base_url}{path}")
         if resp.status_code not in ok:
             _raise_for_engine(resp, path)
@@ -149,4 +226,6 @@ def _raise_for_engine(resp: Any, action: str) -> None:
     except ValueError:
         data = {"message": resp.text}
     if resp.status_code != 200 or data.get("success") is False:
-        raise RuntimeError(f"sglang rejected {action} (HTTP {resp.status_code}): {data.get('message', data)}")
+        raise RuntimeError(
+            f"sglang rejected {action} (HTTP {resp.status_code}): {data.get('message', data)}"
+        )

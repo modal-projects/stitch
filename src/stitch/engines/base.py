@@ -1,8 +1,8 @@
 """The ``Engine`` port — a client to one inference engine.
 
 ``engines/sglang.py`` is the working instance; ``engines/vllm.py`` sketches the vLLM
-shape. Subclasses override the methods they use — ``prefetch`` and ``blocked_routes``
-have safe defaults.
+shape. Subclasses override the methods they use —
+``initialize_update_destination`` and ``blocked_routes`` have safe defaults.
 """
 
 from __future__ import annotations
@@ -18,23 +18,20 @@ class Engine:
 
     async def stage(self, manifest: VersionManifest, source_dir: str) -> None:
         """Bring the local checkpoint to ``manifest.ref``: seed from the nearest FULL
-        anchor, then replay deltas forward. May run while the engine serves."""
+        anchor, then apply deltas forward. May run while the engine serves."""
         raise NotImplementedError
 
     async def commit(
-        self, ref: VersionRef, *, flush_cache: bool = False, weight_names: list[str] | None = None
+        self, manifest: VersionManifest, *, flush_cache: bool = False
     ) -> None:
-        """Reload the staged checkpoint into the serving weights — the gate covers only this.
+        """Apply the staged checkpoint to the serving weights; the gate covers only this.
         ``flush_cache`` (a commit-policy decision the reconciler passes) evicts the engine's
-        prefix/KV cache as part of the reload. ``weight_names`` are the tensors the staged
-        deltas touched (union across the applied→target range); an engine that supports it
-        reloads only those (+ their fused/expert closures) instead of the full checkpoint.
-        None means reload everything."""
+        prefix/KV cache as part of the commit."""
         raise NotImplementedError
 
     async def flush_cache(self) -> None:
         """Evict the engine's prefix/KV cache — the standalone ``/flush_cache`` primitive.
-        Not on the reconcile path: flushing on a reload goes through ``commit(flush_cache=…)``."""
+        Commit-time flushing goes through ``commit(flush_cache=…)`` instead."""
         raise NotImplementedError
 
     async def pause(self) -> None:
@@ -46,13 +43,15 @@ class Engine:
         raise NotImplementedError
 
     async def reset(self) -> None:
-        """Reseed the local checkpoint to the engine's boot base."""
+        """Restore the engine to its boot weights."""
         raise NotImplementedError
 
-    async def prefetch(self) -> None:
-        """Optional: seed the host-local checkpoint from the engine's base ahead of the first
-        stage(), so stage only applies the delta instead of copying the full base off the
-        critical path. Default no-op — an engine with no host-local checkpoint needs nothing."""
+    async def initialize_update_destination(self) -> None:
+        """Initialize engine state required before staging updates.
+
+        This may run while the engine serves its boot weights. A reconciler waits
+        for it before staging the first published update.
+        """
         return
 
     def stamp_request(self, request: dict[str, Any], served: VersionRef) -> None:

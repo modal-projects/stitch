@@ -12,11 +12,11 @@ from stitch.engines.base import Engine
 from stitch.stores.base import Store
 from stitch.sync import ConstraintUnmet, Reconciler
 from stitch.types import (
+    SyncState,
     VersionConstraint,
     VersionKind,
     VersionManifest,
     VersionRef,
-    SyncState,
 )
 
 
@@ -53,18 +53,19 @@ class FakeEngine(Engine):
         self.calls: list[str] = []
         self.staged: list[VersionRef] = []
         self.committed: list[VersionRef] = []
-        self.commit_weight_names: list[list[str] | None] = []
 
     async def stage(self, manifest: VersionManifest, source_dir: str) -> None:
         self.staged.append(manifest.ref)
         self.calls.append(f"stage:{manifest.ref.version}")
 
     async def commit(
-        self, ref: VersionRef, *, flush_cache: bool = False, weight_names: list[str] | None = None
+        self,
+        manifest: VersionManifest,
+        *,
+        flush_cache: bool = False,
     ) -> None:
-        self.committed.append(ref)
-        self.commit_weight_names.append(weight_names)
-        self.calls.append(f"commit:{ref.version}")
+        self.committed.append(manifest.ref)
+        self.calls.append(f"commit:{manifest.ref.version}")
 
     async def flush_cache(self) -> None:
         self.calls.append("flush_cache")
@@ -78,8 +79,8 @@ class FakeEngine(Engine):
     async def reset(self) -> None:
         self.calls.append("reset")
 
-    async def prefetch(self) -> None:
-        self.calls.append("prefetch")
+    async def initialize_update_destination(self) -> None:
+        self.calls.append("initialize_update_destination")
 
     def stamp_request(self, request, served) -> None:
         pass
@@ -95,10 +96,8 @@ def _full(run: str, version: int) -> VersionManifest:
     return VersionManifest(VersionRef(run, version), VersionKind.FULL, ["model.safetensors"])
 
 
-def _delta(
-    run: str, version: int, *, files: list[str], tensor_names: list[str] | None = None
-) -> VersionManifest:
-    return VersionManifest(VersionRef(run, version), VersionKind.DELTA, files, tensor_names or [])
+def _delta(run: str, version: int, *, files: list[str]) -> VersionManifest:
+    return VersionManifest(VersionRef(run, version), VersionKind.DELTA, files)
 
 
 def _run(coro) -> None:
@@ -131,13 +130,13 @@ def test_reconcile_latches_ready() -> None:
     _run(go())
 
 
-def test_startup_prefetches_base() -> None:
+def test_startup_initializes_update_destination() -> None:
     async def go() -> None:
         engine = FakeEngine()
         r = Reconciler(store=FakeStore(), engine=engine)  # unclaimed pool: reconcile is a no-op
         await r.startup()
-        await r._prefetch_task  # let the background base-seed finish
-        assert "prefetch" in engine.calls
+        await r._destination_init_task
+        assert "initialize_update_destination" in engine.calls
 
     _run(go())
 
@@ -149,8 +148,7 @@ def test_catch_up() -> None:
         r.applied = VersionRef("r1", 3)
         await r.reconcile()
         assert r.applied == VersionRef("r1", 5)
-        assert engine.committed == [VersionRef("r1", 5)]  # one composed stage+reload, not per-version
-        assert engine.commit_weight_names == [None]  # FULL target reseeds -> full reload, not partial
+        assert engine.committed == [VersionRef("r1", 5)]  # one staged chain and one commit
 
     _run(go())
 
@@ -164,7 +162,7 @@ def test_run_switch_resets_in_place() -> None:
         assert r.applied == VersionRef("r2", 2)
         assert "reset" in engine.calls  # was patched -> reseed base for the new run
         assert engine.calls.index("pause") < engine.calls.index("reset") < engine.calls.index("resume")
-        assert "flush" not in engine.calls  # in_place never flushes
+        assert "flush_cache" not in engine.calls  # cache flushing is an explicit commit policy
 
     _run(go())
 
@@ -227,56 +225,99 @@ def test_rolling_requests_cross_in_place_commit() -> None:
     _run(go())
 
 
-def test_empty_delta_skips_reload() -> None:
+def test_new_request_waits_for_in_place_commit() -> None:
+    async def go() -> None:
+        engine = FakeEngine()
+        commit_started = asyncio.Event()
+        finish_commit = asyncio.Event()
+        original_commit = engine.commit
+
+        async def slow_commit(
+            manifest: VersionManifest,
+            *,
+            flush_cache: bool = False,
+        ) -> None:
+            commit_started.set()
+            await finish_commit.wait()
+            await original_commit(manifest, flush_cache=flush_cache)
+
+        engine.commit = slow_commit  # type: ignore[method-assign]
+        r = Reconciler(
+            store=FakeStore(VersionRef("r1", 4), _full("r1", 4)),
+            engine=engine,
+            commit_mode="in_place",
+        )
+        r.applied = VersionRef("r1", 3)
+        rolling_release = asyncio.Event()
+        late_served: list[VersionRef | None] = []
+
+        async def rolling() -> None:
+            async with r.admit():
+                await rolling_release.wait()
+
+        async def late() -> None:
+            async with r.admit() as served:
+                late_served.append(served)
+
+        rolling_task = asyncio.create_task(rolling())
+        await asyncio.sleep(0)
+        sync_task = asyncio.create_task(r.reconcile())
+        await commit_started.wait()
+        late_task = asyncio.create_task(late())
+        await asyncio.sleep(0.01)
+        assert not late_served
+
+        finish_commit.set()
+        await asyncio.gather(sync_task, late_task)
+        assert late_served == [VersionRef("r1", 4)]
+        assert not rolling_task.done()
+        rolling_release.set()
+        await rolling_task
+
+    _run(go())
+
+
+def test_empty_delta_skips_commit() -> None:
     async def go() -> None:
         engine = FakeEngine()
         r = Reconciler(store=FakeStore(VersionRef("r1", 4), _delta("r1", 4, files=[])), engine=engine)
         r.applied = VersionRef("r1", 3)
         await r.reconcile()
         assert r.applied == VersionRef("r1", 4)
-        assert engine.staged == [VersionRef("r1", 4)]
-        assert engine.committed == []  # no reload for a zero-file delta
-        assert r.metrics.get("skipped_reload") is True
+        assert engine.staged == []
+        assert engine.committed == []  # no commit for a zero-file delta
+        assert r.metrics.get("skipped_weight_update") is True
 
     _run(go())
 
 
-def test_touched_names_union_reaches_commit() -> None:
-    # A multi-version catch-up hands the engine the UNION of touched tensor names across the
-    # applied→target range, so an O(delta) reload refreshes every tensor any delta changed —
-    # not just the target's. (This is the plumbing a partial reload needs; without it the
-    # engine names no tensors and pays a full reload.)
+def test_nonempty_delta_in_catch_up_range_commits() -> None:
     async def go() -> None:
         engine = FakeEngine()
         store = FakeStore(
             VersionRef("r1", 5),
-            _delta("r1", 4, files=["f1"], tensor_names=["a", "b"]),
-            _delta("r1", 5, files=["f1", "f2"], tensor_names=["b", "c"]),
+            _delta("r1", 4, files=["f1"]),
+            _delta("r1", 5, files=[]),
         )
         r = Reconciler(store=store, engine=engine)
         r.applied = VersionRef("r1", 3)
         await r.reconcile()
         assert r.applied == VersionRef("r1", 5)
-        assert engine.commit_weight_names == [["a", "b", "c"]]  # union of v4 + v5, deduped + sorted
-        assert r.metrics.get("reload_names") == 3
+        assert engine.committed == [VersionRef("r1", 5)]
 
     _run(go())
 
 
-def test_delta_without_touched_names_full_reloads_not_skips() -> None:
-    # A store that records a non-empty delta but NOT its touched tensor names must full-reload,
-    # never skip: an empty touched-set reads as "nothing changed" and would advance the version
-    # onto stale weights (a downstream DeltaStore regression). weight_names=None => full reload.
+def test_nonempty_delta_commits() -> None:
     async def go() -> None:
         engine = FakeEngine()
-        store = FakeStore(VersionRef("r1", 5), _delta("r1", 5, files=["f1"], tensor_names=[]))
+        store = FakeStore(VersionRef("r1", 5), _delta("r1", 5, files=["f1"]))
         r = Reconciler(store=store, engine=engine)
         r.applied = VersionRef("r1", 4)
         await r.reconcile()
         assert r.applied == VersionRef("r1", 5)
-        assert engine.committed == [VersionRef("r1", 5)]  # reloaded, not skipped
-        assert engine.commit_weight_names == [None]       # full reload (touched names unknown)
-        assert r.metrics.get("skipped_reload") is not True
+        assert engine.committed == [VersionRef("r1", 5)]
+        assert r.metrics.get("skipped_weight_update") is not True
 
     _run(go())
 
@@ -311,26 +352,80 @@ def test_reconcile_interval_zero_disables_backstop() -> None:
     _run(go())
 
 
-def test_stage_waits_for_prefetch() -> None:
-    # Prefetch and stage both write the checkpoint; the stage must wait for the prefetch so they never race.
+def test_stage_waits_for_update_destination() -> None:
     async def go() -> None:
         engine = FakeEngine()
         release = asyncio.Event()
-        base_prefetch = engine.prefetch
+        initialize = engine.initialize_update_destination
 
-        async def slow_prefetch() -> None:
+        async def slow_initialize() -> None:
             await release.wait()
-            await base_prefetch()
+            await initialize()
 
-        engine.prefetch = slow_prefetch  # type: ignore[method-assign]
+        engine.initialize_update_destination = slow_initialize  # type: ignore[method-assign]
         r = Reconciler(store=FakeStore(VersionRef("r1", 2), _full("r1", 2)), engine=engine, reconcile_interval=0.0)
         r.applied = VersionRef("r1", 0)  # same run, behind -> stage v2 (no run switch)
         task = asyncio.create_task(r.startup())
-        await asyncio.sleep(0.05)  # startup fires the prefetch; reconcile reaches the await
-        assert "stage:2" not in engine.calls  # blocked on the (still-running) prefetch
+        await asyncio.sleep(0.05)
+        assert "stage:2" not in engine.calls
         release.set()
         await task
-        assert engine.calls.index("prefetch") < engine.calls.index("stage:2")
+        assert engine.calls.index(
+            "initialize_update_destination"
+        ) < engine.calls.index("stage:2")
+        assert r.metrics["destination_init_wait_s"] >= 0.05
+        await r.shutdown()
+
+    _run(go())
+
+
+def test_boot_weights_serve_before_update_destination_is_ready() -> None:
+    async def go() -> None:
+        engine = FakeEngine()
+        release = asyncio.Event()
+
+        async def slow_initialize() -> None:
+            await release.wait()
+            engine.calls.append("initialize_update_destination")
+
+        engine.initialize_update_destination = slow_initialize  # type: ignore[method-assign]
+        r = Reconciler(
+            store=FakeStore(VersionRef("r1", 0)),
+            engine=engine,
+            reconcile_interval=0.0,
+        )
+        await r.startup()
+        assert r.ready
+        assert r.applied == VersionRef("r1", 0)
+        assert "pause" not in engine.calls
+        assert not r._destination_ready
+        release.set()
+        await r._destination_init_task
+        assert r._destination_ready
+        await r.shutdown()
+
+    _run(go())
+
+
+def test_update_fails_after_update_destination_initialization_fails() -> None:
+    async def go() -> None:
+        engine = FakeEngine()
+
+        async def fail_initialize() -> None:
+            raise RuntimeError("broken destination")
+
+        engine.initialize_update_destination = fail_initialize  # type: ignore[method-assign]
+        r = Reconciler(
+            store=FakeStore(VersionRef("r1", 2), _full("r1", 2)),
+            engine=engine,
+            reconcile_interval=0.0,
+        )
+        r.applied = VersionRef("r1", 0)
+        await r.startup()
+        assert r.sync_state is SyncState.ERROR
+        assert r.last_error is not None
+        assert "broken destination" in r.last_error
+        assert "stage:2" not in engine.calls
         await r.shutdown()
 
     _run(go())

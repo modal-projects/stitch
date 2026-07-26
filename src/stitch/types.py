@@ -9,7 +9,7 @@ with their instances (``stores/base.py``, ``engines/base.py``, ``pools/base.py``
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -59,15 +59,12 @@ class VersionManifest:
     ``checksum_format``) and lineage straight off the on-disk index — the codec is the
     engine's concern, not part of this domain type.
 
-    ``tensor_names`` are the version's touched tensor names (the index's ``weight_map``
-    keys); the reconciler unions them across a catch-up range and hands them to the engine
-    for an O(delta) partial reload (``files`` are the changed *file* names, for FULL seeding).
+    ``files`` are the checkpoint or delta payload files named by the index.
     """
 
     ref: VersionRef
     kind: VersionKind
     files: list[str]
-    tensor_names: list[str] = field(default_factory=list)
 
     @classmethod
     def from_hf_index(cls, version_dir: str | Path, *, run_id: str | None = None) -> "VersionManifest":
@@ -81,7 +78,6 @@ class VersionManifest:
             ref=VersionRef(run_id, int(meta["version"])),
             kind=VersionKind.DELTA if meta.get("delta_encoding") else VersionKind.FULL,
             files=sorted({str(f) for f in weight_map.values()}),
-            tensor_names=sorted(str(k) for k in weight_map),
         )
 
 
@@ -115,9 +111,8 @@ class VersionConstraint:
 
 class SyncState(str, Enum):
     IDLE = "IDLE"
-    QUEUED = "QUEUED"
-    PREFETCHING = "PREFETCHING"
-    PREPARING = "PREPARING"
+    FETCHING = "FETCHING"
+    STAGING = "STAGING"
     COMMITTING = "COMMITTING"
     ERROR = "ERROR"
 

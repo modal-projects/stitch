@@ -41,8 +41,11 @@ class Store:
         raise NotImplementedError
 
     def materialize(self, ref: VersionRef) -> str:
-        """Ensure the version's files are locally readable and return their directory
-        (hides mount vs download)."""
+        """Return a local directory for the version.
+
+        Download-backed stores materialize into a cache. Mounted stores assume
+        the caller has already made remote writes visible with ``refresh``.
+        """
         raise NotImplementedError
 
     def commit(self) -> None:

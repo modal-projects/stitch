@@ -63,7 +63,8 @@ class ModalVolumeStore(Store):
             _volume(self.volume_name).commit()
 
     def materialize(self, ref: VersionRef) -> str:
-        self.refresh()
+        # The reconciler refreshed the mount before reading the pointer and manifest.
+        # Repeating the Volume reload here adds no visibility and can serialize I/O.
         return str(self._version_dir(ref))
 
     def commit(self) -> None:
@@ -75,21 +76,6 @@ class ModalVolumeStore(Store):
 
     def _version_dir(self, ref: VersionRef) -> Path:
         return self.root / ref.identity
-
-
-def pull_weights_pre_read_hook(source_dir: str, target_version: int) -> None:
-    """Engine-side ``--custom-pull-weights-pre-read-hook``: reload the delta Volume onto
-    THIS host exactly once so the engine's pull can read the published version.
-
-    One reload, not a loop: looping thrashes the Modal-v2 mount (turned ~3s delta pulls into
-    100-500s and tripped the engine's 300s watchdog). Completeness is verified downstream —
-    the engine size-checks each staged delta and fails fast so the sidecar retries with a
-    fresh reload. Volume name comes from ``DELTA_VOLUME_NAME`` (set on the serving container)."""
-    del source_dir  # unused: the reload is by volume name, not path
-    volume_name = os.environ.get("DELTA_VOLUME_NAME", "")
-    if not volume_name or target_version <= 0:
-        return
-    _volume(volume_name).reload()
 
 
 def _volume(name: str):
