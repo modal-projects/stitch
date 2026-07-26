@@ -30,7 +30,7 @@ from typing import Any
 import modal
 import modal.experimental
 
-from cookbook.common import launch, ray_cluster, server, serving_image, smoke
+from cookbook.common import launch, ray_cluster, server, serving_image
 from cookbook.common.constants import (
     CHECKPOINTS_PATH,
     DATA_PATH,
@@ -250,12 +250,3 @@ def launch_train() -> None:
             f"  EXPERIMENT_CONFIG={EXPERIMENT} uv run --extra modal python -m cookbook.miles_disagg.launch"
         ) from None
     print(f"stop this run when done: modal app stop {APP_NAME}")
-
-
-@app.local_entrypoint()
-def smoke_flash_pool(weight_version: int = 0, timeout_seconds: int = 30 * MINUTES) -> None:
-    """Check the deployed Flash pool serves completions at the expected weight version."""
-    smoke.smoke_flash_pool(
-        app_name=APP_NAME, cls_name="Server", model_name=miles_cfg.hf_checkpoint,
-        weight_version=weight_version, timeout_seconds=timeout_seconds,
-    )

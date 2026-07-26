@@ -86,6 +86,15 @@ Use `cookbook.slime_disagg.prep_app` and
 `cookbook.slime_disagg.launch` for a Slime config. Each launch creates a unique
 run ID and prints the app name and stop command.
 
+Check an already-deployed pool without creating another Modal app:
+
+```bash
+uv run --extra modal python -m cookbook.common.smoke \
+  --app-name <printed-app-name> \
+  --model-name /prep/glm45-air/fp8 \
+  --weight-version 10
+```
+
 ## Profiling
 
 The reusable profilers are
