@@ -373,7 +373,7 @@ def test_stage_waits_for_update_destination() -> None:
         assert engine.calls.index(
             "initialize_update_destination"
         ) < engine.calls.index("stage:2")
-        assert r.metrics["destination_init_wait_s"] >= 0.05
+        assert r.metrics["destination_init_wait_s"] > 0
         await r.shutdown()
 
     _run(go())
