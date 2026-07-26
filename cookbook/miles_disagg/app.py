@@ -248,7 +248,7 @@ def launch_train() -> None:
         raise SystemExit(
             f"App {APP_NAME!r} is not deployed. Launch a fresh run with:\n"
             f"  EXPERIMENT_CONFIG={EXPERIMENT} uv run --extra modal python -m cookbook.miles_disagg.launch"
-        )
+        ) from None
     print(f"stop this run when done: modal app stop {APP_NAME}")
 
 

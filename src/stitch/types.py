@@ -35,7 +35,7 @@ class VersionRef:
         return f"{self.run_id}/{name}" if self.run_id else name
 
     @classmethod
-    def parse(cls, text: str) -> "VersionRef":
+    def parse(cls, text: str) -> VersionRef:
         # ``[<run_id>/]weight_vNNNNNN`` (or legacy bare ``NNNNNN``). Non-empty unparseable content
         # raises — never fall back to base and serve the wrong weights (stitch#31).
         text = (text or "").strip()
@@ -67,7 +67,7 @@ class VersionManifest:
     files: list[str]
 
     @classmethod
-    def from_hf_index(cls, version_dir: str | Path, *, run_id: str | None = None) -> "VersionManifest":
+    def from_hf_index(cls, version_dir: str | Path, *, run_id: str | None = None) -> VersionManifest:
         # model.safetensors.index.json holds the version number under `metadata` and the
         # files as `weight_map` values; a `delta_encoding` key (the same one the engine's
         # applier reads) marks a delta.
@@ -92,7 +92,7 @@ class VersionConstraint:
     exact_version: int | None = None
 
     @classmethod
-    def from_payload(cls, payload: dict[str, Any] | None) -> "VersionConstraint":
+    def from_payload(cls, payload: dict[str, Any] | None) -> VersionConstraint:
         raw = (payload or {}).get("weight_version")
         raw = raw if isinstance(raw, dict) else {}
         mn, ex = raw.get("min_version"), raw.get("exact_version")
@@ -134,7 +134,7 @@ class ReplicaState:
         return self.applied == target and self.sync_state is not SyncState.ERROR
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "ReplicaState":
+    def from_dict(cls, data: dict[str, Any]) -> ReplicaState:
         applied, state = data.get("applied"), data.get("sync_state")
         return cls(
             applied=VersionRef.parse(applied) if applied else None,

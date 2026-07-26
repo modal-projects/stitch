@@ -228,7 +228,7 @@ class _GenerationProbe:
                 self.errors.append(f"{type(exc).__name__}: {exc}")
                 return
 
-    def __enter__(self) -> "_GenerationProbe":
+    def __enter__(self) -> _GenerationProbe:
         self.thread.start()
         return self
 

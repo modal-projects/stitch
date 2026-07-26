@@ -91,7 +91,11 @@ async def run(
 async def _worker(client, gateway, model, shape_name, deadline, rows, floor, lag, context_limit, worker_id, rng) -> None:  # noqa: ANN001
     n = 0  # one worker = sequential sessions
     while time.time() < deadline:
-        name = shape_name if shape_name != "mixed" else rng.choices(*zip(*MIXED_WEIGHTS.items()))[0]
+        name = (
+            shape_name
+            if shape_name != "mixed"
+            else rng.choices(*zip(*MIXED_WEIGHTS.items(), strict=True))[0]
+        )
         await _session(
             client, gateway, model, name, SHAPES[name], rng, rows, floor, lag, context_limit,
             session_id=f"w{worker_id}-{n}",
