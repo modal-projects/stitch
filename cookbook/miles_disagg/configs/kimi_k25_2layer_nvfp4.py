@@ -10,17 +10,17 @@ from cookbook.common.config import ModalConfig
 from cookbook.common.constants import DATA_PATH, PREP_PATH
 from cookbook.miles_disagg.config import MilesConfig
 
-
 APP_NAME = "stitch-kimi-k25-2layer-nvfp4"
 DELTA_VOLUME_NAME = "stitch-delta-kimi-k25-2layer-nvfp4"
 DELTA_BULLETIN_ROOT = "/delta-bulletin"
 LOCAL_CHECKPOINT_PATH = "/local-checkpoint"
 
 SOURCE_MODEL = "CharyZeng/Kimi-K2.5-2layer"  # INT4, KimiK25 arch, 2 layers
-MODEL_TAG = "kimi-k25-2layer-nvfp4"
+MODEL_TAG = "kimi-k25-2layer"
 
 SIDECAR_COMMIT_MODE = "in_place"
 SIDECAR_FLUSH_CACHE_ON_COMMIT = False
+SGLANG_DELTA_UPDATE_MODE = "disk"
 # R3 routing-replay needs the dropless Megatron dispatch fix at startup.
 MEGATRON_RUNTIME_PATCHES = [
     "/root/cookbook/miles_disagg/patches/megatron-r3-dispatch.patch",
@@ -28,8 +28,10 @@ MEGATRON_RUNTIME_PATCHES = [
 
 
 SGLANG_SERVER_ARGS = {
-    # fastsafetensors: per-rank O_DIRECT read (~1/tp bytes/rank), no gVisor mmap tax; reload inherits it. nogds set in image.
+    # Use the no-GDS fastsafetensors path on hosts without nvidia-fs.
     "--load-format": "fastsafetensors",
+    "--model-loader-extra-config": '{"enable_gds":false}',
+    "--weight-loader-drop-cache-after-load": "",
     "--tool-call-parser": "kimi_k2",
     "--reasoning-parser": "kimi_k2",
     "--dist-timeout": "3600",
@@ -40,8 +42,6 @@ SGLANG_SERVER_ARGS = {
     "--skip-server-warmup": "",
     "--enable-return-routed-experts": "",
 }
-
-SGLANG_ENV = {"SGLANG_ENABLE_RELOAD_LOAD_PLAN": "1"}  # NVFP4: load-plan replay + O(delta) partial reload
 
 modal = ModalConfig(
     gpu="B200",

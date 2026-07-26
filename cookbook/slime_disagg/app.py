@@ -30,15 +30,21 @@ from typing import Any
 import modal
 import modal.experimental
 
-from stitch.pools.modal_flash import ModalFlashPool
-
-from cookbook.common import launch, ray_cluster, serving_image, server, smoke
+from cookbook.common import launch, ray_cluster, server, serving_image, smoke
 from cookbook.common.constants import (
-    CHECKPOINTS_PATH, DATA_PATH, HF_CACHE_PATH, MINUTES, RAY_PORT, SERVER_STARTUP_TIMEOUT, SIDECAR_PORT,
+    CHECKPOINTS_PATH,
+    DATA_PATH,
+    HF_CACHE_PATH,
+    MINUTES,
+    RAY_PORT,
+    SERVER_STARTUP_TIMEOUT,
+    SGLANG_CACHE_PATH,
+    SIDECAR_PORT,
 )
 from cookbook.slime_disagg import trainer_image
-from cookbook.slime_disagg.config import SlimeConfig, YAML_CONFIG_FIELDS
+from cookbook.slime_disagg.config import YAML_CONFIG_FIELDS, SlimeConfig
 from cookbook.slime_disagg.trainer_image import SLIME_ROOT
+from stitch.pools.modal_flash import ModalFlashPool
 
 EXPERIMENT = os.environ["EXPERIMENT_CONFIG"]  # required; a default would silently serve the wrong experiment
 SLIME_LOCAL_DIR = os.environ.get("SLIME_LOCAL_DIR")  # optional dev overlay of a local slime checkout
@@ -66,6 +72,7 @@ if SLIME_LOCAL_DIR:
 hf_cache_volume = modal.Volume.from_name("huggingface-cache", create_if_missing=True, version=2)
 data_volume = modal.Volume.from_name("slime-data", create_if_missing=True, version=2)
 checkpoints_volume = modal.Volume.from_name("slime-checkpoints", create_if_missing=True, version=2)
+sglang_cache_volume = modal.Volume.from_name("sglang-cache", create_if_missing=True, version=2)
 delta_volume = modal.Volume.from_name(exp.DELTA_VOLUME_NAME, create_if_missing=True, version=2)
 
 train_volumes = {
@@ -83,7 +90,6 @@ SGLANG_SERVER_ARGS = {
     "--cuda-graph-max-bs-decode": str(ROLLOUT_CONCURRENCY),
     "--max-running-requests": str(ROLLOUT_CONCURRENCY),
     "--trust-remote-code": "",
-    "--custom-pull-weights-pre-read-hook": "stitch.stores.modal_volume.pull_weights_pre_read_hook",
     **exp.SGLANG_SERVER_ARGS,
 }
 
@@ -94,7 +100,11 @@ SGLANG_SERVER_ARGS = {
     image=server_image,
     gpu=f"{modal_cfg.gpu}:{slime_cfg.rollout_num_gpus_per_engine}",
     cloud=modal_cfg.cloud, region=modal_cfg.region,
-    volumes={str(HF_CACHE_PATH): hf_cache_volume, exp.DELTA_BULLETIN_ROOT: delta_volume},
+    volumes={
+        str(HF_CACHE_PATH): hf_cache_volume,
+        SGLANG_CACHE_PATH: sglang_cache_volume,
+        exp.DELTA_BULLETIN_ROOT: delta_volume,
+    },
     min_containers=modal_cfg.rollout_min_containers, max_containers=modal_cfg.rollout_max_containers,
     timeout=40 * MINUTES, scaledown_window=15 * MINUTES,
     ephemeral_disk=modal_cfg.rollout_ephemeral_disk_mib, memory=modal_cfg.rollout_memory_mib,
@@ -111,10 +121,12 @@ class Server:
         server.serve_startup(
             self, model_name=slime_cfg.hf_checkpoint, sglang_args=SGLANG_SERVER_ARGS,
             tp=slime_cfg.rollout_num_gpus_per_engine, concurrency=ROLLOUT_CONCURRENCY,
-            bulletin_root=BULLETIN_ROOT, local_checkpoint_dir=exp.LOCAL_CHECKPOINT_PATH,
+            bulletin_root=BULLETIN_ROOT,
+            local_checkpoint_dir=exp.LOCAL_CHECKPOINT_PATH,
+            delta_update_mode=exp.SGLANG_DELTA_UPDATE_MODE,
             volume_name=exp.DELTA_VOLUME_NAME, commit_mode=exp.SIDECAR_COMMIT_MODE,
             flush_cache_on_commit=exp.SIDECAR_FLUSH_CACHE_ON_COMMIT,
-            startup_timeout=SERVER_STARTUP_TIMEOUT, sglang_env=getattr(exp, "SGLANG_ENV", {}),
+            startup_timeout=SERVER_STARTUP_TIMEOUT,
         )
 
     @modal.exit()
@@ -131,7 +143,7 @@ _MULTINODE = slime_cfg.n_train_nodes > 1
 @app.cls(
     image=image,
     gpu=f"{modal_cfg.gpu}:{slime_cfg.actor_num_gpus_per_node}",
-    memory=modal_cfg.memory,
+    memory=modal_cfg.trainer_memory_mib,
     cloud=modal_cfg.cloud, region=modal_cfg.region,
     volumes=train_volumes,
     ephemeral_disk=modal_cfg.trainer_ephemeral_disk_mib,

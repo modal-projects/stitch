@@ -18,9 +18,9 @@ from cookbook.common import trainer_image as common_trainer_image
 
 # Dated tag, never `latest`: Modal caches from_registry per tag string and won't re-pull
 # a moved mutable tag, so `latest` silently serves whatever was first pulled.
-MILES_IMAGE_TAG = "radixark/miles:dev-202607182122"  # base Megatron/TE; match the upstream main stitch-miles is on
+MILES_IMAGE_TAG = "radixark/miles:dev-202607260602"
 MILES_REPO_URL = "https://github.com/modal-projects/miles.git"
-MILES_REPO_REF = "15cf7ed0344850affa354b8b81ad3acbda11474b"  # branch stitch-miles; see MILES_FORK.md
+MILES_REPO_REF = "748f1724ae2ee62974623538f0054c362f02ccea"  # stitch-weight-sync-v0516
 
 MILES_ROOT = "/root/miles"
 MEGATRON_PATH = "/root/Megatron-LM"  # source-only megatron.training must be on PYTHONPATH
@@ -36,6 +36,9 @@ def build_trainer_image(*, hf_cache_path: str, experiment: str, run_id: str | No
     image = (
         modal.Image.from_registry(MILES_IMAGE_TAG)
         .entrypoint([])
+        # TransformerEngine 2.17 declares this dependency, but the dated Miles
+        # image installs its TE wheels with --no-deps.
+        .pip_install("onnxscript==0.7.1")
         # RDMA/EFA userspace so multi-node NCCL binds EFA under rdma=True instead of TCP.
         .apt_install("libibverbs-dev", "libibverbs1", "libhwloc-dev", "libnl-route-3-200")
         .run_commands(f"rm -rf {hf_cache_path}")  # baked HF cache must not shadow the mounted volume
