@@ -12,7 +12,7 @@ loading for quantized rollout models.
 SGLANG_IMAGE_TAG = "lmsysorg/sglang:v0.5.16"
 SGLANG_FORK_REPO = "https://github.com/modal-projects/sglang.git"
 SGLANG_FORK_BRANCH = "stitch-sglang-v0.5.16"
-SGLANG_FORK_COMMIT = "a8e66a00f3023a600bb8d92851454d9fd760ccc3"
+SGLANG_FORK_COMMIT = "418b2fb4995f3b0eac9d7424c6cd9877ecc386ec"
 ```
 
 The branch is upstream v0.5.16 plus:
@@ -24,6 +24,9 @@ The branch is upstream v0.5.16 plus:
 | `a7e20596ba` | Restore checkpoint-facing quantized layouts for complete weight loading. |
 | `c867782f3e` | Build verified, rank-ready CPU weight images from canonical targets. |
 | `a8e66a00f3` | Expose asynchronous disk/CPU staging and CPU-to-GPU commit APIs. |
+| `0581bd9920` | Stream CPU delta lineages through bounded memory. |
+| `2625e5ed2a` | Fold disk XOR lineages with bounded positional I/O. |
+| `418b2fb499` | Fail cache-flushing CPU commits before GPU mutation when the engine is busy. |
 
 The image and branch must use the same SGLang release because Stitch overlays
 Python code onto the image’s existing CUDA and C++ extensions.
@@ -68,6 +71,12 @@ required delta chain, verifies target checksums, and publishes its applied
 version only after the files are durable. A backward target automatically
 reseeds from an immutable anchor.
 
+When catch-up spans consecutive XOR deltas, SGLang validates the complete
+published lineage first, then range-streams the compressed fragments while
+reading and writing each changed target tensor once. The folded representation
+is ephemeral: no aggregate delta or additional checkpoint is persisted. The
+final published target checksum remains the commit boundary.
+
 The rollout engine initially loads v0 directly from `base_checkpoint_dir`.
 Stitch initializes the mutable local checkpoint in the background after v0 is
 serving, so initial rollout readiness is not delayed by a second model-sized
@@ -93,7 +102,8 @@ CPU mode trades host RAM for the shortest commit:
    per host and one complete rank-ready image per local TP rank.
 2. It builds v0 through the model’s ordinary weight loader and quantization
    hooks and verifies that the prepared runtime storages match the active model.
-3. For every delta, it reconstructs and checksums the canonical target, then
+3. For every delta lineage, it range-streams compressed fragments through a
+   bounded work budget, reconstructs and checksums the canonical target, then
    builds every next rank image while inference continues.
 4. `/update_weights_from_cpu` performs distributed preflight and copies the
    complete images into the existing CUDA storages without replacing storage
@@ -106,7 +116,8 @@ or staging failure is reported and the GPU remains on its prior weights.
 CPU mode is delta-only. It rejects FULL publications and cannot reset a patched
 live replica to another run’s v0; the controller must use disk mode or replace
 that replica. This keeps a single canonical snapshot rather than retaining a
-second rollback-sized CPU checkpoint.
+second rollback-sized CPU checkpoint. Compressed deltas are not retained in a
+lineage-sized CPU arena after reconstruction.
 
 Enable it explicitly:
 

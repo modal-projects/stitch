@@ -44,9 +44,11 @@ requires disk mode or a fresh rollout replica. Both modes reconstruct every
 published target and load every runtime weight storage; neither depends on
 tensor-level sparsity.
 
-Checksums are verified in canonical checkpoint tensor space before TP sharding
-or runtime layout conversion. A missing file, malformed lineage, size mismatch,
-or checksum mismatch fails staging and leaves live GPU weights untouched.
+The trainer records checksums of the reconstructed target tensor bytes in every
+delta. Both destinations verify those same values in canonical checkpoint tensor
+space before TP sharding or runtime layout conversion; that canonical validation
+is the parity boundary. A missing file, malformed lineage, size mismatch, or
+checksum mismatch fails staging and leaves live GPU weights untouched.
 
 At TP4, the persistent core allocation for CPU mode is approximately:
 
