@@ -57,6 +57,7 @@ def serve_startup(
         extra_server_args=sglang_args,
         health_timeout=startup_timeout,
         health_poll_interval=10.0,
+        log_requests_level=-1,
     )
     replica.endpoint.start()
     warmup = {

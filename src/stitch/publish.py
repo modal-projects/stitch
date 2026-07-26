@@ -32,6 +32,12 @@ def publish_version(
     store.publish(manifest, version_dir)
     store.advance_pointer(manifest.ref)
     _wake(pool, manifest.ref)
+    logger.info(
+        "published %s: kind=%s files=%d",
+        manifest.ref.identity,
+        manifest.kind.value,
+        len(manifest.files),
+    )
     return manifest.ref
 
 
@@ -43,6 +49,7 @@ def claim_run(store: Store, pool: Pool | None, run_id: str) -> None:
     decide_pointer_move(store.read_pointer(), VersionRef(run_id, 0))  # rewind guard (a reused run_id)
     store.claim(run_id)
     _wake(pool, VersionRef(run_id, 0))
+    logger.info("claimed run %s at base", run_id)
 
 
 def _wake(pool: Pool | None, ref: VersionRef) -> None:
