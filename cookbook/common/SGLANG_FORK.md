@@ -14,7 +14,7 @@ DEFAULT_SGLANG_RUNTIME = SGLangRuntime(
     image="lmsysorg/sglang:v0.5.16",
     repository="https://github.com/modal-projects/sglang.git",
     branch="stitch-sglang-v0.5.16",
-    commit="a562908a10fb67509a906c7c9ed8d7ff105c7a28",
+    commit="1a4a4fd6b54ab332c3b0b17a0383037390939587",
 )
 ```
 
@@ -31,6 +31,7 @@ The branch is upstream v0.5.16 plus:
 | `77eca472e6` | Fold disk XOR lineages with bounded positional I/O. |
 | `526e0ddca2` | Fail cache-flushing CPU commits before GPU mutation when the engine is busy. |
 | `a562908a10` | Normalize native ModelOpt FP4 expert tensors through their existing loader path. |
+| `1a4a4fd6b5` | Return aligned verifier logprobs for DFlash rollout tokens. |
 
 The image and branch must use the same SGLang release because Stitch overlays
 Python code onto the image’s existing CUDA and C++ extensions.
