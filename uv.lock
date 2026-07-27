@@ -1000,6 +1000,9 @@ sglang = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "fastapi" },
+    { name = "httpx" },
+    { name = "modal" },
     { name = "pytest" },
     { name = "ruff" },
 ]
@@ -1015,6 +1018,9 @@ provides-extras = ["modal", "sglang"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "fastapi" },
+    { name = "httpx" },
+    { name = "modal", specifier = ">=1.5.1.dev9" },
     { name = "pytest" },
     { name = "ruff", specifier = "==0.15.1" },
 ]

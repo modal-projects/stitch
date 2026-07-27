@@ -3,14 +3,169 @@ probe uses to suppress health blips while the reconciler commits staged weights.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
+import logging
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from typing import Any
 
+import httpx
 import pytest
 
-from stitch.service import sync_in_progress
+from stitch.engines.base import Engine
+from stitch.service import create_app, sync_in_progress
+from stitch.sync import AdmissionGate
+from stitch.types import VersionRef
+
+
+class _ProxyEngine(Engine):
+    def base_url(self) -> str:
+        return "http://local-engine:8001"
+
+    def blocked_routes(self) -> frozenset[str]:
+        return frozenset()
+
+    def stamp_request(self, request: dict[str, Any], served: VersionRef) -> None:
+        request["served_version"] = served.version
+
+    def stamp_response(self, response: dict[str, Any], served: VersionRef, current: VersionRef) -> None:
+        response["served_version"] = served.version
+
+
+class _FailingUpstream:
+    """Let a test observe admission, then fail the engine request at a controlled point."""
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.fail = asyncio.Event()
+        self.abort_rids: list[str] = []
+
+    async def request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+        if url.endswith("/abort_request"):
+            self.abort_rids.append(kwargs["json"]["rid"])
+            return httpx.Response(200)
+        self.started.set()
+        await self.fail.wait()
+        raise httpx.ConnectError("all connection attempts failed", request=httpx.Request(method, url))
+
+
+class _HangingUpstream:
+    """An engine request which runs until the proxy cancels it on client disconnect."""
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.cancelled = asyncio.Event()
+        self.abort_rids: list[str] = []
+
+    async def request(self, _method: str, url: str, **kwargs: Any) -> httpx.Response:
+        if url.endswith("/abort_request"):
+            self.abort_rids.append(kwargs["json"]["rid"])
+            return httpx.Response(200)
+        self.started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
+
+
+async def _asgi_post(app: Any, payload: dict[str, Any], *, disconnect_on: asyncio.Event | None = None):
+    """Issue one request directly to the ASGI app, optionally disconnecting after its body."""
+    body = json.dumps(payload).encode()
+    body_sent = False
+    sent: list[dict[str, Any]] = []
+
+    async def receive() -> dict[str, Any]:
+        nonlocal body_sent
+        if not body_sent:
+            body_sent = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        if disconnect_on is not None:
+            await disconnect_on.wait()
+            return {"type": "http.disconnect"}
+        await asyncio.Future()
+        raise AssertionError("unreachable")
+
+    async def send(message: dict[str, Any]) -> None:
+        sent.append(message)
+
+    await app(
+        {
+            "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
+            "method": "POST", "scheme": "http", "path": "/generate",
+            "raw_path": b"/generate", "query_string": b"",
+            "headers": [(b"content-type", b"application/json")],
+            "client": ("127.0.0.1", 1234), "server": ("sidecar", 8000),
+        },
+        receive,
+        send,
+    )
+    start = next(m for m in sent if m["type"] == "http.response.start")
+    response_body = b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body")
+    headers = {k.decode().lower(): v.decode() for k, v in start["headers"]}
+    return start["status"], headers, response_body
+
+
+def test_upstream_transport_failure_is_retryable_and_releases_admission(monkeypatch, caplog):
+    async def go():
+        upstream = _FailingUpstream()
+        gate = AdmissionGate()
+        gate.applied = VersionRef("run", 3)
+        monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: upstream)
+        app = create_app(gate, _ProxyEngine())  # type: ignore[arg-type]
+
+        request = asyncio.create_task(_asgi_post(app, {"rid": "rollout-1"}))
+        await upstream.started.wait()
+        assert gate.active_requests == 1
+        upstream.fail.set()
+        status, headers, body = await request
+
+        assert gate.active_requests == 0
+        assert upstream.abort_rids == ["rollout-1"]
+        return status, headers, json.loads(body)
+
+    with caplog.at_level(logging.WARNING, logger="stitch.service"):
+        status, headers, data = asyncio.run(go())
+
+    assert status == 503
+    assert headers["retry-after"] == "1"
+    assert data == {
+        "error": {
+            "type": "EngineUnavailable",
+            "message": "the local inference engine is unavailable",
+            "retryable": True,
+        }
+    }
+    records = [r for r in caplog.records if "local engine request failed" in r.message]
+    assert len(records) == 1
+    assert records[0].exc_info is None  # concise per-request signal, not a traceback storm
+
+
+def test_client_disconnect_cancels_aborts_and_releases_admission(monkeypatch):
+    async def go():
+        upstream = _HangingUpstream()
+        allow_disconnect = asyncio.Event()
+        gate = AdmissionGate()
+        gate.applied = VersionRef("run", 3)
+        monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: upstream)
+        app = create_app(gate, _ProxyEngine())  # type: ignore[arg-type]
+
+        request = asyncio.create_task(
+            _asgi_post(app, {"rid": "rollout-2"}, disconnect_on=allow_disconnect)
+        )
+        await upstream.started.wait()
+        assert gate.active_requests == 1
+        allow_disconnect.set()
+        status, _headers, _body = await request
+
+        assert upstream.cancelled.is_set()
+        assert upstream.abort_rids == ["rollout-2"]
+        assert gate.active_requests == 0
+        assert status == 499
+
+    asyncio.run(go())
 
 
 @contextlib.contextmanager

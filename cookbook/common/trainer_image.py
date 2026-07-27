@@ -12,16 +12,39 @@ import modal
 _COOKBOOK_DIR = Path(__file__).resolve().parent.parent  # .../cookbook
 
 
-def add_common_layers(image: modal.Image, *, experiment: str, run_id: str | None = None) -> modal.Image:
+def add_common_layers(
+    image: modal.Image,
+    *,
+    experiment: str,
+    run_id: str | None = None,
+    copy_source: bool = False,
+) -> modal.Image:
     """Append the framework-agnostic trainer layers: the trainer-side delta ENCODER's codecs
     (needed even under --no-deps), the HF-download env (``EXPERIMENT_CONFIG``/``RUN_ID`` so a
     container's re-import selects the same experiment/run as the deploy), and the stitch + cookbook
-    source mounts so the trainer, Ray actors, and the sidecar subprocess resolve their imports."""
+    source so the trainer, Ray actors, and the sidecar subprocess resolve their imports.
+
+    ``copy_source=True`` bakes those sources into image layers.  Callers that need to append
+    build steps must opt into that mode because Modal intentionally rejects build steps after a
+    runtime ``add_local_*`` mount.
+    """
     return (
-        image
-        .pip_install("fastapi", "httpx", "uvicorn", "zstandard", "xxhash", "blake3")
-        .env({"HF_XET_HIGH_PERFORMANCE": "1", "HF_HUB_ENABLE_HF_TRANSFER": "1",
-              "EXPERIMENT_CONFIG": experiment, **({"RUN_ID": run_id} if run_id else {})})
-        .add_local_python_source("stitch")
-        .add_local_dir(str(_COOKBOOK_DIR), remote_path="/root/cookbook", ignore=["**/__pycache__"])
+        image.pip_install(
+            "fastapi", "httpx", "uvicorn", "zstandard", "xxhash", "blake3"
+        )
+        .env(
+            {
+                "HF_XET_HIGH_PERFORMANCE": "1",
+                "HF_HUB_ENABLE_HF_TRANSFER": "1",
+                "EXPERIMENT_CONFIG": experiment,
+                **({"RUN_ID": run_id} if run_id else {}),
+            }
+        )
+        .add_local_python_source("stitch", copy=copy_source)
+        .add_local_dir(
+            str(_COOKBOOK_DIR),
+            remote_path="/root/cookbook",
+            ignore=["**/__pycache__"],
+            copy=copy_source,
+        )
     )

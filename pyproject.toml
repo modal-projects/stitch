@@ -12,7 +12,13 @@ modal = ["modal>=1.5.1.dev9", "httpx"]
 sglang = ["fastapi", "httpx"]
 
 [dependency-groups]
-dev = ["pytest", "ruff==0.15.1"]
+dev = [
+    "pytest",
+    "ruff==0.15.1",
+    "modal>=1.5.1.dev9",
+    "fastapi",
+    "httpx",
+]
 
 [build-system]
 requires = ["hatchling"]
