@@ -24,6 +24,14 @@ See the paired
 Memory sizing and SGLang implementation details are in
 [`SGLANG_FORK.md`](common/SGLANG_FORK.md).
 
+## External speculative drafts
+
+Set `modal.draft_volume` and, for a volume in another Modal environment,
+`modal.draft_volume_env`. The rollout server mounts the volume at `/draft`;
+point `--speculative-draft-model-path` at the checkpoint beneath it. Draft
+weights are loaded at startup and remain fixed across target-weight updates.
+Bundled MTP heads do not need a separate volume.
+
 ## Prepare and launch
 
 Miles:
