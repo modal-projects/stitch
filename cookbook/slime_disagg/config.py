@@ -83,7 +83,7 @@ class SlimeConfig:
         }
 
     @classmethod
-    def from_payload(cls, payload: dict[str, Any]) -> "SlimeConfig":
+    def from_payload(cls, payload: dict[str, Any]) -> SlimeConfig:
         cfg = cls(**payload["fields"])
         cfg.environment = dict(payload["environment"])
         cfg.async_mode = payload["async_mode"]

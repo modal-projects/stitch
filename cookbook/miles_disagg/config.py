@@ -86,7 +86,7 @@ class MilesConfig:
         }
 
     @classmethod
-    def from_payload(cls, payload: dict[str, Any]) -> "MilesConfig":
+    def from_payload(cls, payload: dict[str, Any]) -> MilesConfig:
         cfg = cls(**payload["fields"])
         cfg.environment = dict(payload["environment"])
         cfg.async_mode = payload["async_mode"]

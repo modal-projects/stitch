@@ -16,7 +16,7 @@ class ModalConfig:
     """Modal infrastructure: GPU model, region, rollout-pool sizing, prep topology."""
 
     gpu: GPUType = "B200"
-    memory: tuple[int, int] | None = None
+    trainer_memory_mib: tuple[int, int] | None = None
     cloud: str | None = None
     region: str | None = None
     rollout_min_containers: int = 2
@@ -26,7 +26,7 @@ class ModalConfig:
     rollout_target_inputs: int | None = None
     proxy_regions: list[str] = ["us-west"]
     rollout_ephemeral_disk_mib: int | None = None
-    rollout_memory_mib: int | None = None
+    rollout_memory_mib: tuple[int, int] | None = None
     torch_dist_prep_nodes: int = 2
     torch_dist_prep_gpus_per_node: int = 8
     torch_dist_convert_extra_args: str = ""

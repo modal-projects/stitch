@@ -29,6 +29,10 @@ def smoke_flash_pool(*, app_name: str, cls_name: str, model_name: str, weight_ve
             # A fresh pool has no claimed run, so version 0 is unpinnable — an exact-version
             # request would 409. Gate on plain serving until a run has claimed the pool.
             if _get_json(f"{gateway}/server_info", timeout=60).get("run_id") is None:
+                if weight_version != 0:
+                    raise RuntimeError(
+                        f"pool is unclaimed; cannot serve expected weight version {weight_version}"
+                    )
                 data = _post_json(f"{gateway}/v1/chat/completions", _completion(model_name), timeout=900)
                 _check_serves(data)
                 print(f"Pool serves base (unclaimed): {data.get('choices')}")
@@ -99,3 +103,27 @@ def _post_json(url: str, payload: dict, *, timeout: float) -> dict:
     request = urllib.request.Request(url, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(request, timeout=timeout) as resp:
         return json.load(resp)
+
+
+def main() -> None:
+    """Run a smoke check as a plain client without creating a transient Modal app."""
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--app-name", required=True)
+    parser.add_argument("--model-name", required=True)
+    parser.add_argument("--weight-version", type=int, default=0)
+    parser.add_argument("--class-name", default="Server")
+    parser.add_argument("--timeout-seconds", type=int, default=1800)
+    args = parser.parse_args()
+    smoke_flash_pool(
+        app_name=args.app_name,
+        cls_name=args.class_name,
+        model_name=args.model_name,
+        weight_version=args.weight_version,
+        timeout_seconds=args.timeout_seconds,
+    )
+
+
+if __name__ == "__main__":
+    main()

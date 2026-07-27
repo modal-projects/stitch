@@ -14,7 +14,11 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from cookbook.common.constants import PREP_PATH
-from cookbook.miles_disagg.trainer_image import MEGATRON_PATH, MILES_ROOT, TORCH_DIST_CONVERT_WRAPPER
+from cookbook.miles_disagg.trainer_image import (
+    MEGATRON_PATH,
+    MILES_ROOT,
+    TORCH_DIST_CONVERT_WRAPPER,
+)
 
 
 def prepare_checkpoints(exp, prep_volume) -> None:

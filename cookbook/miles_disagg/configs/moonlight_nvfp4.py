@@ -9,18 +9,18 @@ from cookbook.common.config import ModalConfig
 from cookbook.common.constants import DATA_PATH, PREP_PATH
 from cookbook.miles_disagg.config import MilesConfig
 
-
 APP_NAME = "stitch-moonlight-nvfp4"
 DELTA_VOLUME_NAME = "stitch-delta-moonlight-nvfp4"
 DELTA_BULLETIN_ROOT = "/delta-bulletin"
 LOCAL_CHECKPOINT_PATH = "/local-checkpoint"
 
 SOURCE_MODEL = "moonshotai/Moonlight-16B-A3B-Instruct"
-MODEL_TAG = "moonlight-16b-nvfp4"
+MODEL_TAG = "moonlight-16b"
 
 # in_place applies weights without draining in-flight rollouts; stale KV isolated per version.
 SIDECAR_COMMIT_MODE = "in_place"
 SIDECAR_FLUSH_CACHE_ON_COMMIT = False
+SGLANG_DELTA_UPDATE_MODE = "disk"
 # R3 routing-replay needs the dropless Megatron dispatch fix at startup.
 MEGATRON_RUNTIME_PATCHES = [
     "/root/cookbook/miles_disagg/patches/megatron-r3-dispatch.patch",
@@ -30,8 +30,10 @@ MEGATRON_RUNTIME_PATCHES = [
 # No --quantization flag — NVFP4 comes from the served checkpoint's quant config.
 # mem-fraction / context-length are starting points; measure.
 SGLANG_SERVER_ARGS = {
-    # fastsafetensors: per-rank O_DIRECT read (~1/tp bytes/rank), no gVisor mmap tax; reload inherits it. nogds set in image.
+    # Use the no-GDS fastsafetensors path on hosts without nvidia-fs.
     "--load-format": "fastsafetensors",
+    "--model-loader-extra-config": '{"enable_gds":false}',
+    "--weight-loader-drop-cache-after-load": "",
     "--attention-backend": "tokenspeed_mla",
     "--kv-cache-dtype": "fp8_e4m3",  # tokenspeed_mla requires this
     "--context-length": "8192",  # Moonlight's max_position_embeddings
@@ -41,8 +43,6 @@ SGLANG_SERVER_ARGS = {
     # routing replay: pool emits per-token routed experts for the trainer to replay.
     "--enable-return-routed-experts": "",
 }
-
-SGLANG_ENV = {"SGLANG_ENABLE_RELOAD_LOAD_PLAN": "1"}  # NVFP4: load-plan replay + O(delta) partial reload
 
 modal = ModalConfig(
     gpu="B200",
