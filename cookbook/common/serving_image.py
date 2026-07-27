@@ -9,6 +9,7 @@ weight staging, correct quantized weight loading, and the optional CPU delta cac
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import modal
@@ -38,11 +39,13 @@ def build_serving_image(
     delta_volume_name: str | None = None,
     experiment: str,
     run_id: str | None = None,
+    extra_packages: Sequence[str] = (),
+    extra_env: Mapping[str, str] | None = None,
 ) -> modal.Image:
     """The rollout-pool image. Volume-backed recipes set ``delta_volume_name`` for their
-    Store; other Store backends omit it. ``EXPERIMENT_CONFIG`` (and ``RUN_ID`` where the
-    recipe scopes per run) let the container's re-import resolve the same
-    experiment/run as the deploy."""
+    Store; other Store backends omit it. Backend-specific packages and environment
+    belong in ``extra_packages`` / ``extra_env`` so all build steps still precede the
+    local source layers."""
     return (
         modal.Image.from_registry(SGLANG_IMAGE_TAG)
         .run_commands(
@@ -61,10 +64,12 @@ def build_serving_image(
             "xxhash",
             "blake3",  # engine-side weight-staging checksum
             "fastsafetensors",
+            *extra_packages,
         )
         .env(
             {
                 **_SERVING_ENV,
+                **(extra_env or {}),
                 "EXPERIMENT_CONFIG": experiment,
                 **(
                     {"DELTA_VOLUME_NAME": delta_volume_name}
