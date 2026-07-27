@@ -12,7 +12,7 @@ loading for quantized rollout models.
 SGLANG_IMAGE_TAG = "lmsysorg/sglang:v0.5.16"
 SGLANG_FORK_REPO = "https://github.com/modal-projects/sglang.git"
 SGLANG_FORK_BRANCH = "stitch-sglang-v0.5.16"
-SGLANG_FORK_COMMIT = "418b2fb4995f3b0eac9d7424c6cd9877ecc386ec"
+SGLANG_FORK_COMMIT = "e8d7dee6106fa79bb064f5e1822608ef39898e02"
 ```
 
 The branch is upstream v0.5.16 plus:
@@ -27,6 +27,7 @@ The branch is upstream v0.5.16 plus:
 | `0581bd9920` | Stream CPU delta lineages through bounded memory. |
 | `2625e5ed2a` | Fold disk XOR lineages with bounded positional I/O. |
 | `418b2fb499` | Fail cache-flushing CPU commits before GPU mutation when the engine is busy. |
+| `e8d7dee610` | Keep speculative draft weights fixed during CPU-staged target updates. |
 
 The image and branch must use the same SGLang release because Stitch overlays
 Python code onto the image’s existing CUDA and C++ extensions.
@@ -58,7 +59,9 @@ Commit remains a separate operation:
 
 - `POST /update_weights_from_disk` runs SGLang’s complete checkpoint loader.
 - `POST /update_weights_from_cpu` copies already-prepared rank images into the
-  existing CUDA storages.
+  existing target-model CUDA storages. A speculative draft model remains fixed;
+  target verification preserves generation correctness while its acceptance
+  rate may change as the target evolves.
 
 The separation is the pause boundary: staging may overlap rollout generation,
 while commit is the short operation coordinated by Stitch.
