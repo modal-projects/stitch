@@ -34,6 +34,7 @@ from cookbook.common import launch, ray_cluster, server, serving_image
 from cookbook.common.constants import (
     CHECKPOINTS_PATH,
     DATA_PATH,
+    DRAFT_PATH,
     HF_CACHE_PATH,
     MINUTES,
     RAY_PORT,
@@ -74,6 +75,15 @@ data_volume = modal.Volume.from_name("slime-data", create_if_missing=True, versi
 checkpoints_volume = modal.Volume.from_name("slime-checkpoints", create_if_missing=True, version=2)
 sglang_cache_volume = modal.Volume.from_name("sglang-cache", create_if_missing=True, version=2)
 delta_volume = modal.Volume.from_name(exp.DELTA_VOLUME_NAME, create_if_missing=True, version=2)
+draft_volume = (
+    modal.Volume.from_name(
+        modal_cfg.draft_volume,
+        environment_name=modal_cfg.draft_volume_env,
+        version=2,
+    )
+    if modal_cfg.draft_volume
+    else None
+)
 
 train_volumes = {
     str(HF_CACHE_PATH): hf_cache_volume,
@@ -104,6 +114,7 @@ SGLANG_SERVER_ARGS = {
         str(HF_CACHE_PATH): hf_cache_volume,
         SGLANG_CACHE_PATH: sglang_cache_volume,
         exp.DELTA_BULLETIN_ROOT: delta_volume,
+        **({str(DRAFT_PATH): draft_volume} if draft_volume is not None else {}),
     },
     min_containers=modal_cfg.rollout_min_containers, max_containers=modal_cfg.rollout_max_containers,
     timeout=40 * MINUTES, scaledown_window=15 * MINUTES,

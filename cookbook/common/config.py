@@ -19,6 +19,8 @@ class ModalConfig:
     trainer_memory_mib: tuple[int, int] | None = None
     cloud: str | None = None
     region: str | None = None
+    draft_volume: str | None = None
+    draft_volume_env: str | None = None
     rollout_min_containers: int = 2
     rollout_max_containers: int | None = None
     # Flash autoscaler target: keep well below sglang engine concurrency so Flash adds
