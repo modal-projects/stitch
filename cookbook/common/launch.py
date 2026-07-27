@@ -27,8 +27,8 @@ def build_train_cmd(cfg: Any, root: str, model_script_attr: str) -> str:
 def resolve_config(cfg: Any, tmpdir: str, yaml_fields: tuple[str, ...]) -> None:
     """Resolve HF repo-id checkpoint fields to local paths and materialize inline YAML
     config dicts to files the trainer reads. Absolute paths are left untouched."""
-    from huggingface_hub import snapshot_download
     import yaml
+    from huggingface_hub import snapshot_download
 
     for attr in ("hf_checkpoint", "load", "ref_load", "critic_load"):
         if (val := getattr(cfg, attr, None)) and not str(val).startswith("/"):
