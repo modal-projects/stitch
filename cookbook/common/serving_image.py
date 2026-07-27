@@ -35,14 +35,14 @@ _SERVING_ENV = {
 def build_serving_image(
     *,
     hf_cache_path: str,
-    delta_volume_name: str,
+    delta_volume_name: str | None = None,
     experiment: str,
     run_id: str | None = None,
 ) -> modal.Image:
-    """The rollout-pool image. ``DELTA_VOLUME_NAME`` is read by the engine's pre-read hook and
-    the sidecar's Store; ``EXPERIMENT_CONFIG`` (and ``RUN_ID`` where the recipe scopes per run) let
-    the container's re-import resolve the same experiment/run as the deploy; stitch + the cookbook
-    package are mounted so the sidecar and the framework hooks resolve."""
+    """The rollout-pool image. Volume-backed recipes set ``delta_volume_name`` for their
+    Store; other Store backends omit it. ``EXPERIMENT_CONFIG`` (and ``RUN_ID`` where the
+    recipe scopes per run) let the container's re-import resolve the same
+    experiment/run as the deploy."""
     return (
         modal.Image.from_registry(SGLANG_IMAGE_TAG)
         .run_commands(
@@ -65,8 +65,12 @@ def build_serving_image(
         .env(
             {
                 **_SERVING_ENV,
-                "DELTA_VOLUME_NAME": delta_volume_name,
                 "EXPERIMENT_CONFIG": experiment,
+                **(
+                    {"DELTA_VOLUME_NAME": delta_volume_name}
+                    if delta_volume_name
+                    else {}
+                ),
                 **({"RUN_ID": run_id} if run_id else {}),
             }
         )
