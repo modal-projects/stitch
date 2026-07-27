@@ -9,7 +9,7 @@ with their instances (``stores/base.py``, ``engines/base.py``, ``pools/base.py``
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -35,7 +35,7 @@ class VersionRef:
         return f"{self.run_id}/{name}" if self.run_id else name
 
     @classmethod
-    def parse(cls, text: str) -> "VersionRef":
+    def parse(cls, text: str) -> VersionRef:
         # ``[<run_id>/]weight_vNNNNNN`` (or legacy bare ``NNNNNN``). Non-empty unparseable content
         # raises — never fall back to base and serve the wrong weights (stitch#31).
         text = (text or "").strip()
@@ -59,18 +59,15 @@ class VersionManifest:
     ``checksum_format``) and lineage straight off the on-disk index — the codec is the
     engine's concern, not part of this domain type.
 
-    ``tensor_names`` are the version's touched tensor names (the index's ``weight_map``
-    keys); the reconciler unions them across a catch-up range and hands them to the engine
-    for an O(delta) partial reload (``files`` are the changed *file* names, for FULL seeding).
+    ``files`` are the checkpoint or delta payload files named by the index.
     """
 
     ref: VersionRef
     kind: VersionKind
     files: list[str]
-    tensor_names: list[str] = field(default_factory=list)
 
     @classmethod
-    def from_hf_index(cls, version_dir: str | Path, *, run_id: str | None = None) -> "VersionManifest":
+    def from_hf_index(cls, version_dir: str | Path, *, run_id: str | None = None) -> VersionManifest:
         # model.safetensors.index.json holds the version number under `metadata` and the
         # files as `weight_map` values; a `delta_encoding` key (the same one the engine's
         # applier reads) marks a delta.
@@ -81,7 +78,6 @@ class VersionManifest:
             ref=VersionRef(run_id, int(meta["version"])),
             kind=VersionKind.DELTA if meta.get("delta_encoding") else VersionKind.FULL,
             files=sorted({str(f) for f in weight_map.values()}),
-            tensor_names=sorted(str(k) for k in weight_map),
         )
 
 
@@ -96,7 +92,7 @@ class VersionConstraint:
     exact_version: int | None = None
 
     @classmethod
-    def from_payload(cls, payload: dict[str, Any] | None) -> "VersionConstraint":
+    def from_payload(cls, payload: dict[str, Any] | None) -> VersionConstraint:
         raw = (payload or {}).get("weight_version")
         raw = raw if isinstance(raw, dict) else {}
         mn, ex = raw.get("min_version"), raw.get("exact_version")
@@ -115,9 +111,8 @@ class VersionConstraint:
 
 class SyncState(str, Enum):
     IDLE = "IDLE"
-    QUEUED = "QUEUED"
-    PREFETCHING = "PREFETCHING"
-    PREPARING = "PREPARING"
+    FETCHING = "FETCHING"
+    STAGING = "STAGING"
     COMMITTING = "COMMITTING"
     ERROR = "ERROR"
 
@@ -139,7 +134,7 @@ class ReplicaState:
         return self.applied == target and self.sync_state is not SyncState.ERROR
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "ReplicaState":
+    def from_dict(cls, data: dict[str, Any]) -> ReplicaState:
         applied, state = data.get("applied"), data.get("sync_state")
         return cls(
             applied=VersionRef.parse(applied) if applied else None,

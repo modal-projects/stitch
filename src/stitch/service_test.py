@@ -1,5 +1,5 @@
 """``sync_in_progress`` — the shared /server_info interpretation a deployment's engine-health
-probe uses to suppress health blips while the reconciler is reloading weights."""
+probe uses to suppress health blips while the reconciler commits staged weights."""
 
 from __future__ import annotations
 
@@ -36,11 +36,24 @@ def _server_info(payload):
 @pytest.mark.parametrize(
     "info,expected",
     [
-        ({"prefetch_done": True, "sync_state": "COMMITTING"}, True),   # reloading
-        ({"prefetch_done": True, "sync_state": "PREFETCHING"}, True),  # staging deltas
-        ({"prefetch_done": False, "prefetch_error": None}, True),      # boot base-seed (IDLE)
-        ({"prefetch_done": True, "sync_state": "IDLE"}, False),        # settled: a blip is real
-        ({"prefetch_done": False, "prefetch_error": "boom"}, False),   # seed failed: report it
+        ({"update_destination_ready": True, "sync_state": "COMMITTING"}, True),
+        ({"update_destination_ready": True, "sync_state": "STAGING"}, True),
+        ({"update_destination_ready": True, "sync_state": "FETCHING"}, False),
+        (
+            {
+                "update_destination_ready": False,
+                "update_destination_error": None,
+            },
+            True,
+        ),
+        ({"update_destination_ready": True, "sync_state": "IDLE"}, False),
+        (
+            {
+                "update_destination_ready": False,
+                "update_destination_error": "boom",
+            },
+            False,
+        ),
     ],
 )
 def test_sync_in_progress(info, expected):
