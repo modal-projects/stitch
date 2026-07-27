@@ -12,7 +12,7 @@ loading for quantized rollout models.
 SGLANG_IMAGE_TAG = "lmsysorg/sglang:v0.5.16"
 SGLANG_FORK_REPO = "https://github.com/modal-projects/sglang.git"
 SGLANG_FORK_BRANCH = "stitch-sglang-v0.5.16"
-SGLANG_FORK_COMMIT = "e8d7dee6106fa79bb064f5e1822608ef39898e02"
+SGLANG_FORK_COMMIT = "6307bce368456caebda3535e63d17f9d7c287127"
 ```
 
 The branch is upstream v0.5.16 plus:
@@ -23,11 +23,11 @@ The branch is upstream v0.5.16 plus:
 | `5f6e1e613f` | Materialize and verify complete targets on host-local disk. |
 | `a7e20596ba` | Restore checkpoint-facing quantized layouts for complete weight loading. |
 | `c867782f3e` | Build verified, rank-ready CPU weight images from canonical targets. |
-| `a8e66a00f3` | Expose asynchronous disk/CPU staging and CPU-to-GPU commit APIs. |
-| `0581bd9920` | Stream CPU delta lineages through bounded memory. |
-| `2625e5ed2a` | Fold disk XOR lineages with bounded positional I/O. |
-| `418b2fb499` | Fail cache-flushing CPU commits before GPU mutation when the engine is busy. |
-| `e8d7dee610` | Keep speculative draft weights fixed during CPU-staged target updates. |
+| `111a804d2e` | Expose asynchronous disk/CPU staging and CPU-to-GPU target-model commit APIs. |
+| `e0859b7390` | Stream CPU delta lineages through bounded memory. |
+| `77eca472e6` | Fold disk XOR lineages with bounded positional I/O. |
+| `526e0ddca2` | Fail cache-flushing CPU commits before GPU mutation when the engine is busy. |
+| `6307bce368` | Normalize ModelOpt FP4 expert tensors through their native loader path. |
 
 The image and branch must use the same SGLang release because Stitch overlays
 Python code onto the image’s existing CUDA and C++ extensions.
@@ -170,8 +170,9 @@ workarounds.
 
 Every TP rank must pass preflight before commit starts. A rank-local copy failure
 after that point is fatal because continuing with mixed rank versions would be
-incorrect. Speculative draft models remain rejected until target and draft
-weights can be committed atomically.
+incorrect. With a fixed speculative draft, CPU staging and commit cover the
+target model only. Updating target and draft weights together is unsupported
+because they cannot yet be committed atomically.
 
 ## Re-porting
 
