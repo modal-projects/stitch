@@ -66,7 +66,13 @@ ROLLOUT_CONCURRENCY = modal_cfg.rollout_target_inputs or slime_cfg.sglang_server
 # EXPERIMENT_CONFIG + RUN_ID are baked into both images so a container's re-import rebuilds the same
 # app name and transport paths as the deploy, not the defaults.
 image = trainer_image.build_trainer_image(hf_cache_path=str(HF_CACHE_PATH), experiment=EXPERIMENT, run_id=RUN_ID, slime_local=SLIME_LOCAL_DIR)
-server_image = serving_image.build_serving_image(hf_cache_path=str(HF_CACHE_PATH), delta_volume_name=exp.DELTA_VOLUME_NAME, experiment=EXPERIMENT, run_id=RUN_ID)
+server_image = serving_image.build_serving_image(
+    hf_cache_path=str(HF_CACHE_PATH),
+    delta_volume_name=exp.DELTA_VOLUME_NAME,
+    experiment=EXPERIMENT,
+    run_id=RUN_ID,
+    runtime=getattr(exp, "SGLANG_RUNTIME", serving_image.DEFAULT_SGLANG_RUNTIME),
+)
 if SLIME_LOCAL_DIR:
     server_image = server_image.add_local_dir(SLIME_LOCAL_DIR, remote_path=SLIME_ROOT, ignore=[".git", "**/__pycache__", "**/*.pyc"])
 

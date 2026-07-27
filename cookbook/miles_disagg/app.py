@@ -73,6 +73,7 @@ server_image = serving_image.build_serving_image(
     experiment=EXPERIMENT,
     run_id=RUN_ID,
     extra_env=getattr(exp, "SGLANG_SERVER_ENV", None),
+    runtime=getattr(exp, "SGLANG_RUNTIME", serving_image.DEFAULT_SGLANG_RUNTIME),
 )
 if MILES_LOCAL_DIR:
     server_image = server_image.add_local_dir(MILES_LOCAL_DIR, remote_path=MILES_ROOT, ignore=[".git", "**/__pycache__", "**/*.pyc"])

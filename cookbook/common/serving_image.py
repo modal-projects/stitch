@@ -10,22 +10,35 @@ weight staging, correct quantized weight loading, and the optional CPU delta cac
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 import modal
 
-# The base tag MUST match the branch's base tag: the fork overlays python/ only, so the
-# baked kernels/CUDA must be ABI-compatible with it.
-SGLANG_IMAGE_TAG = "lmsysorg/sglang:v0.5.16"
-SGLANG_FORK_REPO = "https://github.com/modal-projects/sglang.git"
-SGLANG_FORK_BRANCH = "stitch-sglang-v0.5.16"
-SGLANG_FORK_COMMIT = "a562908a10fb67509a906c7c9ed8d7ff105c7a28"
+
+@dataclass(frozen=True)
+class SGLangRuntime:
+    """An immutable SGLang source overlay and its ABI-compatible base image."""
+
+    image: str
+    repository: str
+    branch: str
+    commit: str
+
+
+DEFAULT_SGLANG_RUNTIME = SGLangRuntime(
+    image="lmsysorg/sglang:v0.5.16",
+    repository="https://github.com/modal-projects/sglang.git",
+    branch="stitch-sglang-v0.5.16",
+    commit="a562908a10fb67509a906c7c9ed8d7ff105c7a28",
+)
 
 _COOKBOOK_DIR = Path(__file__).resolve().parent.parent
 
 _SERVING_ENV = {
     "HF_XET_HIGH_PERFORMANCE": "1",
     "HF_HUB_ENABLE_HF_TRANSFER": "1",
+    "HF_MODULES_CACHE": "/tmp/huggingface/modules",
     "SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN": "1",
     "SGLANG_DISABLE_CUDNN_CHECK": "1",
     "SGLANG_ENABLE_OVERLAP_PLAN_STREAM": "1",
@@ -41,16 +54,22 @@ def build_serving_image(
     run_id: str | None = None,
     extra_packages: Sequence[str] = (),
     extra_env: Mapping[str, str] | None = None,
+    runtime: SGLangRuntime = DEFAULT_SGLANG_RUNTIME,
 ) -> modal.Image:
     """The rollout-pool image. Volume-backed recipes set ``delta_volume_name`` for their
     Store; other Store backends omit it. Backend-specific packages and environment
     belong in ``extra_packages`` / ``extra_env`` so all build steps still precede the
     local source layers."""
     return (
-        modal.Image.from_registry(SGLANG_IMAGE_TAG)
+        modal.Image.from_registry(runtime.image)
         .run_commands(
-            f"cd /sgl-workspace/sglang && git remote add modal-fork {SGLANG_FORK_REPO}"
-            f" && git fetch modal-fork {SGLANG_FORK_BRANCH} && git checkout {SGLANG_FORK_COMMIT} -- python/"
+            "rm -rf /tmp/stitch-sglang-overlay"
+            f" && git clone --filter=blob:none --single-branch --branch {runtime.branch}"
+            f" {runtime.repository} /tmp/stitch-sglang-overlay"
+            f" && git -C /tmp/stitch-sglang-overlay checkout --detach {runtime.commit}"
+            " && rm -rf /sgl-workspace/sglang/python/sglang"
+            " && cp -a /tmp/stitch-sglang-overlay/python/. /sgl-workspace/sglang/python/"
+            " && rm -rf /tmp/stitch-sglang-overlay"
         )
         .run_commands(
             f"rm -rf {hf_cache_path}"
