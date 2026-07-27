@@ -1,169 +1,188 @@
-# The sglang fork stitch pins
+# SGLang fork
 
-stitch's rollout engines run a **patched sglang**, not upstream: the disaggregated
-weight-sync path (engine-side `/pull_weights`, correct quantized reloads, and the
-O(delta) partial reload) is not in upstream sglang yet. This file is the source of
-truth for *what* we patch, *why*, and *how to move the patch stack onto a newer
-sglang release*.
+Stitch overlays a small SGLang fork onto the matching upstream image. The fork
+adds general, asynchronous checkpoint staging and correct complete-weight
+loading for quantized rollout models.
 
-## The pin
+## Pin
 
-`cookbook/common/serving_image.py` builds the serving image by overlaying the fork's
-`python/` onto a stock sglang container:
+[`serving_image.py`](serving_image.py) is the executable source of truth:
 
 ```python
-SGLANG_IMAGE_TAG   = "lmsysorg/sglang:v0.5.15.post1"    # base kernels/CUDA
-SGLANG_FORK_BRANCH = "stitch-sglang-v0.5.15-post1"      # modal-projects/sglang
-SGLANG_FORK_COMMIT = "557e19e1b6fdceeea46d8674f6e3ae3428d1d102"
+SGLANG_IMAGE_TAG = "lmsysorg/sglang:v0.5.16"
+SGLANG_FORK_REPO = "https://github.com/modal-projects/sglang.git"
+SGLANG_FORK_BRANCH = "stitch-sglang-v0.5.16"
+SGLANG_FORK_COMMIT = "418b2fb4995f3b0eac9d7424c6cd9877ecc386ec"
 ```
 
-The branch is **`v0.5.15.post1` + the patch stack below, nothing else** — every commit
-`git log v0.5.15.post1..stitch-sglang-v0.5.15-post1` is one of ours. Because only `python/`
-is overlaid, `SGLANG_IMAGE_TAG` **must** be the same sglang version the branch is based on
-(`v0.5.15.post1`), or the baked C++/CUDA ops will be ABI-mismatched with the python.
+The branch is upstream v0.5.16 plus:
 
-## The patch stack
+| Commit | Responsibility |
+| --- | --- |
+| `49031cb24c` | Configure fastsafetensors with or without GDS and honor post-load cache release. |
+| `5f6e1e613f` | Materialize and verify complete targets on host-local disk. |
+| `a7e20596ba` | Restore checkpoint-facing quantized layouts for complete weight loading. |
+| `c867782f3e` | Build verified, rank-ready CPU weight images from canonical targets. |
+| `a8e66a00f3` | Expose asynchronous disk/CPU staging and CPU-to-GPU commit APIs. |
+| `0581bd9920` | Stream CPU delta lineages through bounded memory. |
+| `2625e5ed2a` | Fold disk XOR lineages with bounded positional I/O. |
+| `418b2fb499` | Fail cache-flushing CPU commits before GPU mutation when the engine is busy. |
 
-Two tiers. The **base case** makes disaggregated weight sync work at all; the
-**optimization** tier makes a reload O(delta) instead of O(full checkpoint). Read the
-commit bodies for the details — this is the map.
+The image and branch must use the same SGLang release because Stitch overlays
+Python code onto the image’s existing CUDA and C++ extensions.
 
-### Base case — weight sync works
+## API
 
-1. **`[RL] /pull_weights: engine-side pull ... into a host-local checkpoint`**
-   The disaggregated receiver: `POST /pull_weights` walks the published
-   `weight_v{N}/` chain from the nearest full anchor, replays deltas (xor + zstd,
-   xxh3 checksum) into a host-local checkpoint that `/update_weights_from_disk` then
-   reloads, while the engine keeps serving. A steady-state host applies the one new
-   delta in place; a host several versions behind (a fresh joiner catching up) folds
-   the whole delta range in one pass per tensor — one buffered read + XOR the range in
-   RAM + one write — instead of N mmap read-modify-writes. Hardened for an eventually-consistent
-   volume mount (whole-file in-memory read + size-verify before the xor, one reload
-   per host, reseed from the pristine boot checkpoint). The base-seed reseed copies shards
-   in parallel with a 16 MiB streaming read (the /prep read is Volume-backend-fetch bound —
-   ~8 streams is the profiled knee, ~5x over one) and logs staging progress + throughput.
-   *Upstreaming:* https://github.com/sgl-project/sglang/pull/30367
+`POST /stage_weight_update` prepares a target while inference continues:
 
-2. **`[RL] update_weights_from_disk: load quantized checkpoints like initial loading`**
-   Makes an in-place reload of a quantized checkpoint reproduce `init(checkpoint)`
-   (fp8 blockwise + compressed-tensors block/channel): restore latched quant scale
-   state before loading, fix the rollback path, keep weights refillable, and fix the
-   UE8M0 scale inverse for row counts not divisible by 128. Without this, fp8
-   reloads silently diverge from the served kernel format.
-   *Upstreaming:* https://github.com/sgl-project/sglang/pull/30761
+```json
+{
+  "base_checkpoint_dir": "/prep/model/format",
+  "checkpoint_source_dir": "/delta-bulletin/run",
+  "local_checkpoint_dir": "/local-checkpoint",
+  "target_version": 7,
+  "destination": "disk"
+}
+```
 
-### Optimization — O(delta) reload
+- `base_checkpoint_dir` is the immutable v0 checkpoint. It defaults to the
+  engine’s boot model path.
+- `checkpoint_source_dir` contains `weight_vNNNNNN` publications. It is omitted
+  when initializing version 0.
+- `destination="disk"` requires `local_checkpoint_dir` and accepts FULL or
+  DELTA targets.
+- `destination="cpu"` does not use `local_checkpoint_dir`. Version 0 initializes
+  the cache; later targets must be DELTAs.
 
-3. **`[RL] reload: record/replay load plans for repeated reloads`**
-   Record the model's first-reload weight dispatch once, replay it directly after
-   (skip the per-tensor routing scan, parallelize the load). Opt in per model
-   (`supports_load_plan_replay`); gated by `SGLANG_ENABLE_RELOAD_LOAD_PLAN=1`. Falls
-   back to the legacy loader on any failure.
+Commit remains a separate operation:
 
-4. **`[RL] reload: O(delta) partial reload via touched checkpoint names`**
-   Given the touched tensor names (`weight_names`, from a delta apply), reload only
-   those tensors + their fused/expert closures and re-post-process only the touched
-   modules. Pre-flights every touched module's quant method for incremental support;
-   any gap falls back to a full reload.
+- `POST /update_weights_from_disk` runs SGLang’s complete checkpoint loader.
+- `POST /update_weights_from_cpu` copies already-prepared rank images into the
+  existing CUDA storages.
 
-5. **`[RL] modelopt fp4: incremental post-loading for partial reloads`**
-   The NVFP4 model-side enabler for (4): `process_weights_after_partial_loading`
-   re-derives kernel state for only the touched experts — CUTLASS per-expert
-   re-swizzle and TRT-LLM per-expert re-alignment — declining marlin/cutedsl and any
-   padded/whole-layer layout to a safe full reload. Also restores NVFP4 raw bit-exact
-   compare in the weight checker (v0.5.15 replaced it with a NotImplementedError) so a
-   partial reload is byte-verifiable against a full one via `/weights_checker`. Without
-   this, NVFP4 partial reload declines and pays a full reload.
-   *Upstreaming:* not yet filed.
+The separation is the pause boundary: staging may overlap rollout generation,
+while commit is the short operation coordinated by Stitch.
 
-6. **`[RL] load plan: record during the initial load so reloads start already-replaying`**
-   Record the load plan during the model's initial boot load, so the first
-   `update_weights_from_disk` already replays / goes O(delta) partial instead of paying
-   a full record-reload — the full reload is eliminated from steady state (matters most
-   for elastic joiners that boot then immediately catch up via deltas). Gated on the
-   same flag; drops the plan and falls back to a plain load on any failure.
+## Disk destination
 
-7. **`[RL] fastsafetensors: env-gated nogds for sandboxed (no-GDS) hosts`**
-   The fast full-reload path for a DENSE checkpoint, where the O(delta) partial reload
-   (3–6) doesn't apply (e.g. fp8 — the delta touches ~all weight tensors). Upstream
-   `--load-format fastsafetensors` splits the safetensors files across TP ranks (each
-   rank reads only its 1/N) but defaults to GDS/cuFile, which needs the `nvidia-fs`
-   driver — absent under gVisor, so it fails at open (`"Error opening file"`). Read
-   `SGLANG_FASTSAFETENSORS_NOGDS` to force the nogds path (O_DIRECT + host bounce
-   buffer); default preserves upstream GDS behavior. The win is *fewer bytes*, not the
-   disk: under gVisor the read is bound by the Sentry's single-thread byte-copy
-   (~5 GB/s/node), so cutting the per-node read ~408→~102 GB takes GLM-4.5-Air-fp8's
-   reload ~130 s → ~23 s. Enabled per recipe via `--load-format fastsafetensors`.
-   *Upstreaming:* not yet filed.
+Disk mode is the general lower-RAM path. SGLang keeps one mutable host-local
+checkpoint, seeds it from the immutable base or newest FULL anchor, applies the
+required delta chain, verifies target checksums, and publishes its applied
+version only after the files are durable. A backward target automatically
+reseeds from an immutable anchor.
 
-`SGLANG_ENABLE_RELOAD_LOAD_PLAN` is opt-in per recipe (off unless set): the NVFP4 configs
-enable it via `SGLANG_ENV` — their native load is single-threaded, so replay is a large win.
-A dense config where partial reload can't apply (fp8) instead uses `--load-format
-fastsafetensors` (patch 7) for a fast *full* reload and leaves the load plan off (see
-`cookbook/miles_disagg/configs/glm45_air_fp8.py`).
+When catch-up spans consecutive XOR deltas, SGLang validates the complete
+published lineage first, then range-streams the compressed fragments while
+reading and writing each changed target tensor once. The folded representation
+is ephemeral: no aggregate delta or additional checkpoint is persisted. The
+final published target checksum remains the commit boundary.
 
-## Variant branches
+The rollout engine initially loads v0 directly from `base_checkpoint_dir`.
+Stitch initializes the mutable local checkpoint in the background after v0 is
+serving, so initial rollout readiness is not delayed by a second model-sized
+copy. Local storage must hold the mutable checkpoint plus filesystem headroom;
+the immutable base remains in its configured source.
 
-- **`stitch-sglang-v0.5.15-post1-dflash`** (@ `0114538468b56df32a522f6dede85d1def34b45c`):
-  the branch above + two upstream cherry-picks that missed the `v0.5.15` release branch,
-  enabling DFlash speculative decoding on pure-MLA fp8-KV targets (Kimi-K2.x-NVFP4):
-  sgl-project/sglang#29218 (fa4 draft gets its own bf16 KV; mamba verify-commit guard for
-  pure-MLA) and sgl-project/sglang#30680 (its `_need_mamba_verify_commit` init-ordering
-  fix — the two go together). Both are upstream commits (`git cherry-pick -x`), so they
-  drop out on a rebase past their merge. Plus three fork-local loader-compat commits
-  (`c85b9409f` + `54324ba7c` + `3e8ab94f6`, tested tip `3e8ab94f6d59…`) for the
-  F4-serialized Kimi-family NVFP4 re-quants: view
-  `float4_e2m1fn_x2` safetensors tensors as packed uint8 across all three loader
-  iterators (post-fp4-dtype torch/safetensors otherwise dies at
-  `expert_data.copy_(loaded_weight)`; the pre-fp4 v0.5.12 image read the same bytes as
-  uint8), and map the fp8-style expert scale names (`weight_scale_inv` /
-  `weight_scale_global`) onto the modelopt NVFP4 params (`weight_scale` /
-  `weight_scale_2`), plus `101a9de7e` extending the fp4 view to
-  `load_plan.partial_weights_iterator` (its direct `safe_open` reads bypass the
-  iterator-level view — without it every partial reload of an F4-serialized checkpoint
-  demotes to a full reload). Upstreaming candidates.
+The commit RPC still reads and transforms the complete target checkpoint. On
+each commit, Stitch forwards the load format selected for the initial server
+load. On hosts without GDS, recipes select fastsafetensors’ supported no-GDS
+mode:
 
-- **`stitch-sglang-minkai-dflash`** (@ `28a554ccddd035b6d592b49f32163b812384287d`): the
-  full RL patch stack ported onto the PROD serving base —
-  `minkai/nvfp4-w13-global-requant-fp32bias` @ `7175bbd4f` (v0.5.12 base + the
-  jamesliu dflash-fa4-fp8 stack + the w13 global-requant fix). 11 commits: the seven
-  RL patches (patch 5 rewritten per the doctrine below — per-expert fast paths for
-  flashinfer_trtllm and CUTLASS, declining cutedsl/padded layouts, and preserving the
-  base's w13 requant per touched expert via `_fold_w13_global_scales`) + the four
-  loader-compat commits above. GPU byte-identity validation (`/weights_checker`,
-  partial vs full) pending — the doctrine's step 4. Pinned by the private provider
-  repo's Kimi-K2.6 NVFP4 serving config.
+```python
+"--load-format": "fastsafetensors",
+"--model-loader-extra-config": '{"enable_gds":false}',
+"--weight-loader-drop-cache-after-load": "",
+```
 
-## Re-porting to a newer sglang release (`stitch-sglang-vX`)
+## CPU destination
 
-When bumping the base (e.g. to `v0.5.16`):
+CPU mode trades host RAM for the shortest commit:
 
-1. Branch `stitch-sglang-vX` off the new tag on `modal-projects/sglang`.
-2. Re-apply the seven commits **in the order above** (cherry-pick from
-   `stitch-sglang-v0.5.15`, or from the source branches `weight-sync-miles` /
-   `fp8-reload-main` / `weight-sync-upstream`). Squash-preserving is fine; keep the
-   two tiers legible. Patch 7 (fastsafetensors nogds) is a small standalone one-liner.
-3. **Audit before trusting a clean cherry-pick** — a clean apply does not prove the
-   patch is still needed or correct. In particular:
-   - `[RL] modelopt fp4 ...` (5) is tightly coupled to sglang's NVFP4 MoE post-load
-     (`ModelOptNvFp4FusedMoEMethod.process_weights_after_loading`, the swizzle/alias
-     helpers, and the MoE runner backends). This function is restructured often; the
-     partial pass usually needs a genuine **rewrite**, not a port. The v0.5.15
-     rewrite scopes the fast path to CUTLASS and declines other backends to a safe
-     full reload.
-   - Check whether the new base already upstreamed any patch (then drop it).
-4. **Validate** a quantized partial reload is byte-identical to a full reload of the
-   same bytes via `/weights_checker` (per-tensor checksums) before shipping — this is
-   how the NVFP4 partial pass is proven correct.
-5. Update the three constants in `cookbook/common/serving_image.py` and this file.
+1. After v0 begins serving, SGLang allocates one canonical checkpoint snapshot
+   per host and one complete rank-ready image per local TP rank.
+2. It builds v0 through the model’s ordinary weight loader and quantization
+   hooks and verifies that the prepared runtime storages match the active model.
+3. For every delta lineage, it range-streams compressed fragments through a
+   bounded work budget, reconstructs and checksums the canonical target, then
+   builds every next rank image while inference continues.
+4. `/update_weights_from_cpu` performs distributed preflight and copies the
+   complete images into the existing CUDA storages without replacing storage
+   pointers.
 
-_Most recent bump: `v0.5.15` → `v0.5.15.post1` — a clean cherry-pick of all seven commits.
-`git range-diff` was identical (post1's changes are disjoint from the patch surface except
-`scheduler.py` / `server_args.py`, which auto-merged). GPU byte-identical reload validation
-runs at the next e2e._
+Stitch starts step 1 in the background. A published delta waits for that same
+initialization task; it does not start a second cache build. An initialization
+or staging failure is reported and the GPU remains on its prior weights.
 
-## Upstreaming
+CPU mode is delta-only. It rejects FULL publications and cannot reset a patched
+live replica to another run’s v0; the controller must use disk mode or replace
+that replica. This keeps a single canonical snapshot rather than retaining a
+second rollback-sized CPU checkpoint. Compressed deltas are not retained in a
+lineage-sized CPU arena after reconstruction.
 
-We want these in upstream sglang so the fork shrinks to zero. Open PRs:
-`/pull_weights` → sgl-project/sglang#30367; quantized reload → sgl-project/sglang#30761.
-The load-plan / partial-reload tier is not yet filed.
+Enable it explicitly:
+
+```python
+"--enable-cpu-weight-cache": "",
+"--cpu-weight-cache-max-compile-group-gb": "8",
+```
+
+The group bound limits transient loader work; it does not tune correctness or
+assume a model architecture. An indivisible module larger than the requested
+bound remains intact and is reported.
+
+Persistent host RAM is approximately:
+
+```text
+one canonical checkpoint per host
++ one rank-local runtime image per local TP rank
+```
+
+Measured TP4 reference costs are:
+
+| Model | Canonical checkpoint | Rank image × 4 | Persistent core |
+| --- | ---: | ---: | ---: |
+| GLM-4.5-Air FP8 | 112.6 GB | 27.2 GB × 4 | 221.3 GB |
+| Kimi K2.6 NVFP4 | about 595 GB | about 151 GB × 4 | about 1.20 TB |
+
+Allow additional memory for the engine process, delta decoding, and bounded
+loader staging. The supplied recipes request `(512 GiB, 2 TiB)` for GLM and
+`(1 TiB, 3 TiB)` for Kimi, expressed as `(request, limit)`.
+
+All runtime storages are prepared and committed. Element-wise sparsity only
+reduces the compressed delta transport and XOR work.
+
+## Correctness
+
+Delta application and checksum verification happen in canonical checkpoint
+tensor space, before TP sharding and runtime-layout conversion. Missing bytes,
+invalid lineage, size mismatches, and checksum mismatches fail staging without
+mutating the live model.
+
+Verified tensors then pass through the same model loader and quantization hooks
+used for initial loading. The implementation does not special-case changed
+tensor sets and applies to dense element-wise deltas. Checkpoint layout support is
+selected by each quantization method; FP8, ModelOpt NVFP4, and Blackwell MXFP4
+therefore use their native SGLang transforms rather than checkpoint-specific
+workarounds.
+
+Every TP rank must pass preflight before commit starts. A rank-local copy failure
+after that point is fatal because continuing with mixed rank versions would be
+incorrect. Speculative draft models remain rejected until target and draft
+weights can be committed atomically.
+
+## Re-porting
+
+For a new SGLang release:
+
+1. create `stitch-sglang-vX` from the exact upstream tag;
+2. omit the fastsafetensors commit if upstream already contains PR #31859;
+3. reapply the remaining responsibilities as separate commits;
+4. audit the release’s loader, quantization, scheduler, process-group, and
+   CUDA-graph primitives and delete fork code superseded upstream;
+5. run SGLang’s own pre-commit hooks and focused unit tests;
+6. validate generation before, during, and after one complete delta update on
+   FP8 and ModelOpt NVFP4, and validate MXFP4 transforms on Blackwell; and
+7. update the image, branch, immutable commit, and this file.
+
+Upstream fastsafetensors reference:
+<https://github.com/sgl-project/sglang/pull/31859>.
