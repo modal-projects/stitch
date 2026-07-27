@@ -6,13 +6,16 @@ loading for quantized rollout models.
 
 ## Pin
 
-[`serving_image.py`](serving_image.py) is the executable source of truth:
+[`serving_image.py`](serving_image.py) is the executable source of truth for the
+default runtime:
 
 ```python
-SGLANG_IMAGE_TAG = "lmsysorg/sglang:v0.5.16"
-SGLANG_FORK_REPO = "https://github.com/modal-projects/sglang.git"
-SGLANG_FORK_BRANCH = "stitch-sglang-v0.5.16"
-SGLANG_FORK_COMMIT = "a562908a10fb67509a906c7c9ed8d7ff105c7a28"
+DEFAULT_SGLANG_RUNTIME = SGLangRuntime(
+    image="lmsysorg/sglang:v0.5.16",
+    repository="https://github.com/modal-projects/sglang.git",
+    branch="stitch-sglang-v0.5.16",
+    commit="a562908a10fb67509a906c7c9ed8d7ff105c7a28",
+)
 ```
 
 The branch is upstream v0.5.16 plus:
@@ -31,6 +34,15 @@ The branch is upstream v0.5.16 plus:
 
 The image and branch must use the same SGLang release because Stitch overlays
 Python code onto the image’s existing CUDA and C++ extensions.
+
+Models that require another upstream SGLang line set `SGLANG_RUNTIME` in their
+configuration. The image, fork branch, and immutable commit stay together so
+the Python overlay remains ABI-compatible with the image.
+
+[`kimi_k3_mxfp4.py`](../miles_disagg/configs/kimi_k3_mxfp4.py) pins the public
+K3 image and `stitch-sglang-kimi-k3` fork. That fork ports the same weight-sync
+responsibilities onto SGLang’s public `kimi-k3` branch; other recipes continue
+to use the v0.5.16 default.
 
 ## API
 
@@ -140,16 +152,18 @@ one canonical checkpoint per host
 + one rank-local runtime image per local TP rank
 ```
 
-Measured TP4 reference costs are:
+Measured reference costs are:
 
-| Model | Canonical checkpoint | Rank image × 4 | Persistent core |
-| --- | ---: | ---: | ---: |
-| GLM-4.5-Air FP8 | 112.6 GB | 27.2 GB × 4 | 221.3 GB |
-| Kimi K2.6 NVFP4 | about 595 GB | about 151 GB × 4 | about 1.20 TB |
+| Model | TP | Canonical checkpoint | Rank image | Persistent core |
+| --- | ---: | ---: | ---: | ---: |
+| GLM-4.5-Air FP8 | 4 | 112.6 GB | 27.2 GB × 4 | 221.3 GB |
+| Kimi K2.6 NVFP4 | 4 | about 595 GB | about 151 GB × 4 | about 1.20 TB |
+| Kimi K3 MXFP4 | 8 | 1.561 TB | 207.5 GB × 8 | 3.221 TB |
 
 Allow additional memory for the engine process, delta decoding, and bounded
 loader staging. The supplied recipes request `(512 GiB, 2 TiB)` for GLM and
-`(1 TiB, 3 TiB)` for Kimi, expressed as `(request, limit)`.
+`(1 TiB, 3 TiB)` for Kimi K2.6, expressed as `(request, limit)`. The K3
+profiler uses `(1 TiB, 4 TiB)`.
 
 All runtime storages are prepared and committed. Element-wise sparsity only
 reduces the compressed delta transport and XOR work.

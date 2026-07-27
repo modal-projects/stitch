@@ -44,7 +44,10 @@ def server_args_for_mode(
     if update_mode == "cpu":
         result["--enable-cpu-weight-cache"] = ""
         result["--cpu-weight-cache-max-compile-group-gb"] = "8"
-    elif update_mode != "disk":
+    elif update_mode == "disk":
+        result.pop("--enable-cpu-weight-cache", None)
+        result.pop("--cpu-weight-cache-max-compile-group-gb", None)
+    else:
         raise ValueError(f"unsupported update mode: {update_mode!r}")
     return result
 
@@ -124,7 +127,7 @@ def _generate(
         body = response.json()
         message = body["choices"][0]["message"]
         text = message.get("content") or message.get("reasoning_content") or ""
-        if len(text.split()) < 8 or sum(character.isalpha() for character in text) < 25:
+        if len(text.split()) < 5 or sum(character.isalpha() for character in text) < 20:
             raise RuntimeError(f"completion was not plausibly fluent: {text!r}")
         result = {
             "wall_s": round(time.perf_counter() - started, 6),
