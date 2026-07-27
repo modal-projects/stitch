@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import threading
 import time
@@ -25,8 +26,8 @@ def prepare_checkpoints(exp, prep_volume) -> None:
     """Build the bf16 masters (trainer arch source) + the served base on a GPU.
 
     masters (bf16): a quantized source (Kimi INT4) is dequantized; a bf16 source IS the
-    masters. served base: bf16 = masters; fp8 = the published ROLLOUT_SOURCE_MODEL; nvfp4 =
-    miles' TE-direct quantizer over the masters (packing == the trainer's export packing).
+    masters. served base: bf16 = masters; a published ROLLOUT_SOURCE_MODEL is copied
+    directly; otherwise NVFP4 is built with Miles' TE-direct quantizer over the masters.
     """
     if getattr(exp, "DISABLE_HF_XET", False):
         os.environ["HF_HUB_DISABLE_XET"] = "1"
@@ -61,14 +62,26 @@ def prepare_checkpoints(exp, prep_volume) -> None:
         print(f"Prepared masters={bf16_dir} served_base={bf16_dir}")
         return
 
-    if served_format == "fp8":
-        fp8_source = getattr(exp, "ROLLOUT_SOURCE_MODEL", None)
-        if not fp8_source:
-            raise SystemExit("SERVED_CHECKPOINT_FORMAT='fp8' requires ROLLOUT_SOURCE_MODEL")
-        _staged(fp8_dir, lambda out: _copy_tree("fp8 served base", snapshot_download(fp8_source), out))
+    rollout_source = getattr(exp, "ROLLOUT_SOURCE_MODEL", None)
+    if rollout_source:
+        rollout_revision = getattr(exp, "ROLLOUT_SOURCE_REVISION", None)
+        served_dir = fp8_dir if served_format == "fp8" else nvfp4_dir
+
+        def _download_rollout_checkpoint(out: str) -> None:
+            snapshot_download(
+                rollout_source,
+                revision=rollout_revision,
+                local_dir=out,
+            )
+            shutil.rmtree(os.path.join(out, ".cache"), ignore_errors=True)
+
+        _staged(served_dir, _download_rollout_checkpoint, resume=True)
         prep_volume.commit()
-        print(f"Prepared masters={bf16_dir} served_base={fp8_dir}")
+        print(f"Prepared masters={bf16_dir} served_base={served_dir}")
         return
+
+    if served_format == "fp8":
+        raise SystemExit("SERVED_CHECKPOINT_FORMAT='fp8' requires ROLLOUT_SOURCE_MODEL")
 
     # nvfp4: miles' TE-direct quantizer. bf16 carve-outs must match the trainer's
     # --num-layers-at-start/end-in-bf16 so the served base == the export layout.
@@ -157,14 +170,15 @@ def _copy_tree(label: str, src: str, dst: str) -> None:
     print(f"copied {label}: {total_gb:.0f} GB", flush=True)
 
 
-def _staged(final_dir: str, build) -> None:
+def _staged(final_dir: str, build, *, resume: bool = False) -> None:
     """Build into a .partial sibling and atomically rename, so an interrupted step never
     leaves a half-built dir the reuse check mistakes for complete."""
     if os.path.isdir(final_dir) and os.listdir(final_dir):
         print(f"reusing existing {final_dir}")
         return
     partial = f"{final_dir}.partial"
-    subprocess.run(["rm", "-rf", partial], check=True)
+    if not resume:
+        subprocess.run(["rm", "-rf", partial], check=True)
     os.makedirs(partial, exist_ok=True)
     build(partial)
     os.rename(partial, final_dir)

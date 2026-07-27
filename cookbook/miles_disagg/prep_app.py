@@ -37,11 +37,17 @@ data_volume = modal.Volume.from_name("miles-data", create_if_missing=True, versi
 prep_volume = modal.Volume.from_name("miles-prep-checkpoints", create_if_missing=True, version=2)
 
 app = modal.App(f"{exp.APP_NAME}-prep")
+checkpoint_gpu = (
+    f"{modal_cfg.gpu}:1"
+    if getattr(exp, "CHECKPOINT_PREP_REQUIRES_GPU", True)
+    else None
+)
 
 
 @app.function(
-    image=image, gpu=f"{modal_cfg.gpu}:1",
+    image=image, gpu=checkpoint_gpu,
     volumes={str(HF_CACHE_PATH): hf_cache_volume, str(PREP_PATH): prep_volume},
+    memory=modal_cfg.trainer_memory_mib,
     timeout=6 * 60 * MINUTES, secrets=[modal.Secret.from_name("huggingface-secret")], include_source=False,
 )
 def prepare_checkpoints() -> None:

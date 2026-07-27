@@ -14,8 +14,12 @@ DELTA_VOLUME_NAME = "stitch-delta-glm5-2-nvfp4"
 DELTA_BULLETIN_ROOT = "/delta-bulletin"
 LOCAL_CHECKPOINT_PATH = "/local-checkpoint"
 
-# GLM-5.2 ships bf16 (unlike Kimi's INT4): the bf16 masters ARE the source, no dequant.
+# GLM-5.2 ships BF16 training masters and an NVIDIA NVFP4 rollout checkpoint.
 SOURCE_MODEL = "zai-org/GLM-5.2"
+ROLLOUT_SOURCE_MODEL = "nvidia/GLM-5.2-NVFP4"
+ROLLOUT_SOURCE_REVISION = "aec724e8c7b8ee9db3b48c01c320f63f9cdaf8aa"
+SERVED_CHECKPOINT_FORMAT = "nvfp4"
+CHECKPOINT_PREP_REQUIRES_GPU = False
 MODEL_TAG = "glm5-2"
 
 SIDECAR_COMMIT_MODE = "in_place"
@@ -32,11 +36,6 @@ SGLANG_SERVER_ARGS = {
     "--load-format": "fastsafetensors",
     "--model-loader-extra-config": '{"enable_gds":false}',
     "--weight-loader-drop-cache-after-load": "",
-    # Run the checkpoint's bundled MTP head for a three-step EAGLE draft.
-    "--speculative-algorithm": "EAGLE",
-    "--speculative-num-steps": "3",
-    "--speculative-eagle-topk": "1",
-    "--speculative-num-draft-tokens": "4",
     # The pinned SGLang has no GLM-5.2 parser; these are the closest available formats.
     "--reasoning-parser": "glm45",
     "--tool-call-parser": "glm47",
@@ -48,11 +47,6 @@ SGLANG_SERVER_ARGS = {
     "--chunked-prefill-size": "16384",
     "--schedule-conservativeness": "0.5",
     "--schedule-policy": "lpm",
-    "--enable-hierarchical-cache": "",
-    "--hicache-ratio": "2",
-    "--hicache-io-backend": "kernel",
-    "--hicache-mem-layout": "page_first",
-    "--hicache-write-policy": "write_through",
     "--skip-server-warmup": "",
     "--enable-return-routed-experts": "",  # routing replay (DeepSeek-V3-arch MoE)
 }
