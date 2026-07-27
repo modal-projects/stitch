@@ -27,6 +27,18 @@ from . import process
 logger = logging.getLogger(__name__)
 
 
+def sample_affinity_key(sample: Any) -> str | None:
+    """Return one stable routing key for a rollout trajectory or GRPO group."""
+    group_index = getattr(sample, "group_index", None)
+    if group_index is not None:
+        return f"group-{group_index}"
+    for name in ("routing_key", "session_id"):
+        value = getattr(sample, name, None)
+        if value is not None:
+            return str(value)
+    return None
+
+
 # ── publish ────────────────────────────────────────────────────────────────────
 def commit_and_wake(args: Any, published_dir: str, rollout_engines: Any = None) -> None:
     """Bridge the framework's disk-delta publish to the stitch store. The framework fires this
@@ -49,7 +61,9 @@ def commit_and_wake(args: Any, published_dir: str, rollout_engines: Any = None) 
         publish_version(store, _pool(args), published_dir, run_id=_run_id(args))
     except PointerRewind:
         # A same-run republish (e.g. a retried step) — drop it rather than serve stale.
-        logger.warning("publish of %s would rewind latest; dropping", published_dir, exc_info=True)
+        logger.warning(
+            "publish of %s would rewind latest; dropping", published_dir, exc_info=True
+        )
 
 
 def claim_pool(args: Any) -> None:
@@ -61,14 +75,17 @@ def claim_pool(args: Any) -> None:
 
 
 # ── staleness-gated rollout requests ────────────────────────────────────────────
-async def gated_rollout_request_hook(args: Any, sample: Any, request: dict[str, Any]) -> None:
+async def gated_rollout_request_hook(
+    args: Any, sample: Any, request: dict[str, Any]
+) -> None:
     """Pin each request to a bounded-staleness version, so a too-stale replica returns a
     retryable 409 (nudging it to sync) instead of the trainer spending rollout compute on
     weights beyond its lag bound."""
     payload, headers = request["payload"], dict(request.get("headers") or {})
     mode = str(getattr(args, "rollout_request_weight_version_mode", "min"))
-    affinity = str(getattr(args, "rollout_session_affinity_header", "x-session-affinity"))
-    session_id = getattr(sample, "session_id", None)
+    affinity = str(
+        getattr(args, "rollout_session_affinity_header", "x-session-affinity")
+    )
 
     latest = exact = None
     lag = 0
@@ -80,12 +97,21 @@ async def gated_rollout_request_hook(args: Any, sample: Any, request: dict[str, 
         else:
             latest = floor
     constrain_request(
-        payload, headers, latest=latest, lag=lag, exact=exact,
-        session_id=session_id, affinity_header=affinity,
+        payload,
+        headers,
+        latest=latest,
+        lag=lag,
+        exact=exact,
+        session_id=sample_affinity_key(sample),
+        affinity_header=affinity,
     )
     request["headers"] = headers
-    request["max_retries"] = int(getattr(args, "rollout_request_retry_attempts", request.get("max_retries", 60)))
-    request["retry_sleep"] = float(getattr(args, "rollout_request_retry_sleep", request.get("retry_sleep", 1.0)))
+    request["max_retries"] = int(
+        getattr(args, "rollout_request_retry_attempts", request.get("max_retries", 60))
+    )
+    request["retry_sleep"] = float(
+        getattr(args, "rollout_request_retry_sleep", request.get("retry_sleep", 1.0))
+    )
 
 
 class _CachedPointer:
@@ -101,7 +127,9 @@ class _CachedPointer:
     async def get(self, args: Any, ttl: float = 2.0) -> int:
         store = self._store
         root = Path(_transport_root(args))
-        volume = getattr(args, "update_weight_delta_volume_name", None) or os.environ.get("DELTA_VOLUME_NAME")
+        volume = getattr(
+            args, "update_weight_delta_volume_name", None
+        ) or os.environ.get("DELTA_VOLUME_NAME")
         if store is None or store.root != root or store.volume_name != (volume or None):
             store = self._store = _store(args)
             self._version = 0
@@ -110,11 +138,17 @@ class _CachedPointer:
         if now - self._at >= ttl:
             self._at = now
             try:
-                await asyncio.to_thread(store.refresh)  # reload is blocking; keep the loop free
+                await asyncio.to_thread(
+                    store.refresh
+                )  # reload is blocking; keep the loop free
                 pointer = store.read_pointer()
                 self._version = pointer.version if pointer else 0
             except Exception:  # noqa: BLE001
-                logger.warning("gate: could not read latest; using cached %s", self._version, exc_info=True)
+                logger.warning(
+                    "gate: could not read latest; using cached %s",
+                    self._version,
+                    exc_info=True,
+                )
         return self._version
 
 
@@ -123,24 +157,34 @@ _latest = _CachedPointer()
 
 # ── args → run coordinates ───────────────────────────────────────────────────────
 def _store(args: Any) -> ModalVolumeStore:
-    volume = getattr(args, "update_weight_delta_volume_name", None) or os.environ.get("DELTA_VOLUME_NAME")
+    volume = getattr(args, "update_weight_delta_volume_name", None) or os.environ.get(
+        "DELTA_VOLUME_NAME"
+    )
     return ModalVolumeStore(_transport_root(args), volume_name=volume or None)
 
 
 def _pool(args: Any) -> ModalFlashPool:
-    app = getattr(args, "rollout_modal_flash_app_name", None) or os.environ.get("DELTA_APP_NAME")
-    cls = getattr(args, "rollout_modal_flash_server_cls_name", None) or os.environ.get("DELTA_SERVER_CLS_NAME", "Server")
+    app = getattr(args, "rollout_modal_flash_app_name", None) or os.environ.get(
+        "DELTA_APP_NAME"
+    )
+    cls = getattr(args, "rollout_modal_flash_server_cls_name", None) or os.environ.get(
+        "DELTA_SERVER_CLS_NAME", "Server"
+    )
     return ModalFlashPool(app, cls)
 
 
 def _transport_root(args: Any) -> str:
     # The trainer writes version dirs under <root>/<run_id>; the Store is rooted at <root>.
-    write_dir = getattr(args, "update_weight_disk_dir", None) or os.environ.get("DELTA_BULLETIN_ROOT", "/delta-bulletin")
+    write_dir = getattr(args, "update_weight_disk_dir", None) or os.environ.get(
+        "DELTA_BULLETIN_ROOT", "/delta-bulletin"
+    )
     return str(Path(write_dir).parent)
 
 
 def _run_id(args: Any) -> str:
     run_id = getattr(args, "run_id", None)
     if not run_id:
-        raise ValueError("run_id is required (pass it via custom_config_path) — it is the run's fence token")
+        raise ValueError(
+            "run_id is required (pass it via custom_config_path) — it is the run's fence token"
+        )
     return str(run_id)
