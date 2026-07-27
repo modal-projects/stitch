@@ -1,7 +1,7 @@
 [project]
 name = "stitch"
 version = "0.1.0"
-description = "Trainer-agnostic disaggregated rollout weight sync helpers"
+description = "Versioned control plane for disaggregated RL rollouts"
 requires-python = ">=3.11"
 dependencies = []
 
