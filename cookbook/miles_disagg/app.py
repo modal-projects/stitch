@@ -66,7 +66,13 @@ ROLLOUT_CONCURRENCY = modal_cfg.rollout_target_inputs or miles_cfg.sglang_server
 # EXPERIMENT_CONFIG + RUN are baked into both images so a container's re-import rebuilds the same
 # app name and transport paths as the deploy, not the defaults.
 image = trainer_image.build_trainer_image(hf_cache_path=str(HF_CACHE_PATH), experiment=EXPERIMENT, run_id=RUN_ID, miles_local=MILES_LOCAL_DIR)
-server_image = serving_image.build_serving_image(hf_cache_path=str(HF_CACHE_PATH), delta_volume_name=exp.DELTA_VOLUME_NAME, experiment=EXPERIMENT, run_id=RUN_ID)
+server_image = serving_image.build_serving_image(
+    hf_cache_path=str(HF_CACHE_PATH),
+    delta_volume_name=exp.DELTA_VOLUME_NAME,
+    experiment=EXPERIMENT,
+    run_id=RUN_ID,
+    extra_env=getattr(exp, "SGLANG_SERVER_ENV", None),
+)
 if MILES_LOCAL_DIR:
     server_image = server_image.add_local_dir(MILES_LOCAL_DIR, remote_path=MILES_ROOT, ignore=[".git", "**/__pycache__", "**/*.pyc"])
 

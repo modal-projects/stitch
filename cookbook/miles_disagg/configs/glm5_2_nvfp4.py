@@ -32,6 +32,11 @@ SGLANG_SERVER_ARGS = {
     "--load-format": "fastsafetensors",
     "--model-loader-extra-config": '{"enable_gds":false}',
     "--weight-loader-drop-cache-after-load": "",
+    # Run the checkpoint's bundled MTP head for a three-step EAGLE draft.
+    "--speculative-algorithm": "EAGLE",
+    "--speculative-num-steps": "3",
+    "--speculative-eagle-topk": "1",
+    "--speculative-num-draft-tokens": "4",
     # The pinned SGLang has no GLM-5.2 parser; these are the closest available formats.
     "--reasoning-parser": "glm45",
     "--tool-call-parser": "glm47",

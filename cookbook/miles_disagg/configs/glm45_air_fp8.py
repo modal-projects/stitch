@@ -13,6 +13,11 @@ LOCAL_CHECKPOINT_PATH = None
 SIDECAR_COMMIT_MODE = "in_place"
 SIDECAR_FLUSH_CACHE_ON_COMMIT = False
 SGLANG_DELTA_UPDATE_MODE = "cpu"
+SGLANG_SERVER_ENV = {
+    # SGLang v0.5.16's FA3 backend lacks EAGLE's post-draft overlap-plan hook.
+    # Prepare verification metadata on the main stream while keeping EAGLE enabled.
+    "SGLANG_ENABLE_OVERLAP_PLAN_STREAM": "0",
+}
 
 MODEL_TAG = "glm45-air"
 SOURCE_MODEL = "zai-org/GLM-4.5-Air"
@@ -32,9 +37,16 @@ SGLANG_SERVER_ARGS = {
     "--cpu-weight-cache-max-compile-group-gb": "8",
     "--weight-loader-drop-cache-after-load": "",
     "--dtype": "auto",
+    # Run the checkpoint's bundled MTP head for a three-step EAGLE draft.
+    "--speculative-algorithm": "EAGLE",
+    "--speculative-num-steps": "3",
+    "--speculative-eagle-topk": "1",
+    "--speculative-num-draft-tokens": "4",
     "--reasoning-parser": "glm45",
     "--tool-call-parser": "glm",
     "--dist-timeout": "3600",
+    "--kv-cache-dtype": "fp8_e4m3",  # Lower decode bandwidth; slightly changes KV numerics.
+    "--disable-shared-experts-fusion": "",  # Recommended for GLM-4.5 FP8.
     "--context-length": "32768",
     "--mem-fraction-static": "0.7",
     "--chunked-prefill-size": "8192",
