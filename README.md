@@ -1,36 +1,59 @@
 # Stitch
 
-Stitch synchronizes policy weights from an RL trainer to an elastic rollout
-fleet.
+Stitch is the versioned control plane for disaggregated reinforcement learning.
+It lets policy training and rollout inference run as independent, elastic
+systems while preserving which policy produced every trajectory.
 
-## Guarantees
+This matters for asynchronous and agentic RL: policy updates continue while
+long rollouts are in flight, rollout workers join and leave, and different
+consumers tolerate different amounts of staleness. Stitch turns an inference
+fleet into a coherent, versioned rollout service. It coordinates policy
+publication, replica convergence, request admission, and engine commits without
+prescribing the training algorithm, inference engine, storage system, or
+compute provider.
 
-- **Updates overlap serving.** Replicas stage and verify the next full
-  checkpoint or delta before briefly gating new requests for the engine commit.
-- **Rollouts are versioned.** Requests can require a minimum or exact version;
-  incompatible replicas return a retryable `409`, and responses report their
-  start and end versions.
-- **The fleet is elastic.** New replicas load the base, catch up to the current
-  version, and enter rotation without trainer coordination.
-- **Publication is failure-safe.** Checkpoint bytes become durable before the
-  shared pointer advances, and a replica reports a version only after its
-  engine commits it.
-- **Integrations are pluggable.** Stores, inference engines, and rollout pools
-  implement the separate `Store`, `Engine`, and `Pool` interfaces.
+```text
+Trainer ── publish policy versions ──> Store
+   │                                      ▲
+   │ version-constrained requests         │ reconcile
+   ▼                                      │
+Pool gateway ───────────────────────> Rollout replicas ──> Inference engines
+```
 
-The trainer publishes immutable versions to a shared store. Replicas reconcile
-independently, so a missed notification delays an update but does not prevent
-convergence.
+## What Stitch provides
+
+- **A versioned rollout service.** Requests can require a minimum or exact
+  policy version. Incompatible replicas return a retryable `409`, and responses
+  report the versions at generation start and end.
+- **Continuous policy updates.** Replicas stage and verify the next full
+  checkpoint or delta while serving. Only the engine commit briefly gates new
+  requests.
+- **Elastic rollout capacity.** New replicas load the base policy, catch up to
+  the current version, and enter rotation only when ready.
+- **Failure-safe convergence.** Version bytes become durable before the shared
+  pointer advances. A replica reports a version only after its engine commits
+  it successfully.
+- **Replaceable infrastructure.** Trainers, stores, inference engines, and
+  rollout pools meet at small, separate interfaces.
+
+The store is the source of truth. Replicas reconcile independently against its
+monotonic version pointer, so a missed notification delays an update but cannot
+prevent convergence. This decentralized model lets the rollout fleet scale and
+recover without becoming part of the trainer's process lifecycle.
 
 ## Integrations
 
-Stitch includes Modal Volume and S3 stores, SGLang engines, Modal Flash pools,
-and reference Miles and Slime deployments.
+The core package is trainer-, engine-, and provider-agnostic through the
+[`Store`](src/stitch/stores/base.py),
+[`Engine`](src/stitch/engines/base.py), and
+[`Pool`](src/stitch/pools/base.py) interfaces.
 
-See the [cookbook](cookbook/README.md) to choose an update mode, launch a run,
-scale the rollout fleet, and validate an update. Fork pins and re-porting notes
-are in [SGLANG_FORK.md](cookbook/common/SGLANG_FORK.md) and
-[MILES_FORK.md](cookbook/miles_disagg/MILES_FORK.md).
+Stitch includes Modal Volume and S3 stores, SGLang engines, Modal Flash pools,
+and reference Miles and Slime deployments. See the
+[`cookbook`](cookbook/README.md) to choose an update mode, launch a run, scale
+the rollout fleet, and validate an update. Fork pins and re-porting notes are
+in [`SGLANG_FORK.md`](cookbook/common/SGLANG_FORK.md) and
+[`MILES_FORK.md`](cookbook/miles_disagg/MILES_FORK.md).
 
 ## Development
 
