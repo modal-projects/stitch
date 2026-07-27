@@ -5,8 +5,8 @@ and observing weight-version convergence. It is not a deployment example.
 
 - `traffic.py` sends long-decode, long-prefill, agentic, or mixed traffic and
   records version attribution.
-- `poller.py` records each replica's version, convergence lag, stage/commit
-  timing, and not-ready windows.
+- `poller.py` records each replica's version, convergence lag, staging and
+  engine pause timing, and not-ready windows.
 - `app.py` runs both probes on Modal and stores JSONL results.
 
 ## Run

@@ -38,7 +38,7 @@ Miles owns trainer-side state:
 
 Stitch and SGLang own rollout-host state: materializing publications, verifying
 lineage and checksums, compiling disk or CPU destinations, gating admission for
-the short commit, and reporting the version that served each request.
+the short engine pause, and reporting the version that served each request.
 
 Canonical checkpoint bytes are required only for `disk-delta`. Other Miles
 weight transports retain their established engine-runtime layouts. Delta

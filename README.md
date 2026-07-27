@@ -8,9 +8,9 @@ This matters for asynchronous and agentic RL: policy updates continue while
 long rollouts are in flight, rollout workers join and leave, and different
 consumers tolerate different amounts of staleness. Stitch turns an inference
 fleet into a coherent, versioned rollout service. It coordinates policy
-publication, replica convergence, request admission, and engine commits without
-prescribing the training algorithm, inference engine, storage system, or
-compute provider.
+publication, replica convergence, request admission, and weight activation
+without prescribing the training algorithm, inference engine, storage system,
+or compute provider.
 
 ```text
 Trainer ── publish policy versions ──> Store
@@ -26,12 +26,12 @@ Pool gateway ──────────────────────�
   policy version. Incompatible replicas return a retryable `409`, and responses
   report the versions at generation start and end.
 - **Continuous policy updates.** Replicas stage and verify the next full
-  checkpoint or delta while serving. Only the engine commit briefly gates new
-  requests.
+  checkpoint or delta while serving. Weight activation briefly pauses the
+  engine and gates new requests.
 - **Elastic rollout capacity.** New replicas load the base policy, catch up to
   the current version, and enter rotation only when ready.
 - **Failure-safe convergence.** Version bytes become durable before the shared
-  pointer advances. A replica reports a version only after its engine commits
+  pointer advances. A replica reports a version only after its engine activates
   it successfully.
 - **Replaceable infrastructure.** Trainers, stores, inference engines, and
   rollout pools meet at small, separate interfaces.
