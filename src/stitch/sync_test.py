@@ -153,7 +153,7 @@ def test_catch_up() -> None:
     _run(go())
 
 
-def test_latest_advance_during_stage_folds_next_pass() -> None:
+def test_latest_advance_during_stage_coalesces_before_commit() -> None:
     async def go() -> None:
         manifests = [_delta("r1", version, files=[f"v{version}"]) for version in range(7, 11)]
         store = FakeStore(VersionRef("r1", 7), *manifests)
@@ -179,8 +179,102 @@ def test_latest_advance_during_stage_folds_next_pass() -> None:
         await syncing
 
         assert engine.staged == [VersionRef("r1", 7), VersionRef("r1", 10)]
-        assert engine.committed == [VersionRef("r1", 7), VersionRef("r1", 10)]
+        assert engine.committed == [VersionRef("r1", 10)]
         assert r.applied == VersionRef("r1", 10)
+        assert r.metrics["initial_target_version"] == 7
+        assert r.metrics["target_version"] == 10
+        assert r.metrics["coalesced_versions"] == 3
+
+    _run(go())
+
+
+def test_continuous_publishing_cannot_starve_commit() -> None:
+    async def go() -> None:
+        store = FakeStore(
+            VersionRef("r1", 1),
+            *(
+                _delta("r1", version, files=[f"v{version}"])
+                for version in range(1, 4)
+            ),
+        )
+        engine = FakeEngine()
+        stage = engine.stage
+
+        async def advancing_stage(
+            manifest: VersionManifest,
+            source_dir: str,
+        ) -> None:
+            await stage(manifest, source_dir)
+            if manifest.ref.version < 3:
+                store.advance_pointer(
+                    VersionRef("r1", manifest.ref.version + 1)
+                )
+
+        engine.stage = advancing_stage  # type: ignore[method-assign]
+        r = Reconciler(store=store, engine=engine)
+        r.applied = VersionRef("r1", 0)
+
+        caught_up = await r._reconcile_once()
+
+        assert not caught_up
+        assert engine.staged == [VersionRef("r1", 1), VersionRef("r1", 2)]
+        assert engine.committed == [VersionRef("r1", 2)]
+        assert r.applied == VersionRef("r1", 2)
+        assert store.read_pointer() == VersionRef("r1", 3)
+
+    _run(go())
+
+
+def test_coalesce_does_not_cross_run_lineage() -> None:
+    async def go() -> None:
+        store = FakeStore(
+            VersionRef("r1", 1),
+            _delta("r1", 1, files=["old"]),
+            _delta("r2", 1, files=["new"]),
+        )
+        engine = FakeEngine()
+        stage = engine.stage
+
+        async def switching_stage(
+            manifest: VersionManifest,
+            source_dir: str,
+        ) -> None:
+            await stage(manifest, source_dir)
+            store.advance_pointer(VersionRef("r2", 1))
+
+        engine.stage = switching_stage  # type: ignore[method-assign]
+        r = Reconciler(store=store, engine=engine)
+        r.applied = VersionRef("r1", 0)
+
+        assert not await r._reconcile_once()
+        assert engine.staged == [VersionRef("r1", 1)]
+        assert engine.committed == [VersionRef("r1", 1)]
+        assert r.applied == VersionRef("r1", 1)
+
+    _run(go())
+
+
+def test_coalesce_observation_failure_commits_staged_target() -> None:
+    class FailSecondRefreshStore(FakeStore):
+        def refresh(self) -> None:
+            super().refresh()
+            if self.refreshed == 2:
+                raise RuntimeError("transient store error")
+
+    async def go() -> None:
+        store = FailSecondRefreshStore(
+            VersionRef("r1", 1),
+            _delta("r1", 1, files=["v1"]),
+        )
+        engine = FakeEngine()
+        r = Reconciler(store=store, engine=engine)
+        r.applied = VersionRef("r1", 0)
+
+        assert await r._reconcile_once()
+        assert engine.staged == [VersionRef("r1", 1)]
+        assert engine.committed == [VersionRef("r1", 1)]
+        assert r.applied == VersionRef("r1", 1)
+        assert r.metrics["coalesce_error"] == "transient store error"
 
     _run(go())
 

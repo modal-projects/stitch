@@ -278,7 +278,8 @@ class Reconciler(AdmissionGate):
                 if caught_up:
                     # A publish can land mid-commit; re-check before idling.
                     await asyncio.to_thread(self.store.refresh)
-                    if self._behind(self.store.read_pointer()):
+                    pointer = await asyncio.to_thread(self.store.read_pointer)
+                    if self._behind(pointer):
                         caught_up = False
             except Exception as exc:  # noqa: BLE001
                 self.last_error = str(exc)
@@ -356,7 +357,7 @@ class Reconciler(AdmissionGate):
 
     async def _reconcile_once_measured(self, m: dict[str, Any]) -> bool:
         await asyncio.to_thread(self.store.refresh)
-        pointer = self.store.read_pointer()
+        pointer = await asyncio.to_thread(self.store.read_pointer)
         if pointer is None:
             return True
         if self.applied is None or pointer.run_id != self.applied.run_id:
@@ -368,7 +369,7 @@ class Reconciler(AdmissionGate):
         self.last_error = None
         m["target_version"] = pointer.version
         m["applied_version"] = self.applied.version if self.applied else -1
-        target = self.store.read_manifest(pointer)
+        target = await asyncio.to_thread(self.store.read_manifest, pointer)
         source_dir = await asyncio.to_thread(self.store.materialize, pointer)
         logger.info(
             "catch-up: %s -> v%d, preparing weight update",
@@ -401,10 +402,55 @@ class Reconciler(AdmissionGate):
             await self.commit(apply=self._commit_noop, on_applied=on_applied)
             m["skipped_weight_update"] = True
         else:
-            # Preparation runs while serving; the gate covers only the load.
+            # Preparation runs while serving. Re-read the head once before the
+            # commit so a slow stage does not force an avoidable GPU update to an
+            # already-obsolete version. One re-check bounds the work when the
+            # trainer publishes continuously.
             self.sync_state = SyncState.STAGING
+            initial_pointer = pointer
             with _timed(m, "stage_s"):
                 await self.engine.stage(target, source_dir)
+                try:
+                    await asyncio.to_thread(self.store.refresh)
+                    latest = await asyncio.to_thread(self.store.read_pointer)
+                    if (
+                        latest is not None
+                        and latest.run_id == pointer.run_id
+                        and latest.version > pointer.version
+                    ):
+                        latest_target = await asyncio.to_thread(
+                            self.store.read_manifest, latest
+                        )
+                        latest_source_dir = await asyncio.to_thread(
+                            self.store.materialize, latest
+                        )
+                    else:
+                        latest = None
+                except Exception as exc:  # noqa: BLE001
+                    latest = None
+                    m["coalesce_error"] = str(exc)
+                    logger.warning(
+                        "could not inspect a newer target; committing staged v%d",
+                        pointer.version,
+                        exc_info=True,
+                    )
+
+                if latest is not None:
+                    logger.info(
+                        "catch-up: staging advanced head v%d -> v%d before commit",
+                        pointer.version,
+                        latest.version,
+                    )
+                    await self.engine.stage(latest_target, latest_source_dir)
+                    pointer = latest
+                    target = latest_target
+
+            if pointer != initial_pointer:
+                m["initial_target_version"] = initial_pointer.version
+                m["target_version"] = pointer.version
+                m["coalesced_versions"] = (
+                    pointer.version - initial_pointer.version
+                )
             logger.info("catch-up: loading v%d into the engine", pointer.version)
 
             async def apply() -> None:
@@ -422,9 +468,8 @@ class Reconciler(AdmissionGate):
                 resume=self.engine.resume,
             )
         self.sync_state = SyncState.FETCHING
-        return not self._behind(
-            self.store.read_pointer()
-        )  # a mid-pass publish is next tick's work
+        pointer = await asyncio.to_thread(self.store.read_pointer)
+        return not self._behind(pointer)  # a mid-pass publish is next tick's work
 
     async def _commit_noop(self) -> None:
         self.sync_state = SyncState.COMMITTING
