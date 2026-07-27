@@ -39,9 +39,11 @@ SGLANG_SERVER_ARGS = {
     # The pinned SGLang has no GLM-5.2 parser; these are the closest available formats.
     "--reasoning-parser": "glm45",
     "--tool-call-parser": "glm47",
+    "--trust-remote-code": "",
+    "--quantization": "modelopt_fp4",
+    "--moe-runner-backend": "flashinfer_trtllm",
     "--dist-timeout": "3600",
     "--kv-cache-dtype": "fp8_e4m3",
-    "--attention-backend": "tokenspeed_mla",
     "--context-length": "32768",
     "--mem-fraction-static": "0.85",
     "--chunked-prefill-size": "16384",
@@ -86,7 +88,8 @@ class _Miles(MilesConfig):
     num_gpus_per_node = 8
     colocate = False
     rollout_num_gpus = 0
-    rollout_num_gpus_per_engine = 4  # TODO(glm5.2): B200s per rollout engine (fit the base)
+    # TODO(glm5.2): Size B200s per rollout engine to the served checkpoint.
+    rollout_num_gpus_per_engine = 4
     rollout_endpoint_url = None
     use_miles_router = True
 

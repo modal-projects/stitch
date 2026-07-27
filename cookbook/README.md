@@ -30,7 +30,9 @@ Set `modal.draft_volume` and, for a volume in another Modal environment,
 `modal.draft_volume_env`. The rollout server mounts the volume at `/draft`;
 point `--speculative-draft-model-path` at the checkpoint beneath it. Draft
 weights are loaded at startup and remain fixed across target-weight updates.
-Bundled MTP heads do not need a separate volume.
+The draft acceptance rate may change as the target evolves; changing both
+models requires restarting the replica because they cannot yet be committed
+atomically. Bundled MTP heads do not need a separate volume.
 
 ## Prepare and launch
 
@@ -99,4 +101,7 @@ uv run --extra modal modal run -d \
 ```
 
 They exercise generation during staging, commit the prepared target, validate
-post-update generation, and report timing and resource usage.
+post-update generation, and report timing and resource usage. On the pinned
+SGLang, DFlash and DSPARK reject logprob-returning generation requests while
+speculation is enabled. The profiler therefore checks repeated deterministic
+text for those algorithms and uses token IDs plus logprobs otherwise.

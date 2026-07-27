@@ -12,7 +12,7 @@ loading for quantized rollout models.
 SGLANG_IMAGE_TAG = "lmsysorg/sglang:v0.5.16"
 SGLANG_FORK_REPO = "https://github.com/modal-projects/sglang.git"
 SGLANG_FORK_BRANCH = "stitch-sglang-v0.5.16"
-SGLANG_FORK_COMMIT = "40800da7a23016b9dba7d37642d92857926b1ad6"
+SGLANG_FORK_COMMIT = "a562908a10fb67509a906c7c9ed8d7ff105c7a28"
 ```
 
 The branch is upstream v0.5.16 plus:
@@ -27,7 +27,7 @@ The branch is upstream v0.5.16 plus:
 | `e0859b7390` | Stream CPU delta lineages through bounded memory. |
 | `77eca472e6` | Fold disk XOR lineages with bounded positional I/O. |
 | `526e0ddca2` | Fail cache-flushing CPU commits before GPU mutation when the engine is busy. |
-| `40800da7a2` | Load native ModelOpt FP4 expert tensors through their existing loader path. |
+| `a562908a10` | Normalize native ModelOpt FP4 expert tensors through their existing loader path. |
 
 The image and branch must use the same SGLang release because Stitch overlays
 Python code onto the image’s existing CUDA and C++ extensions.

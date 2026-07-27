@@ -7,7 +7,7 @@ executable source of truth:
 ```python
 MILES_IMAGE_TAG = "radixark/miles:dev-202607260602"
 MILES_REPO_URL = "https://github.com/modal-projects/miles.git"
-MILES_REPO_REF = "1eb752001dd719fbb111e844a291918bb896e2df"
+MILES_REPO_REF = "1eb7520018446cb94b7406715f66dff1a271b53b"
 ```
 
 The branch `stitch-weight-sync-v0516` is upstream `radixark/miles` main at
