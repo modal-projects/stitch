@@ -9,7 +9,6 @@ from cookbook.common.config import ModalConfig
 from cookbook.common.constants import DATA_PATH, PREP_PATH
 from cookbook.miles_disagg.config import MilesConfig
 
-
 APP_NAME = "stitch-glm5-2-nvfp4"
 DELTA_VOLUME_NAME = "stitch-delta-glm5-2-nvfp4"
 DELTA_BULLETIN_ROOT = "/delta-bulletin"
@@ -17,10 +16,11 @@ LOCAL_CHECKPOINT_PATH = "/local-checkpoint"
 
 # GLM-5.2 ships bf16 (unlike Kimi's INT4): the bf16 masters ARE the source, no dequant.
 SOURCE_MODEL = "zai-org/GLM-5.2"
-MODEL_TAG = "glm5-2-nvfp4"
+MODEL_TAG = "glm5-2"
 
 SIDECAR_COMMIT_MODE = "in_place"
 SIDECAR_FLUSH_CACHE_ON_COMMIT = False
+SGLANG_DELTA_UPDATE_MODE = "disk"
 # R3 routing-replay needs the dropless Megatron dispatch fix at startup.
 MEGATRON_RUNTIME_PATCHES = [
     "/root/cookbook/miles_disagg/patches/megatron-r3-dispatch.patch",
@@ -28,9 +28,11 @@ MEGATRON_RUNTIME_PATCHES = [
 
 
 SGLANG_SERVER_ARGS = {
-    # fastsafetensors: per-rank O_DIRECT read (~1/tp bytes/rank), no gVisor mmap tax; reload inherits it. nogds set in image.
+    # Use the no-GDS fastsafetensors path on hosts without nvidia-fs.
     "--load-format": "fastsafetensors",
-    # v0.5.15 has no glm5.2 parser; glm45/glm47 are closest. TODO(glm5.2): confirm 5.2's format.
+    "--model-loader-extra-config": '{"enable_gds":false}',
+    "--weight-loader-drop-cache-after-load": "",
+    # The pinned SGLang has no GLM-5.2 parser; these are the closest available formats.
     "--reasoning-parser": "glm45",
     "--tool-call-parser": "glm47",
     "--dist-timeout": "3600",
@@ -50,14 +52,12 @@ SGLANG_SERVER_ARGS = {
     "--enable-return-routed-experts": "",  # routing replay (DeepSeek-V3-arch MoE)
 }
 
-SGLANG_ENV = {"SGLANG_ENABLE_RELOAD_LOAD_PLAN": "1"}  # NVFP4: load-plan replay + O(delta) partial reload
-
 modal = ModalConfig(
     gpu="B200",
     region="us",
     # TODO(glm5.2): size to the actual model. These are Kimi's (~1T) numbers — scale
     # down for a smaller GLM 5.2 (memory, ephemeral disk, node count).
-    memory=(1024, int(3 * 1024 * 1024)),
+    trainer_memory_mib=(1024, int(3 * 1024 * 1024)),
     rollout_min_containers=8,  # warm floor; Flash scales above under load
     rollout_target_inputs=32,
     proxy_regions=["us-west"],
@@ -144,8 +144,8 @@ class _Miles(MilesConfig):
         },
     }
     num_layers_at_start_in_bf16 = 3
-    # END must stay 0: sglang's fused-MoE reload allocates NVFP4 for every expert layer,
-    # so a bf16 last layer can't reload.
+    # END must stay 0: SGLang's fused-MoE weight update allocates NVFP4 for
+    # every expert layer, so a bf16 last layer cannot be updated.
     num_layers_at_end_in_bf16 = 0
 
     update_weight_transfer_mode = "disk-delta"
@@ -239,7 +239,7 @@ class _Miles(MilesConfig):
 
 
 # TODO(glm5.2) — still to confirm before a real run:
-#  1. Parsers: glm45 vs a GLM-5.2-specific reasoning/tool parser in sglang v0.5.15.
+#  1. Parsers: glm45/glm47 vs a future GLM-5.2-specific parser.
 #  2. Size the trainer to 744B-A40B / 78 layers: actor_num_nodes + TP/PP/CP/EP +
 #     decoder_last_pipeline_num_layers + memory / ephemeral disk (values above are
 #     Kimi's ~1T/128-GPU layout as a starting point).

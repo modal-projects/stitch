@@ -17,19 +17,45 @@ SIDECAR_MODULE = "cookbook.common.sidecar"
 
 
 def start_sidecar(
-    *, sidecar_port: int, sglang_port: int, bulletin_root: str, local_checkpoint_dir: str,
-    volume_name: str, commit_mode: str, flush_cache_on_commit: bool = False, debug_requests: bool = False,
+    *,
+    sidecar_port: int,
+    sglang_port: int,
+    bulletin_root: str,
+    base_checkpoint_dir: str,
+    local_checkpoint_dir: str | None,
+    delta_update_mode: str,
+    disk_load_format: str,
+    volume_name: str,
+    commit_mode: str,
+    flush_cache_on_commit: bool = False,
+    debug_requests: bool = False,
 ) -> subprocess.Popen:
     """Launch the versioned rollout proxy (the shared sidecar) beside sglang."""
     cmd = [
-        "python3", "-m", SIDECAR_MODULE,
-        "--host", "0.0.0.0", "--port", str(sidecar_port),
-        "--upstream", f"http://127.0.0.1:{sglang_port}",
-        "--bulletin-root", bulletin_root,
-        "--local-checkpoint-dir", local_checkpoint_dir,
-        "--volume-name", volume_name,
-        "--commit-mode", commit_mode,
+        "python3",
+        "-m",
+        SIDECAR_MODULE,
+        "--host",
+        "0.0.0.0",
+        "--port",
+        str(sidecar_port),
+        "--upstream",
+        f"http://127.0.0.1:{sglang_port}",
+        "--bulletin-root",
+        bulletin_root,
+        "--base-checkpoint-dir",
+        base_checkpoint_dir,
+        "--delta-update-mode",
+        delta_update_mode,
+        "--disk-load-format",
+        disk_load_format,
+        "--volume-name",
+        volume_name,
+        "--commit-mode",
+        commit_mode,
     ]
+    if local_checkpoint_dir is not None:
+        cmd.extend(["--local-checkpoint-dir", local_checkpoint_dir])
     if flush_cache_on_commit:
         cmd.append("--flush-cache-on-commit")
     if debug_requests:

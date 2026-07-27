@@ -9,11 +9,12 @@ from cookbook.miles_disagg.config import MilesConfig
 APP_NAME = "stitch-glm45-air-fp8"
 DELTA_VOLUME_NAME = "stitch-delta-glm45-air-fp8"
 DELTA_BULLETIN_ROOT = "/delta-bulletin"
-LOCAL_CHECKPOINT_PATH = "/local-checkpoint"
-SIDECAR_COMMIT_MODE = "in_place"  # reload without pausing generation — no serving gap; weights shift under in-flight decodes, RL-tolerated
+LOCAL_CHECKPOINT_PATH = None
+SIDECAR_COMMIT_MODE = "in_place"
 SIDECAR_FLUSH_CACHE_ON_COMMIT = False
+SGLANG_DELTA_UPDATE_MODE = "cpu"
 
-MODEL_TAG = "glm45-air-bf16"
+MODEL_TAG = "glm45-air"
 SOURCE_MODEL = "zai-org/GLM-4.5-Air"
 ROLLOUT_SOURCE_MODEL = "zai-org/GLM-4.5-Air-FP8"
 SERVED_CHECKPOINT_FORMAT = "fp8"
@@ -24,13 +25,15 @@ DISABLE_HF_TRANSFER = True
 MEGATRON_RUNTIME_PATCHES = ["/root/cookbook/miles_disagg/patches/megatron-r3-dispatch.patch"]
 
 SGLANG_SERVER_ARGS = {
-    # Dense FP8 reloads the full checkpoint each step; fastsafetensors splits files across TP
-    # ranks (each reads 1/N) to cut bytes under gVisor's byte-copy-bound read. nogds is forced
-    # via SGLANG_FASTSAFETENSORS_NOGDS in the serving image (GDS/nvidia-fs is absent under gVisor).
+    # Use the no-GDS fastsafetensors path on hosts without nvidia-fs.
     "--load-format": "fastsafetensors",
+    "--model-loader-extra-config": '{"enable_gds":false}',
+    "--enable-cpu-weight-cache": "",
+    "--cpu-weight-cache-max-compile-group-gb": "8",
+    "--weight-loader-drop-cache-after-load": "",
     "--dtype": "auto",
     "--reasoning-parser": "glm45",
-    "--tool-call-parser": "glm45",
+    "--tool-call-parser": "glm",
     "--dist-timeout": "3600",
     "--context-length": "32768",
     "--mem-fraction-static": "0.7",
@@ -108,6 +111,7 @@ class _Miles(MilesConfig):
     recompute_granularity = "full"
     recompute_method = "uniform"
     recompute_num_layers = 1
+    attention_backend = "flash"
     attention_dropout = 0.0
     hidden_dropout = 0.0
     accumulate_allreduce_grads_in_fp32 = True
@@ -152,12 +156,13 @@ class _Miles(MilesConfig):
 
 modal = ModalConfig(
     gpu="H200",
-    memory=(1024, int(2 * 1024 * 1024)),
+    trainer_memory_mib=(1024, 2 * 1024 * 1024),
     rollout_min_containers=2,
     rollout_max_containers=4,   # start at 2; scale to 4 mid-run to exercise elastic join
     rollout_target_inputs=32,
     proxy_regions=["us-west"],
-    rollout_ephemeral_disk_mib=819_200,
+    rollout_ephemeral_disk_mib=524_288,
+    rollout_memory_mib=(512 * 1024, 2 * 1024 * 1024),
     torch_dist_prep_nodes=4,
     torch_dist_prep_gpus_per_node=8,
     torch_dist_convert_extra_args=(

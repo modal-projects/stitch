@@ -9,18 +9,18 @@ from cookbook.common.config import ModalConfig
 from cookbook.common.constants import DATA_PATH, PREP_PATH
 from cookbook.miles_disagg.config import MilesConfig
 
-
 APP_NAME = "stitch-kimi-k2-6-nvfp4"
 DELTA_VOLUME_NAME = "stitch-delta-kimi-k2-6-nvfp4"
 DELTA_BULLETIN_ROOT = "/delta-bulletin"
-LOCAL_CHECKPOINT_PATH = "/local-checkpoint"
+LOCAL_CHECKPOINT_PATH = None
 
 # SOURCE_MODEL (INT4) -> dequant -> bf16 masters -> convert -> served NVFP4 base.
 SOURCE_MODEL = "moonshotai/Kimi-K2.6"
-MODEL_TAG = "kimi-k2-6-nvfp4"
+MODEL_TAG = "kimi-k2-6"
 
 SIDECAR_COMMIT_MODE = "in_place"
 SIDECAR_FLUSH_CACHE_ON_COMMIT = False
+SGLANG_DELTA_UPDATE_MODE = "cpu"
 # R3 routing-replay needs the dropless Megatron dispatch fix at startup.
 MEGATRON_RUNTIME_PATCHES = [
     "/root/cookbook/miles_disagg/patches/megatron-r3-dispatch.patch",
@@ -29,8 +29,12 @@ MEGATRON_RUNTIME_PATCHES = [
 
 # mem-fraction / context-length are starting points — measure on a warm B200:4.
 SGLANG_SERVER_ARGS = {
-    # fastsafetensors: per-rank O_DIRECT read (~1/tp bytes/rank), no gVisor mmap tax; reload inherits it. nogds set in image.
+    # Use the no-GDS fastsafetensors path on hosts without nvidia-fs.
     "--load-format": "fastsafetensors",
+    "--model-loader-extra-config": '{"enable_gds":false}',
+    "--enable-cpu-weight-cache": "",
+    "--cpu-weight-cache-max-compile-group-gb": "8",
+    "--weight-loader-drop-cache-after-load": "",
     "--tool-call-parser": "kimi_k2",
     "--reasoning-parser": "kimi_k2",
     "--dist-timeout": "3600",
@@ -41,27 +45,23 @@ SGLANG_SERVER_ARGS = {
     "--chunked-prefill-size": "16384",
     "--schedule-conservativeness": "0.5",
     "--schedule-policy": "lpm",
-    "--enable-hierarchical-cache": "",
-    "--hicache-ratio": "2",
-    "--hicache-io-backend": "kernel",
-    "--hicache-mem-layout": "page_first",
-    "--hicache-write-policy": "write_through",
     "--skip-server-warmup": "",
     "--enable-return-routed-experts": "",
 }
 
-SGLANG_ENV = {"SGLANG_ENABLE_RELOAD_LOAD_PLAN": "1"}  # NVFP4: load-plan replay + O(delta) partial reload
-
 modal = ModalConfig(
     gpu="B200",
     region="us",
-    memory=(1024, int(2 * 1024 * 1024)),
-    # Small pool (2x B200:4) so the 64-GPU trainer gang can co-schedule; min==max pins it.
-    rollout_min_containers=4,  # 4 B200:4 engines is enough for this rollout load
+    trainer_memory_mib=(1024, 2 * 1024 * 1024),
+    # Four fixed B200:4 engines leave capacity for the trainer gang.
+    rollout_min_containers=4,
     rollout_max_containers=4,
     rollout_target_inputs=32,
     proxy_regions=["us-west"],
-    rollout_ephemeral_disk_mib=819_200,  # ~591 GB base copy + delta-apply headroom
+    # Local disk holds runtime files and spill; CPU delta updates do not
+    # materialize a target checkpoint.
+    rollout_ephemeral_disk_mib=524_288,
+    rollout_memory_mib=(1024 * 1024, 3 * 1024 * 1024),
     trainer_ephemeral_disk_mib=2_097_152,  # Ray logs + object spill need the headroom
     torch_dist_prep_nodes=8,
     torch_dist_prep_gpus_per_node=8,
@@ -144,8 +144,8 @@ class _Miles(MilesConfig):
         },
     }
     num_layers_at_start_in_bf16 = 1
-    # END must stay 0: SGLang's fused-MoE reload allocates NVFP4 for every expert layer,
-    # so a bf16 last layer can't reload.
+    # END must stay 0: SGLang's fused-MoE weight update allocates NVFP4 for every
+    # expert layer, so a bf16 last layer cannot be updated.
     num_layers_at_end_in_bf16 = 0
 
     update_weight_transfer_mode = "disk-delta"

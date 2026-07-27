@@ -34,7 +34,10 @@ def main() -> None:
     p.add_argument("--port", type=int, default=8000)
     p.add_argument("--upstream", default="http://127.0.0.1:8001")
     p.add_argument("--bulletin-root", required=True)
-    p.add_argument("--local-checkpoint-dir", required=True)
+    p.add_argument("--base-checkpoint-dir", required=True)
+    p.add_argument("--local-checkpoint-dir")
+    p.add_argument("--delta-update-mode", choices=["disk", "cpu"], required=True)
+    p.add_argument("--disk-load-format", default="auto")
     p.add_argument("--volume-name", default="")
     p.add_argument("--commit-mode", choices=["in_place", "quiesce"], default="in_place")
     p.add_argument("--flush-cache-on-commit", action="store_true")
@@ -42,14 +45,26 @@ def main() -> None:
     p.add_argument("--debug-requests", action="store_true")
     p.add_argument("--reconcile-interval", type=float, default=5.0)  # 0 disables the periodic re-check
     args = p.parse_args()
+    if args.delta_update_mode == "disk" and not args.local_checkpoint_dir:
+        p.error("--local-checkpoint-dir is required in disk mode")
 
     store = ModalVolumeStore(args.bulletin_root, volume_name=args.volume_name or None)
-    engine = SGLangEngine(args.upstream, args.local_checkpoint_dir)
+    engine = SGLangEngine(
+        args.upstream,
+        args.base_checkpoint_dir,
+        args.local_checkpoint_dir,
+        delta_update_mode=args.delta_update_mode,
+        disk_load_format=args.disk_load_format,
+    )
     serve(
-        store, engine,
-        run_id=args.run_id, commit_mode=args.commit_mode,
+        store,
+        engine,
+        run_id=args.run_id,
+        commit_mode=args.commit_mode,
         flush_cache_on_commit=args.flush_cache_on_commit,
-        host=args.host, port=args.port, debug_requests=args.debug_requests,
+        host=args.host,
+        port=args.port,
+        debug_requests=args.debug_requests,
         reconcile_interval=args.reconcile_interval,
     )
 
