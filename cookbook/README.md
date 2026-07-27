@@ -83,8 +83,7 @@ uv run --extra modal python -m cookbook.common.smoke \
 
 ## Profile an update
 
-The GLM-4.5-Air FP8 and Kimi K2.6 NVFP4 profilers support
-`--update-mode disk|cpu`:
+The model profilers support `--update-mode disk|cpu`:
 
 ```bash
 uv run --extra modal modal run -d \
@@ -96,3 +95,12 @@ They generate during staging, commit the target, validate the new version, and
 report timing and resource use. SGLang rejects logprob-returning requests when
 DFlash or DSPARK is enabled, so those profiles compare repeated deterministic
 text instead of token IDs and logprobs.
+
+The K3 profiler downloads the pinned public checkpoint and constructs a
+checksummed XOR publication covering every checkpoint tensor:
+
+```bash
+MODAL_FUNCTION_RUNTIME=runc uv run --extra modal modal run -d \
+  tools/profiling/kimi_k3_mxfp4_delta_weight_update.py \
+  --update-mode cpu
+```
