@@ -5,7 +5,7 @@ delta metadata, and a ``<prefix>/latest`` object holds the self-identifying poin
 identity. S3 is strongly read-after-write consistent, so ``refresh`` is a no-op and a
 single ``latest`` PUT is the durable, immediately-visible pointer move (no rename). Unlike
 a mounted Volume there is no shared filesystem, so ``materialize`` downloads a version's
-chain into ``cache_dir`` — the local path the engine's pull then reads.
+chain into ``cache_dir`` — the local path the engine's staging step reads.
 
 ``boto3`` is imported lazily (only when the store is used), so the module loads without it;
 credentials/region come from the standard AWS resolution chain, and ``endpoint_url`` targets
@@ -14,7 +14,6 @@ S3-compatible stores (MinIO, R2, ...).
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -26,7 +25,9 @@ _INDEX = "model.safetensors.index.json"
 
 
 class S3Store(Store):
-    def __init__(self, root: str, *, cache_dir: str | Path, endpoint_url: str | None = None) -> None:
+    def __init__(
+        self, root: str, *, cache_dir: str | Path, endpoint_url: str | None = None
+    ) -> None:
         parsed = urlparse(root if "://" in root else f"s3://{root}")
         self.bucket = parsed.netloc
         self.prefix = parsed.path.strip("/")
@@ -42,11 +43,17 @@ class S3Store(Store):
         return VersionRef.parse(text) if text else None
 
     def advance_pointer(self, ref: VersionRef) -> None:
-        self._s3().put_object(Bucket=self.bucket, Key=self._key(_POINTER), Body=ref.identity.encode("utf-8"))
+        self._s3().put_object(
+            Bucket=self.bucket,
+            Key=self._key(_POINTER),
+            Body=ref.identity.encode("utf-8"),
+        )
 
     def claim(self, run_id: str) -> None:
         if not run_id:
-            raise ValueError("claim requires a run_id (the run's per-launch epoch token)")
+            raise ValueError(
+                "claim requires a run_id (the run's per-launch epoch token)"
+            )
         self.advance_pointer(VersionRef(run_id, 0))
 
     def read_manifest(self, ref: VersionRef) -> VersionManifest:
@@ -62,7 +69,8 @@ class S3Store(Store):
             self._s3().upload_file(str(path), self.bucket, key)
 
     def materialize(self, ref: VersionRef) -> str:
-        # No shared mount: sync the run's chain into the local cache; its parent is the run dir the pull walks.
+        # No shared mount: sync the run's chain into the local cache; its parent is
+        # the run directory the engine stages from.
         self._sync(self._key(ref.run_id), self.cache_dir / ref.run_id)
         return str(self.cache_dir / ref.identity)
 
@@ -80,7 +88,12 @@ class S3Store(Store):
     def _read_text(self, key: str) -> str | None:
         s3 = self._s3()
         try:
-            return s3.get_object(Bucket=self.bucket, Key=key)["Body"].read().decode("utf-8").strip()
+            return (
+                s3.get_object(Bucket=self.bucket, Key=key)["Body"]
+                .read()
+                .decode("utf-8")
+                .strip()
+            )
         except s3.exceptions.NoSuchKey:
             return None
 
@@ -92,9 +105,11 @@ class S3Store(Store):
         """Download every object under ``key_prefix`` into ``dest_root``, skipping any file
         already present at the same size — so re-materializing a chain only fetches new versions."""
         s3 = self._s3()
-        for page in s3.get_paginator("list_objects_v2").paginate(Bucket=self.bucket, Prefix=key_prefix + "/"):
+        for page in s3.get_paginator("list_objects_v2").paginate(
+            Bucket=self.bucket, Prefix=key_prefix + "/"
+        ):
             for obj in page.get("Contents", []):
-                rel = obj["Key"][len(key_prefix) + 1:]
+                rel = obj["Key"][len(key_prefix) + 1 :]
                 if not rel:  # the prefix "directory" placeholder, if any
                     continue
                 dest = dest_root / rel
@@ -102,19 +117,3 @@ class S3Store(Store):
                     continue
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 s3.download_file(self.bucket, obj["Key"], str(dest))
-
-
-def pull_weights_pre_read_hook(source_dir: str, target_version: int) -> None:
-    """Engine-side ``--custom-pull-weights-pre-read-hook``: download the run's published
-    versions onto THIS host's ``source_dir`` so the engine's pull can read them — the S3
-    analogue of the Modal-Volume reload, for engines that span hosts not sharing the cache.
-
-    ``source_dir`` is the run dir (``<cache>/<run_id>``); its basename is the run. The bucket/
-    prefix travel via ``DELTA_S3_URI`` (and optional ``DELTA_S3_ENDPOINT_URL``) on the serving
-    container. Guarded on ``target_version > 0`` — version 0 is the engine's own served base."""
-    uri = os.environ.get("DELTA_S3_URI", "")
-    if not uri or target_version <= 0:
-        return
-    run_id = Path(source_dir).name
-    store = S3Store(uri, cache_dir=Path(source_dir).parent, endpoint_url=os.environ.get("DELTA_S3_ENDPOINT_URL") or None)
-    store.materialize(VersionRef(run_id, target_version))
