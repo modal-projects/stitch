@@ -1,1 +1,1 @@
-"""Modal measurement probes (weight-sync reload profiling, disk surveys)."""
+"""Modal profilers for staged SGLang weight updates."""

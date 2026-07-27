@@ -8,13 +8,8 @@ only when it graduates into the standing regression harness.
 
 ## Design
 
-A pool certification doesn't need a trainer. The serving side needs **publishes**
-and **traffic**, so the harness decouples them:
+A pool certification needs traffic plus replica-state observation:
 
-- **`replay_publisher.py`** — replays a *recorded* delta chain (past runs persist on
-  the delta Volume) through the real `publish_version()` path at a controlled
-  cadence, under a fresh `run_id`. Real delta densities, sizes, and chain structure;
-  zero trainer GPUs. The target pool must serve the same base model.
 - **`traffic.py`** — reward-free load shapes against the pool gateway:
   `long_decode`, `long_prefill`, `agentic` (multi-turn sessions with growing
   context, synthetic tool-result injections, session affinity), `mixed`. Responses
@@ -23,8 +18,7 @@ and **traffic**, so the harness decouples them:
 - **`poller.py`** — scrapes every replica's `/server_info` into JSONL and
   summarizes: applied-version timelines, per-version convergence lag,
   stage/commit timings, not-ready windows.
-- **`app.py`** — Modal wrapper to run the above from containers (the replay
-  publisher needs the delta Volume mounted).
+- **`app.py`** — Modal wrapper to run the probes from containers.
 
 ## Conventions
 
@@ -46,16 +40,13 @@ uv run --extra modal modal environment create stitch-dev
 # deploy the target pool (example: glm45_air_fp8) into stitch-dev
 EXPERIMENT_CONFIG=glm45_air_fp8 uv run --extra modal modal deploy -m cookbook.miles_disagg.app -e stitch-dev
 
-# deploy the probe app, bound to that recipe's delta volume
-PROBE_DELTA_VOLUME=stitch-delta-glm45-air-fp8 \
-  uv run --extra modal modal deploy -m tools.probes.app -e stitch-dev
+# deploy the probe app
+uv run --extra modal modal deploy -m tools.probes.app -e stitch-dev
 
-# start the poller (background), then traffic, then the replay
+# start the poller and traffic
 uv run --extra modal modal run -e stitch-dev -m tools.probes.app::poll --pool-app stitch-glm45-air-fp8 --tag demo &
 uv run --extra modal modal run -e stitch-dev -m tools.probes.app::traffic \
   --pool-app stitch-glm45-air-fp8 --shape agentic --concurrency 32 --duration 1800 --tag demo &
-uv run --extra modal modal run -e stitch-dev -m tools.probes.app::replay \
-  --pool-app stitch-glm45-air-fp8 --source-run <run_id> --cadence-s 60 --tag demo
 ```
 
 ## Known limitations (skeleton)
@@ -65,7 +56,5 @@ uv run --extra modal modal run -e stitch-dev -m tools.probes.app::replay \
 - **Synthetic filler text.** Prompt content is pseudo-text at controlled lengths;
   swap in real document corpora when content realism starts to matter.
 - **Token counts are approximated** from word counts (~0.75 words/token).
-- The replay publisher **copies** each version dir under the new run prefix
-  (that's the real publish path) — delta volumes grow per replay and nothing GCs.
 - Version floor tracking polls the gateway's `/server_info`, which answers from an
   arbitrary replica — probe-grade, not exact.
