@@ -1,4 +1,4 @@
-"""Private shared runner for the two SGLang delta weight-update profilers.
+"""Shared runner for SGLang delta weight-update profilers.
 
 Model-specific Modal apps supply the checkpoint paths, recorded delta, GPU
 shape, and direct SGLang arguments. This module owns the benchmark sequence:
@@ -86,25 +86,68 @@ def _post(
     return body
 
 
-def _generate(url: str, *, fingerprint: bool = False) -> dict[str, Any]:
+def _generate(
+    url: str,
+    *,
+    fingerprint: bool = False,
+    fingerprint_logprobs: bool = True,
+) -> dict[str, Any]:
     import httpx
 
     started = time.perf_counter()
+    models_response = httpx.get(
+        f"{url}/v1/models",
+        timeout=30,
+        trust_env=False,
+    )
+    models_response.raise_for_status()
+    model = models_response.json()["data"][0]["id"]
+    messages = [
+        {
+            "role": "user",
+            "content": "Explain in exactly three short clauses why the Moon has phases.",
+        }
+    ]
+    if not fingerprint or not fingerprint_logprobs:
+        response = httpx.post(
+            f"{url}/v1/chat/completions",
+            json={
+                "model": model,
+                "messages": messages,
+                "temperature": 0,
+                "max_tokens": 96 if fingerprint else 80,
+            },
+            timeout=300,
+            trust_env=False,
+        )
+        response.raise_for_status()
+        body = response.json()
+        message = body["choices"][0]["message"]
+        text = message.get("content") or message.get("reasoning_content") or ""
+        if len(text.split()) < 8 or sum(character.isalpha() for character in text) < 25:
+            raise RuntimeError(f"completion was not plausibly fluent: {text!r}")
+        result = {
+            "wall_s": round(time.perf_counter() - started, 6),
+            "text": text,
+            "weight_version": (body.get("metadata") or {}).get("weight_version"),
+        }
+        if fingerprint:
+            result["output_ids"] = []
+            result["output_logprobs"] = []
+        return result
+
     response = httpx.post(
         f"{url}/generate",
         json={
-            "text": (
-                "Correctness probe 7f31c9: Explain in exactly three short "
-                "clauses why the Moon has phases."
-            ),
+            "text": "Explain why the Moon has phases in exactly three short clauses.",
             "sampling_params": {
                 "temperature": 0,
                 "max_new_tokens": 48 if fingerprint else 80,
                 "ignore_eos": fingerprint,
             },
-            "return_logprob": fingerprint,
+            "return_logprob": fingerprint and fingerprint_logprobs,
             "return_text_in_logprobs": False,
-            "top_logprobs_num": 1 if fingerprint else 0,
+            "top_logprobs_num": 1 if fingerprint and fingerprint_logprobs else 0,
             "logprob_start_len": -1,
             "stream": False,
         },
@@ -114,8 +157,6 @@ def _generate(url: str, *, fingerprint: bool = False) -> dict[str, Any]:
     response.raise_for_status()
     body = response.json()
     text = body.get("text") or ""
-    if len(text.split()) < 8 or sum(character.isalpha() for character in text) < 25:
-        raise RuntimeError(f"completion was not plausibly fluent: {text!r}")
     result = {
         "wall_s": round(time.perf_counter() - started, 6),
         "text": text,
@@ -128,10 +169,12 @@ def _generate(url: str, *, fingerprint: bool = False) -> dict[str, Any]:
             float(item[0] if isinstance(item, (list, tuple)) else item)
             for item in raw_logprobs
         ]
-        if not result["output_ids"] or len(result["output_ids"]) != len(
+        if fingerprint_logprobs and not result["output_ids"]:
+            raise RuntimeError("fingerprint token IDs are incomplete")
+        if fingerprint_logprobs and len(result["output_ids"]) != len(
             result["output_logprobs"]
         ):
-            raise RuntimeError("fingerprint token IDs/logprobs are incomplete")
+            raise RuntimeError("fingerprint logprobs are incomplete")
     return result
 
 
@@ -143,38 +186,46 @@ def _assert_repeat_consistency(
         raise RuntimeError("repeated fingerprint token IDs differ")
     if first["text"] != second["text"]:
         raise RuntimeError("repeated fingerprint text differs")
-    max_logprob_difference = max(
-        (
-            abs(left - right)
-            for left, right in zip(
-                first["output_logprobs"],
-                second["output_logprobs"],
-                strict=True,
-            )
-        ),
-        default=0.0,
+    max_logprob_difference = (
+        max(
+            (
+                abs(left - right)
+                for left, right in zip(
+                    first["output_logprobs"],
+                    second["output_logprobs"],
+                    strict=True,
+                )
+            ),
+            default=0.0,
+        )
+        if first["output_logprobs"]
+        else None
     )
-    return {
-        "exact_token_ids": True,
+    result = {
         "exact_text": True,
-        "tokens": len(first["output_ids"]),
-        "repeat_max_logprob_abs_diff": max_logprob_difference,
         **_fingerprint_hashes(first),
     }
+    if first["output_ids"]:
+        result["exact_token_ids"] = True
+        result["tokens"] = len(first["output_ids"])
+    if max_logprob_difference is not None:
+        result["repeat_max_logprob_abs_diff"] = max_logprob_difference
+    return result
 
 
 def _fingerprint_hashes(fingerprint: dict[str, Any]) -> dict[str, str]:
     token_ids = fingerprint["output_ids"]
     output_logprobs = fingerprint["output_logprobs"]
-    return {
-        "token_ids_sha256": hashlib.sha256(
+    hashes = {"text_sha256": hashlib.sha256(fingerprint["text"].encode()).hexdigest()}
+    if token_ids:
+        hashes["token_ids_sha256"] = hashlib.sha256(
             struct.pack(f"<{len(token_ids)}q", *token_ids)
-        ).hexdigest(),
-        "text_sha256": hashlib.sha256(fingerprint["text"].encode()).hexdigest(),
-        "logprobs_sha256": hashlib.sha256(
+        ).hexdigest()
+    if output_logprobs:
+        hashes["logprobs_sha256"] = hashlib.sha256(
             struct.pack(f"<{len(output_logprobs)}d", *output_logprobs)
-        ).hexdigest(),
-    }
+        ).hexdigest()
+    return hashes
 
 
 def _assert_target_changed(
@@ -183,7 +234,9 @@ def _assert_target_changed(
 ) -> dict[str, Any]:
     token_ids_changed = baseline["output_ids"] != target["output_ids"]
     text_changed = baseline["text"] != target["text"]
-    if len(baseline["output_logprobs"]) == len(target["output_logprobs"]):
+    if baseline["output_logprobs"] and len(baseline["output_logprobs"]) == len(
+        target["output_logprobs"]
+    ):
         max_logprob_difference = max(
             (
                 abs(left - right)
@@ -197,7 +250,9 @@ def _assert_target_changed(
         )
     else:
         max_logprob_difference = None
-    logprobs_changed = max_logprob_difference is None or max_logprob_difference > 0.0
+    logprobs_changed = (
+        max_logprob_difference is not None and max_logprob_difference > 0.0
+    )
     if not (token_ids_changed or text_changed or logprobs_changed):
         raise RuntimeError("post-update fingerprint is identical to the base model")
     return {
@@ -362,10 +417,7 @@ def _print_profile_summary(results: dict[str, Any]) -> None:
         if key in results
     }
     summary["critical_rank_stage_s"] = max(
-        (
-            rank.get("wall_s", rank.get("total_wall_s", 0.0))
-            for rank in stage_ranks
-        ),
+        (rank.get("wall_s", rank.get("total_wall_s", 0.0)) for rank in stage_ranks),
         default=None,
     )
     destination_init_ranks = results.get("destination_init_rank_stats") or []
@@ -440,7 +492,27 @@ def run_delta_weight_update(
         )
         results["memory_after_initial_load"] = _memory_snapshot()
         results["generation_before"] = _generate(url)
-        baseline_fingerprint = _generate(url, fingerprint=True)
+        speculative_algorithm = spec.server_args.get(
+            "--speculative-algorithm", ""
+        ).upper()
+        # These SGLang speculative workers reject return_logprob requests.
+        fingerprint_logprobs = speculative_algorithm not in {"DFLASH", "DSPARK"}
+        baseline_fingerprint = _generate(
+            url,
+            fingerprint=True,
+            fingerprint_logprobs=fingerprint_logprobs,
+        )
+        if not fingerprint_logprobs:
+            _assert_repeat_consistency(
+                [
+                    baseline_fingerprint,
+                    _generate(
+                        url,
+                        fingerprint=True,
+                        fingerprint_logprobs=False,
+                    ),
+                ]
+            )
         results["fingerprint_before"] = {
             "wall_s": baseline_fingerprint["wall_s"],
             "weight_version": baseline_fingerprint["weight_version"],
@@ -484,8 +556,8 @@ def run_delta_weight_update(
                     f"{generation.summary()}"
                 )
             if update_mode == "disk":
-                results["destination_init_cache_drop"] = (
-                    _drop_checkpoint_page_cache(spec.local_target_checkpoint_dir)
+                results["destination_init_cache_drop"] = _drop_checkpoint_page_cache(
+                    spec.local_target_checkpoint_dir
                 )
 
             stage_started = time.perf_counter()
@@ -518,8 +590,7 @@ def run_delta_weight_update(
             results["memory_after_stage"] = _memory_snapshot()
             if generation.errors or not generation.samples:
                 raise RuntimeError(
-                    "generation was not healthy during staging: "
-                    f"{generation.summary()}"
+                    f"generation was not healthy during staging: {generation.summary()}"
                 )
 
             commit_started = time.perf_counter()
@@ -561,8 +632,16 @@ def run_delta_weight_update(
 
         results["generation_after"] = _generate(url)
         fingerprints = [
-            _generate(url, fingerprint=True),
-            _generate(url, fingerprint=True),
+            _generate(
+                url,
+                fingerprint=True,
+                fingerprint_logprobs=fingerprint_logprobs,
+            ),
+            _generate(
+                url,
+                fingerprint=True,
+                fingerprint_logprobs=fingerprint_logprobs,
+            ),
         ]
         observed_versions = {
             results["generation_after"]["weight_version"],
