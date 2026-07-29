@@ -43,10 +43,11 @@ def server_args_for_mode(
     result = dict(server_args)
     if update_mode == "cpu":
         result["--enable-cpu-weight-cache"] = ""
-        result["--cpu-weight-cache-max-compile-group-gb"] = "8"
+        result.setdefault("--cpu-weight-cache-max-compile-group-gb", "8")
     elif update_mode == "disk":
         result.pop("--enable-cpu-weight-cache", None)
         result.pop("--cpu-weight-cache-max-compile-group-gb", None)
+        result.pop("--cpu-weight-cache-canonical-checkpoint-dir", None)
     else:
         raise ValueError(f"unsupported update mode: {update_mode!r}")
     return result
