@@ -15,7 +15,7 @@ SGLANG_RUNTIME = SGLangRuntime(
     ),
     repository="https://github.com/modal-projects/sglang.git",
     branch="stitch-sglang-kimi-k3",
-    commit="1a87b07642368bbc9a7985edea73548fb3d07203",
+    commit="2fd91cac9a6bd7c7c611edcfa13a6c4bf799b4e2",
 )
 
 SGLANG_SERVER_ARGS = {
@@ -23,7 +23,10 @@ SGLANG_SERVER_ARGS = {
     "--load-format": "fastsafetensors",
     "--model-loader-extra-config": '{"enable_gds":false}',
     "--enable-cpu-weight-cache": "",
-    "--cpu-weight-cache-max-compile-group-gb": "8",
+    "--cpu-weight-cache-max-compile-group-gb": "16",
+    "--cpu-weight-cache-canonical-checkpoint-dir": (
+        "/local-checkpoint/kimi-k3-mxfp4/canonical"
+    ),
     "--weight-loader-drop-cache-after-load": "",
     "--dist-timeout": "3600",
     "--context-length": "1048576",
@@ -46,6 +49,7 @@ modal = ModalConfig(
     gpu="B300",
     rollout_target_inputs=32,
     rollout_ephemeral_disk_mib=2 * 1024 * 1024,
-    # CPU updates retain the canonical checkpoint plus all TP rank images.
-    rollout_memory_mib=(1024 * 1024, 4 * 1024 * 1024),
+    # CPU updates retain TP rank images in RAM and the canonical checkpoint on
+    # ephemeral NVMe.
+    rollout_memory_mib=(1024 * 1024, 3 * 1024 * 1024),
 )

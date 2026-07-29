@@ -10,7 +10,7 @@ Each recipe sets `SGLANG_DELTA_UPDATE_MODE`:
 | Mode | Prepared state | During engine pause | Use when |
 | --- | --- | --- | --- |
 | `disk` | Complete checkpoint on local storage | Reload from disk | Host RAM is constrained or the trainer publishes full checkpoints |
-| `cpu` | Canonical checkpoint and rank-ready weight images in RAM | Copy the images to GPU | Updates are deltas and minimizing the pause justifies the RAM |
+| `cpu` | Rank-ready images in RAM; canonical checkpoint in RAM or on local storage | Copy the images to GPU | Updates are deltas and minimizing the pause justifies rank-image RAM |
 
 Both modes reconstruct and checksum the complete target in canonical checkpoint
 space. CPU mode accepts deltas only and requires a new replica for a new

@@ -14,7 +14,7 @@ DEFAULT_SGLANG_RUNTIME = SGLangRuntime(
     image="lmsysorg/sglang:v0.5.16",
     repository="https://github.com/modal-projects/sglang.git",
     branch="stitch-sglang-v0.5.16",
-    commit="1a4a4fd6b54ab332c3b0b17a0383037390939587",
+    commit="1051a95a6ab16773037f8795a51aa03a1664a3b2",
 )
 ```
 
@@ -32,6 +32,8 @@ The branch is upstream v0.5.16 plus:
 | `526e0ddca2` | Fail cache-flushing CPU commits before GPU mutation when the engine is busy. |
 | `a562908a10` | Normalize native ModelOpt FP4 expert tensors through their existing loader path. |
 | `1a4a4fd6b5` | Return aligned verifier logprobs for DFlash rollout tokens. |
+| `607e107b44` | Store the canonical CPU-cache checkpoint on NVMe and overlap verified persistence with bounded rank-image compilation. |
+| `1051a95a6a` | Balance CPU delta transforms across persistent worker tasks. |
 
 The image and branch must use the same SGLang release because Stitch overlays
 Python code onto the image’s existing CUDA and C++ extensions.
@@ -41,9 +43,11 @@ configuration. The image, fork branch, and immutable commit stay together so
 the Python overlay remains ABI-compatible with the image.
 
 [`kimi_k3_mxfp4.py`](../miles_disagg/configs/kimi_k3_mxfp4.py) pins the public
-K3 image and `stitch-sglang-kimi-k3` fork. That fork ports the same weight-sync
-responsibilities onto SGLang’s public `kimi-k3` branch; other recipes continue
-to use the v0.5.16 default.
+K3 image and `stitch-sglang-kimi-k3` fork. That fork ports the
+same weight-sync responsibilities onto SGLang’s public `kimi-k3` branch; other
+recipes continue to use the v0.5.16 default. Its K3-native loader narrows expert
+lookup, batches safe copies, scopes post-load work to loaded modules, and reuses
+MXFP4 staging buffers.
 
 ## API
 
@@ -112,15 +116,17 @@ mode:
 
 ## CPU destination
 
-CPU mode trades host RAM for the shortest commit:
+CPU mode keeps rank-ready images in RAM for the shortest commit:
 
-1. After v0 begins serving, SGLang allocates one canonical checkpoint snapshot
-   per host and one complete rank-ready image per local TP rank.
+1. After v0 begins serving, SGLang allocates one complete rank-ready image per
+   local TP rank and either caches one canonical checkpoint per host in RAM or
+   materializes it on host-local storage.
 2. It builds v0 through the model’s ordinary weight loader and quantization
    hooks and verifies that the prepared runtime storages match the active model.
-3. For every delta lineage, it range-streams compressed fragments through a
-   bounded work budget, reconstructs and checksums the canonical target, then
-   builds every next rank image while inference continues.
+3. For every delta lineage, it reconstructs and checksums the canonical target,
+   then builds every next rank image while inference continues. The in-memory
+   path streams deltas through a bounded work budget; the storage-backed path
+   reuses the transactional disk materializer.
 4. `/update_weights_from_cpu` performs distributed preflight and copies the
    complete images into the existing CUDA storages without replacing storage
    pointers.
@@ -142,29 +148,49 @@ Enable it explicitly:
 "--cpu-weight-cache-max-compile-group-gb": "8",
 ```
 
+By default, both the canonical checkpoint and rank images remain in RAM. Keep
+only the rank images in RAM by placing the canonical checkpoint on writable
+host-local storage:
+
+```python
+"--cpu-weight-cache-canonical-checkpoint-dir": "/local-checkpoint/canonical",
+```
+
+Use local NVMe rather than a network or shared filesystem. This path pays a
+complete checkpoint copy during background initialization and adds NVMe
+read/write work during preparation; it does not change the CPU-to-GPU engine
+pause. Set `--weight-loader-drop-cache-after-load` to release clean checkpoint
+pages after every local TP rank finishes compiling; otherwise the kernel may
+retain those reclaimable pages for later reads.
+
 The group bound limits transient loader work; it does not tune correctness or
 assume a model architecture. An indivisible module larger than the requested
-bound remains intact and is reported.
+bound remains intact and is reported. The K3 recipe uses a 16 GiB bound to
+balance its module granularity against transient RAM.
 
-Persistent host RAM is approximately:
+With the default in-memory canonical checkpoint, persistent host RAM is:
 
 ```text
 one canonical checkpoint per host
 + one rank-local runtime image per local TP rank
 ```
 
-Measured reference costs are:
+With a storage-backed canonical checkpoint, persistent host RAM is the rank
+images; local storage holds one canonical checkpoint. File-cache pages used
+during preparation are reclaimable.
 
-| Model | TP | Canonical checkpoint | Rank image | Persistent core |
-| --- | ---: | ---: | ---: | ---: |
-| GLM-4.5-Air FP8 | 4 | 112.6 GB | 27.2 GB × 4 | 221.3 GB |
-| Kimi K2.6 NVFP4 | 4 | about 595 GB | about 151 GB × 4 | about 1.20 TB |
-| Kimi K3 MXFP4 | 8 | 1.561 TB | 207.5 GB × 8 | 3.221 TB |
+Measured component sizes are:
+
+| Model | TP | Canonical checkpoint per host | Rank image |
+| --- | ---: | ---: | ---: |
+| GLM-4.5-Air FP8 | 4 | 112.6 GB | 27.2 GB × 4 |
+| Kimi K2.6 NVFP4 | 4 | about 595 GB | about 151 GB × 4 |
+| Kimi K3 MXFP4 | 8 | 1.561 TB | 207.5 GB × 8 |
 
 Allow additional memory for the engine process, delta decoding, and bounded
 loader staging. The supplied recipes request `(512 GiB, 2 TiB)` for GLM and
-`(1 TiB, 3 TiB)` for Kimi K2.6, expressed as `(request, limit)`. The K3
-profiler uses `(1 TiB, 4 TiB)`.
+`(1 TiB, 3 TiB)` for Kimi K2.6 and Kimi K3, expressed as
+`(request, limit)`.
 
 All runtime storages are prepared and committed. Element-wise sparsity only
 reduces the compressed delta transport and XOR work.
