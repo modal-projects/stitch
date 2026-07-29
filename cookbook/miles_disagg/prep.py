@@ -22,6 +22,17 @@ from cookbook.miles_disagg.trainer_image import (
 )
 
 
+def _apply_prep_environment(exp) -> None:
+    """Apply download toggles and the experiment's checkpoint quantizer contract."""
+    if getattr(exp, "DISABLE_HF_XET", False):
+        os.environ["HF_HUB_DISABLE_XET"] = "1"
+        os.environ.pop("HF_XET_HIGH_PERFORMANCE", None)
+    if getattr(exp, "DISABLE_HF_TRANSFER", False):
+        os.environ.pop("HF_HUB_ENABLE_HF_TRANSFER", None)
+    # The served base and live trainer export must use an identical quantizer contract.
+    os.environ.update(getattr(exp, "PREP_ENV", {}))
+
+
 def prepare_checkpoints(exp, prep_volume) -> None:
     """Build the bf16 masters (trainer arch source) + the served base on a GPU.
 
@@ -29,11 +40,7 @@ def prepare_checkpoints(exp, prep_volume) -> None:
     masters. served base: bf16 = masters; a published ROLLOUT_SOURCE_MODEL is copied
     directly; otherwise NVFP4 is built with Miles' TE-direct quantizer over the masters.
     """
-    if getattr(exp, "DISABLE_HF_XET", False):
-        os.environ["HF_HUB_DISABLE_XET"] = "1"
-        os.environ.pop("HF_XET_HIGH_PERFORMANCE", None)
-    if getattr(exp, "DISABLE_HF_TRANSFER", False):
-        os.environ.pop("HF_HUB_ENABLE_HF_TRANSFER", None)
+    _apply_prep_environment(exp)
     from huggingface_hub import snapshot_download
 
     prep_volume.reload()
