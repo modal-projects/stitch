@@ -46,8 +46,9 @@ the Python overlay remains ABI-compatible with the image.
 K3 image and `stitch-sglang-kimi-k3` fork. That fork ports the
 same weight-sync responsibilities onto SGLang’s public `kimi-k3` branch; other
 recipes continue to use the v0.5.16 default. Its K3-native loader narrows expert
-lookup, batches safe copies, scopes post-load work to loaded modules, and reuses
-MXFP4 staging buffers.
+lookup, batches safe copies, scopes post-load work to loaded modules, and
+transforms Blackwell MXFP4 runtime layouts on GPU before caching rank-ready host
+images.
 
 ## API
 

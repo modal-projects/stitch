@@ -190,7 +190,7 @@ def _materialize_checkpoint_view() -> None:
     image=serving_image,
     gpu=f"{model.modal.gpu}:{model.ROLLOUT_NUM_GPUS_PER_ENGINE}",
     cpu=64,
-    memory=model.modal.rollout_memory_mib,
+    memory=(model.modal.rollout_memory_mib[0], 4 * 1024 * 1024),
     ephemeral_disk=model.modal.rollout_ephemeral_disk_mib,
     volumes={
         HF_CACHE_PATH: hf_cache_volume.read_only(),
