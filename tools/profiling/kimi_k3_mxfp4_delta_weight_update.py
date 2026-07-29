@@ -1,12 +1,14 @@
 """Download Kimi K3 and validate one complete MXFP4 delta update on Modal.
 
-Run the CPU destination:
+Run the CPU destination with the canonical checkpoint on local storage:
 
     MODAL_FUNCTION_RUNTIME=runc uv run --extra modal modal run -d \
       tools/profiling/kimi_k3_mxfp4_delta_weight_update.py \
-      --update-mode cpu
+      --update-mode cpu --canonical-storage disk
 
-Use ``--update-mode disk`` to profile the lower-RAM destination.
+Use ``--canonical-storage memory`` only when the host can retain both the
+canonical checkpoint and TP rank images. ``--update-mode disk`` profiles the
+disk destination instead of rank-ready CPU staging.
 """
 
 from __future__ import annotations
@@ -35,7 +37,7 @@ HF_SNAPSHOT_DIR = (
     f"{model.ROLLOUT_SOURCE_REVISION}"
 )
 DELTA_MOUNT = "/synthetic-delta"
-DELTA_ID = f"kimi-k3/{model.ROLLOUT_SOURCE_REVISION}/full-coverage-v1"
+DELTA_ID = f"kimi-k3/{model.ROLLOUT_SOURCE_REVISION}/full-coverage-v3"
 DELTA_SOURCE_DIR = f"{DELTA_MOUNT}/{DELTA_ID}"
 BASE_CHECKPOINT_DIR = "/local-checkpoint/kimi-k3-mxfp4/base"
 LOCAL_TARGET_CHECKPOINT_DIR = "/local-checkpoint/kimi-k3-mxfp4/target"
@@ -82,6 +84,7 @@ download_image = (
 serving_image = build_serving_image(
     hf_cache_path=HF_CACHE_PATH,
     experiment=EXPERIMENT,
+    extra_env=getattr(model, "SGLANG_SERVER_ENV", None),
     runtime=model.SGLANG_RUNTIME,
 ).add_local_dir(
     str(Path(__file__).resolve().parents[1]),
@@ -187,7 +190,7 @@ def _materialize_checkpoint_view() -> None:
     image=serving_image,
     gpu=f"{model.modal.gpu}:{model.ROLLOUT_NUM_GPUS_PER_ENGINE}",
     cpu=64,
-    memory=model.modal.rollout_memory_mib,
+    memory=(model.modal.rollout_memory_mib[0], 4 * 1024 * 1024),
     ephemeral_disk=model.modal.rollout_ephemeral_disk_mib,
     volumes={
         HF_CACHE_PATH: hf_cache_volume.read_only(),
@@ -198,16 +201,22 @@ def _materialize_checkpoint_view() -> None:
 )
 def benchmark(
     update_mode: str,
+    canonical_storage: str,
     runtime: str,
     sample_id: str,
 ) -> dict:
     _materialize_checkpoint_view()
+    server_args = dict(model.SGLANG_SERVER_ARGS)
+    if canonical_storage == "memory":
+        server_args.pop("--cpu-weight-cache-canonical-checkpoint-dir", None)
+    elif canonical_storage != "disk":
+        raise ValueError("canonical_storage must be 'memory' or 'disk'")
     return run_delta_weight_update(
         WeightUpdateSpec(
             model_name="Kimi K3 MXFP4",
             base_checkpoint_dir=BASE_CHECKPOINT_DIR,
             local_target_checkpoint_dir=LOCAL_TARGET_CHECKPOINT_DIR,
-            server_args=model.SGLANG_SERVER_ARGS,
+            server_args=server_args,
             tp_size=model.ROLLOUT_NUM_GPUS_PER_ENGINE,
         ),
         source_dir=DELTA_SOURCE_DIR,
@@ -221,6 +230,7 @@ def benchmark(
 @app.local_entrypoint()
 def main(
     update_mode: str = "cpu",
+    canonical_storage: str = "disk",
     sample_id: str = "1",
 ) -> None:
     parsed_mode = parse_update_mode(update_mode)
@@ -228,6 +238,7 @@ def main(
     prepare_delta.remote()
     benchmark.remote(
         parsed_mode,
+        canonical_storage,
         modal_runtime_label(),
         sample_id,
     )

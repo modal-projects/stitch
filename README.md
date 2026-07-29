@@ -41,6 +41,30 @@ monotonic version pointer, so a missed notification delays an update but cannot
 prevent convergence. This decentralized model lets the rollout fleet scale and
 recover without becoming part of the trainer's process lifecycle.
 
+## Measured delta updates
+
+These single-update measurements use the pinned cookbook stack, 64 vCPUs, and
+element-wise deltas covering every checkpoint tensor. Remote transfer, delta
+generation, and one-time CPU destination initialization are excluded.
+Preparation runs while inference remains available; only activation pauses the
+engine.
+
+| Model | TP | Canonical checkpoint | Preparation | Engine pause | Total update |
+| --- | ---: | --- | ---: | ---: | ---: |
+| GLM-4.5-Air FP8 | 4 | RAM | 41.2 s | 1.0 s | 42.2 s |
+| Kimi K2.6 NVFP4 | 4 | RAM | 55.6 s | 2.78 s | 58.4 s |
+| Kimi K2.6 NVFP4 | 4 | NVMe | 102.3 s | 2.76 s | 105.1 s |
+| GLM-5.2 NVFP4 | 4 | RAM | 59.3 s | 2.14 s | 61.5 s |
+| Kimi K3 MXFP4 | 8 | RAM | 122.3 s | 3.82 s | 126.1 s |
+| Kimi K3 MXFP4 | 8 | NVMe | 283.8 s | 3.79 s | 287.5 s |
+
+Each profiler reconstructs and checksums the complete target and validates
+generation before, during, and after activation. See
+[`Profile an update`](cookbook/README.md#profile-an-update) to reproduce these
+measurements and
+[`SGLANG_FORK.md`](cookbook/common/SGLANG_FORK.md#cpu-destination) for memory
+sizing and destination tradeoffs.
+
 ## Integrations
 
 The core package is trainer-, engine-, and provider-agnostic through the

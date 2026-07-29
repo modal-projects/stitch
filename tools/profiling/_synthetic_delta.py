@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import struct
 import time
@@ -11,7 +12,11 @@ from pathlib import Path
 from typing import Any
 
 _STREAM_BYTES = 8 * 1024 * 1024
+_CHANGE_STRIDE_BYTES = 1024 * 1024
 _ZERO_CHUNK = bytes(_STREAM_BYTES)
+_XOR_CHUNK = bytearray(_ZERO_CHUNK)
+_XOR_CHUNK[::_CHANGE_STRIDE_BYTES] = b"\x01" * (_STREAM_BYTES // _CHANGE_STRIDE_BYTES)
+_XOR_CHUNK = bytes(_XOR_CHUNK)
 
 
 def _safetensors_header(path: Path) -> tuple[int, dict[str, Any]]:
@@ -20,45 +25,15 @@ def _safetensors_header(path: Path) -> tuple[int, dict[str, Any]]:
         return 8 + header_bytes, json.loads(handle.read(header_bytes))
 
 
-def _choose_bfloat16_tensor(
-    checkpoint_dir: Path,
-    weight_map: dict[str, str],
-) -> str:
-    headers: dict[Path, dict[str, Any]] = {}
-    candidates: list[tuple[int, int, str]] = []
-    for name, filename in weight_map.items():
-        path = checkpoint_dir / filename
-        if path not in headers:
-            _, headers[path] = _safetensors_header(path)
-        info = headers[path][name]
-        begin, end = info["data_offsets"]
-        if info["dtype"] != "BF16" or end <= begin:
-            continue
-        priority = (
-            0
-            if name.endswith(("model.norm.weight", "language_model.norm.weight"))
-            else 1
-            if "norm" in name
-            else 2
-        )
-        candidates.append((priority, end - begin, name))
-    if not candidates:
-        raise RuntimeError("checkpoint has no BF16 tensor for a controlled delta")
-    return min(candidates)[2]
-
-
-def _compress_xor(byte_count: int, *, flip_first_byte: bool) -> bytes:
+def _compress_xor(byte_count: int) -> bytes:
     import zstandard
 
     compressor = zstandard.ZstdCompressor(level=1).compressobj()
     output = []
     remaining = byte_count
-    if flip_first_byte:
-        output.append(compressor.compress(b"\x01"))
-        remaining -= 1
     while remaining:
-        size = min(remaining, len(_ZERO_CHUNK))
-        output.append(compressor.compress(memoryview(_ZERO_CHUNK)[:size]))
+        size = min(remaining, len(_XOR_CHUNK))
+        output.append(compressor.compress(memoryview(_XOR_CHUNK)[:size]))
         remaining -= size
     output.append(compressor.flush())
     return b"".join(output)
@@ -69,25 +44,30 @@ def _target_checksum(
     *,
     offset: int,
     byte_count: int,
-    flip_first_byte: bool,
 ) -> str:
     import xxhash
 
     checksum = xxhash.xxh3_128()
     handle.seek(offset)
     remaining = byte_count
-    first = True
+    position = 0
     while remaining:
         chunk = handle.read(min(remaining, _STREAM_BYTES))
         if not chunk:
             raise RuntimeError("checkpoint tensor ended before its declared size")
-        if first and flip_first_byte:
+        first_change = (-position) % _CHANGE_STRIDE_BYTES
+        if first_change < len(chunk):
             changed = bytearray(chunk)
-            changed[0] ^= 1
+            for index in range(
+                first_change,
+                len(changed),
+                _CHANGE_STRIDE_BYTES,
+            ):
+                changed[index] ^= 1
             chunk = changed
         checksum.update(chunk)
         remaining -= len(chunk)
-        first = False
+        position += len(chunk)
     return checksum.hexdigest()
 
 
@@ -97,7 +77,7 @@ def write_full_coverage_delta(
     *,
     workers: int = 8,
 ) -> dict[str, Any]:
-    """Write one DELTA containing every tensor and one safe changed byte."""
+    """Write one DELTA with an element-level change in every tensor."""
 
     import numpy as np
     import safetensors.numpy
@@ -106,7 +86,6 @@ def write_full_coverage_delta(
     checkpoint = Path(checkpoint_dir)
     index = json.loads((checkpoint / "model.safetensors.index.json").read_text())
     weight_map = index["weight_map"]
-    primary_name = _choose_bfloat16_tensor(checkpoint, weight_map)
     names_by_shard: dict[str, list[str]] = {}
     for name, filename in weight_map.items():
         names_by_shard.setdefault(filename, []).append(name)
@@ -122,27 +101,24 @@ def write_full_coverage_delta(
         compressed_tensors: dict[str, np.ndarray] = {}
         checksums: dict[str, str] = {}
         tensor_bytes = 0
+        changed_tensors = 0
         changed_bytes = 0
         with source_path.open("rb") as handle:
             for name in names:
                 begin, end = header[name]["data_offsets"]
                 byte_count = end - begin
-                flip_first_byte = name == primary_name
                 checksums[name] = _target_checksum(
                     handle,
                     offset=data_start + begin,
                     byte_count=byte_count,
-                    flip_first_byte=flip_first_byte,
                 )
                 compressed_tensors[name] = np.frombuffer(
-                    _compress_xor(
-                        byte_count,
-                        flip_first_byte=flip_first_byte,
-                    ),
+                    _compress_xor(byte_count),
                     dtype=np.uint8,
                 )
                 tensor_bytes += byte_count
-                changed_bytes += int(flip_first_byte)
+                changed_tensors += int(byte_count > 0)
+                changed_bytes += math.ceil(byte_count / _CHANGE_STRIDE_BYTES)
             if hasattr(os, "posix_fadvise"):
                 try:
                     os.posix_fadvise(
@@ -164,6 +140,7 @@ def write_full_coverage_delta(
             "filename": filename,
             "tensors": len(names),
             "tensor_bytes": tensor_bytes,
+            "changed_tensors": changed_tensors,
             "changed_bytes": changed_bytes,
             "wire_bytes": target_path.stat().st_size,
         }
@@ -192,10 +169,10 @@ def write_full_coverage_delta(
     return {
         "scope": "all_tensors",
         "tensors": len(weight_map),
-        "changed_tensors": 1,
+        "changed_tensors": sum(int(shard["changed_tensors"]) for shard in shards),
         "tensor_bytes": sum(int(shard["tensor_bytes"]) for shard in shards),
         "changed_bytes": sum(int(shard["changed_bytes"]) for shard in shards),
+        "change_stride_bytes": _CHANGE_STRIDE_BYTES,
         "wire_bytes": sum(int(shard["wire_bytes"]) for shard in shards),
-        "primary_tensor": primary_name,
         "generation_s": round(time.perf_counter() - started, 6),
     }

@@ -39,6 +39,7 @@ DELTA_MOUNT = "/delta-bulletin"
 SGLANG_CACHE_MOUNT = "/root/.cache/sglang"
 LOCAL_CHECKPOINT_ROOT = "/local-checkpoint/kimi-k2-6-nvfp4"
 LOCAL_TARGET_CHECKPOINT_DIR = f"{LOCAL_CHECKPOINT_ROOT}/target"
+LOCAL_CANONICAL_CHECKPOINT_DIR = f"{LOCAL_CHECKPOINT_ROOT}/canonical"
 
 DEFAULT_RUN_ID = "520c51f61535"
 DEFAULT_TARGET_VERSION = 1
@@ -48,6 +49,7 @@ SGLANG_SERVER_ARGS = {
     "--load-format": "fastsafetensors",
     "--model-loader-extra-config": '{"enable_gds":false}',
     "--weight-loader-drop-cache-after-load": "",
+    "--cpu-weight-cache-canonical-checkpoint-dir": LOCAL_CANONICAL_CHECKPOINT_DIR,
     "--trust-remote-code": "",
     "--tool-call-parser": "kimi_k2",
     "--reasoning-parser": "kimi_k2",
