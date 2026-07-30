@@ -9,7 +9,7 @@ from cookbook.miles_disagg.config import MilesConfig
 APP_NAME = "stitch-glm45-air-bf16"
 DELTA_VOLUME_NAME = "stitch-delta-glm45-air-bf16"
 DELTA_BULLETIN_ROOT = "/delta-bulletin"
-LOCAL_CHECKPOINT_PATH = "/local-checkpoint"
+LOCAL_CHECKPOINT_PATH = None
 
 SOURCE_MODEL = "zai-org/GLM-4.5-Air"
 MODEL_TAG = "glm45-air"
@@ -20,7 +20,7 @@ DISABLE_HF_TRANSFER = True
 
 SIDECAR_COMMIT_MODE = "in_place"
 SIDECAR_FLUSH_CACHE_ON_COMMIT = False
-SGLANG_DELTA_UPDATE_MODE = "disk"
+SGLANG_DELTA_UPDATE_MODE = "cpu"
 MEGATRON_RUNTIME_PATCHES = ["/root/cookbook/miles_disagg/patches/megatron-r3-dispatch.patch"]
 
 
@@ -28,6 +28,7 @@ SGLANG_SERVER_ARGS = {
     # Use the no-GDS fastsafetensors path on hosts without nvidia-fs.
     "--load-format": "fastsafetensors",
     "--model-loader-extra-config": '{"enable_gds":false}',
+    "--enable-cpu-weight-cache": "",
     "--weight-loader-drop-cache-after-load": "",
     "--reasoning-parser": "glm45",
     "--tool-call-parser": "glm",
