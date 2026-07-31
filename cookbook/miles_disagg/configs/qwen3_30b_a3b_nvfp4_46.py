@@ -123,6 +123,8 @@ modal = ModalConfig(
     # queue pressure so Flash scales OUT to the container cap instead of one engine
     # absorbing the whole wave at its concurrency ceiling.
     rollout_target_inputs=24,
+    # cpu persist ≈ 2x the 23.5 GiB canonical checkpoint; request covers staging + serving baseline.
+    rollout_memory_mib=(128 * 1024, 512 * 1024),
     proxy_regions=["us-west"],
 )
 

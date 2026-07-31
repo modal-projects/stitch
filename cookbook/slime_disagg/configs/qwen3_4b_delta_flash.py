@@ -29,7 +29,11 @@ SGLANG_SERVER_ARGS = {
     "--max-prefill-tokens": "4096",
 }
 
-modal = ModalConfig(gpu="H200")
+modal = ModalConfig(
+    gpu="H200",
+    # cpu persist ≈ 2x the ~7.5 GiB bf16 canonical checkpoint; request covers staging + serving baseline.
+    rollout_memory_mib=(64 * 1024, 256 * 1024),
+)
 
 
 class _Slime(SlimeConfig):

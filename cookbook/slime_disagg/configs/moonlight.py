@@ -32,7 +32,12 @@ SGLANG_SERVER_ARGS = {
     "--enable-return-routed-experts": "",
 }
 
-modal = ModalConfig(gpu="H200", region="us")
+modal = ModalConfig(
+    gpu="H200",
+    region="us",
+    # cpu persist ≈ 2x the ~30 GiB bf16 canonical checkpoint; request covers staging + serving baseline.
+    rollout_memory_mib=(128 * 1024, 512 * 1024),
+)
 
 
 class _Slime(SlimeConfig):
