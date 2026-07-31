@@ -12,7 +12,7 @@ from cookbook.miles_disagg.config import MilesConfig
 APP_NAME = "stitch-glm5-2-nvfp4"
 DELTA_VOLUME_NAME = "stitch-delta-glm5-2-nvfp4"
 DELTA_BULLETIN_ROOT = "/delta-bulletin"
-LOCAL_CHECKPOINT_PATH = None
+LOCAL_CHECKPOINT_PATH = "/local-checkpoint"
 
 # GLM-5.2 ships BF16 training masters and an NVIDIA NVFP4 rollout checkpoint.
 SOURCE_MODEL = "zai-org/GLM-5.2"
@@ -24,7 +24,7 @@ MODEL_TAG = "glm5-2"
 
 SIDECAR_COMMIT_MODE = "in_place"
 SIDECAR_FLUSH_CACHE_ON_COMMIT = False
-SGLANG_DELTA_UPDATE_MODE = "cpu"
+SGLANG_DELTA_UPDATE_MODE = "disk"
 # R3 routing-replay needs the dropless Megatron dispatch fix at startup.
 MEGATRON_RUNTIME_PATCHES = [
     "/root/cookbook/miles_disagg/patches/megatron-r3-dispatch.patch",
@@ -35,7 +35,6 @@ SGLANG_SERVER_ARGS = {
     # Use the no-GDS fastsafetensors path on hosts without nvidia-fs.
     "--load-format": "fastsafetensors",
     "--model-loader-extra-config": '{"enable_gds":false}',
-    "--enable-cpu-weight-cache": "",
     "--weight-loader-drop-cache-after-load": "",
     # The pinned SGLang has no GLM-5.2 parser; these are the closest available formats.
     "--reasoning-parser": "glm45",
@@ -63,7 +62,7 @@ modal = ModalConfig(
     rollout_min_containers=8,  # warm floor; Flash scales above under load
     rollout_target_inputs=32,
     proxy_regions=["us-west"],
-    rollout_ephemeral_disk_mib=819_200,  # delta bulletins + runtime spill
+    rollout_ephemeral_disk_mib=819_200,  # NVFP4 base copy + in-place delta headroom
     trainer_ephemeral_disk_mib=2_097_152,
     # TODO(glm5.2): torch_dist conversion parallelism — match the trainer EP/TP below.
     torch_dist_prep_nodes=4,

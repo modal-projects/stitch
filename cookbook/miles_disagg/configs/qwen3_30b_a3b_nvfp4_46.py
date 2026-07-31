@@ -46,14 +46,14 @@ from cookbook.miles_disagg.config import MilesConfig
 APP_NAME = "stitch-qwen3-30b-nvfp4-46"
 DELTA_VOLUME_NAME = "stitch-delta-qwen3-30b-nvfp4-46"
 DELTA_BULLETIN_ROOT = "/delta-bulletin"
-LOCAL_CHECKPOINT_PATH = None
+LOCAL_CHECKPOINT_PATH = "/local-checkpoint"
 
 SOURCE_MODEL = "Qwen/Qwen3-30B-A3B"  # bf16 -> masters ARE the download
 MODEL_TAG = "qwen3-30b-a3b-nvfp4-46"
 
 SIDECAR_COMMIT_MODE = "in_place"
 SIDECAR_FLUSH_CACHE_ON_COMMIT = False
-SGLANG_DELTA_UPDATE_MODE = "cpu"
+SGLANG_DELTA_UPDATE_MODE = "disk"
 # R3 routing-replay needs the dropless Megatron dispatch fix at startup.
 MEGATRON_RUNTIME_PATCHES = [
     "/root/cookbook/miles_disagg/patches/megatron-r3-dispatch.patch",
@@ -100,7 +100,6 @@ SGLANG_SERVER_ENV = {
 SGLANG_SERVER_ARGS = {
     "--weight-loader-prefetch-checkpoints": "",
     "--weight-loader-prefetch-num-threads": "8",
-    "--enable-cpu-weight-cache": "",
     "--attention-backend": "trtllm_mha",
     "--moe-runner-backend": "flashinfer_trtllm_routed",
     "--kv-cache-dtype": "bfloat16",
@@ -139,7 +138,7 @@ class _Miles(MilesConfig):
     actor_num_nodes = 1
     actor_num_gpus_per_node = 8
     num_gpus_per_node = 8
-    colocate = False  # disaggregated: rollouts live on the pool, not the trainer
+    colocate = False  # disk-delta is incompatible with --colocate
     rollout_num_gpus = 0
     rollout_num_gpus_per_engine = 1  # 30B NVFP4 is ~17 GB packed; 1 B200 per engine
     rollout_endpoint_url = None

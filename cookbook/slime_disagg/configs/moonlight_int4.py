@@ -14,20 +14,19 @@ from cookbook.slime_disagg.config import SlimeConfig
 APP_NAME = "stitch-moonlight-int4"
 DELTA_VOLUME_NAME = "stitch-delta-moonlight-int4"
 DELTA_BULLETIN_ROOT = "/delta-bulletin"
-LOCAL_CHECKPOINT_PATH = None
+LOCAL_CHECKPOINT_PATH = "/local-checkpoint"
 
 INT4_GROUP_SIZE = "128"
 
 SIDECAR_COMMIT_MODE = "in_place"
 SIDECAR_FLUSH_CACHE_ON_COMMIT = False
-SGLANG_DELTA_UPDATE_MODE = "cpu"
+SGLANG_DELTA_UPDATE_MODE = "disk"
 
 # The pool reuses the trainer image (its SGLang serves native INT4; no Blackwell fork).
 SGLANG_SERVER_ARGS = {
     # Use the no-GDS fastsafetensors path on hosts without nvidia-fs.
     "--load-format": "fastsafetensors",
     "--model-loader-extra-config": '{"enable_gds":false}',
-    "--enable-cpu-weight-cache": "",
     "--weight-loader-drop-cache-after-load": "",
     "--context-length": "16384",
     "--mem-fraction-static": "0.85",

@@ -229,7 +229,7 @@ def benchmark(
 
 @app.local_entrypoint()
 def main(
-    update_mode: str = "disk",
+    update_mode: str = "cpu",
     canonical_storage: str = "disk",
     sample_id: str = "1",
 ) -> None:

@@ -12,19 +12,18 @@ from cookbook.slime_disagg.config import SlimeConfig
 APP_NAME = "stitch-moonlight"
 DELTA_VOLUME_NAME = "stitch-delta-moonlight"
 DELTA_BULLETIN_ROOT = "/delta-bulletin"
-LOCAL_CHECKPOINT_PATH = None
+LOCAL_CHECKPOINT_PATH = "/local-checkpoint"
 
 # in_place applies weights without draining in-flight rollouts; stale KV isolated per version.
 SIDECAR_COMMIT_MODE = "in_place"
 SIDECAR_FLUSH_CACHE_ON_COMMIT = False
-SGLANG_DELTA_UPDATE_MODE = "cpu"
+SGLANG_DELTA_UPDATE_MODE = "disk"
 
 # mem-fraction-static is a starting point -- measure on a warm container.
 SGLANG_SERVER_ARGS = {
     # Use the no-GDS fastsafetensors path on hosts without nvidia-fs.
     "--load-format": "fastsafetensors",
     "--model-loader-extra-config": '{"enable_gds":false}',
-    "--enable-cpu-weight-cache": "",
     "--weight-loader-drop-cache-after-load": "",
     "--context-length": "8192",
     "--mem-fraction-static": "0.85",
