@@ -13,14 +13,14 @@ from cookbook.miles_disagg.config import MilesConfig
 APP_NAME = "stitch-kimi-k25-2layer-nvfp4"
 DELTA_VOLUME_NAME = "stitch-delta-kimi-k25-2layer-nvfp4"
 DELTA_BULLETIN_ROOT = "/delta-bulletin"
-LOCAL_CHECKPOINT_PATH = "/local-checkpoint"
+LOCAL_CHECKPOINT_PATH = None
 
 SOURCE_MODEL = "CharyZeng/Kimi-K2.5-2layer"  # INT4, KimiK25 arch, 2 layers
 MODEL_TAG = "kimi-k25-2layer"
 
 SIDECAR_COMMIT_MODE = "in_place"
 SIDECAR_FLUSH_CACHE_ON_COMMIT = False
-SGLANG_DELTA_UPDATE_MODE = "disk"
+SGLANG_DELTA_UPDATE_MODE = "cpu"
 # R3 routing-replay needs the dropless Megatron dispatch fix at startup.
 MEGATRON_RUNTIME_PATCHES = [
     "/root/cookbook/miles_disagg/patches/megatron-r3-dispatch.patch",
@@ -31,6 +31,7 @@ SGLANG_SERVER_ARGS = {
     # Use the no-GDS fastsafetensors path on hosts without nvidia-fs.
     "--load-format": "fastsafetensors",
     "--model-loader-extra-config": '{"enable_gds":false}',
+    "--enable-cpu-weight-cache": "",
     "--weight-loader-drop-cache-after-load": "",
     "--tool-call-parser": "kimi_k2",
     "--reasoning-parser": "kimi_k2",

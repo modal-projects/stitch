@@ -17,9 +17,9 @@ space. CPU mode accepts deltas only and requires a new replica for a new
 lineage. Disk mode accepts full checkpoints and deltas and can reset a live
 replica.
 
-See the paired
-[`glm45_air_fp8`](miles_disagg/configs/glm45_air_fp8.py) and
-[`glm45_air_fp8_disk`](miles_disagg/configs/glm45_air_fp8_disk.py) configs.
+Every bundled recipe serves `cpu` updates except the Kimi K3 example, which
+stays on `disk` pending its own benchmark (`cpu` dominated on every model
+family benchmarked so far). The profiling scripts exercise both modes.
 Memory sizing and SGLang details are in
 [`SGLANG_FORK.md`](common/SGLANG_FORK.md).
 

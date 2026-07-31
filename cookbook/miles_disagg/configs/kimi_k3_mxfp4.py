@@ -6,7 +6,7 @@ from cookbook.common.serving_image import SGLangRuntime
 ROLLOUT_SOURCE_MODEL = "moonshotai/Kimi-K3"
 ROLLOUT_SOURCE_REVISION = "9f62e4e9fffbd0a83ddd60e1c209d828994b3569"
 ROLLOUT_NUM_GPUS_PER_ENGINE = 8
-SGLANG_DELTA_UPDATE_MODE = "cpu"
+SGLANG_DELTA_UPDATE_MODE = "disk"
 
 SGLANG_RUNTIME = SGLangRuntime(
     image=(

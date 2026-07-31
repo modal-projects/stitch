@@ -9,17 +9,18 @@ from cookbook.slime_disagg.config import SlimeConfig
 APP_NAME = "stitch-qwen3-4b"
 DELTA_VOLUME_NAME = "stitch-delta-qwen3-4b"
 DELTA_BULLETIN_ROOT = "/delta-bulletin"
-LOCAL_CHECKPOINT_PATH = "/local-checkpoint"
+LOCAL_CHECKPOINT_PATH = None
 
 # in_place applies weights without draining; stale KV isolated per version via extra_key.
 SIDECAR_COMMIT_MODE = "in_place"
 SIDECAR_FLUSH_CACHE_ON_COMMIT = False
-SGLANG_DELTA_UPDATE_MODE = "disk"
+SGLANG_DELTA_UPDATE_MODE = "cpu"
 
 SGLANG_SERVER_ARGS = {
     # Use the no-GDS fastsafetensors path on hosts without nvidia-fs.
     "--load-format": "fastsafetensors",
     "--model-loader-extra-config": '{"enable_gds":false}',
+    "--enable-cpu-weight-cache": "",
     "--weight-loader-drop-cache-after-load": "",
     "--reasoning-parser": "qwen3",
     "--context-length": "16384",

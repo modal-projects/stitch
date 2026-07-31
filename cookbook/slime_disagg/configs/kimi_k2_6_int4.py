@@ -12,7 +12,7 @@ from cookbook.slime_disagg.config import SlimeConfig
 APP_NAME = "stitch-kimi-k2-6-int4"
 DELTA_VOLUME_NAME = "stitch-delta-kimi-k2-6-int4"
 DELTA_BULLETIN_ROOT = "/delta-bulletin"
-LOCAL_CHECKPOINT_PATH = "/local-checkpoint"
+LOCAL_CHECKPOINT_PATH = None
 
 # QAT grouping; MUST match the served INT4 checkpoint's compressed-tensors group_size.
 INT4_GROUP_SIZE = "32"
@@ -20,12 +20,13 @@ INT4_GROUP_SIZE = "32"
 # in_place applies weights without draining in-flight rollouts; stale KV isolated per version.
 SIDECAR_COMMIT_MODE = "in_place"
 SIDECAR_FLUSH_CACHE_ON_COMMIT = False
-SGLANG_DELTA_UPDATE_MODE = "disk"
+SGLANG_DELTA_UPDATE_MODE = "cpu"
 
 SGLANG_SERVER_ARGS = {
     # Use the no-GDS fastsafetensors path on hosts without nvidia-fs.
     "--load-format": "fastsafetensors",
     "--model-loader-extra-config": '{"enable_gds":false}',
+    "--enable-cpu-weight-cache": "",
     "--weight-loader-drop-cache-after-load": "",
     "--tool-call-parser": "kimi_k2",
     "--reasoning-parser": "kimi_k2",

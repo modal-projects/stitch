@@ -12,7 +12,7 @@ from cookbook.miles_disagg.config import MilesConfig
 APP_NAME = "stitch-moonlight-nvfp4"
 DELTA_VOLUME_NAME = "stitch-delta-moonlight-nvfp4"
 DELTA_BULLETIN_ROOT = "/delta-bulletin"
-LOCAL_CHECKPOINT_PATH = "/local-checkpoint"
+LOCAL_CHECKPOINT_PATH = None
 
 SOURCE_MODEL = "moonshotai/Moonlight-16B-A3B-Instruct"
 MODEL_TAG = "moonlight-16b"
@@ -20,7 +20,7 @@ MODEL_TAG = "moonlight-16b"
 # in_place applies weights without draining in-flight rollouts; stale KV isolated per version.
 SIDECAR_COMMIT_MODE = "in_place"
 SIDECAR_FLUSH_CACHE_ON_COMMIT = False
-SGLANG_DELTA_UPDATE_MODE = "disk"
+SGLANG_DELTA_UPDATE_MODE = "cpu"
 # R3 routing-replay needs the dropless Megatron dispatch fix at startup.
 MEGATRON_RUNTIME_PATCHES = [
     "/root/cookbook/miles_disagg/patches/megatron-r3-dispatch.patch",
@@ -33,6 +33,7 @@ SGLANG_SERVER_ARGS = {
     # Use the no-GDS fastsafetensors path on hosts without nvidia-fs.
     "--load-format": "fastsafetensors",
     "--model-loader-extra-config": '{"enable_gds":false}',
+    "--enable-cpu-weight-cache": "",
     "--weight-loader-drop-cache-after-load": "",
     "--attention-backend": "tokenspeed_mla",
     "--kv-cache-dtype": "fp8_e4m3",  # tokenspeed_mla requires this
