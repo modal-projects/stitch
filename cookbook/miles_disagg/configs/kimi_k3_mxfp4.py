@@ -22,11 +22,6 @@ SGLANG_SERVER_ARGS = {
     "--trust-remote-code": "",
     "--load-format": "fastsafetensors",
     "--model-loader-extra-config": '{"enable_gds":false}',
-    "--enable-cpu-weight-cache": "",
-    "--cpu-weight-cache-max-compile-group-gb": "16",
-    "--cpu-weight-cache-canonical-checkpoint-dir": (
-        "/local-checkpoint/kimi-k3-mxfp4/canonical"
-    ),
     "--weight-loader-drop-cache-after-load": "",
     "--dist-timeout": "3600",
     "--context-length": "1048576",
@@ -49,7 +44,7 @@ modal = ModalConfig(
     gpu="B300",
     rollout_target_inputs=32,
     rollout_ephemeral_disk_mib=2 * 1024 * 1024,
-    # CPU updates retain TP rank images in RAM and the canonical checkpoint on
-    # ephemeral NVMe.
+    # Disk updates reconstruct the ~600 GiB target checkpoint on ephemeral NVMe;
+    # RAM stays generous as read cache for the canonical base.
     rollout_memory_mib=(1024 * 1024, 3 * 1024 * 1024),
 )

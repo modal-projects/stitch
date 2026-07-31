@@ -7,7 +7,7 @@ from cookbook.slime_disagg.configs import qwen3_4b_delta_flash as _base
 APP_NAME = "stitch-qwen3-4b-hillclimb"
 DELTA_VOLUME_NAME = "stitch-delta-qwen3-4b-hillclimb"
 DELTA_BULLETIN_ROOT = _base.DELTA_BULLETIN_ROOT
-LOCAL_CHECKPOINT_PATH = "/local-checkpoint"
+LOCAL_CHECKPOINT_PATH = _base.LOCAL_CHECKPOINT_PATH
 SIDECAR_COMMIT_MODE = _base.SIDECAR_COMMIT_MODE
 SIDECAR_FLUSH_CACHE_ON_COMMIT = _base.SIDECAR_FLUSH_CACHE_ON_COMMIT
 SGLANG_DELTA_UPDATE_MODE = _base.SGLANG_DELTA_UPDATE_MODE

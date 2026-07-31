@@ -1,12 +1,18 @@
 """Download Kimi K3 and validate one complete MXFP4 delta update on Modal.
 
-Run the CPU destination with the canonical checkpoint on local storage:
+Disk destination (the Kimi K3 config's declared update mode):
+
+    MODAL_FUNCTION_RUNTIME=runc uv run --extra modal modal run -d \
+      tools/profiling/kimi_k3_mxfp4_delta_weight_update.py
+
+CPU destination with the canonical checkpoint on local storage:
 
     MODAL_FUNCTION_RUNTIME=runc uv run --extra modal modal run -d \
       tools/profiling/kimi_k3_mxfp4_delta_weight_update.py \
       --update-mode cpu --canonical-storage disk
 
-Use ``--canonical-storage memory`` only when the host can retain both the
+``--canonical-storage`` applies only with ``--update-mode cpu``; use
+``--canonical-storage memory`` only when the host can retain both the
 canonical checkpoint and TP rank images. ``--update-mode disk`` profiles the
 disk destination instead of rank-ready CPU staging.
 """
@@ -41,6 +47,10 @@ DELTA_ID = f"kimi-k3/{model.ROLLOUT_SOURCE_REVISION}/full-coverage-v3"
 DELTA_SOURCE_DIR = f"{DELTA_MOUNT}/{DELTA_ID}"
 BASE_CHECKPOINT_DIR = "/local-checkpoint/kimi-k3-mxfp4/base"
 LOCAL_TARGET_CHECKPOINT_DIR = "/local-checkpoint/kimi-k3-mxfp4/target"
+# CPU-mode-only overlay: the config is a clean disk config, so the profiler
+# injects the cpu-weight-cache args when profiling the cpu destination.
+CPU_CACHE_GROUP_GB = "16"
+CANONICAL_CHECKPOINT_DIR = "/local-checkpoint/kimi-k3-mxfp4/canonical"
 SGLANG_CACHE_PATH = "/root/.cache/sglang"
 _REPO_ROOT = Path(__file__).resolve().parents[2] if modal.is_local() else Path("/root")
 
@@ -201,16 +211,22 @@ def _materialize_checkpoint_view() -> None:
 )
 def benchmark(
     update_mode: str,
-    canonical_storage: str,
+    canonical_storage: str | None,
     runtime: str,
     sample_id: str,
 ) -> dict:
     _materialize_checkpoint_view()
     server_args = dict(model.SGLANG_SERVER_ARGS)
-    if canonical_storage == "memory":
-        server_args.pop("--cpu-weight-cache-canonical-checkpoint-dir", None)
-    elif canonical_storage != "disk":
-        raise ValueError("canonical_storage must be 'memory' or 'disk'")
+    if update_mode == "cpu":
+        server_args["--enable-cpu-weight-cache"] = ""
+        server_args["--cpu-weight-cache-max-compile-group-gb"] = CPU_CACHE_GROUP_GB
+        storage = canonical_storage if canonical_storage is not None else "disk"
+        if storage == "disk":
+            server_args["--cpu-weight-cache-canonical-checkpoint-dir"] = CANONICAL_CHECKPOINT_DIR
+        elif storage != "memory":
+            raise ValueError("canonical_storage must be 'memory' or 'disk'")
+    elif canonical_storage is not None:
+        raise ValueError("--canonical-storage applies only with --update-mode cpu")
     return run_delta_weight_update(
         WeightUpdateSpec(
             model_name="Kimi K3 MXFP4",
@@ -230,10 +246,12 @@ def benchmark(
 @app.local_entrypoint()
 def main(
     update_mode: str = "disk",
-    canonical_storage: str = "disk",
+    canonical_storage: str | None = None,
     sample_id: str = "1",
 ) -> None:
     parsed_mode = parse_update_mode(update_mode)
+    if parsed_mode == "disk" and canonical_storage is not None:
+        raise ValueError("--canonical-storage applies only with --update-mode cpu")
     download_model.remote()
     prepare_delta.remote()
     benchmark.remote(

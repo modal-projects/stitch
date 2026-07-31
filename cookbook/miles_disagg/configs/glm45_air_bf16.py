@@ -46,7 +46,10 @@ modal = ModalConfig(
     rollout_min_containers=1,
     rollout_target_inputs=32,
     proxy_regions=["us-west"],
-    rollout_ephemeral_disk_mib=819_200,
+    # cpu persist ≈ 2x the 207.5 GiB canonical checkpoint; request covers staging + serving baseline.
+    rollout_memory_mib=(1024 * 1024, 3 * 1024 * 1024),
+    # cpu updates stage nothing local; disk is runtime + spill only.
+    rollout_ephemeral_disk_mib=524_288,
     torch_dist_prep_nodes=4,
     torch_dist_prep_gpus_per_node=8,
     torch_dist_convert_extra_args=(

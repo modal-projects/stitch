@@ -50,6 +50,8 @@ modal = ModalConfig(
     region="us",
     # warm floor of 1 so the pool is up before the trainer sends rollouts; Flash scales above under load.
     rollout_min_containers=1,
+    # cpu persist ≈ 2x the ~10 GiB canonical checkpoint; request covers staging + serving baseline.
+    rollout_memory_mib=(64 * 1024, 256 * 1024),
     proxy_regions=["us-west"],
 )
 

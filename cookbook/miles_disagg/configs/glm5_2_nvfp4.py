@@ -62,8 +62,11 @@ modal = ModalConfig(
     trainer_memory_mib=(1024, int(3 * 1024 * 1024)),
     rollout_min_containers=8,  # warm floor; Flash scales above under load
     rollout_target_inputs=32,
+    # cpu persist ≈ 862 GiB measured (canonical + TP rank images), ~995 GB observed after staging.
+    rollout_memory_mib=(1024 * 1024, 3 * 1024 * 1024),
     proxy_regions=["us-west"],
-    rollout_ephemeral_disk_mib=819_200,  # delta bulletins + runtime spill
+    # cpu updates stage nothing local; disk is runtime + spill only.
+    rollout_ephemeral_disk_mib=524_288,
     trainer_ephemeral_disk_mib=2_097_152,
     # TODO(glm5.2): torch_dist conversion parallelism — match the trainer EP/TP below.
     torch_dist_prep_nodes=4,
