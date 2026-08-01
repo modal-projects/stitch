@@ -6,16 +6,16 @@ Deploy: EXPERIMENT_CONFIG=moonlight_nvfp4 uv run --extra modal modal deploy --st
 from __future__ import annotations
 
 from cookbook.common.config import ModalConfig
-from cookbook.common.constants import DATA_PATH, PREP_PATH
+from cookbook.common.constants import CHECKPOINTS_PATH, DATA_PATH, STITCH_PATH
 from cookbook.miles_disagg.config import MilesConfig
 
 APP_NAME = "stitch-moonlight-nvfp4"
-DELTA_VOLUME_NAME = "stitch-delta-moonlight-nvfp4"
-DELTA_BULLETIN_ROOT = "/delta-bulletin"
+EXPERIMENT_VOLUME_NAME = "stitch-miles-moonlight-nvfp4"
 LOCAL_CHECKPOINT_PATH = None
 
 SOURCE_MODEL = "moonshotai/Moonlight-16B-A3B-Instruct"
-MODEL_TAG = "moonlight-16b"
+BF16_CHECKPOINT_PATH = CHECKPOINTS_PATH / "moonlight-bf16"
+ROLLOUT_CHECKPOINT_PATH = CHECKPOINTS_PATH / "moonlight-nvfp4"
 
 # in_place applies weights without draining in-flight rollouts; stale KV isolated per version.
 SIDECAR_COMMIT_MODE = "in_place"
@@ -60,22 +60,28 @@ class _Miles(MilesConfig):
     # Arch comes from the model script; do NOT inline arch attrs here.
     miles_model_script = "scripts/models/moonlight.sh"
 
-    hf_checkpoint = f"{PREP_PATH}/{MODEL_TAG}/nvfp4"
-    ref_load = f"{PREP_PATH}/{MODEL_TAG}/bf16"
+    hf_checkpoint = str(ROLLOUT_CHECKPOINT_PATH)
+    ref_load = str(BF16_CHECKPOINT_PATH)
     megatron_to_hf_mode = "bridge"
     model_name = "deepseekv3"  # bridge dispatch: Moonlight is DeepSeek-V3 arch
 
     actor_num_nodes = 1
-    actor_num_gpus_per_node = 4  # 1 node x 4 B200 trainer (matches the proven moonlight recipe)
+    actor_num_gpus_per_node = (
+        4  # 1 node x 4 B200 trainer (matches the proven moonlight recipe)
+    )
     num_gpus_per_node = 4
     colocate = False  # disk-delta is incompatible with --colocate
     rollout_num_gpus = 0  # publish-only forces this
-    rollout_num_gpus_per_engine = 1  # B200:1 per rollout container (Moonlight NVFP4 is tiny)
+    rollout_num_gpus_per_engine = (
+        1  # B200:1 per rollout container (Moonlight NVFP4 is tiny)
+    )
     rollout_endpoint_url = None
     use_miles_router = True
 
     # Staleness gate; the knobs ride in custom_config_path (read by the hook, not miles core).
-    custom_rollout_request_hook_path = "cookbook.common.hooks.gated_rollout_request_hook"
+    custom_rollout_request_hook_path = (
+        "cookbook.common.hooks.gated_rollout_request_hook"
+    )
     custom_config_path = {
         "rollout_request_weight_version_mode": "min",
         "rollout_request_weight_version_lag": 1,
@@ -94,7 +100,7 @@ class _Miles(MilesConfig):
     update_weight_transfer_mode = "disk-delta"
     update_weight_delta_encoding = "xor"
     update_weight_delta_checksum = "xxh3-128"
-    update_weight_disk_dir = DELTA_BULLETIN_ROOT  # modal_train run-scopes this
+    update_weight_disk_dir = str(STITCH_PATH)
     custom_update_weight_post_write_path = "cookbook.common.hooks.commit_and_wake"
 
     prompt_data = f"{DATA_PATH}/dapo-math-17k/dapo-math-17k.jsonl"
@@ -107,7 +113,9 @@ class _Miles(MilesConfig):
     eval_interval = None
 
     num_rollout = 20
-    save_interval = 1000  # megatron requires it; > num_rollout so the smoke skips megatron saves
+    save_interval = (
+        1000  # megatron requires it; > num_rollout so the smoke skips megatron saves
+    )
     rollout_batch_size = 32
     rollout_max_response_len = 4096  # fits within the 8192 context (prompt + response)
     rollout_temperature = 0.8

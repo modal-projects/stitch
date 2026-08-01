@@ -49,17 +49,13 @@ _SERVING_ENV = {
 def build_serving_image(
     *,
     hf_cache_path: str,
-    delta_volume_name: str | None = None,
     experiment: str,
     run_id: str | None = None,
     extra_packages: Sequence[str] = (),
     extra_env: Mapping[str, str] | None = None,
     runtime: SGLangRuntime = DEFAULT_SGLANG_RUNTIME,
 ) -> modal.Image:
-    """The rollout-pool image. Volume-backed recipes set ``delta_volume_name`` for their
-    Store; other Store backends omit it. Backend-specific packages and environment
-    belong in ``extra_packages`` / ``extra_env`` so all build steps still precede the
-    local source layers."""
+    """Build the rollout-pool image for one experiment config."""
     return (
         modal.Image.from_registry(runtime.image)
         .run_commands(
@@ -90,11 +86,6 @@ def build_serving_image(
                 **_SERVING_ENV,
                 **(extra_env or {}),
                 "EXPERIMENT_CONFIG": experiment,
-                **(
-                    {"DELTA_VOLUME_NAME": delta_volume_name}
-                    if delta_volume_name
-                    else {}
-                ),
                 **({"RUN_ID": run_id} if run_id else {}),
             }
         )

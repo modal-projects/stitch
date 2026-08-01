@@ -41,14 +41,20 @@ def main() -> None:
     p.add_argument("--volume-name", default="")
     p.add_argument("--commit-mode", choices=["in_place", "quiesce"], default="in_place")
     p.add_argument("--flush-cache-on-commit", action="store_true")
-    p.add_argument("--run-id", default=None)
+    p.add_argument("--run-id", required=True)
     p.add_argument("--debug-requests", action="store_true")
-    p.add_argument("--reconcile-interval", type=float, default=5.0)  # 0 disables the periodic re-check
+    p.add_argument(
+        "--reconcile-interval", type=float, default=5.0
+    )  # 0 disables the periodic re-check
     args = p.parse_args()
     if args.delta_update_mode == "disk" and not args.local_checkpoint_dir:
         p.error("--local-checkpoint-dir is required in disk mode")
 
-    store = ModalVolumeStore(args.bulletin_root, volume_name=args.volume_name or None)
+    store = ModalVolumeStore(
+        args.bulletin_root,
+        volume_name=args.volume_name or None,
+        run_id=args.run_id,
+    )
     engine = SGLangEngine(
         args.upstream,
         args.base_checkpoint_dir,

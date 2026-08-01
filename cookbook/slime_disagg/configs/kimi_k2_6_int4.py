@@ -6,13 +6,14 @@ Deploy: EXPERIMENT_CONFIG=kimi_k2_6_int4 uv run --extra modal modal deploy -m co
 from __future__ import annotations
 
 from cookbook.common.config import ModalConfig
-from cookbook.common.constants import DATA_PATH
+from cookbook.common.constants import CHECKPOINTS_PATH, DATA_PATH, STITCH_PATH
 from cookbook.slime_disagg.config import SlimeConfig
 
 APP_NAME = "stitch-kimi-k2-6-int4"
-DELTA_VOLUME_NAME = "stitch-delta-kimi-k2-6-int4"
-DELTA_BULLETIN_ROOT = "/delta-bulletin"
+EXPERIMENT_VOLUME_NAME = "stitch-slime-kimi-k2-6-int4"
 LOCAL_CHECKPOINT_PATH = None
+SOURCE_MODEL = "moonshotai/Kimi-K2.6"
+ROLLOUT_CHECKPOINT_PATH = CHECKPOINTS_PATH / "kimi-k2-6-int4"
 
 # QAT grouping; MUST match the served INT4 checkpoint's compressed-tensors group_size.
 INT4_GROUP_SIZE = "32"
@@ -64,7 +65,7 @@ class _Slime(SlimeConfig):
     slime_model_script = "scripts/models/kimi-k2-thinking.sh"
 
     # The native-INT4 base is the served model, the QAT init, and the disk-delta base.
-    hf_checkpoint = "moonshotai/Kimi-K2.6"
+    hf_checkpoint = str(ROLLOUT_CHECKPOINT_PATH)
     ref_load = hf_checkpoint
     megatron_to_hf_mode = "bridge"
 
@@ -76,7 +77,9 @@ class _Slime(SlimeConfig):
     rollout_endpoint_url = None          # filled at launch from the pool gateway
 
     # The three plug points stitch fills (slime's publish hook key is custom_delta_pre_push_path):
-    custom_rollout_request_hook_path = "cookbook.common.hooks.gated_rollout_request_hook"
+    custom_rollout_request_hook_path = (
+        "cookbook.common.hooks.gated_rollout_request_hook"
+    )
     custom_delta_pre_push_path = "cookbook.common.hooks.commit_and_wake"
     rollout_request_weight_version_mode = "min"
     rollout_request_weight_version_lag = 1
@@ -90,7 +93,7 @@ class _Slime(SlimeConfig):
     update_weight_transport = "disk"
     update_weight_delta_encoding = "xor"
     update_weight_delta_checksum = "xxh3-128"
-    update_weight_disk_dir = DELTA_BULLETIN_ROOT  # run-scoped at launch to <root>/<run_id>
+    update_weight_disk_dir = str(STITCH_PATH)  # run-scoped at launch
 
     prompt_data = f"{DATA_PATH}/dapo-math-17k/dapo-math-17k.jsonl"
     input_key = "prompt"
@@ -108,7 +111,9 @@ class _Slime(SlimeConfig):
     rollout_top_p = 1.0
     n_samples_per_prompt = 8
     over_sampling_batch_size = 256
-    dynamic_sampling_filter_path = "slime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std"
+    dynamic_sampling_filter_path = (
+        "slime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std"
+    )
     num_steps_per_rollout = 4
     balance_data = True
     sglang_server_concurrency = 256

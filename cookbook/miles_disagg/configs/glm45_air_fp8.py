@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 from cookbook.common.config import ModalConfig
-from cookbook.common.constants import DATA_PATH, PREP_PATH
+from cookbook.common.constants import CHECKPOINTS_PATH, DATA_PATH, STITCH_PATH
 from cookbook.miles_disagg.config import MilesConfig
 
 APP_NAME = "stitch-glm45-air-fp8"
-DELTA_VOLUME_NAME = "stitch-delta-glm45-air-fp8"
-DELTA_BULLETIN_ROOT = "/delta-bulletin"
+EXPERIMENT_VOLUME_NAME = "stitch-miles-glm45-air-fp8"
 LOCAL_CHECKPOINT_PATH = None
 SIDECAR_COMMIT_MODE = "in_place"
 SIDECAR_FLUSH_CACHE_ON_COMMIT = False
@@ -19,15 +18,19 @@ SGLANG_SERVER_ENV = {
     "SGLANG_ENABLE_OVERLAP_PLAN_STREAM": "0",
 }
 
-MODEL_TAG = "glm45-air"
 SOURCE_MODEL = "zai-org/GLM-4.5-Air"
 ROLLOUT_SOURCE_MODEL = "zai-org/GLM-4.5-Air-FP8"
+BF16_CHECKPOINT_PATH = CHECKPOINTS_PATH / "glm45-air-bf16"
+ROLLOUT_CHECKPOINT_PATH = CHECKPOINTS_PATH / "glm45-air-fp8"
+TORCH_DIST_CHECKPOINT_PATH = CHECKPOINTS_PATH / "glm45-air-torch-dist"
 SERVED_CHECKPOINT_FORMAT = "fp8"
 USE_MODAL_TORCH_DIST_WRAPPER = True
 DISABLE_HF_XET = True
 DISABLE_HF_TRANSFER = True
 
-MEGATRON_RUNTIME_PATCHES = ["/root/cookbook/miles_disagg/patches/megatron-r3-dispatch.patch"]
+MEGATRON_RUNTIME_PATCHES = [
+    "/root/cookbook/miles_disagg/patches/megatron-r3-dispatch.patch"
+]
 
 SGLANG_SERVER_ARGS = {
     # Use the no-GDS fastsafetensors path on hosts without nvidia-fs.
@@ -59,8 +62,8 @@ SGLANG_SERVER_ARGS = {
 class _Miles(MilesConfig):
     miles_model_script = "scripts/models/glm4.5-106B-A12B.sh"
 
-    hf_checkpoint = f"{PREP_PATH}/{MODEL_TAG}/fp8"
-    ref_load = f"{PREP_PATH}/{MODEL_TAG}/torch_dist"
+    hf_checkpoint = str(ROLLOUT_CHECKPOINT_PATH)
+    ref_load = str(TORCH_DIST_CHECKPOINT_PATH)
     megatron_to_hf_mode = "raw"
     model_name = "glm4moe"
 
@@ -73,7 +76,9 @@ class _Miles(MilesConfig):
     rollout_endpoint_url = None          # filled at launch from the pool gateway
     use_miles_router = True
 
-    custom_rollout_request_hook_path = "cookbook.common.hooks.gated_rollout_request_hook"
+    custom_rollout_request_hook_path = (
+        "cookbook.common.hooks.gated_rollout_request_hook"
+    )
     custom_update_weight_post_write_path = "cookbook.common.hooks.commit_and_wake"
     custom_config_path = {
         "rollout_request_weight_version_mode": "min",
@@ -89,7 +94,7 @@ class _Miles(MilesConfig):
     update_weight_transfer_mode = "disk-delta"
     update_weight_delta_encoding = "xor"
     update_weight_delta_checksum = "xxh3-128"
-    update_weight_disk_dir = DELTA_BULLETIN_ROOT  # run-scoped at launch to <root>/<run_id>
+    update_weight_disk_dir = str(STITCH_PATH)  # run-scoped at launch
 
     prompt_data = f"{DATA_PATH}/dapo-math-17k/dapo-math-17k.jsonl"
     input_key = "prompt"

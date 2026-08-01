@@ -6,21 +6,22 @@ Deploy: EXPERIMENT_CONFIG=glm5_2_nvfp4 uv run --extra modal modal deploy --strat
 from __future__ import annotations
 
 from cookbook.common.config import ModalConfig
-from cookbook.common.constants import DATA_PATH, PREP_PATH
+from cookbook.common.constants import CHECKPOINTS_PATH, DATA_PATH, STITCH_PATH
 from cookbook.miles_disagg.config import MilesConfig
 
 APP_NAME = "stitch-glm5-2-nvfp4"
-DELTA_VOLUME_NAME = "stitch-delta-glm5-2-nvfp4"
-DELTA_BULLETIN_ROOT = "/delta-bulletin"
+EXPERIMENT_VOLUME_NAME = "stitch-miles-glm5-2-nvfp4"
 LOCAL_CHECKPOINT_PATH = None
 
 # GLM-5.2 ships BF16 training masters and an NVIDIA NVFP4 rollout checkpoint.
 SOURCE_MODEL = "zai-org/GLM-5.2"
 ROLLOUT_SOURCE_MODEL = "nvidia/GLM-5.2-NVFP4"
 ROLLOUT_SOURCE_REVISION = "aec724e8c7b8ee9db3b48c01c320f63f9cdaf8aa"
+BF16_CHECKPOINT_PATH = CHECKPOINTS_PATH / "glm5-2-bf16"
+ROLLOUT_CHECKPOINT_PATH = CHECKPOINTS_PATH / "glm5-2-nvfp4"
+TORCH_DIST_CHECKPOINT_PATH = CHECKPOINTS_PATH / "glm5-2-torch-dist"
 SERVED_CHECKPOINT_FORMAT = "nvfp4"
 CHECKPOINT_PREP_REQUIRES_GPU = False
-MODEL_TAG = "glm5-2"
 
 SIDECAR_COMMIT_MODE = "in_place"
 SIDECAR_FLUSH_CACHE_ON_COMMIT = False
@@ -81,8 +82,8 @@ modal = ModalConfig(
 class _Miles(MilesConfig):
     miles_model_script = "scripts/models/glm5.2-744B-A40B.sh"
 
-    hf_checkpoint = f"{PREP_PATH}/{MODEL_TAG}/nvfp4"
-    ref_load = f"{PREP_PATH}/{MODEL_TAG}/torch_dist"
+    hf_checkpoint = str(ROLLOUT_CHECKPOINT_PATH)
+    ref_load = str(TORCH_DIST_CHECKPOINT_PATH)
     megatron_to_hf_mode = "raw"
     model_name = "glm_moe_dsa"
 
@@ -157,7 +158,7 @@ class _Miles(MilesConfig):
     update_weight_transfer_mode = "disk-delta"
     update_weight_delta_encoding = "xor"
     update_weight_delta_checksum = "xxh3-128"
-    update_weight_disk_dir = DELTA_BULLETIN_ROOT
+    update_weight_disk_dir = str(STITCH_PATH)
     custom_update_weight_post_write_path = "cookbook.common.hooks.commit_and_wake"
 
     prompt_data = f"{DATA_PATH}/dapo-math-17k/dapo-math-17k.jsonl"

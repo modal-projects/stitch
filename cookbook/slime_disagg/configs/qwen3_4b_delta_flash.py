@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from cookbook.common.config import ModalConfig
-from cookbook.common.constants import DATA_PATH
+from cookbook.common.constants import CHECKPOINTS_PATH, DATA_PATH, STITCH_PATH
 from cookbook.slime_disagg.config import SlimeConfig
 
 APP_NAME = "stitch-qwen3-4b"
-DELTA_VOLUME_NAME = "stitch-delta-qwen3-4b"
-DELTA_BULLETIN_ROOT = "/delta-bulletin"
+EXPERIMENT_VOLUME_NAME = "stitch-slime-qwen3-4b"
 LOCAL_CHECKPOINT_PATH = None
+SOURCE_MODEL = "Qwen/Qwen3-4B"
+ROLLOUT_CHECKPOINT_PATH = CHECKPOINTS_PATH / "qwen3-4b-bf16"
 
 # in_place applies weights without draining; stale KV isolated per version via extra_key.
 SIDECAR_COMMIT_MODE = "in_place"
@@ -37,7 +38,7 @@ modal = ModalConfig(
 
 
 class _Slime(SlimeConfig):
-    hf_checkpoint = "Qwen/Qwen3-4B"
+    hf_checkpoint = str(ROLLOUT_CHECKPOINT_PATH)
     ref_load = hf_checkpoint
     megatron_to_hf_mode = "bridge"
 
@@ -46,8 +47,12 @@ class _Slime(SlimeConfig):
     colocate = False
     rollout_num_gpus = 0
     rollout_num_gpus_per_engine = 1
-    rollout_endpoint_url = None  # publish-only: slime routes /generate to the Flash gateway
-    custom_rollout_request_hook_path = "cookbook.common.hooks.gated_rollout_request_hook"
+    rollout_endpoint_url = (
+        None  # publish-only: slime routes /generate to the Flash gateway
+    )
+    custom_rollout_request_hook_path = (
+        "cookbook.common.hooks.gated_rollout_request_hook"
+    )
     rollout_request_weight_version_mode = "exact"
     rollout_request_weight_version_lag = 0
     rollout_request_retry_attempts = 240
@@ -60,7 +65,7 @@ class _Slime(SlimeConfig):
     update_weight_transport = "disk"
     update_weight_delta_encoding = "xor"
     update_weight_delta_checksum = "xxh3-128"
-    update_weight_disk_dir = DELTA_BULLETIN_ROOT
+    update_weight_disk_dir = str(STITCH_PATH)
     custom_delta_pre_push_path = "cookbook.common.hooks.commit_and_wake"
 
     prompt_data = f"{DATA_PATH}/gsm8k/train.parquet"
