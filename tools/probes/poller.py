@@ -14,7 +14,9 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-REDISCOVER_EVERY = 30.0  # seconds between replica-list refreshes (containers come and go)
+REDISCOVER_EVERY = (
+    30.0  # seconds between replica-list refreshes (containers come and go)
+)
 
 
 async def poll(
@@ -42,10 +44,14 @@ async def poll(
     async with httpx.AsyncClient(timeout=10.0, trust_env=False) as client:
         with out.open("a") as f:
             while deadline is None or time.time() < deadline:
-                if pool is not None and (not replicas or time.time() - last_discover >= REDISCOVER_EVERY):
+                if pool is not None and (
+                    not replicas or time.time() - last_discover >= REDISCOVER_EVERY
+                ):
                     replicas = await asyncio.to_thread(pool.discover_replicas)
                     last_discover = time.time()
-                for row in await asyncio.gather(*(_probe(client, url) for url in replicas)):
+                for row in await asyncio.gather(
+                    *(_probe(client, url) for url in replicas)
+                ):
                     f.write(json.dumps(row) + "\n")
                 f.flush()
                 await asyncio.sleep(interval)
@@ -64,9 +70,15 @@ def summarize(path: str) -> dict[str, Any]:
     """Reduce a poll JSONL to the certification quantities."""
     from stitch.types import VersionRef
 
-    first_seen: dict[str, dict[int, float]] = defaultdict(dict)  # replica -> version -> t
-    timings: dict[tuple[str, float], dict[str, Any]] = {}  # (replica, metrics.at) -> metrics
-    unready: dict[str, float] = defaultdict(float)  # replica -> seconds observed not ready
+    first_seen: dict[str, dict[int, float]] = defaultdict(
+        dict
+    )  # replica -> version -> t
+    timings: dict[
+        tuple[str, float], dict[str, Any]
+    ] = {}  # (replica, metrics.at) -> metrics
+    unready: dict[str, float] = defaultdict(
+        float
+    )  # replica -> seconds observed not ready
     prev_t: dict[str, float] = {}
     errors = 0
 
@@ -88,8 +100,11 @@ def summarize(path: str) -> dict[str, Any]:
 
     versions = sorted({v for per in first_seen.values() for v in per})
     convergence = {
-        v: round(max(per[v] for per in first_seen.values() if v in per)
-                 - min(per[v] for per in first_seen.values() if v in per), 3)
+        v: round(
+            max(per[v] for per in first_seen.values() if v in per)
+            - min(per[v] for per in first_seen.values() if v in per),
+            3,
+        )
         for v in versions
         if sum(v in per for per in first_seen.values()) > 1
     }
@@ -109,7 +124,12 @@ def summarize(path: str) -> dict[str, Any]:
 def _dist(xs: list[float]) -> dict[str, float] | None:
     if not xs:
         return None
-    return {"n": len(xs), "p50": xs[len(xs) // 2], "p95": xs[int(len(xs) * 0.95)], "max": xs[-1]}
+    return {
+        "n": len(xs),
+        "p50": xs[len(xs) // 2],
+        "p95": xs[int(len(xs) * 0.95)],
+        "max": xs[-1],
+    }
 
 
 if __name__ == "__main__":
@@ -127,6 +147,14 @@ if __name__ == "__main__":
     s.add_argument("path")
     args = ap.parse_args()
     if args.cmd == "poll":
-        asyncio.run(poll(args.app, args.cls, interval=args.interval, duration=args.duration, out_path=args.out))
+        asyncio.run(
+            poll(
+                args.app,
+                args.cls,
+                interval=args.interval,
+                duration=args.duration,
+                out_path=args.out,
+            )
+        )
     else:
         print(json.dumps(summarize(args.path), indent=2))

@@ -46,7 +46,11 @@ class _FakeS3:
 
         class _Paginator:
             def paginate(self, Bucket, Prefix):
-                contents = [{"Key": k, "Size": len(v)} for (b, k), v in objs.items() if b == Bucket and k.startswith(Prefix)]
+                contents = [
+                    {"Key": k, "Size": len(v)}
+                    for (b, k), v in objs.items()
+                    if b == Bucket and k.startswith(Prefix)
+                ]
                 return [{"Contents": contents}]
 
         return _Paginator()
@@ -63,11 +67,18 @@ def _write_local_version(root: Path, ref: VersionRef) -> str:
     d = root / ref.identity
     d.mkdir(parents=True)
     (d / "model.safetensors.index.json").write_text(
-        json.dumps({
-            "metadata": {"version": ref.version, "base_version": ref.version - 1, "delta_encoding": "xor",
-                         "compression_format": "zstd", "checksum_format": "xxh3-128"},
-            "weight_map": {"w": "model-00001-of-00001.safetensors"},
-        })
+        json.dumps(
+            {
+                "metadata": {
+                    "version": ref.version,
+                    "base_version": ref.version - 1,
+                    "delta_encoding": "xor",
+                    "compression_format": "zstd",
+                    "checksum_format": "xxh3-128",
+                },
+                "weight_map": {"w": "model-00001-of-00001.safetensors"},
+            }
+        )
     )
     (d / "model-00001-of-00001.safetensors").write_bytes(b"\x00\x11\x22\x33")
     return str(d)
@@ -97,7 +108,9 @@ def test_s3_publish_manifest_materialize() -> None:
 
         version_dir = Path(store.materialize(ref))
         assert version_dir == store.cache_dir / ref.identity
-        assert (version_dir / "model-00001-of-00001.safetensors").read_bytes() == b"\x00\x11\x22\x33"
+        assert (
+            version_dir / "model-00001-of-00001.safetensors"
+        ).read_bytes() == b"\x00\x11\x22\x33"
 
 
 if __name__ == "__main__":

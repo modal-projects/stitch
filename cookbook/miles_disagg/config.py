@@ -22,11 +22,15 @@ class MilesConfig:
     become miles CLI args via ``cli_args``."""
 
     environment: dict = {}
-    async_mode: bool = False       # True -> train_async.py
-    miles_model_script: str = ""   # shell script (relative to the miles root) defining MODEL_ARGS
+    async_mode: bool = False  # True -> train_async.py
+    miles_model_script: str = (
+        ""  # shell script (relative to the miles root) defining MODEL_ARGS
+    )
 
     def __init__(self, **kwargs: Any) -> None:
-        self.environment = dict(type(self).environment)  # fresh per instance; never mutate the class default
+        self.environment = dict(
+            type(self).environment
+        )  # fresh per instance; never mutate the class default
         for k, v in kwargs.items():
             setattr(self, k, v)
 
@@ -34,7 +38,10 @@ class MilesConfig:
     def n_train_nodes(self) -> int:
         """Trainer node count: actor nodes, plus critic nodes for PPO/critic setups."""
         nodes = int(getattr(self, "actor_num_nodes", 1))
-        if getattr(self, "use_critic", False) or getattr(self, "advantage_estimator", None) == "ppo":
+        if (
+            getattr(self, "use_critic", False)
+            or getattr(self, "advantage_estimator", None) == "ppo"
+        ):
             nodes += int(getattr(self, "critic_num_nodes", nodes))
         return nodes
 

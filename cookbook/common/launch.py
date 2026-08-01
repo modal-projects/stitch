@@ -41,7 +41,9 @@ def resolve_config(cfg: Any, tmpdir: str, yaml_fields: tuple[str, ...]) -> None:
             setattr(cfg, field, path)
 
 
-def materialize_node_local_yaml(cfg: Any, field: str, dest_dir: str = "/root/.node_yaml") -> None:
+def materialize_node_local_yaml(
+    cfg: Any, field: str, dest_dir: str = "/root/.node_yaml"
+) -> None:
     """Write an inline-dict config field to a deterministic node-local YAML path, so every Ray
     actor across nodes re-reads identical content at an identical path — unlike ``resolve_config``'s
     per-launch tmpdir. Call on every node (before the rank gate). No-op unless the field is a dict;
@@ -66,4 +68,6 @@ def deploy_pool_and_spawn(run: Any) -> None:
     run.app.deploy()
     await_pool_ready(ModalFlashPool(run.APP_NAME, "Server"))
     run.spawn_train()
-    print(f"run {os.environ['RUN_ID']} up on {run.APP_NAME}; stop it with: modal app stop {run.APP_NAME}")
+    print(
+        f"run {os.environ['RUN_ID']} up on {run.APP_NAME}; stop it with: modal app stop {run.APP_NAME}"
+    )

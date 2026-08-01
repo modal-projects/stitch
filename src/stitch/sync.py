@@ -448,9 +448,7 @@ class Reconciler(AdmissionGate):
             if pointer != initial_pointer:
                 m["initial_target_version"] = initial_pointer.version
                 m["target_version"] = pointer.version
-                m["coalesced_versions"] = (
-                    pointer.version - initial_pointer.version
-                )
+                m["coalesced_versions"] = pointer.version - initial_pointer.version
             logger.info("catch-up: loading v%d into the engine", pointer.version)
 
             async def apply() -> None:

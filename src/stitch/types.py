@@ -40,15 +40,19 @@ class VersionRef:
         # raises — never fall back to base and serve the wrong weights (stitch#31).
         text = (text or "").strip()
         run_id, _, tail = text.rpartition("/")
-        digits = tail[len(_WEIGHT_PREFIX):] if tail.startswith(_WEIGHT_PREFIX) else tail
+        digits = (
+            tail[len(_WEIGHT_PREFIX) :] if tail.startswith(_WEIGHT_PREFIX) else tail
+        )
         if not digits.isdigit():
             raise ValueError(f"unparseable snapshot pointer: {text!r}")
         return cls(run_id or None, int(digits))
 
 
 class VersionKind(str, Enum):
-    FULL = "full"    # an anchor: the version's files are the weights
-    DELTA = "delta"  # a diff against base_version (same run), chaining back to an anchor
+    FULL = "full"  # an anchor: the version's files are the weights
+    DELTA = (
+        "delta"  # a diff against base_version (same run), chaining back to an anchor
+    )
 
 
 @dataclass(frozen=True)
@@ -67,11 +71,15 @@ class VersionManifest:
     files: list[str]
 
     @classmethod
-    def from_hf_index(cls, version_dir: str | Path, *, run_id: str | None = None) -> VersionManifest:
+    def from_hf_index(
+        cls, version_dir: str | Path, *, run_id: str | None = None
+    ) -> VersionManifest:
         # model.safetensors.index.json holds the version number under `metadata` and the
         # files as `weight_map` values; a `delta_encoding` key (the same one the engine's
         # applier reads) marks a delta.
-        index = json.loads((Path(version_dir) / "model.safetensors.index.json").read_text())
+        index = json.loads(
+            (Path(version_dir) / "model.safetensors.index.json").read_text()
+        )
         meta = index.get("metadata") or {}
         weight_map = index.get("weight_map") or {}
         return cls(
@@ -96,7 +104,9 @@ class VersionConstraint:
         raw = (payload or {}).get("weight_version")
         raw = raw if isinstance(raw, dict) else {}
         mn, ex = raw.get("min_version"), raw.get("exact_version")
-        return cls(int(mn) if mn is not None else None, int(ex) if ex is not None else None)
+        return cls(
+            int(mn) if mn is not None else None, int(ex) if ex is not None else None
+        )
 
     def to_payload(self) -> dict[str, int | None]:
         return {"min_version": self.min_version, "exact_version": self.exact_version}
@@ -180,7 +190,9 @@ class PointerMove:
     reset: bool  # crossed to a new run -> reset to base
 
 
-def decide_pointer_move(current: VersionRef | None, proposed: VersionRef) -> PointerMove:
+def decide_pointer_move(
+    current: VersionRef | None, proposed: VersionRef
+) -> PointerMove:
     """A different run forks at base (a reset, even at a lower number); within the
     same run the move must be strictly newer, else :class:`PointerRewind`."""
     current_run = current.run_id if current is not None else None

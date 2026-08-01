@@ -30,7 +30,9 @@ class _ProxyEngine(Engine):
     def stamp_request(self, request: dict[str, Any], served: VersionRef) -> None:
         request["served_version"] = served.version
 
-    def stamp_response(self, response: dict[str, Any], served: VersionRef, current: VersionRef) -> None:
+    def stamp_response(
+        self, response: dict[str, Any], served: VersionRef, current: VersionRef
+    ) -> None:
         response["served_version"] = served.version
 
 
@@ -48,7 +50,9 @@ class _FailingUpstream:
             return httpx.Response(200)
         self.started.set()
         await self.fail.wait()
-        raise httpx.ConnectError("all connection attempts failed", request=httpx.Request(method, url))
+        raise httpx.ConnectError(
+            "all connection attempts failed", request=httpx.Request(method, url)
+        )
 
 
 class _HangingUpstream:
@@ -71,7 +75,9 @@ class _HangingUpstream:
             raise
 
 
-async def _asgi_post(app: Any, payload: dict[str, Any], *, disconnect_on: asyncio.Event | None = None):
+async def _asgi_post(
+    app: Any, payload: dict[str, Any], *, disconnect_on: asyncio.Event | None = None
+):
     """Issue one request directly to the ASGI app, optionally disconnecting after its body."""
     body = json.dumps(payload).encode()
     body_sent = False
@@ -93,22 +99,32 @@ async def _asgi_post(app: Any, payload: dict[str, Any], *, disconnect_on: asynci
 
     await app(
         {
-            "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
-            "method": "POST", "scheme": "http", "path": "/generate",
-            "raw_path": b"/generate", "query_string": b"",
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/generate",
+            "raw_path": b"/generate",
+            "query_string": b"",
             "headers": [(b"content-type", b"application/json")],
-            "client": ("127.0.0.1", 1234), "server": ("sidecar", 8000),
+            "client": ("127.0.0.1", 1234),
+            "server": ("sidecar", 8000),
         },
         receive,
         send,
     )
     start = next(m for m in sent if m["type"] == "http.response.start")
-    response_body = b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body")
+    response_body = b"".join(
+        m.get("body", b"") for m in sent if m["type"] == "http.response.body"
+    )
     headers = {k.decode().lower(): v.decode() for k, v in start["headers"]}
     return start["status"], headers, response_body
 
 
-def test_upstream_transport_failure_is_retryable_and_releases_admission(monkeypatch, caplog):
+def test_upstream_transport_failure_is_retryable_and_releases_admission(
+    monkeypatch, caplog
+):
     async def go():
         upstream = _FailingUpstream()
         gate = AdmissionGate()
@@ -140,7 +156,9 @@ def test_upstream_transport_failure_is_retryable_and_releases_admission(monkeypa
     }
     records = [r for r in caplog.records if "local engine request failed" in r.message]
     assert len(records) == 1
-    assert records[0].exc_info is None  # concise per-request signal, not a traceback storm
+    assert (
+        records[0].exc_info is None
+    )  # concise per-request signal, not a traceback storm
 
 
 def test_client_disconnect_cancels_aborts_and_releases_admission(monkeypatch):
@@ -171,6 +189,7 @@ def test_client_disconnect_cancels_aborts_and_releases_admission(monkeypatch):
 @contextlib.contextmanager
 def _server_info(payload):
     """Serve ``payload`` as JSON at /server_info on a throwaway localhost port."""
+
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):  # noqa: N802
             self.send_response(200)

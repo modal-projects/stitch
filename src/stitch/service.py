@@ -88,7 +88,10 @@ def create_app(
         # catch-up). A fresh boot clears at once; a mid-run joiner waits until it has applied the
         # live version. Liveness/boot checks use /server_info instead.
         if not reconciler.ready:
-            return JSONResponse({"ready": False, "reason": reconciler.readiness_reason()}, status_code=503)
+            return JSONResponse(
+                {"ready": False, "reason": reconciler.readiness_reason()},
+                status_code=503,
+            )
         return JSONResponse({"ready": True})
 
     @app.get("/server_info")
@@ -110,18 +113,29 @@ def create_app(
         route = path.strip("/")
         if route in blocked:
             return JSONResponse(
-                {"error": {"type": "RouteBlocked", "message": f"/{route} is managed by the sidecar"}},
+                {
+                    "error": {
+                        "type": "RouteBlocked",
+                        "message": f"/{route} is managed by the sidecar",
+                    }
+                },
                 status_code=403,
             )
 
         body = await request.body()
         payload: dict[str, Any] | None = None
-        if body and request.headers.get("content-type", "").startswith("application/json"):
+        if body and request.headers.get("content-type", "").startswith(
+            "application/json"
+        ):
             parsed = await request.json()
             payload = parsed if isinstance(parsed, dict) else None
 
         is_versioned = route in versioned
-        constraint = VersionConstraint.from_payload(payload) if is_versioned else VersionConstraint()
+        constraint = (
+            VersionConstraint.from_payload(payload)
+            if is_versioned
+            else VersionConstraint()
+        )
 
         # rid lets us abort the upstream generation on client disconnect, else it holds the quiesce point.
         rid = None
@@ -129,19 +143,31 @@ def create_app(
             payload.pop("weight_version", None)
             rid = payload.setdefault("rid", uuid.uuid4().hex)
 
-        headers = {k: v for k, v in request.headers.items() if k.lower() not in _DROP_HEADERS}
+        headers = {
+            k: v for k, v in request.headers.items() if k.lower() not in _DROP_HEADERS
+        }
 
         try:
             async with reconciler.admit(constraint if is_versioned else None) as served:
                 if is_versioned and payload is not None and served is not None:
                     engine.stamp_request(payload, served)
-                kwargs: dict[str, Any] = {"params": request.query_params, "headers": headers}
-                kwargs["json" if payload is not None else "content"] = payload if payload is not None else body
+                kwargs: dict[str, Any] = {
+                    "params": request.query_params,
+                    "headers": headers,
+                }
+                kwargs["json" if payload is not None else "content"] = (
+                    payload if payload is not None else body
+                )
 
-                upstream_task = asyncio.ensure_future(client().request(request.method, f"{engine_url}/{path}", **kwargs))
+                upstream_task = asyncio.ensure_future(
+                    client().request(request.method, f"{engine_url}/{path}", **kwargs)
+                )
                 disconnect_task = asyncio.ensure_future(_watch_disconnect(request))
                 try:
-                    await asyncio.wait({upstream_task, disconnect_task}, return_when=asyncio.FIRST_COMPLETED)
+                    await asyncio.wait(
+                        {upstream_task, disconnect_task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
                     if not upstream_task.done():
                         upstream_task.cancel()
                         with contextlib.suppress(BaseException):
@@ -163,7 +189,11 @@ def create_app(
                     # retain the admission lease until the best-effort abort has completed.
                     logger.warning(
                         "local engine request failed method=%s route=/%s rid=%s error=%s: %s",
-                        request.method, route, rid, type(exc).__name__, exc,
+                        request.method,
+                        route,
+                        rid,
+                        type(exc).__name__,
+                        exc,
                     )
                     if rid is not None:
                         await _abort(client(), engine_url, rid)
@@ -179,14 +209,24 @@ def create_app(
                         headers={"Retry-After": "1"},
                     )
                 if "application/json" not in resp.headers.get("content-type", ""):
-                    return Response(content=resp.content, status_code=resp.status_code,
-                                    media_type=resp.headers.get("content-type") or None)
+                    return Response(
+                        content=resp.content,
+                        status_code=resp.status_code,
+                        media_type=resp.headers.get("content-type") or None,
+                    )
                 data = resp.json()
-                current = reconciler.applied  # capture while still pinned, before a commit advances it
+                current = (
+                    reconciler.applied
+                )  # capture while still pinned, before a commit advances it
         except ConstraintUnmet as exc:
             return JSONResponse(exc.error, status_code=409)
 
-        if is_versioned and isinstance(data, dict) and served is not None and current is not None:
+        if (
+            is_versioned
+            and isinstance(data, dict)
+            and served is not None
+            and current is not None
+        ):
             engine.stamp_response(data, served, current)
         return JSONResponse(data, status_code=resp.status_code)
 
@@ -195,10 +235,15 @@ def create_app(
 
 async def _abort(client: Any, engine_url: str, rid: str) -> None:
     try:
-        await client.request("POST", f"{engine_url}/abort_request", json={"rid": rid}, timeout=10.0)
+        await client.request(
+            "POST", f"{engine_url}/abort_request", json={"rid": rid}, timeout=10.0
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
-            "failed to abort upstream rid=%s error=%s: %s", rid, type(exc).__name__, exc,
+            "failed to abort upstream rid=%s error=%s: %s",
+            rid,
+            type(exc).__name__,
+            exc,
         )
 
 
@@ -219,9 +264,13 @@ def serve(
     import uvicorn
 
     reconciler = Reconciler(
-        store=store, engine=engine, run_id=run_id, commit_mode=commit_mode,
+        store=store,
+        engine=engine,
+        run_id=run_id,
+        commit_mode=commit_mode,
         flush_cache_on_commit=flush_cache_on_commit,
-        debug_requests=debug_requests, reconcile_interval=reconcile_interval,
+        debug_requests=debug_requests,
+        reconcile_interval=reconcile_interval,
     )
     uvicorn.run(create_app(reconciler, engine), host=host, port=port, log_level="info")
 
@@ -236,7 +285,9 @@ async def readiness(pool: Pool, *, timeout: float = 15.0) -> PoolState:
             resp = await c.get(f"{url.rstrip('/')}/server_info", timeout=timeout)
             return ReplicaState.from_dict(resp.json())
         except Exception as exc:  # noqa: BLE001
-            return ReplicaState(reason=str(exc)[:80])  # applied=None => counts as not at any version
+            return ReplicaState(
+                reason=str(exc)[:80]
+            )  # applied=None => counts as not at any version
 
     async with httpx.AsyncClient(trust_env=False) as c:
         # the async variant keeps pool-client I/O off this event loop (native or threaded per pool)
@@ -265,13 +316,15 @@ def sync_in_progress(server_info_url: str, *, timeout: float = 5.0) -> bool:
             info = json.loads(resp.read())
     except Exception:  # noqa: BLE001
         return False
-    initializing = not info.get(
-        "update_destination_ready", True
-    ) and not info.get("update_destination_error")
+    initializing = not info.get("update_destination_ready", True) and not info.get(
+        "update_destination_error"
+    )
     return bool(initializing or info.get("sync_state") in _SYNCING_STATES)
 
 
-def await_pool_ready(pool: Pool, *, timeout: float = 20 * 60, interval: float = 30.0) -> bool:
+def await_pool_ready(
+    pool: Pool, *, timeout: float = 20 * 60, interval: float = 30.0
+) -> bool:
     """Block until the pool's gateway answers /health 200 — Flash holds requests through a
     cold-starting pool, so the first rollout/hot-load meets a ready pool instead of a 5xx storm
     while engines load. Returns True when ready; on timeout, warns and returns False (the caller
@@ -287,5 +340,7 @@ def await_pool_ready(pool: Pool, *, timeout: float = 20 * 60, interval: float = 
         except Exception:  # noqa: BLE001
             pass
         time.sleep(interval)
-    print(f"WARNING: pool at {gateway} not ready after {timeout:.0f}s; proceeding (the trainer retries)")
+    print(
+        f"WARNING: pool at {gateway} not ready after {timeout:.0f}s; proceeding (the trainer retries)"
+    )
     return False
