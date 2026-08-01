@@ -28,6 +28,7 @@ def serve_startup(
     local_checkpoint_dir: str | None,
     delta_update_mode: str,
     volume_name: str,
+    run_id: str,
     commit_mode: str,
     flush_cache_on_commit: bool = False,
     startup_timeout: int,
@@ -83,6 +84,7 @@ def serve_startup(
         delta_update_mode=delta_update_mode,
         disk_load_format=str(sglang_args.get("--load-format", "auto")),
         volume_name=volume_name,
+        run_id=run_id,
         commit_mode=commit_mode,
         flush_cache_on_commit=flush_cache_on_commit,
     )

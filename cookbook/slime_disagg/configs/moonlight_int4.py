@@ -8,13 +8,14 @@ Deploy: EXPERIMENT_CONFIG=moonlight_int4 m deploy --strategy recreate -m cookboo
 from __future__ import annotations
 
 from cookbook.common.config import ModalConfig
-from cookbook.common.constants import DATA_PATH
+from cookbook.common.constants import CHECKPOINTS_PATH, DATA_PATH
 from cookbook.slime_disagg.config import SlimeConfig
 
 APP_NAME = "stitch-moonlight-int4"
-DELTA_VOLUME_NAME = "stitch-delta-moonlight-int4"
-DELTA_BULLETIN_ROOT = "/delta-bulletin"
+EXPERIMENT_VOLUME_NAME = "stitch-slime-moonlight-int4"
 LOCAL_CHECKPOINT_PATH = None
+SOURCE_MODEL = "moonshotai/Moonlight-16B-A3B-Instruct-INT4"
+ROLLOUT_CHECKPOINT_PATH = CHECKPOINTS_PATH / "moonlight-int4"
 
 INT4_GROUP_SIZE = "128"
 
@@ -47,7 +48,7 @@ class _Slime(SlimeConfig):
     slime_model_script = "scripts/models/moonlight.sh"
 
     # The native-INT4 base is the served model, the QAT init, and the disk-delta base.
-    hf_checkpoint = "moonshotai/Moonlight-16B-A3B-Instruct-INT4"
+    hf_checkpoint = str(ROLLOUT_CHECKPOINT_PATH)
     ref_load = hf_checkpoint
     megatron_to_hf_mode = "bridge"
 
@@ -74,7 +75,6 @@ class _Slime(SlimeConfig):
     update_weight_transport = "disk"
     update_weight_delta_encoding = "xor"
     update_weight_delta_checksum = "xxh3-128"
-    update_weight_disk_dir = DELTA_BULLETIN_ROOT
     custom_delta_pre_push_path = "cookbook.common.hooks.commit_and_wake"
 
     prompt_data = f"{DATA_PATH}/dapo-math-17k/dapo-math-17k.jsonl"

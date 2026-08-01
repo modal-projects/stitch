@@ -6,16 +6,16 @@ Deploy: EXPERIMENT_CONFIG=moonlight_nvfp4 uv run --extra modal modal deploy --st
 from __future__ import annotations
 
 from cookbook.common.config import ModalConfig
-from cookbook.common.constants import DATA_PATH, PREP_PATH
+from cookbook.common.constants import CHECKPOINTS_PATH, DATA_PATH
 from cookbook.miles_disagg.config import MilesConfig
 
 APP_NAME = "stitch-moonlight-nvfp4"
-DELTA_VOLUME_NAME = "stitch-delta-moonlight-nvfp4"
-DELTA_BULLETIN_ROOT = "/delta-bulletin"
+EXPERIMENT_VOLUME_NAME = "stitch-miles-moonlight-nvfp4"
 LOCAL_CHECKPOINT_PATH = None
 
 SOURCE_MODEL = "moonshotai/Moonlight-16B-A3B-Instruct"
-MODEL_TAG = "moonlight-16b"
+BF16_CHECKPOINT_PATH = CHECKPOINTS_PATH / "moonlight-bf16"
+ROLLOUT_CHECKPOINT_PATH = CHECKPOINTS_PATH / "moonlight-nvfp4"
 
 # in_place applies weights without draining in-flight rollouts; stale KV isolated per version.
 SIDECAR_COMMIT_MODE = "in_place"
@@ -60,8 +60,8 @@ class _Miles(MilesConfig):
     # Arch comes from the model script; do NOT inline arch attrs here.
     miles_model_script = "scripts/models/moonlight.sh"
 
-    hf_checkpoint = f"{PREP_PATH}/{MODEL_TAG}/nvfp4"
-    ref_load = f"{PREP_PATH}/{MODEL_TAG}/bf16"
+    hf_checkpoint = str(ROLLOUT_CHECKPOINT_PATH)
+    ref_load = str(BF16_CHECKPOINT_PATH)
     megatron_to_hf_mode = "bridge"
     model_name = "deepseekv3"  # bridge dispatch: Moonlight is DeepSeek-V3 arch
 
@@ -100,7 +100,6 @@ class _Miles(MilesConfig):
     update_weight_transfer_mode = "disk-delta"
     update_weight_delta_encoding = "xor"
     update_weight_delta_checksum = "xxh3-128"
-    update_weight_disk_dir = DELTA_BULLETIN_ROOT  # modal_train run-scopes this
     custom_update_weight_post_write_path = "cookbook.common.hooks.commit_and_wake"
 
     prompt_data = f"{DATA_PATH}/dapo-math-17k/dapo-math-17k.jsonl"

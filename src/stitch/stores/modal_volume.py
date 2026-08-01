@@ -1,10 +1,9 @@
 """``ModalVolumeStore`` — the ``Store`` instance backed by a Modal Volume.
 
-Each run's chain lives under ``<root>/<run_id>/weight_vNNNNNN/`` (run-less:
-``<root>/weight_vNNNNNN/``) as HF-safetensors + delta metadata, and a ``latest``
-text file holds the self-identifying pointer identity. Durability is an explicit
-Volume commit; cross-host visibility is a reload. With ``volume_name=None`` it is a
-plain local directory, so the class is exercisable without Modal.
+``root`` is one run's directory. The training framework owns
+``<root>/updates/`` and may recreate it while initializing; Stitch owns the
+self-identifying ``<root>/latest`` commit pointer. Durability is an explicit
+Volume commit and cross-host visibility is a reload.
 """
 
 from __future__ import annotations
@@ -21,9 +20,18 @@ _POINTER = "latest"
 
 
 class ModalVolumeStore(Store):
-    def __init__(self, root: str | Path, *, volume_name: str | None = None) -> None:
+    def __init__(
+        self,
+        root: str | Path,
+        *,
+        run_id: str,
+        volume_name: str | None = None,
+    ) -> None:
+        if not run_id:
+            raise ValueError("run_id is required")
         self.root = Path(root)
         self.volume_name = volume_name
+        self.run_id = run_id
 
     def refresh(self) -> None:
         if self.volume_name:
@@ -37,6 +45,10 @@ class ModalVolumeStore(Store):
         return VersionRef.parse(text) if text else None
 
     def advance_pointer(self, ref: VersionRef) -> None:
+        if ref.run_id != self.run_id:
+            raise ValueError(
+                f"store is scoped to run {self.run_id!r}, got {ref.run_id!r}"
+            )
         self.root.mkdir(parents=True, exist_ok=True)
         _atomic_write(self.root / _POINTER, ref.identity)
         if self.volume_name:
@@ -77,7 +89,11 @@ class ModalVolumeStore(Store):
             _volume(self.volume_name).commit()
 
     def _version_dir(self, ref: VersionRef) -> Path:
-        return self.root / ref.identity
+        if ref.run_id != self.run_id:
+            raise ValueError(
+                f"store is scoped to run {self.run_id!r}, got {ref.run_id!r}"
+            )
+        return self.root / "updates" / Path(ref.identity).name
 
 
 def _volume(name: str):

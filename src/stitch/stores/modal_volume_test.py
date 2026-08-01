@@ -18,7 +18,7 @@ from stitch.types import VersionKind, VersionRef
 def _write_version(
     root: Path, ref: VersionRef, *, base: int | None = None, diff: str | None = None
 ) -> str:
-    d = root / ref.identity
+    d = root / "updates" / Path(ref.identity).name
     d.mkdir(parents=True)
     meta: dict = {"version": ref.version}
     if diff:
@@ -40,7 +40,7 @@ def _write_version(
 def test_publish_full_roundtrip() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        store = ModalVolumeStore(root)
+        store = ModalVolumeStore(root, run_id="r1")
         assert store.read_pointer() is None
         vdir = _write_version(root, VersionRef("r1", 1))  # framework wrote it in place
         ref = publish_version(store, None, vdir, run_id="r1")
@@ -56,7 +56,7 @@ def test_publish_full_roundtrip() -> None:
 def test_claim_then_delta_chain() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        store = ModalVolumeStore(root)
+        store = ModalVolumeStore(root, run_id="r1")
         store.claim("r1")
         assert store.read_pointer() == VersionRef("r1", 0)  # base before any publish
         publish_version(
@@ -77,14 +77,48 @@ def test_copies_when_files_dir_is_external() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root, staging = Path(tmp) / "store", Path(tmp) / "staging"
         root.mkdir()
-        store = ModalVolumeStore(root)
+        store = ModalVolumeStore(root, run_id="r1")
         src = _write_version(
             staging, VersionRef("r1", 1)
         )  # a staging dir, not the store layout
         publish_version(store, None, src, run_id="r1")
         assert (
-            root / "r1" / "weight_v000001" / "model.safetensors.index.json"
+            root / "updates" / "weight_v000001" / "model.safetensors.index.json"
         ).exists()
+
+
+def test_rejects_a_version_from_another_run() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        store = ModalVolumeStore(tmp, run_id="r1")
+        try:
+            store.advance_pointer(VersionRef("r2", 1))
+        except ValueError as exc:
+            assert "scoped to run 'r1'" in str(exc)
+        else:
+            raise AssertionError("cross-run pointer must fail")
+
+
+def test_runs_sharing_a_volume_have_independent_state() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        volume_root = Path(tmp)
+        first_root = volume_root / "run-a"
+        second_root = volume_root / "run-b"
+        first = ModalVolumeStore(first_root, run_id="run-a")
+        second = ModalVolumeStore(second_root, run_id="run-b")
+
+        first.claim("run-a")
+        second.claim("run-b")
+        publish_version(
+            first,
+            None,
+            _write_version(first_root, VersionRef("run-a", 1)),
+            run_id="run-a",
+        )
+
+        assert first.read_pointer() == VersionRef("run-a", 1)
+        assert second.read_pointer() == VersionRef("run-b", 0)
+        assert Path(first.materialize(VersionRef("run-a", 1))).is_dir()
+        assert not Path(second.materialize(VersionRef("run-b", 1))).exists()
 
 
 if __name__ == "__main__":

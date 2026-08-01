@@ -7,16 +7,17 @@ Deploy (::prepare_checkpoints, ::prepare_torch_dist, deploy, then ::launch_train
 from __future__ import annotations
 
 from cookbook.common.config import ModalConfig
-from cookbook.common.constants import DATA_PATH, PREP_PATH
+from cookbook.common.constants import CHECKPOINTS_PATH, DATA_PATH
 from cookbook.miles_disagg.config import MilesConfig
 
 APP_NAME = "stitch-kimi-k25-2layer-nvfp4"
-DELTA_VOLUME_NAME = "stitch-delta-kimi-k25-2layer-nvfp4"
-DELTA_BULLETIN_ROOT = "/delta-bulletin"
+EXPERIMENT_VOLUME_NAME = "stitch-miles-kimi-k25-2layer-nvfp4"
 LOCAL_CHECKPOINT_PATH = None
 
 SOURCE_MODEL = "CharyZeng/Kimi-K2.5-2layer"  # INT4, KimiK25 arch, 2 layers
-MODEL_TAG = "kimi-k25-2layer"
+BF16_CHECKPOINT_PATH = CHECKPOINTS_PATH / "kimi-k25-2layer-bf16"
+ROLLOUT_CHECKPOINT_PATH = CHECKPOINTS_PATH / "kimi-k25-2layer-nvfp4"
+TORCH_DIST_CHECKPOINT_PATH = CHECKPOINTS_PATH / "kimi-k25-2layer-torch-dist"
 
 SIDECAR_COMMIT_MODE = "in_place"
 SIDECAR_FLUSH_CACHE_ON_COMMIT = False
@@ -60,8 +61,8 @@ modal = ModalConfig(
 class _Miles(MilesConfig):
     miles_model_script = "scripts/models/kimi-k25_2layer.sh"
 
-    hf_checkpoint = f"{PREP_PATH}/{MODEL_TAG}/nvfp4"
-    ref_load = f"{PREP_PATH}/{MODEL_TAG}/torch_dist"
+    hf_checkpoint = str(ROLLOUT_CHECKPOINT_PATH)
+    ref_load = str(TORCH_DIST_CHECKPOINT_PATH)
     megatron_to_hf_mode = "raw"
     model_name = "kimi_k25"  # KimiK25 mbridge import + convert_kimi_k25_to_hf export
 
@@ -132,7 +133,6 @@ class _Miles(MilesConfig):
     update_weight_transfer_mode = "disk-delta"
     update_weight_delta_encoding = "xor"
     update_weight_delta_checksum = "xxh3-128"
-    update_weight_disk_dir = DELTA_BULLETIN_ROOT
     custom_update_weight_post_write_path = "cookbook.common.hooks.commit_and_wake"
 
     prompt_data = f"{DATA_PATH}/dapo-math-17k/dapo-math-17k.jsonl"
