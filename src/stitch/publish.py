@@ -51,7 +51,9 @@ def claim_run(store: Store, pool: Pool | None, run_id: str) -> None:
     pool, so every replica (cold or warm on a finished run) resets to base up front. A
     reused ``run_id`` (the run's per-launch fence token) is a rewind — rejected here so a
     restart can't leave the pool pinned to a dead incarnation's high-water mark."""
-    decide_pointer_move(store.read_pointer(), VersionRef(run_id, 0))  # rewind guard (a reused run_id)
+    decide_pointer_move(
+        store.read_pointer(), VersionRef(run_id, 0)
+    )  # rewind guard (a reused run_id)
     store.claim(run_id)
     _wake(pool, VersionRef(run_id, 0))
     logger.info("claimed run %s at base", run_id)
@@ -65,7 +67,11 @@ def _wake(pool: Pool | None, ref: VersionRef) -> None:
     try:
         pool.wake(pool.discover_replicas(), ref)
     except Exception:  # noqa: BLE001
-        logger.warning("pool wake failed for %s; replicas will self-sync", ref.identity, exc_info=True)
+        logger.warning(
+            "pool wake failed for %s; replicas will self-sync",
+            ref.identity,
+            exc_info=True,
+        )
 
 
 def constrain_request(

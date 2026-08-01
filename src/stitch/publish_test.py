@@ -41,12 +41,21 @@ class FakePool(Pool):
         self.woke.append(ref)
 
 
-def _version_dir(tmp: str, *, version: int, base: int | None = None, diff: str | None = None) -> str:
+def _version_dir(
+    tmp: str, *, version: int, base: int | None = None, diff: str | None = None
+) -> str:
     d = Path(tmp) / f"weight_v{version:06d}"
     d.mkdir()
     meta: dict = {"version": version}
     if diff:
-        meta.update({"delta_encoding": diff, "base_version": base, "compression_format": "zstd", "checksum_format": "xxh3-128"})
+        meta.update(
+            {
+                "delta_encoding": diff,
+                "base_version": base,
+                "compression_format": "zstd",
+                "checksum_format": "xxh3-128",
+            }
+        )
     index = {"metadata": meta, "weight_map": {"w": "model-00001.safetensors"}}
     (d / "model.safetensors.index.json").write_text(json.dumps(index))
     return str(d)
@@ -66,7 +75,9 @@ def test_publish_full() -> None:
 def test_publish_delta() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         store = FakeStore(VersionRef("r1", 1))
-        publish_version(store, None, _version_dir(tmp, version=2, base=1, diff="xor"), run_id="r1")
+        publish_version(
+            store, None, _version_dir(tmp, version=2, base=1, diff="xor"), run_id="r1"
+        )
         man = store.published[0]
         assert man.kind.value == "delta"
         assert store._pointer == VersionRef("r1", 2)
@@ -100,7 +111,9 @@ def test_claim_rewind_rejected() -> None:
 
 def test_constrain_lag() -> None:
     payload, headers = {}, {}
-    constrain_request(payload, headers, latest=10, lag=2, session_id="g1", affinity_header="X-Session")
+    constrain_request(
+        payload, headers, latest=10, lag=2, session_id="g1", affinity_header="X-Session"
+    )
     assert payload["weight_version"] == {"min_version": 8, "exact_version": None}
     assert headers["X-Session"] == "g1"
 

@@ -53,13 +53,19 @@ class ModalFlashPool(Pool):
         import modal.experimental
 
         self._cls()  # resolve first: clear error if not deployed
-        return _replica_urls(modal.experimental.flash_get_containers(self.app_name, self.cls_name))
+        return _replica_urls(
+            modal.experimental.flash_get_containers(self.app_name, self.cls_name)
+        )
 
     async def discover_replicas_async(self) -> list[str]:
         import modal.experimental
 
         self._cls()  # resolve first: clear error if not deployed
-        return _replica_urls(await modal.experimental.flash_get_containers.aio(self.app_name, self.cls_name))
+        return _replica_urls(
+            await modal.experimental.flash_get_containers.aio(
+                self.app_name, self.cls_name
+            )
+        )
 
     def wake(self, replicas: list[str], ref: VersionRef) -> None:
         # Fan out (this is on the publish hot path); each replica re-reads the pointer, so no version in the body.
@@ -73,7 +79,9 @@ class ModalFlashPool(Pool):
                 try:
                     client.post(f"{url}/wake").raise_for_status()
                 except Exception as exc:  # noqa: BLE001
-                    logger.warning("failed to wake %s for %s: %s", url, ref.identity, exc)
+                    logger.warning(
+                        "failed to wake %s for %s: %s", url, ref.identity, exc
+                    )
 
             with ThreadPoolExecutor(max_workers=min(16, len(replicas))) as pool:
                 list(pool.map(wake_one, replicas))
@@ -89,7 +97,9 @@ class ModalFlashPool(Pool):
                 try:
                     (await client.post(f"{url}/wake")).raise_for_status()
                 except Exception as exc:  # noqa: BLE001
-                    logger.warning("failed to wake %s for %s: %s", url, ref.identity, exc)
+                    logger.warning(
+                        "failed to wake %s for %s: %s", url, ref.identity, exc
+                    )
 
             await asyncio.gather(*(wake_one(url) for url in replicas))
 

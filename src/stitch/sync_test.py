@@ -21,7 +21,9 @@ from stitch.types import (
 
 
 class FakeStore(Store):
-    def __init__(self, pointer: VersionRef | None = None, *manifests: VersionManifest) -> None:
+    def __init__(
+        self, pointer: VersionRef | None = None, *manifests: VersionManifest
+    ) -> None:
         self._pointer = pointer
         self._manifests = {(m.ref.run_id, m.ref.version): m for m in manifests}
         self.refreshed = 0
@@ -93,7 +95,9 @@ class FakeEngine(Engine):
 
 
 def _full(run: str, version: int) -> VersionManifest:
-    return VersionManifest(VersionRef(run, version), VersionKind.FULL, ["model.safetensors"])
+    return VersionManifest(
+        VersionRef(run, version), VersionKind.FULL, ["model.safetensors"]
+    )
 
 
 def _delta(run: str, version: int, *, files: list[str]) -> VersionManifest:
@@ -108,22 +112,32 @@ def _run(coro) -> None:
 def test_fresh_reconcile() -> None:
     async def go() -> None:
         engine = FakeEngine()
-        r = Reconciler(store=FakeStore(VersionRef("r1", 3), _full("r1", 3)), engine=engine, commit_mode="quiesce")
+        r = Reconciler(
+            store=FakeStore(VersionRef("r1", 3), _full("r1", 3)),
+            engine=engine,
+            commit_mode="quiesce",
+        )
         await r.startup()
         assert r.applied == VersionRef("r1", 3)
         assert engine.staged[-1] == VersionRef("r1", 3)
         assert VersionRef("r1", 3) in engine.committed
         assert r.sync_state is SyncState.IDLE
         assert r.ready
-        assert "flush_cache" not in engine.calls  # flushing is not automatic; it rides commit(flush_cache=…)
+        assert (
+            "flush_cache" not in engine.calls
+        )  # flushing is not automatic; it rides commit(flush_cache=…)
 
     _run(go())
 
 
 def test_reconcile_latches_ready() -> None:
     async def go() -> None:
-        r = Reconciler(store=FakeStore(VersionRef("r1", 2), _full("r1", 2)), engine=FakeEngine())
-        assert not r.ready  # /health keeps a replica out of Flash rotation until it has caught up
+        r = Reconciler(
+            store=FakeStore(VersionRef("r1", 2), _full("r1", 2)), engine=FakeEngine()
+        )
+        assert (
+            not r.ready
+        )  # /health keeps a replica out of Flash rotation until it has caught up
         await r.reconcile()
         assert r.ready
 
@@ -133,7 +147,9 @@ def test_reconcile_latches_ready() -> None:
 def test_startup_initializes_update_destination() -> None:
     async def go() -> None:
         engine = FakeEngine()
-        r = Reconciler(store=FakeStore(), engine=engine)  # unclaimed pool: reconcile is a no-op
+        r = Reconciler(
+            store=FakeStore(), engine=engine
+        )  # unclaimed pool: reconcile is a no-op
         await r.startup()
         await r._destination_init_task
         assert "initialize_update_destination" in engine.calls
@@ -144,18 +160,24 @@ def test_startup_initializes_update_destination() -> None:
 def test_catch_up() -> None:
     async def go() -> None:
         engine = FakeEngine()
-        r = Reconciler(store=FakeStore(VersionRef("r1", 5), _full("r1", 5)), engine=engine)
+        r = Reconciler(
+            store=FakeStore(VersionRef("r1", 5), _full("r1", 5)), engine=engine
+        )
         r.applied = VersionRef("r1", 3)
         await r.reconcile()
         assert r.applied == VersionRef("r1", 5)
-        assert engine.committed == [VersionRef("r1", 5)]  # one staged chain and one commit
+        assert engine.committed == [
+            VersionRef("r1", 5)
+        ]  # one staged chain and one commit
 
     _run(go())
 
 
 def test_latest_advance_during_stage_coalesces_before_commit() -> None:
     async def go() -> None:
-        manifests = [_delta("r1", version, files=[f"v{version}"]) for version in range(7, 11)]
+        manifests = [
+            _delta("r1", version, files=[f"v{version}"]) for version in range(7, 11)
+        ]
         store = FakeStore(VersionRef("r1", 7), *manifests)
         engine = FakeEngine()
         stage_started = asyncio.Event()
@@ -192,10 +214,7 @@ def test_continuous_publishing_cannot_starve_commit() -> None:
     async def go() -> None:
         store = FakeStore(
             VersionRef("r1", 1),
-            *(
-                _delta("r1", version, files=[f"v{version}"])
-                for version in range(1, 4)
-            ),
+            *(_delta("r1", version, files=[f"v{version}"]) for version in range(1, 4)),
         )
         engine = FakeEngine()
         stage = engine.stage
@@ -206,9 +225,7 @@ def test_continuous_publishing_cannot_starve_commit() -> None:
         ) -> None:
             await stage(manifest, source_dir)
             if manifest.ref.version < 3:
-                store.advance_pointer(
-                    VersionRef("r1", manifest.ref.version + 1)
-                )
+                store.advance_pointer(VersionRef("r1", manifest.ref.version + 1))
 
         engine.stage = advancing_stage  # type: ignore[method-assign]
         r = Reconciler(store=store, engine=engine)
@@ -282,13 +299,23 @@ def test_coalesce_observation_failure_commits_staged_target() -> None:
 def test_run_switch_resets_in_place() -> None:
     async def go() -> None:
         engine = FakeEngine()
-        r = Reconciler(store=FakeStore(VersionRef("r2", 2), _full("r2", 2)), engine=engine, commit_mode="in_place")
+        r = Reconciler(
+            store=FakeStore(VersionRef("r2", 2), _full("r2", 2)),
+            engine=engine,
+            commit_mode="in_place",
+        )
         r.applied = VersionRef("r1", 5)
         await r.reconcile()
         assert r.applied == VersionRef("r2", 2)
         assert "reset" in engine.calls  # was patched -> reseed base for the new run
-        assert engine.calls.index("pause") < engine.calls.index("reset") < engine.calls.index("resume")
-        assert "flush_cache" not in engine.calls  # cache flushing is an explicit commit policy
+        assert (
+            engine.calls.index("pause")
+            < engine.calls.index("reset")
+            < engine.calls.index("resume")
+        )
+        assert (
+            "flush_cache" not in engine.calls
+        )  # cache flushing is an explicit commit policy
 
     _run(go())
 
@@ -297,7 +324,11 @@ def test_run_switch_drains_rolling_requests() -> None:
     # Base reset is incompatible: even in in_place, no rolling request crosses the wipe (drain_all; stitch#32).
     async def go() -> None:
         engine = FakeEngine()
-        r = Reconciler(store=FakeStore(VersionRef("r2", 1), _full("r2", 1)), engine=engine, commit_mode="in_place")
+        r = Reconciler(
+            store=FakeStore(VersionRef("r2", 1), _full("r2", 1)),
+            engine=engine,
+            commit_mode="in_place",
+        )
         r.applied = VersionRef("r1", 5)
         release = asyncio.Event()
         late_served: list[VersionRef | None] = []
@@ -313,7 +344,9 @@ def test_run_switch_drains_rolling_requests() -> None:
         req = asyncio.create_task(rolling())
         await asyncio.sleep(0)  # admitted before the switch begins
         sync = asyncio.create_task(r.reconcile())
-        for _ in range(1000):  # bounded: without drain_all the switch completes without draining
+        for _ in range(
+            1000
+        ):  # bounded: without drain_all the switch completes without draining
             if r._committing:
                 break
             await asyncio.sleep(0.001)
@@ -324,7 +357,9 @@ def test_run_switch_drains_rolling_requests() -> None:
         release.set()
         await asyncio.gather(req, sync, late_task)
         assert "reset" in engine.calls
-        assert late_served[0] is not None and late_served[0].run_id == "r2"  # admitted post-wipe
+        assert (
+            late_served[0] is not None and late_served[0].run_id == "r2"
+        )  # admitted post-wipe
 
     _run(go())
 
@@ -333,7 +368,11 @@ def test_rolling_requests_cross_in_place_commit() -> None:
     # Counterpart: a compatible in_place commit applies while rolling traffic keeps decoding; only a base reset drains.
     async def go() -> None:
         engine = FakeEngine()
-        r = Reconciler(store=FakeStore(VersionRef("r1", 4), _full("r1", 4)), engine=engine, commit_mode="in_place")
+        r = Reconciler(
+            store=FakeStore(VersionRef("r1", 4), _full("r1", 4)),
+            engine=engine,
+            commit_mode="in_place",
+        )
         r.applied = VersionRef("r1", 3)
         release = asyncio.Event()
 
@@ -406,7 +445,10 @@ def test_new_request_waits_for_in_place_commit() -> None:
 def test_empty_delta_skips_commit() -> None:
     async def go() -> None:
         engine = FakeEngine()
-        r = Reconciler(store=FakeStore(VersionRef("r1", 4), _delta("r1", 4, files=[])), engine=engine)
+        r = Reconciler(
+            store=FakeStore(VersionRef("r1", 4), _delta("r1", 4, files=[])),
+            engine=engine,
+        )
         r.applied = VersionRef("r1", 3)
         await r.reconcile()
         assert r.applied == VersionRef("r1", 4)
@@ -489,16 +531,20 @@ def test_stage_waits_for_update_destination() -> None:
             await initialize()
 
         engine.initialize_update_destination = slow_initialize  # type: ignore[method-assign]
-        r = Reconciler(store=FakeStore(VersionRef("r1", 2), _full("r1", 2)), engine=engine, reconcile_interval=0.0)
+        r = Reconciler(
+            store=FakeStore(VersionRef("r1", 2), _full("r1", 2)),
+            engine=engine,
+            reconcile_interval=0.0,
+        )
         r.applied = VersionRef("r1", 0)  # same run, behind -> stage v2 (no run switch)
         task = asyncio.create_task(r.startup())
         await asyncio.sleep(0.05)
         assert "stage:2" not in engine.calls
         release.set()
         await task
-        assert engine.calls.index(
-            "initialize_update_destination"
-        ) < engine.calls.index("stage:2")
+        assert engine.calls.index("initialize_update_destination") < engine.calls.index(
+            "stage:2"
+        )
         assert r.metrics["destination_init_wait_s"] > 0
         await r.shutdown()
 
@@ -583,9 +629,14 @@ class FlakyStore(FakeStore):
 
 
 async def _heals_transient_error(interval: float) -> bool:
-    r = Reconciler(store=FlakyStore(VersionRef("r1", 1), _full("r1", 1)), engine=FakeEngine(),
-                   reconcile_interval=interval)
-    await r.startup()  # the pass hits the error -> ERROR; the store is healed from here on
+    r = Reconciler(
+        store=FlakyStore(VersionRef("r1", 1), _full("r1", 1)),
+        engine=FakeEngine(),
+        reconcile_interval=interval,
+    )
+    await (
+        r.startup()
+    )  # the pass hits the error -> ERROR; the store is healed from here on
     async with r.admit(None):
         pass  # unconstrained traffic never 409s, so it nudges nothing
     ok = await _converged(r, VersionRef("r1", 1))
@@ -595,7 +646,9 @@ async def _heals_transient_error(interval: float) -> bool:
 
 def test_transient_error_recovery_needs_backstop() -> None:
     assert asyncio.run(_heals_transient_error(0.05))
-    assert not asyncio.run(_heals_transient_error(0))  # ERROR retries only on external wake
+    assert not asyncio.run(
+        _heals_transient_error(0)
+    )  # ERROR retries only on external wake
 
 
 class HostViewStore(FakeStore):
@@ -605,7 +658,9 @@ class HostViewStore(FakeStore):
 
     refresh_gate: queue.Queue[threading.Event] | None = None
 
-    def __init__(self, pointer: VersionRef | None = None, *manifests: VersionManifest) -> None:
+    def __init__(
+        self, pointer: VersionRef | None = None, *manifests: VersionManifest
+    ) -> None:
         super().__init__(None, *manifests)
         self.remote_pointer = pointer
 
@@ -628,8 +683,12 @@ async def _heals_dropped_wake(interval: float) -> bool:
 
     gate = store.refresh_gate = queue.Queue()
     r.wake()  # start an idle pass
-    (await asyncio.to_thread(gate.get, True, 10)).set()  # release its pass-start refresh
-    recheck = await asyncio.to_thread(gate.get, True, 10)  # its recheck: snapshotted v1, held
+    (
+        await asyncio.to_thread(gate.get, True, 10)
+    ).set()  # release its pass-start refresh
+    recheck = await asyncio.to_thread(
+        gate.get, True, 10
+    )  # its recheck: snapshotted v1, held
     store.advance_pointer(VersionRef("r1", 2))
     r.wake()  # v2's wake: delivered mid-pass -> dropped; the pass idles on its v1 snapshot
     recheck.set()
@@ -648,8 +707,11 @@ def test_constrained_409_recovers_without_backstop() -> None:
     """The event-driven channel: a min_version 409 self-wakes a stale ERROR replica."""
 
     async def go() -> None:
-        r = Reconciler(store=FlakyStore(VersionRef("r1", 1), _full("r1", 1)), engine=FakeEngine(),
-                       reconcile_interval=0)
+        r = Reconciler(
+            store=FlakyStore(VersionRef("r1", 1), _full("r1", 1)),
+            engine=FakeEngine(),
+            reconcile_interval=0,
+        )
         await r.startup()
         assert r.sync_state is SyncState.ERROR
         try:
@@ -675,7 +737,9 @@ def test_admit_satisfied() -> None:
 
 def test_admit_rejected_triggers_wake() -> None:
     async def go() -> None:
-        r = Reconciler(store=FakeStore(VersionRef("r1", 5), _full("r1", 5)), engine=FakeEngine())
+        r = Reconciler(
+            store=FakeStore(VersionRef("r1", 5), _full("r1", 5)), engine=FakeEngine()
+        )
         r.applied = VersionRef("r1", 2)
         try:
             async with r.admit(VersionConstraint(min_version=5)):
@@ -706,7 +770,11 @@ def test_unapplied_replica_rejects() -> None:
 def test_version_flips_before_resume() -> None:
     async def go() -> None:
         engine = FakeEngine()
-        r = Reconciler(store=FakeStore(VersionRef("r1", 4), _full("r1", 4)), engine=engine, commit_mode="in_place")
+        r = Reconciler(
+            store=FakeStore(VersionRef("r1", 4), _full("r1", 4)),
+            engine=engine,
+            commit_mode="in_place",
+        )
         r.applied = VersionRef("r1", 3)
         seen: dict[str, VersionRef | None] = {}
         base_resume = engine.resume
@@ -717,7 +785,9 @@ def test_version_flips_before_resume() -> None:
 
         engine.resume = resume_spy  # type: ignore[method-assign]
         await r.reconcile()
-        assert seen["applied"] == VersionRef("r1", 4)  # flipped under the gate, before resume
+        assert seen["applied"] == VersionRef(
+            "r1", 4
+        )  # flipped under the gate, before resume
 
     _run(go())
 

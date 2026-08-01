@@ -15,7 +15,14 @@ class VersionAheadError(RuntimeError):
     """A monotonic pool has already advanced past the smoke's expected version."""
 
 
-def smoke_flash_pool(*, app_name: str, cls_name: str, model_name: str, weight_version: int, timeout_seconds: int) -> None:
+def smoke_flash_pool(
+    *,
+    app_name: str,
+    cls_name: str,
+    model_name: str,
+    weight_version: int,
+    timeout_seconds: int,
+) -> None:
     """Poll until the pool serves completions at ``weight_version`` — through the gateway (Flash
     holds the request through a scaled-down pool's cold start) and then each live replica's
     ``/server_info``."""
@@ -33,11 +40,19 @@ def smoke_flash_pool(*, app_name: str, cls_name: str, model_name: str, weight_ve
                     raise RuntimeError(
                         f"pool is unclaimed; cannot serve expected weight version {weight_version}"
                     )
-                data = _post_json(f"{gateway}/v1/chat/completions", _completion(model_name), timeout=900)
+                data = _post_json(
+                    f"{gateway}/v1/chat/completions",
+                    _completion(model_name),
+                    timeout=900,
+                )
                 _check_serves(data)
                 print(f"Pool serves base (unclaimed): {data.get('choices')}")
                 return
-            data = _post_json(f"{gateway}/v1/chat/completions", _completion(model_name, weight_version), timeout=900)
+            data = _post_json(
+                f"{gateway}/v1/chat/completions",
+                _completion(model_name, weight_version),
+                timeout=900,
+            )
             print(f"Gateway completion: {data}")
             _check_completion(data, weight_version)
             for target in pool.discover_replicas():
@@ -50,7 +65,9 @@ def smoke_flash_pool(*, app_name: str, cls_name: str, model_name: str, weight_ve
         except Exception as exc:  # noqa: BLE001
             last_error = f"{type(exc).__name__}: {exc}"
         if time.time() >= deadline:
-            raise TimeoutError(f"Flash pool smoke did not pass before timeout: {last_error}")
+            raise TimeoutError(
+                f"Flash pool smoke did not pass before timeout: {last_error}"
+            )
         print(f"Waiting for Flash pool readiness: {last_error}")
         time.sleep(10)
 
@@ -62,15 +79,22 @@ def _applied_version(info: dict) -> int:
 
 def _check_version(current: int, expected: int, target: str) -> None:
     if current > expected:
-        raise VersionAheadError(f"{target} applied={current} already past expected {expected}")
+        raise VersionAheadError(
+            f"{target} applied={current} already past expected {expected}"
+        )
     if current != expected:
         raise RuntimeError(f"{target} applied={current}, expected {expected}")
 
 
 def _check_completion(data: dict, expected: int) -> None:
-    start, end = int(data.get("weight_version_start", -1)), int(data.get("weight_version_end", -1))
+    start, end = (
+        int(data.get("weight_version_start", -1)),
+        int(data.get("weight_version_end", -1)),
+    )
     if start > expected or end > expected:
-        raise VersionAheadError(f"gateway served {start}->{end}, already past expected {expected}")
+        raise VersionAheadError(
+            f"gateway served {start}->{end}, already past expected {expected}"
+        )
     if start != expected or end != expected:
         raise RuntimeError(f"unexpected gateway weight metadata: {data}")
 
@@ -100,7 +124,11 @@ def _get_json(url: str, *, timeout: float) -> dict:
 
 
 def _post_json(url: str, payload: dict, *, timeout: float) -> dict:
-    request = urllib.request.Request(url, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"},
+    )
     with urllib.request.urlopen(request, timeout=timeout) as resp:
         return json.load(resp)
 

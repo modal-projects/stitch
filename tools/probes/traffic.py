@@ -24,8 +24,10 @@ from typing import Any
 AFFINITY_HEADER = "Modal-Session-ID"  # what the cookbook configs use
 RETRY_409_SLEEP = 1.0
 RETRY_409_LIMIT = 120
-_WORDS = ("the model weights version pool replica delta chain anchor policy rollout "
-          "context token prefill decode publish commit stage pointer session request").split()
+_WORDS = (
+    "the model weights version pool replica delta chain anchor policy rollout "
+    "context token prefill decode publish commit stage pointer session request"
+).split()
 
 
 @dataclass(frozen=True)
@@ -39,13 +41,20 @@ class Shape:
 SHAPES: dict[str, Shape] = {
     "long_decode": Shape(prompt_tokens=(200, 800), max_tokens=(4096, 12288)),
     "long_prefill": Shape(prompt_tokens=(8_000, 24_000), max_tokens=(256, 1024)),
-    "agentic": Shape(prompt_tokens=(1_000, 3_000), max_tokens=(256, 1536), turns=(4, 12), tool_tokens=(500, 4_000)),
+    "agentic": Shape(
+        prompt_tokens=(1_000, 3_000),
+        max_tokens=(256, 1536),
+        turns=(4, 12),
+        tool_tokens=(500, 4_000),
+    ),
 }
 MIXED_WEIGHTS = {"long_decode": 0.4, "long_prefill": 0.2, "agentic": 0.4}
 
 
 def _filler(rng: random.Random, tokens: int) -> str:
-    return " ".join(rng.choices(_WORDS, k=max(1, int(tokens * 0.75))))  # ~0.75 words/token
+    return " ".join(
+        rng.choices(_WORDS, k=max(1, int(tokens * 0.75)))
+    )  # ~0.75 words/token
 
 
 def _estimate_tokens(messages: list[dict[str, str]]) -> int:
@@ -59,7 +68,8 @@ async def run(
     shape: str = "mixed",
     concurrency: int = 16,
     duration: float = 600.0,
-    lag: int | None = None,  # floor requests at (gateway-observed version - lag); None = unconstrained
+    lag: int
+    | None = None,  # floor requests at (gateway-observed version - lag); None = unconstrained
     context_limit: int = 16384,  # engine --context-length; sessions stop growing before it
     out_path: str | None = None,
     seed: int = 0,
@@ -74,7 +84,19 @@ async def run(
             await floor.start(client)
         workers = [
             asyncio.create_task(
-                _worker(client, gateway, model, shape, deadline, rows, floor, lag, context_limit, i, random.Random(seed + i))
+                _worker(
+                    client,
+                    gateway,
+                    model,
+                    shape,
+                    deadline,
+                    rows,
+                    floor,
+                    lag,
+                    context_limit,
+                    i,
+                    random.Random(seed + i),
+                )
             )
             for i in range(concurrency)
         ]
@@ -88,7 +110,19 @@ async def run(
     return summarize(rows)
 
 
-async def _worker(client, gateway, model, shape_name, deadline, rows, floor, lag, context_limit, worker_id, rng) -> None:  # noqa: ANN001
+async def _worker(
+    client,
+    gateway,
+    model,
+    shape_name,
+    deadline,
+    rows,
+    floor,
+    lag,
+    context_limit,
+    worker_id,
+    rng,
+) -> None:  # noqa: ANN001
     n = 0  # one worker = sequential sessions
     while time.time() < deadline:
         name = (
@@ -97,14 +131,27 @@ async def _worker(client, gateway, model, shape_name, deadline, rows, floor, lag
             else rng.choices(*zip(*MIXED_WEIGHTS.items(), strict=True))[0]
         )
         await _session(
-            client, gateway, model, name, SHAPES[name], rng, rows, floor, lag, context_limit,
+            client,
+            gateway,
+            model,
+            name,
+            SHAPES[name],
+            rng,
+            rows,
+            floor,
+            lag,
+            context_limit,
             session_id=f"w{worker_id}-{n}",
         )
         n += 1
 
 
-async def _session(client, gateway, model, name, spec, rng, rows, floor, lag, context_limit, session_id) -> None:  # noqa: ANN001
-    prompt_tokens = min(rng.randint(*spec.prompt_tokens), context_limit - max(spec.max_tokens) - 256)
+async def _session(
+    client, gateway, model, name, spec, rng, rows, floor, lag, context_limit, session_id
+) -> None:  # noqa: ANN001
+    prompt_tokens = min(
+        rng.randint(*spec.prompt_tokens), context_limit - max(spec.max_tokens) - 256
+    )
     messages = [{"role": "user", "content": _filler(rng, prompt_tokens)}]
     headers = {AFFINITY_HEADER: session_id}
     for turn in range(rng.randint(*spec.turns)):
@@ -118,21 +165,41 @@ async def _session(client, gateway, model, name, spec, rng, rows, floor, lag, co
             "temperature": 0.8,
         }
         if floor is not None and floor.version is not None:
-            payload["weight_version"] = {"min_version": max(0, floor.version - (lag or 0))}
-        row = {"t": time.time(), "shape": name, "session": session_id, "turn": turn, "retries_409": 0}
-        data = await _post_with_retry(client, f"{gateway}/v1/chat/completions", payload, headers, row)
+            payload["weight_version"] = {
+                "min_version": max(0, floor.version - (lag or 0))
+            }
+        row = {
+            "t": time.time(),
+            "shape": name,
+            "session": session_id,
+            "turn": turn,
+            "retries_409": 0,
+        }
+        data = await _post_with_retry(
+            client, f"{gateway}/v1/chat/completions", payload, headers, row
+        )
         rows.append(row)
         if data is None:
             return  # session dies with its failed request
         row.update(
             wv_start=data.get("weight_version_start"),
             wv_end=data.get("weight_version_end"),
-            straddled=data.get("weight_version_start") != data.get("weight_version_end"),
+            straddled=data.get("weight_version_start")
+            != data.get("weight_version_end"),
         )
-        content = (data.get("choices") or [{}])[0].get("message", {}).get("content") or ""
+        content = (data.get("choices") or [{}])[0].get("message", {}).get(
+            "content"
+        ) or ""
         messages.append({"role": "assistant", "content": content})
-        if spec.tool_tokens[1]:  # agentic: the "tool result" grows the context every turn
-            messages.append({"role": "user", "content": f"tool result:\n{_filler(rng, rng.randint(*spec.tool_tokens))}\ncontinue."})
+        if spec.tool_tokens[
+            1
+        ]:  # agentic: the "tool result" grows the context every turn
+            messages.append(
+                {
+                    "role": "user",
+                    "content": f"tool result:\n{_filler(rng, rng.randint(*spec.tool_tokens))}\ncontinue.",
+                }
+            )
         else:
             break
 

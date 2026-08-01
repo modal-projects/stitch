@@ -60,7 +60,9 @@ class Engine:
         Mutates ``request`` in place."""
         raise NotImplementedError
 
-    def stamp_response(self, response: dict[str, Any], served: VersionRef, current: VersionRef) -> None:
+    def stamp_response(
+        self, response: dict[str, Any], served: VersionRef, current: VersionRef
+    ) -> None:
         """Record which version generated a response, in the engine's response shape
         (e.g. sglang's meta_info vs OpenAI top-level). Mutates ``response`` in place."""
         raise NotImplementedError

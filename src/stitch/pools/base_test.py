@@ -37,7 +37,11 @@ def test_async_defaults_delegate_to_sync_impls_off_loop() -> None:
 
     url, replicas = asyncio.run(drive())  # the loop runs on THIS thread
     assert (url, replicas) == ("https://gw", ["https://r1", "https://r2"])
-    assert [name for name, _ in pool.calls] == ["gateway_url", "discover_replicas", "wake"]
+    assert [name for name, _ in pool.calls] == [
+        "gateway_url",
+        "discover_replicas",
+        "wake",
+    ]
     # the sync impls must have run on worker threads, never on the loop's thread
     assert all(ident != threading.get_ident() for _, ident in pool.calls)
 

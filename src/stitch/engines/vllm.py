@@ -68,6 +68,8 @@ class VLLMEngine(Engine):
         # sglang's extra_key — e.g. a prefix-cache salt / request tag). Mutates request in place.
         raise NotImplementedError("VLLMEngine.stamp_request: TODO")
 
-    def stamp_response(self, response: dict[str, Any], served: VersionRef, current: VersionRef) -> None:
+    def stamp_response(
+        self, response: dict[str, Any], served: VersionRef, current: VersionRef
+    ) -> None:
         # TODO: record which version generated the response, in vLLM's response shape.
         raise NotImplementedError("VLLMEngine.stamp_response: TODO")

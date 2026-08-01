@@ -16,7 +16,9 @@ RESULTS_ROOT = "/probe-results"
 MINUTES = 60
 
 app = modal.App("stitch-probes")
-results_volume = modal.Volume.from_name("stitch-probe-results", version=2, create_if_missing=True)
+results_volume = modal.Volume.from_name(
+    "stitch-probe-results", version=2, create_if_missing=True
+)
 
 image = (
     modal.Image.debian_slim(python_version="3.12")
@@ -25,17 +27,31 @@ image = (
 )
 
 
-@app.function(image=image, volumes={RESULTS_ROOT: results_volume}, timeout=120 * MINUTES)
-def poll(pool_app: str, pool_cls: str = "Server", interval: float = 2.0, duration: float = 3600.0, tag: str = "run") -> None:
+@app.function(
+    image=image, volumes={RESULTS_ROOT: results_volume}, timeout=120 * MINUTES
+)
+def poll(
+    pool_app: str,
+    pool_cls: str = "Server",
+    interval: float = 2.0,
+    duration: float = 3600.0,
+    tag: str = "run",
+) -> None:
     from tools.probes import poller
 
     out = f"{RESULTS_ROOT}/{tag}/server_info.jsonl"
-    asyncio.run(poller.poll(pool_app, pool_cls, interval=interval, duration=duration, out_path=out))
+    asyncio.run(
+        poller.poll(
+            pool_app, pool_cls, interval=interval, duration=duration, out_path=out
+        )
+    )
     results_volume.commit()
     print(json.dumps(poller.summarize(out), indent=2))
 
 
-@app.function(image=image, volumes={RESULTS_ROOT: results_volume}, timeout=120 * MINUTES)
+@app.function(
+    image=image, volumes={RESULTS_ROOT: results_volume}, timeout=120 * MINUTES
+)
 def traffic(
     pool_app: str,
     pool_cls: str = "Server",
@@ -51,8 +67,16 @@ def traffic(
 
     gateway = ModalFlashPool(pool_app, pool_cls).gateway_url()
     out = f"{RESULTS_ROOT}/{tag}/traffic-{shape}.jsonl"
-    summary = asyncio.run(traffic_mod.run(
-        gateway, model, shape=shape, concurrency=concurrency, duration=duration, lag=lag, out_path=out,
-    ))
+    summary = asyncio.run(
+        traffic_mod.run(
+            gateway,
+            model,
+            shape=shape,
+            concurrency=concurrency,
+            duration=duration,
+            lag=lag,
+            out_path=out,
+        )
+    )
     results_volume.commit()
     print(json.dumps(summary, indent=2))

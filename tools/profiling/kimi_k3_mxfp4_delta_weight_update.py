@@ -222,7 +222,9 @@ def benchmark(
         server_args["--cpu-weight-cache-max-compile-group-gb"] = CPU_CACHE_GROUP_GB
         storage = canonical_storage if canonical_storage is not None else "disk"
         if storage == "disk":
-            server_args["--cpu-weight-cache-canonical-checkpoint-dir"] = CANONICAL_CHECKPOINT_DIR
+            server_args["--cpu-weight-cache-canonical-checkpoint-dir"] = (
+                CANONICAL_CHECKPOINT_DIR
+            )
         elif storage != "memory":
             raise ValueError("canonical_storage must be 'memory' or 'disk'")
     elif canonical_storage is not None:
