@@ -69,7 +69,6 @@ delta_volume = modal.Volume.from_name(DELTA_VOLUME_NAME, version=2)
 sglang_cache_volume = modal.Volume.from_name(SGLANG_CACHE_VOLUME_NAME, version=2)
 image = build_serving_image(
     hf_cache_path="/root/.cache/huggingface",
-    delta_volume_name=DELTA_VOLUME_NAME,
     experiment=EXPERIMENT,
 ).add_local_dir(
     str(Path(__file__).resolve().parents[1]),

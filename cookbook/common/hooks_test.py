@@ -13,6 +13,8 @@ import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from cookbook.common import hooks
 from stitch.stores.modal_volume import ModalVolumeStore
 from stitch.types import VersionRef
@@ -30,14 +32,15 @@ class _FakePool:
 
 
 def _args(root: str, run_id: str = "run-abc", **extra):
-    # transport root = parent of update_weight_disk_dir, so the Store roots at `root`.
     return SimpleNamespace(
-        update_weight_disk_dir=f"{root}/{run_id}", run_id=run_id, **extra
+        update_weight_disk_dir=f"{root}/updates",
+        run_id=run_id,
+        **extra,
     )
 
 
 def _write_version(root: Path, ref: VersionRef) -> str:
-    d = root / ref.identity
+    d = root / "updates" / Path(ref.identity).name
     d.mkdir(parents=True)
     (d / "model.safetensors.index.json").write_text(
         json.dumps(
@@ -79,7 +82,9 @@ def test_commit_and_wake_publishes() -> None:
             hooks.publish_version = original_publish
             ModalVolumeStore.commit = original_commit
         assert events == ["commit", "barrier", "publish"]
-        assert ModalVolumeStore(root).read_pointer() == VersionRef("run-abc", 1)
+        assert ModalVolumeStore(root, run_id="run-abc").read_pointer() == VersionRef(
+            "run-abc", 1
+        )
         assert pool.woke == [VersionRef("run-abc", 1)]
 
 
@@ -89,8 +94,8 @@ def test_commit_and_wake_baseline_is_noop() -> None:
         root = Path(tmp)
         pool = _FakePool()
         hooks._pool = lambda args: pool
-        run_dir = root / "run-abc"
-        run_dir.mkdir(parents=True)
+        updates = root / "updates"
+        updates.mkdir(parents=True, exist_ok=True)
         original_barrier = hooks.process.dist_barrier
 
         def unexpected_barrier() -> None:
@@ -98,10 +103,10 @@ def test_commit_and_wake_baseline_is_noop() -> None:
 
         hooks.process.dist_barrier = unexpected_barrier
         try:
-            hooks.commit_and_wake(_args(str(root)), str(run_dir))
+            hooks.commit_and_wake(_args(str(root)), str(updates))
         finally:
             hooks.process.dist_barrier = original_barrier
-        assert ModalVolumeStore(root).read_pointer() is None
+        assert ModalVolumeStore(root, run_id="run-abc").read_pointer() is None
         assert pool.woke == []
 
 
@@ -110,14 +115,26 @@ def test_claim_pool_resets_to_base() -> None:
         pool = _FakePool()
         hooks._pool = lambda args: pool
         hooks.claim_pool(_args(tmp))
-        assert ModalVolumeStore(Path(tmp)).read_pointer() == VersionRef("run-abc", 0)
+        assert ModalVolumeStore(
+            Path(tmp), run_id="run-abc"
+        ).read_pointer() == VersionRef("run-abc", 0)
         assert pool.woke == [VersionRef("run-abc", 0)]
+
+
+def test_store_rejects_a_non_updates_directory() -> None:
+    with pytest.raises(ValueError, match="must end in /updates"):
+        hooks._store(
+            SimpleNamespace(
+                update_weight_disk_dir="/stitch/run-abc/deltas",
+                run_id="run-abc",
+            )
+        )
 
 
 def test_request_hook_min_lag() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        ModalVolumeStore(root).advance_pointer(
+        ModalVolumeStore(root, run_id="run-abc").advance_pointer(
             VersionRef("run-abc", 10)
         )  # published latest
         hooks._latest = hooks._CachedPointer()  # fresh cache reading this store
@@ -156,7 +173,9 @@ def test_sample_affinity_key_fallbacks() -> None:
 def test_request_hook_exact_and_none() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        ModalVolumeStore(root).advance_pointer(VersionRef("run-abc", 10))
+        ModalVolumeStore(root, run_id="run-abc").advance_pointer(
+            VersionRef("run-abc", 10)
+        )
         hooks._latest = hooks._CachedPointer()
         exact_req = {"payload": {}}
         asyncio.run(
@@ -195,21 +214,27 @@ def test_request_hook_cache_switches_runs() -> None:
         tempfile.TemporaryDirectory() as first,
         tempfile.TemporaryDirectory() as second,
     ):
-        ModalVolumeStore(first).advance_pointer(VersionRef("run-a", 7))
-        ModalVolumeStore(second).advance_pointer(VersionRef("run-b", 3))
+        ModalVolumeStore(first, run_id="run-a").advance_pointer(VersionRef("run-a", 7))
+        ModalVolumeStore(second, run_id="run-b").advance_pointer(VersionRef("run-b", 3))
         hooks._latest = hooks._CachedPointer()
 
-        async def read(root: str) -> dict:
+        async def read(root: str, run_id: str) -> dict:
             request = {"payload": {}}
             await hooks.gated_rollout_request_hook(
-                _args(root, rollout_request_weight_version_lag=0),
+                _args(root, run_id=run_id, rollout_request_weight_version_lag=0),
                 SimpleNamespace(session_id=None),
                 request,
             )
             return request["payload"]["weight_version"]
 
-        assert asyncio.run(read(first)) == {"min_version": 7, "exact_version": None}
-        assert asyncio.run(read(second)) == {"min_version": 3, "exact_version": None}
+        assert asyncio.run(read(first, "run-a")) == {
+            "min_version": 7,
+            "exact_version": None,
+        }
+        assert asyncio.run(read(second, "run-b")) == {
+            "min_version": 3,
+            "exact_version": None,
+        }
 
 
 if __name__ == "__main__":

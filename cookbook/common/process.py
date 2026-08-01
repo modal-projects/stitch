@@ -26,6 +26,7 @@ def start_sidecar(
     delta_update_mode: str,
     disk_load_format: str,
     volume_name: str,
+    run_id: str,
     commit_mode: str,
     flush_cache_on_commit: bool = False,
     debug_requests: bool = False,
@@ -51,6 +52,8 @@ def start_sidecar(
         disk_load_format,
         "--volume-name",
         volume_name,
+        "--run-id",
+        run_id,
         "--commit-mode",
         commit_mode,
     ]

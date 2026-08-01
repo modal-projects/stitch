@@ -14,7 +14,6 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from cookbook.common.constants import PREP_PATH
 from cookbook.miles_disagg.trainer_image import (
     MEGATRON_PATH,
     MILES_ROOT,
@@ -33,29 +32,40 @@ def _apply_prep_environment(exp) -> None:
     os.environ.update(getattr(exp, "PREP_ENV", {}))
 
 
-def prepare_checkpoints(exp, prep_volume) -> None:
+def _source_snapshot(exp) -> str:
+    _apply_prep_environment(exp)
+    from huggingface_hub import snapshot_download
+
+    return snapshot_download(
+        exp.SOURCE_MODEL,
+        revision=getattr(exp, "SOURCE_REVISION", None),
+    )
+
+
+def _bf16_masters(exp) -> str:
+    """Resolve the immutable BF16 source used by both checkpoint converters."""
+    src = _source_snapshot(exp)
+    if _is_int4(src) or getattr(exp, "MATERIALIZE_BF16_MASTERS", True):
+        return str(exp.BF16_CHECKPOINT_PATH)
+    return src
+
+
+def prepare_checkpoints(exp, checkpoint_volume) -> None:
     """Build the bf16 masters (trainer arch source) + the served base on a GPU.
 
     masters (bf16): a quantized source (Kimi INT4) is dequantized; a bf16 source IS the
     masters. served base: bf16 = masters; a published ROLLOUT_SOURCE_MODEL is copied
     directly; otherwise NVFP4 is built with Miles' TE-direct quantizer over the masters.
     """
-    _apply_prep_environment(exp)
-    from huggingface_hub import snapshot_download
-
-    prep_volume.reload()
-    tag = exp.MODEL_TAG
-    bf16_dir, fp8_dir, nvfp4_dir = (
-        f"{PREP_PATH}/{tag}/bf16",
-        f"{PREP_PATH}/{tag}/fp8",
-        f"{PREP_PATH}/{tag}/nvfp4",
-    )
+    checkpoint_volume.reload()
+    materialized_bf16_dir = str(exp.BF16_CHECKPOINT_PATH)
+    served_dir = str(exp.miles.hf_checkpoint)
     served_format = getattr(exp, "SERVED_CHECKPOINT_FORMAT", "nvfp4")
     if served_format not in {"bf16", "fp8", "nvfp4"}:
         raise SystemExit(f"unsupported SERVED_CHECKPOINT_FORMAT={served_format!r}")
     tools = f"{MILES_ROOT}/tools"
 
-    src = snapshot_download(exp.SOURCE_MODEL)
+    src = _source_snapshot(exp)
     is_int4 = _is_int4(src)  # read the source's quant scheme, not its repo name
 
     def _build_bf16(out: str) -> None:
@@ -76,19 +86,30 @@ def prepare_checkpoints(exp, prep_volume) -> None:
             _copy_tree("bf16 masters", src, out)
         _strip_stale_quant_config(os.path.join(out, "config.json"))
 
-    _staged(bf16_dir, _build_bf16)
+    if is_int4 or getattr(exp, "MATERIALIZE_BF16_MASTERS", True):
+        _staged(materialized_bf16_dir, _build_bf16)
+        bf16_dir = materialized_bf16_dir
+    else:
+        bf16_dir = src
+        print(f"using pinned HF snapshot as bf16 masters: {bf16_dir}", flush=True)
 
     if served_format == "bf16":
-        prep_volume.commit()
+        if served_dir != bf16_dir:
+            raise ValueError(
+                "BF16 served checkpoint must match BF16_CHECKPOINT_PATH: "
+                f"{served_dir} != {bf16_dir}"
+            )
+        checkpoint_volume.commit()
         print(f"Prepared masters={bf16_dir} served_base={bf16_dir}")
         return
 
     rollout_source = getattr(exp, "ROLLOUT_SOURCE_MODEL", None)
     if rollout_source:
         rollout_revision = getattr(exp, "ROLLOUT_SOURCE_REVISION", None)
-        served_dir = fp8_dir if served_format == "fp8" else nvfp4_dir
 
         def _download_rollout_checkpoint(out: str) -> None:
+            from huggingface_hub import snapshot_download
+
             snapshot_download(
                 rollout_source,
                 revision=rollout_revision,
@@ -97,7 +118,7 @@ def prepare_checkpoints(exp, prep_volume) -> None:
             shutil.rmtree(os.path.join(out, ".cache"), ignore_errors=True)
 
         _staged(served_dir, _download_rollout_checkpoint, resume=True)
-        prep_volume.commit()
+        checkpoint_volume.commit()
         print(f"Prepared masters={bf16_dir} served_base={served_dir}")
         return
 
@@ -130,20 +151,19 @@ def prepare_checkpoints(exp, prep_volume) -> None:
             check=True,
         )
 
-    _staged(nvfp4_dir, _build_nvfp4)
-    prep_volume.commit()
-    print(f"Prepared masters={bf16_dir} served_base={nvfp4_dir}")
+    _staged(served_dir, _build_nvfp4)
+    checkpoint_volume.commit()
+    print(f"Prepared masters={bf16_dir} served_base={served_dir}")
 
 
-def prepare_torch_dist(exp, prep_volume, *, rank: int, master_addr: str) -> None:
-    """Build {tag}/torch_dist (the raw-mode ref_load) from the {tag}/bf16 masters via a
-    clustered torchrun conversion (large MoE won't fit an 8-way split)."""
-    prep_volume.reload()
-    tag = exp.MODEL_TAG
-    bf16_dir, torch_dist_dir = (
-        f"{PREP_PATH}/{tag}/bf16",
-        f"{PREP_PATH}/{tag}/torch_dist",
-    )
+def prepare_torch_dist(exp, checkpoint_volume, *, rank: int, master_addr: str) -> None:
+    """Build the raw-mode torch_dist reference checkpoint from the BF16 source."""
+    torch_dist_path = getattr(exp, "TORCH_DIST_CHECKPOINT_PATH", None)
+    if torch_dist_path is None:
+        raise SystemExit("this config does not use a torch_dist trainer checkpoint")
+    checkpoint_volume.reload()
+    bf16_dir = _bf16_masters(exp)
+    torch_dist_dir = str(torch_dist_path)
     if os.path.exists(
         os.path.join(torch_dist_dir, "latest_checkpointed_iteration.txt")
     ):
@@ -177,7 +197,7 @@ def prepare_torch_dist(exp, prep_volume, *, rank: int, master_addr: str) -> None
     subprocess.run(["bash", "-c", inner], check=True, env=env)
     # Every node commits its own distcp shards (disjoint files merge on the Volume);
     # a rank-0-only commit would drop the other nodes' shards.
-    prep_volume.commit()
+    checkpoint_volume.commit()
     if rank == 0:
         print(f"Prepared torch_dist={torch_dist_dir}")
 

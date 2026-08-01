@@ -23,7 +23,6 @@ import importlib
 import os
 import subprocess
 import tempfile
-import uuid
 from types import SimpleNamespace
 from typing import Any
 
@@ -41,6 +40,7 @@ from cookbook.common.constants import (
     SERVER_STARTUP_TIMEOUT,
     SGLANG_CACHE_PATH,
     SIDECAR_PORT,
+    STITCH_PATH,
 )
 from cookbook.slime_disagg import trainer_image
 from cookbook.slime_disagg.config import YAML_CONFIG_FIELDS, SlimeConfig
@@ -58,11 +58,12 @@ exp = importlib.import_module(f"cookbook.slime_disagg.configs.{EXPERIMENT}")
 modal_cfg = exp.modal
 slime_cfg = exp.slime
 
-# Per-run id, minted fresh per launch by cookbook.slime_disagg.launch: names the pool app + delta
-# transport root, so each run — even an identical-config relaunch — is its own isolated pool.
+# Per-run id, minted fresh by cookbook.slime_disagg.launch. The same identity
+# scopes the pool, Stitch pointer, publications, checkpoints, and logs.
 RUN_ID = os.environ["RUN_ID"]
 APP_NAME = f"{exp.APP_NAME}-{RUN_ID}"
-BULLETIN_ROOT = f"{exp.DELTA_BULLETIN_ROOT}/{RUN_ID}"
+RUN_DIR = STITCH_PATH / RUN_ID
+UPDATES_DIR = RUN_DIR / "updates"
 
 # Flash autoscaler target / sglang concurrency cap: explicit target_inputs, else engine concurrency.
 ROLLOUT_CONCURRENCY = (
@@ -79,7 +80,6 @@ image = trainer_image.build_trainer_image(
 )
 server_image = serving_image.build_serving_image(
     hf_cache_path=str(HF_CACHE_PATH),
-    delta_volume_name=exp.DELTA_VOLUME_NAME,
     experiment=EXPERIMENT,
     run_id=RUN_ID,
     runtime=getattr(exp, "SGLANG_RUNTIME", serving_image.DEFAULT_SGLANG_RUNTIME),
@@ -95,14 +95,18 @@ hf_cache_volume = modal.Volume.from_name(
     "huggingface-cache", create_if_missing=True, version=2
 )
 data_volume = modal.Volume.from_name("slime-data", create_if_missing=True, version=2)
-checkpoints_volume = modal.Volume.from_name(
-    "slime-checkpoints", create_if_missing=True, version=2
+checkpoint_volume = modal.Volume.from_name(
+    "slime-checkpoints",
+    create_if_missing=True,
+    version=2,
 )
 sglang_cache_volume = modal.Volume.from_name(
     "sglang-cache", create_if_missing=True, version=2
 )
-delta_volume = modal.Volume.from_name(
-    exp.DELTA_VOLUME_NAME, create_if_missing=True, version=2
+run_volume = modal.Volume.from_name(
+    exp.EXPERIMENT_VOLUME_NAME,
+    create_if_missing=True,
+    version=2,
 )
 draft_volume = (
     modal.Volume.from_name(
@@ -116,9 +120,9 @@ draft_volume = (
 
 train_volumes = {
     str(HF_CACHE_PATH): hf_cache_volume,
+    str(CHECKPOINTS_PATH): checkpoint_volume,
     str(DATA_PATH): data_volume,
-    str(CHECKPOINTS_PATH): checkpoints_volume,
-    exp.DELTA_BULLETIN_ROOT: delta_volume,
+    str(STITCH_PATH): run_volume,
 }
 
 app = modal.App(APP_NAME)
@@ -138,12 +142,14 @@ SGLANG_SERVER_ARGS = {
 @app.cls(
     image=server_image,
     gpu=f"{modal_cfg.gpu}:{slime_cfg.rollout_num_gpus_per_engine}",
+    cpu=modal_cfg.rollout_cpu,
     cloud=modal_cfg.cloud,
     region=modal_cfg.region,
     volumes={
         str(HF_CACHE_PATH): hf_cache_volume,
+        str(CHECKPOINTS_PATH): checkpoint_volume,
+        str(STITCH_PATH): run_volume,
         SGLANG_CACHE_PATH: sglang_cache_volume,
-        exp.DELTA_BULLETIN_ROOT: delta_volume,
         **({str(DRAFT_PATH): draft_volume} if draft_volume is not None else {}),
     },
     min_containers=modal_cfg.rollout_min_containers,
@@ -170,11 +176,12 @@ class Server:
             sglang_args=SGLANG_SERVER_ARGS,
             tp=slime_cfg.rollout_num_gpus_per_engine,
             concurrency=ROLLOUT_CONCURRENCY,
-            bulletin_root=BULLETIN_ROOT,
+            bulletin_root=str(RUN_DIR),
             local_checkpoint_dir=exp.LOCAL_CHECKPOINT_PATH,
             delta_update_mode=exp.SGLANG_DELTA_UPDATE_MODE,
-            volume_name=exp.DELTA_VOLUME_NAME,
+            volume_name=exp.EXPERIMENT_VOLUME_NAME,
             commit_mode=exp.SIDECAR_COMMIT_MODE,
+            run_id=RUN_ID,
             flush_cache_on_commit=exp.SIDECAR_FLUSH_CACHE_ON_COMMIT,
             startup_timeout=SERVER_STARTUP_TIMEOUT,
         )
@@ -193,6 +200,7 @@ _MULTINODE = slime_cfg.n_train_nodes > 1
 @app.cls(
     image=image,
     gpu=f"{modal_cfg.gpu}:{slime_cfg.actor_num_gpus_per_node}",
+    cpu=modal_cfg.trainer_cpu,
     memory=modal_cfg.trainer_memory_mib,
     cloud=modal_cfg.cloud,
     region=modal_cfg.region,
@@ -241,13 +249,13 @@ class Trainer:
 
         cfg = SlimeConfig.from_payload(payload)
         cfg.rollout_endpoint_url = ModalFlashPool(APP_NAME, "Server").gateway_url()
-        run_id = uuid.uuid4().hex[:12]  # per-launch fence token; forks a fresh chain
-        cfg.update_weight_disk_dir = f"{BULLETIN_ROOT}/{run_id}"
+        # Slime requires this CLI argument; the deployment owns its run-scoped value.
+        cfg.update_weight_disk_dir = str(UPDATES_DIR)
         hook_knobs = {
-            "update_weight_delta_volume_name": exp.DELTA_VOLUME_NAME,
+            "experiment_volume_name": exp.EXPERIMENT_VOLUME_NAME,
             "rollout_modal_flash_app_name": APP_NAME,
             "rollout_modal_flash_server_cls_name": "Server",
-            "run_id": run_id,
+            "run_id": RUN_ID,
         }
         cfg.custom_config_path = (
             hook_knobs  # materialized to a YAML path below; keep the mapping for claim

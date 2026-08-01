@@ -6,17 +6,18 @@ Deploy: EXPERIMENT_CONFIG=kimi_k2_6_nvfp4 uv run --extra modal modal deploy --st
 from __future__ import annotations
 
 from cookbook.common.config import ModalConfig
-from cookbook.common.constants import DATA_PATH, PREP_PATH
+from cookbook.common.constants import CHECKPOINTS_PATH, DATA_PATH
 from cookbook.miles_disagg.config import MilesConfig
 
 APP_NAME = "stitch-kimi-k2-6-nvfp4"
-DELTA_VOLUME_NAME = "stitch-delta-kimi-k2-6-nvfp4"
-DELTA_BULLETIN_ROOT = "/delta-bulletin"
+EXPERIMENT_VOLUME_NAME = "stitch-miles-kimi-k2-6-nvfp4"
 LOCAL_CHECKPOINT_PATH = None
 
 # SOURCE_MODEL (INT4) -> dequant -> bf16 masters -> convert -> served NVFP4 base.
 SOURCE_MODEL = "moonshotai/Kimi-K2.6"
-MODEL_TAG = "kimi-k2-6"
+BF16_CHECKPOINT_PATH = CHECKPOINTS_PATH / "kimi-k2-6-bf16"
+ROLLOUT_CHECKPOINT_PATH = CHECKPOINTS_PATH / "kimi-k2-6-nvfp4"
+TORCH_DIST_CHECKPOINT_PATH = CHECKPOINTS_PATH / "kimi-k2-6-torch-dist"
 
 SIDECAR_COMMIT_MODE = "in_place"
 SIDECAR_FLUSH_CACHE_ON_COMMIT = False
@@ -32,6 +33,7 @@ SGLANG_SERVER_ARGS = {
     # Use the no-GDS fastsafetensors path on hosts without nvidia-fs.
     "--load-format": "fastsafetensors",
     "--model-loader-extra-config": '{"enable_gds":false}',
+    "--trust-remote-code": "",
     "--enable-cpu-weight-cache": "",
     "--cpu-weight-cache-max-compile-group-gb": "8",
     "--weight-loader-drop-cache-after-load": "",
@@ -73,8 +75,8 @@ class _Miles(MilesConfig):
     # Arch comes from the model script (shared with Kimi-K2-Thinking; K2.6 matches).
     miles_model_script = "scripts/models/kimi-k2-thinking.sh"
 
-    hf_checkpoint = f"{PREP_PATH}/{MODEL_TAG}/nvfp4"
-    ref_load = f"{PREP_PATH}/{MODEL_TAG}/torch_dist"
+    hf_checkpoint = str(ROLLOUT_CHECKPOINT_PATH)
+    ref_load = str(TORCH_DIST_CHECKPOINT_PATH)
     # "raw": K2.6's HF arch is a VLM wrapper AutoBridge can't build; export routes via model_name.
     megatron_to_hf_mode = "raw"
     model_name = (
@@ -155,7 +157,6 @@ class _Miles(MilesConfig):
     update_weight_transfer_mode = "disk-delta"
     update_weight_delta_encoding = "xor"
     update_weight_delta_checksum = "xxh3-128"
-    update_weight_disk_dir = DELTA_BULLETIN_ROOT
     custom_update_weight_post_write_path = "cookbook.common.hooks.commit_and_wake"
 
     prompt_data = f"{DATA_PATH}/dapo-math-17k/dapo-math-17k.jsonl"

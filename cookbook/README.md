@@ -35,6 +35,56 @@ the replica. Bundled MTP heads do not need a separate volume.
 
 ## Prepare and launch
 
+All persistent storage uses Modal Volume v2:
+
+| Volume | Mount | Contents |
+| --- | --- | --- |
+| `huggingface-cache` | `/root/.cache/huggingface` | Pinned source-model downloads |
+| `miles-checkpoints` or `slime-checkpoints` | `/checkpoints` | Immutable prepared model layouts |
+| `miles-data` or `slime-data` | `/data` | Immutable dataset revisions |
+| `stitch-<framework>-<model>` | `/stitch` | Run-scoped publications, checkpoints, and logs |
+| `sglang-cache` | `/root/.cache/sglang` | Compiled SGLang kernels |
+| Configured draft Volume | `/draft` | Optional external speculative draft |
+
+Prepared model layouts are immutable artifacts with explicit paths. For
+example, the Miles GLM-5.2 config uses:
+
+```text
+/checkpoints/
+├── glm5-2-nvfp4/
+└── glm5-2-torch-dist/
+```
+
+Each config also owns one `stitch-<framework>-<model>` Volume mounted at
+`/stitch`. Its root contains only run-scoped state:
+
+```text
+/stitch/
+└── <run-id>/
+    ├── latest
+    ├── updates/weight_vNNNNNN/
+    ├── checkpoints/
+    └── train.log
+```
+
+The training framework owns `updates/`; Stitch owns the `latest` commit
+pointer. A future checkpoint resume starts a new run and reads the previous
+run's `checkpoints/` rather than appending to its update chain.
+
+Datasets are independent of models and runs. Miles mounts the shared
+`miles-data` Volume at `/data`; Slime uses `slime-data`. Each immutable dataset
+revision has its own directory:
+
+```text
+/data/
+└── datasets/
+    └── <dataset>/
+        └── <revision>/
+            ├── manifest.json
+            ├── <trainer-input>
+            └── <dataset-specific-assets>/
+```
+
 Miles:
 
 ```bash
@@ -77,7 +127,7 @@ gateway and every live replica with:
 ```bash
 uv run --extra modal python -m cookbook.common.smoke \
   --app-name <app-name> \
-  --model-name /prep/glm45-air/fp8 \
+  --model-name /checkpoints/glm45-air-fp8 \
   --weight-version 10
 ```
 

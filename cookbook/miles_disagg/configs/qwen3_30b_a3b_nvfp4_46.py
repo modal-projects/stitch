@@ -40,16 +40,16 @@ Launch: EXPERIMENT_CONFIG=qwen3_30b_a3b_nvfp4_46 uv run --extra modal python -m 
 from __future__ import annotations
 
 from cookbook.common.config import ModalConfig
-from cookbook.common.constants import DATA_PATH, PREP_PATH
+from cookbook.common.constants import CHECKPOINTS_PATH, DATA_PATH
 from cookbook.miles_disagg.config import MilesConfig
 
 APP_NAME = "stitch-qwen3-30b-nvfp4-46"
-DELTA_VOLUME_NAME = "stitch-delta-qwen3-30b-nvfp4-46"
-DELTA_BULLETIN_ROOT = "/delta-bulletin"
+EXPERIMENT_VOLUME_NAME = "stitch-miles-qwen3-30b-nvfp4-46"
 LOCAL_CHECKPOINT_PATH = None
 
 SOURCE_MODEL = "Qwen/Qwen3-30B-A3B"  # bf16 -> masters ARE the download
-MODEL_TAG = "qwen3-30b-a3b-nvfp4-46"
+BF16_CHECKPOINT_PATH = CHECKPOINTS_PATH / "qwen3-30b-a3b-bf16"
+ROLLOUT_CHECKPOINT_PATH = CHECKPOINTS_PATH / "qwen3-30b-a3b-nvfp4-46"
 
 SIDECAR_COMMIT_MODE = "in_place"
 SIDECAR_FLUSH_CACHE_ON_COMMIT = False
@@ -133,8 +133,8 @@ class _Miles(MilesConfig):
     miles_model_script = "scripts/models/qwen3-30B-A3B.sh"
 
     # Bridge mode: ref_load is the bf16 HF masters directly (no torch_dist prep).
-    hf_checkpoint = f"{PREP_PATH}/{MODEL_TAG}/nvfp4"
-    ref_load = f"{PREP_PATH}/{MODEL_TAG}/bf16"
+    hf_checkpoint = str(ROLLOUT_CHECKPOINT_PATH)
+    ref_load = str(BF16_CHECKPOINT_PATH)
     megatron_to_hf_mode = "bridge"
     model_name = "qwen3moe"  # megatron_to_hf export dispatch
 
@@ -206,7 +206,6 @@ class _Miles(MilesConfig):
     update_weight_transfer_mode = "disk-delta"
     update_weight_delta_encoding = "xor"
     update_weight_delta_checksum = "xxh3-128"
-    update_weight_disk_dir = DELTA_BULLETIN_ROOT  # app.py run-scopes this
     custom_update_weight_post_write_path = "cookbook.common.hooks.commit_and_wake"
 
     # Data: DAPO-Math-17k — the blog's dataset.
