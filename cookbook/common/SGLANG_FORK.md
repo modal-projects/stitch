@@ -56,8 +56,8 @@ images.
 
 ```json
 {
-  "base_checkpoint_dir": "/prep/model/format",
-  "checkpoint_source_dir": "/delta-bulletin/run",
+  "base_checkpoint_dir": "/checkpoints/<artifact-id>",
+  "checkpoint_source_dir": "/stitch/<run-id>/updates",
   "local_checkpoint_dir": "/local-checkpoint",
   "target_version": 7,
   "destination": "disk"
