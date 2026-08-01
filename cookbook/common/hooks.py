@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import time
 from pathlib import Path
 from typing import Any
@@ -127,10 +126,14 @@ class _CachedPointer:
     async def get(self, args: Any, ttl: float = 2.0) -> int:
         store = self._store
         root = Path(_transport_root(args))
-        volume = getattr(
-            args, "update_weight_delta_volume_name", None
-        ) or os.environ.get("DELTA_VOLUME_NAME")
-        if store is None or store.root != root or store.volume_name != (volume or None):
+        run_id = _run_id(args)
+        volume = getattr(args, "experiment_volume_name", None)
+        if (
+            store is None
+            or store.root != root
+            or store.run_id != run_id
+            or store.volume_name != (volume or None)
+        ):
             store = self._store = _store(args)
             self._version = 0
             self._at = -1e9
@@ -157,27 +160,27 @@ _latest = _CachedPointer()
 
 # ── args → run coordinates ───────────────────────────────────────────────────────
 def _store(args: Any) -> ModalVolumeStore:
-    volume = getattr(args, "update_weight_delta_volume_name", None) or os.environ.get(
-        "DELTA_VOLUME_NAME"
+    volume = getattr(args, "experiment_volume_name", None)
+    return ModalVolumeStore(
+        _transport_root(args),
+        volume_name=volume or None,
+        run_id=_run_id(args),
     )
-    return ModalVolumeStore(_transport_root(args), volume_name=volume or None)
 
 
 def _pool(args: Any) -> ModalFlashPool:
-    app = getattr(args, "rollout_modal_flash_app_name", None) or os.environ.get(
-        "DELTA_APP_NAME"
-    )
-    cls = getattr(args, "rollout_modal_flash_server_cls_name", None) or os.environ.get(
-        "DELTA_SERVER_CLS_NAME", "Server"
-    )
+    app = getattr(args, "rollout_modal_flash_app_name", None)
+    if not app:
+        raise ValueError("rollout_modal_flash_app_name is required")
+    cls = getattr(args, "rollout_modal_flash_server_cls_name", "Server")
     return ModalFlashPool(app, cls)
 
 
 def _transport_root(args: Any) -> str:
-    # The trainer writes version dirs under <root>/<run_id>; the Store is rooted at <root>.
-    write_dir = getattr(args, "update_weight_disk_dir", None) or os.environ.get(
-        "DELTA_BULLETIN_ROOT", "/delta-bulletin"
-    )
+    # The framework owns <run>/updates; Stitch owns <run>/latest.
+    write_dir = getattr(args, "update_weight_disk_dir", None)
+    if not write_dir:
+        raise ValueError("update_weight_disk_dir is required")
     return str(Path(write_dir).parent)
 
 

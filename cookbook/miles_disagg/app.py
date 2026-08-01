@@ -23,7 +23,6 @@ import importlib
 import os
 import subprocess
 import tempfile
-import uuid
 from types import SimpleNamespace
 from typing import Any
 
@@ -37,53 +36,82 @@ from cookbook.common.constants import (
     DRAFT_PATH,
     HF_CACHE_PATH,
     MINUTES,
-    PREP_PATH,
     RAY_PORT,
     SERVER_STARTUP_TIMEOUT,
     SGLANG_CACHE_PATH,
     SIDECAR_PORT,
+    STITCH_PATH,
 )
 from cookbook.miles_disagg import trainer_image
 from cookbook.miles_disagg.config import YAML_CONFIG_FIELDS, MilesConfig
 from cookbook.miles_disagg.trainer_image import MEGATRON_PATH, MILES_ROOT
 from stitch.pools.modal_flash import ModalFlashPool
 
-EXPERIMENT = os.environ["EXPERIMENT_CONFIG"]  # required; a default would silently serve the wrong experiment
-MILES_LOCAL_DIR = os.environ.get("MILES_LOCAL_DIR")  # optional dev overlay of a local miles checkout
+EXPERIMENT = os.environ[
+    "EXPERIMENT_CONFIG"
+]  # required; a default would silently serve the wrong experiment
+MILES_LOCAL_DIR = os.environ.get(
+    "MILES_LOCAL_DIR"
+)  # optional dev overlay of a local miles checkout
 
 exp = importlib.import_module(f"cookbook.miles_disagg.configs.{EXPERIMENT}")
 modal_cfg = exp.modal
 miles_cfg = exp.miles
 
-# Per-run id, minted fresh per launch by cookbook.miles_disagg.launch: names the pool app + delta
-# transport root, so each run — even an identical-config relaunch — is its own isolated pool.
+# Per-run id, minted fresh by cookbook.miles_disagg.launch. The same identity
+# scopes the pool, Stitch pointer, publications, checkpoints, and logs.
 RUN_ID = os.environ["RUN_ID"]
 APP_NAME = f"{exp.APP_NAME}-{RUN_ID}"
-BULLETIN_ROOT = f"{exp.DELTA_BULLETIN_ROOT}/{RUN_ID}"
+RUN_ROOT = f"{STITCH_PATH}/{RUN_ID}"
+UPDATE_ROOT = f"{RUN_ROOT}/updates"
 
 # Flash autoscaler target / sglang concurrency cap: explicit target_inputs, else engine concurrency.
-ROLLOUT_CONCURRENCY = modal_cfg.rollout_target_inputs or miles_cfg.sglang_server_concurrency
+ROLLOUT_CONCURRENCY = (
+    modal_cfg.rollout_target_inputs or miles_cfg.sglang_server_concurrency
+)
 
 # EXPERIMENT_CONFIG + RUN are baked into both images so a container's re-import rebuilds the same
 # app name and transport paths as the deploy, not the defaults.
-image = trainer_image.build_trainer_image(hf_cache_path=str(HF_CACHE_PATH), experiment=EXPERIMENT, run_id=RUN_ID, miles_local=MILES_LOCAL_DIR)
+image = trainer_image.build_trainer_image(
+    hf_cache_path=str(HF_CACHE_PATH),
+    experiment=EXPERIMENT,
+    run_id=RUN_ID,
+    miles_local=MILES_LOCAL_DIR,
+    miles_image_tag=getattr(exp, "MILES_IMAGE_TAG", None),
+    extra_pip_packages=getattr(exp, "TRAINER_EXTRA_PIP_PACKAGES", ()),
+    image_run_commands=getattr(exp, "TRAINER_IMAGE_RUN_COMMANDS", ()),
+)
 server_image = serving_image.build_serving_image(
     hf_cache_path=str(HF_CACHE_PATH),
-    delta_volume_name=exp.DELTA_VOLUME_NAME,
     experiment=EXPERIMENT,
     run_id=RUN_ID,
     extra_env=getattr(exp, "SGLANG_SERVER_ENV", None),
     runtime=getattr(exp, "SGLANG_RUNTIME", serving_image.DEFAULT_SGLANG_RUNTIME),
 )
 if MILES_LOCAL_DIR:
-    server_image = server_image.add_local_dir(MILES_LOCAL_DIR, remote_path=MILES_ROOT, ignore=[".git", "**/__pycache__", "**/*.pyc"])
+    server_image = server_image.add_local_dir(
+        MILES_LOCAL_DIR,
+        remote_path=MILES_ROOT,
+        ignore=[".git", "**/__pycache__", "**/*.pyc"],
+    )
 
-hf_cache_volume = modal.Volume.from_name("huggingface-cache", create_if_missing=True, version=2)
+hf_cache_volume = modal.Volume.from_name(
+    "huggingface-cache", create_if_missing=True, version=2
+)
 data_volume = modal.Volume.from_name("miles-data", create_if_missing=True, version=2)
-checkpoints_volume = modal.Volume.from_name("miles-checkpoints", create_if_missing=True, version=2)
-prep_volume = modal.Volume.from_name("miles-prep-checkpoints", create_if_missing=True, version=2)
-sglang_cache_volume = modal.Volume.from_name("sglang-cache", create_if_missing=True, version=2)  # survives cold starts
-delta_volume = modal.Volume.from_name(exp.DELTA_VOLUME_NAME, create_if_missing=True, version=2)
+checkpoint_volume = modal.Volume.from_name(
+    "miles-checkpoints",
+    create_if_missing=True,
+    version=2,
+)
+run_volume = modal.Volume.from_name(
+    exp.EXPERIMENT_VOLUME_NAME,
+    create_if_missing=True,
+    version=2,
+)
+sglang_cache_volume = modal.Volume.from_name(
+    "sglang-cache", create_if_missing=True, version=2
+)  # survives cold starts
 draft_volume = (
     modal.Volume.from_name(
         modal_cfg.draft_volume,
@@ -96,10 +124,9 @@ draft_volume = (
 
 train_volumes = {
     str(HF_CACHE_PATH): hf_cache_volume,
+    str(CHECKPOINTS_PATH): checkpoint_volume,
     str(DATA_PATH): data_volume,
-    str(CHECKPOINTS_PATH): checkpoints_volume,
-    str(PREP_PATH): prep_volume,
-    exp.DELTA_BULLETIN_ROOT: delta_volume,
+    str(STITCH_PATH): run_volume,
 }
 
 app = modal.App(APP_NAME)
@@ -118,34 +145,46 @@ SGLANG_SERVER_ARGS = {
 @app.cls(
     image=server_image,
     gpu=f"{modal_cfg.gpu}:{miles_cfg.rollout_num_gpus_per_engine}",
-    cloud=modal_cfg.cloud, region=modal_cfg.region,
+    cpu=modal_cfg.rollout_cpu,
+    cloud=modal_cfg.cloud,
+    region=modal_cfg.region,
     volumes={
         str(HF_CACHE_PATH): hf_cache_volume,
-        str(PREP_PATH): prep_volume,
+        str(CHECKPOINTS_PATH): checkpoint_volume,
+        str(STITCH_PATH): run_volume,
         SGLANG_CACHE_PATH: sglang_cache_volume,
-        exp.DELTA_BULLETIN_ROOT: delta_volume,
         **({str(DRAFT_PATH): draft_volume} if draft_volume is not None else {}),
     },
-    min_containers=modal_cfg.rollout_min_containers, max_containers=modal_cfg.rollout_max_containers,
-    timeout=40 * MINUTES, scaledown_window=15 * MINUTES,
-    ephemeral_disk=modal_cfg.rollout_ephemeral_disk_mib, memory=modal_cfg.rollout_memory_mib,
+    min_containers=modal_cfg.rollout_min_containers,
+    max_containers=modal_cfg.rollout_max_containers,
+    timeout=40 * MINUTES,
+    scaledown_window=15 * MINUTES,
+    ephemeral_disk=modal_cfg.rollout_ephemeral_disk_mib,
+    memory=modal_cfg.rollout_memory_mib,
     include_source=False,
 )
 @modal.experimental.http_server(
-    port=SIDECAR_PORT, proxy_regions=modal_cfg.proxy_regions,
-    exit_grace_period=25, startup_timeout=SERVER_STARTUP_TIMEOUT,
+    port=SIDECAR_PORT,
+    proxy_regions=modal_cfg.proxy_regions,
+    exit_grace_period=25,
+    startup_timeout=SERVER_STARTUP_TIMEOUT,
 )
 @modal.concurrent(target_inputs=ROLLOUT_CONCURRENCY)
 class Server:
     @modal.enter()
     def startup(self) -> None:
         server.serve_startup(
-            self, model_name=miles_cfg.hf_checkpoint, sglang_args=SGLANG_SERVER_ARGS,
-            tp=miles_cfg.rollout_num_gpus_per_engine, concurrency=ROLLOUT_CONCURRENCY,
-            bulletin_root=BULLETIN_ROOT,
+            self,
+            model_name=miles_cfg.hf_checkpoint,
+            sglang_args=SGLANG_SERVER_ARGS,
+            tp=miles_cfg.rollout_num_gpus_per_engine,
+            concurrency=ROLLOUT_CONCURRENCY,
+            bulletin_root=RUN_ROOT,
             local_checkpoint_dir=exp.LOCAL_CHECKPOINT_PATH,
             delta_update_mode=exp.SGLANG_DELTA_UPDATE_MODE,
-            volume_name=exp.DELTA_VOLUME_NAME, commit_mode=exp.SIDECAR_COMMIT_MODE,
+            volume_name=exp.EXPERIMENT_VOLUME_NAME,
+            commit_mode=exp.SIDECAR_COMMIT_MODE,
+            run_id=RUN_ID,
             flush_cache_on_commit=exp.SIDECAR_FLUSH_CACHE_ON_COMMIT,
             startup_timeout=SERVER_STARTUP_TIMEOUT,
         )
@@ -164,15 +203,27 @@ _MULTINODE = miles_cfg.n_train_nodes > 1
 @app.cls(
     image=image,
     gpu=f"{modal_cfg.gpu}:{miles_cfg.actor_num_gpus_per_node}",
+    cpu=modal_cfg.trainer_cpu,
     memory=modal_cfg.trainer_memory_mib,
-    cloud=modal_cfg.cloud, region=modal_cfg.region,
+    cloud=modal_cfg.cloud,
+    region=modal_cfg.region,
     volumes=train_volumes,
+    secrets=[
+        modal.Secret.from_name(name)
+        for name in getattr(exp, "TRAINER_SECRET_NAMES", ())
+    ],
     ephemeral_disk=modal_cfg.trainer_ephemeral_disk_mib,
-    timeout=24 * 60 * MINUTES, startup_timeout=20 * MINUTES, scaledown_window=30 * MINUTES,
+    timeout=24 * 60 * MINUTES,
+    startup_timeout=20 * MINUTES,
+    scaledown_window=30 * MINUTES,
     include_source=False,
     **({"experimental_options": {"efa_enabled": True}} if _MULTINODE else {}),
 )
-@(modal.experimental.clustered(miles_cfg.n_train_nodes, rdma=True) if _MULTINODE else lambda c: c)
+@(
+    modal.experimental.clustered(miles_cfg.n_train_nodes, rdma=True)
+    if _MULTINODE
+    else lambda c: c
+)
 class Trainer:
     """miles actor cluster. Ray comes up once per container in enter(), so back-to-back
     runs reuse it."""
@@ -181,12 +232,22 @@ class Trainer:
     def start_ray(self) -> None:
         from cookbook.common import process
 
-        rank, master_addr, my_ip = ray_cluster.get_modal_cluster_context(miles_cfg.n_train_nodes)
-        process.apply_git_patches(list(getattr(exp, "MEGATRON_RUNTIME_PATCHES", [])), MEGATRON_PATH, "Megatron patch")
+        rank, master_addr, my_ip = ray_cluster.get_modal_cluster_context(
+            miles_cfg.n_train_nodes
+        )
+        process.apply_git_patches(
+            list(getattr(exp, "MEGATRON_RUNTIME_PATCHES", [])),
+            MEGATRON_PATH,
+            "Megatron patch",
+        )
         self.rank = rank
         process.start_host_mem_monitor()  # per-node host-RAM trace
         ray_cluster.start_ray_node(
-            rank, master_addr, my_ip, n_nodes=miles_cfg.n_train_nodes, ray_port=RAY_PORT,
+            rank,
+            master_addr,
+            my_ip,
+            n_nodes=miles_cfg.n_train_nodes,
+            ray_port=RAY_PORT,
             extra_env={
                 "MILES_HOST_IP": my_ip,
                 "PYTHONPATH": f"{MEGATRON_PATH}:{os.environ.get('PYTHONPATH', '')}",  # source-only megatron.training
@@ -206,19 +267,18 @@ class Trainer:
             return
 
         cfg.rollout_endpoint_url = ModalFlashPool(APP_NAME, "Server").gateway_url()
-        run_id = uuid.uuid4().hex[:12]  # per-launch fence token; forks a fresh chain
-        cfg.update_weight_disk_dir = f"{BULLETIN_ROOT}/{run_id}"
+        cfg.update_weight_disk_dir = UPDATE_ROOT
         if getattr(cfg, "save_interval", None) is None:
-            cfg.load = cfg.save = cfg.save_hf = None
+            cfg.save = cfg.save_hf = None
         else:
-            cfg.load = cfg.save = f"{CHECKPOINTS_PATH}/{run_id}/checkpoints"
+            cfg.save = f"{RUN_ROOT}/checkpoints"
         # miles setattr's every key onto args for the hooks.
         custom_config = {
             **(cfg.custom_config_path or {}),
-            "update_weight_delta_volume_name": exp.DELTA_VOLUME_NAME,
+            "experiment_volume_name": exp.EXPERIMENT_VOLUME_NAME,
             "rollout_modal_flash_app_name": APP_NAME,
             "rollout_modal_flash_server_cls_name": "Server",
-            "run_id": run_id,
+            "run_id": RUN_ID,
         }
         cfg.custom_config_path = custom_config
         launch.resolve_config(cfg, tempfile.mkdtemp(), YAML_CONFIG_FIELDS)
@@ -227,19 +287,28 @@ class Trainer:
         # Claim the pool before miles publishes: reset every replica to base for this run.
         from cookbook.common import hooks
 
-        hooks.claim_pool(SimpleNamespace(update_weight_disk_dir=cfg.update_weight_disk_dir, **custom_config))
+        hooks.claim_pool(
+            SimpleNamespace(
+                update_weight_disk_dir=cfg.update_weight_disk_dir, **custom_config
+            )
+        )
 
-        print(f"Training {EXPERIMENT}: nodes={miles_cfg.n_train_nodes}, rollout_endpoint={cfg.rollout_endpoint_url}")
+        print(
+            f"Training {EXPERIMENT}: run={RUN_ID}, nodes={miles_cfg.n_train_nodes}, "
+            f"rollout_endpoint={cfg.rollout_endpoint_url}"
+        )
         print(f"Command: {cmd}")
-        log_path = f"{CHECKPOINTS_PATH}/{run_id}/train.log"
+        log_path = f"{RUN_ROOT}/train.log"
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
         teed = f"set -o pipefail; ({cmd}) 2>&1 | tee {log_path}"  # tee to a committed log; survives the app-logs buffer
         try:
             subprocess.run(["bash", "-lc", teed], check=True)
         finally:
             try:
-                checkpoints_volume.commit()
-                print(f"Train log committed to miles-checkpoints at {run_id}/train.log")
+                run_volume.commit()
+                print(
+                    f"Train log committed to {exp.EXPERIMENT_VOLUME_NAME} at {RUN_ROOT}/train.log"
+                )
             except Exception as exc:  # noqa: BLE001
                 print(f"WARNING: could not commit train log: {exc}")
 

@@ -38,13 +38,16 @@ def build_trainer_image(
     experiment: str,
     run_id: str | None = None,
     miles_local: str | None = None,
+    miles_image_tag: str | None = None,
+    extra_pip_packages: tuple[str, ...] = (),
+    image_run_commands: tuple[str, ...] = (),
     copy_source: bool = False,
 ) -> modal.Image:
     """The miles trainer image: RDMA/EFA userspace + the pinned miles fork + the
     trainer-side delta encoder's codecs. stitch + the cookbook package are mounted so the
     trainer, Ray actors, and the sidecar subprocess resolve their imports."""
     image = (
-        modal.Image.from_registry(MILES_IMAGE_TAG)
+        modal.Image.from_registry(miles_image_tag or MILES_IMAGE_TAG)
         .entrypoint([])
         # TransformerEngine 2.17 declares this dependency, but the dated Miles
         # image installs its TE wheels with --no-deps.
@@ -65,6 +68,10 @@ def build_trainer_image(
             str(_TORCH_DIST_WRAPPER_SRC), TORCH_DIST_CONVERT_WRAPPER, copy=True
         )
     )
+    if extra_pip_packages:
+        image = image.pip_install(*extra_pip_packages)
+    if image_run_commands:
+        image = image.run_commands(*image_run_commands)
     image = common_trainer_image.add_common_layers(
         image,
         experiment=experiment,

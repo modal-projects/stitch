@@ -3,8 +3,7 @@
 from cookbook.miles_disagg.configs import glm45_air_fp8
 
 APP_NAME = "stitch-glm45-air-fp8-disk"
-DELTA_VOLUME_NAME = glm45_air_fp8.DELTA_VOLUME_NAME
-DELTA_BULLETIN_ROOT = glm45_air_fp8.DELTA_BULLETIN_ROOT
+EXPERIMENT_VOLUME_NAME = glm45_air_fp8.EXPERIMENT_VOLUME_NAME
 LOCAL_CHECKPOINT_PATH = "/local-checkpoint"
 SIDECAR_COMMIT_MODE = glm45_air_fp8.SIDECAR_COMMIT_MODE
 SIDECAR_FLUSH_CACHE_ON_COMMIT = glm45_air_fp8.SIDECAR_FLUSH_CACHE_ON_COMMIT
@@ -13,7 +12,8 @@ MEGATRON_RUNTIME_PATCHES = glm45_air_fp8.MEGATRON_RUNTIME_PATCHES
 SGLANG_SERVER_ARGS = {
     key: value
     for key, value in glm45_air_fp8.SGLANG_SERVER_ARGS.items()
-    if key not in {"--enable-cpu-weight-cache", "--cpu-weight-cache-max-compile-group-gb"}
+    if key
+    not in {"--enable-cpu-weight-cache", "--cpu-weight-cache-max-compile-group-gb"}
 }
 modal = glm45_air_fp8.modal
 miles = glm45_air_fp8.miles

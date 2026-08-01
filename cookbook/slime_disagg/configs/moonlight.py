@@ -6,13 +6,14 @@ Deploy: EXPERIMENT_CONFIG=moonlight m deploy --strategy recreate -m cookbook.sli
 from __future__ import annotations
 
 from cookbook.common.config import ModalConfig
-from cookbook.common.constants import DATA_PATH
+from cookbook.common.constants import CHECKPOINTS_PATH, DATA_PATH, STITCH_PATH
 from cookbook.slime_disagg.config import SlimeConfig
 
 APP_NAME = "stitch-moonlight"
-DELTA_VOLUME_NAME = "stitch-delta-moonlight"
-DELTA_BULLETIN_ROOT = "/delta-bulletin"
+EXPERIMENT_VOLUME_NAME = "stitch-slime-moonlight"
 LOCAL_CHECKPOINT_PATH = "/local-checkpoint"
+SOURCE_MODEL = "moonshotai/Moonlight-16B-A3B-Instruct"
+ROLLOUT_CHECKPOINT_PATH = CHECKPOINTS_PATH / "moonlight-bf16"
 
 # in_place applies weights without draining in-flight rollouts; stale KV isolated per version.
 SIDECAR_COMMIT_MODE = "in_place"
@@ -38,7 +39,7 @@ class _Slime(SlimeConfig):
     # Arch comes from the model script; do NOT inline arch attrs here.
     slime_model_script = "scripts/models/moonlight.sh"
 
-    hf_checkpoint = "moonshotai/Moonlight-16B-A3B-Instruct"
+    hf_checkpoint = str(ROLLOUT_CHECKPOINT_PATH)
     ref_load = hf_checkpoint
     megatron_to_hf_mode = "bridge"
 
@@ -49,7 +50,9 @@ class _Slime(SlimeConfig):
     rollout_num_gpus_per_engine = 1  # 1xH200 per rollout container (MLA -> cheap KV)
     rollout_endpoint_url = None
     # Staleness gate: pin each request to latest_published - lag; over-stale replicas 409 -> retry.
-    custom_rollout_request_hook_path = "cookbook.common.hooks.gated_rollout_request_hook"
+    custom_rollout_request_hook_path = (
+        "cookbook.common.hooks.gated_rollout_request_hook"
+    )
     rollout_request_weight_version_mode = "min"
     rollout_request_weight_version_lag = 1
     rollout_request_retry_attempts = 240
@@ -64,7 +67,7 @@ class _Slime(SlimeConfig):
     update_weight_transport = "disk"
     update_weight_delta_encoding = "xor"
     update_weight_delta_checksum = "xxh3-128"
-    update_weight_disk_dir = DELTA_BULLETIN_ROOT
+    update_weight_disk_dir = str(STITCH_PATH)
     custom_delta_pre_push_path = "cookbook.common.hooks.commit_and_wake"
 
     prompt_data = f"{DATA_PATH}/dapo-math-17k/dapo-math-17k.jsonl"
