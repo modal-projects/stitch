@@ -46,8 +46,12 @@ class _Slime(SlimeConfig):
     colocate = False
     rollout_num_gpus = 0
     rollout_num_gpus_per_engine = 1
-    rollout_endpoint_url = None  # publish-only: slime routes /generate to the Flash gateway
-    custom_rollout_request_hook_path = "cookbook.common.hooks.gated_rollout_request_hook"
+    rollout_endpoint_url = (
+        None  # publish-only: slime routes /generate to the Flash gateway
+    )
+    custom_rollout_request_hook_path = (
+        "cookbook.common.hooks.gated_rollout_request_hook"
+    )
     rollout_request_weight_version_mode = "exact"
     rollout_request_weight_version_lag = 0
     rollout_request_retry_attempts = 240

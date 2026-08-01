@@ -77,7 +77,9 @@ class _Miles(MilesConfig):
     ref_load = f"{PREP_PATH}/{MODEL_TAG}/torch_dist"
     # "raw": K2.6's HF arch is a VLM wrapper AutoBridge can't build; export routes via model_name.
     megatron_to_hf_mode = "raw"
-    model_name = "kimi_k25"  # megatron_to_hf export dispatch (convert_kimi_k25_to_hf + NVFP4)
+    model_name = (
+        "kimi_k25"  # megatron_to_hf export dispatch (convert_kimi_k25_to_hf + NVFP4)
+    )
 
     actor_num_nodes = 16  # 16x8 B200 = 128 GPUs; TP8*PP8*CP2=128 (DP=1) — debug the actor_train backward deadlock cheaper (same PP8 path as 32 nodes; both hang identically)
     actor_num_gpus_per_node = 8
@@ -109,7 +111,9 @@ class _Miles(MilesConfig):
     # NVFP4 QAT — miles' canonical NVFP4 RL recipe.
     fp4_format = "e2m1"
     fp4_recipe = "nvfp4"
-    fp4_param_gather = False  # True crashes Megatron DDP's param-buffer repoint (TE NVFP4Tensor)
+    fp4_param_gather = (
+        False  # True crashes Megatron DDP's param-buffer repoint (TE NVFP4Tensor)
+    )
     # NVFP4 only on the routed expert GEMMs, everything else bf16 — matches the served base.
     te_precision_config_file = {
         "configs": {

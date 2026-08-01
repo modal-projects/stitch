@@ -43,7 +43,9 @@ def main() -> None:
     p.add_argument("--flush-cache-on-commit", action="store_true")
     p.add_argument("--run-id", default=None)
     p.add_argument("--debug-requests", action="store_true")
-    p.add_argument("--reconcile-interval", type=float, default=5.0)  # 0 disables the periodic re-check
+    p.add_argument(
+        "--reconcile-interval", type=float, default=5.0
+    )  # 0 disables the periodic re-check
     args = p.parse_args()
     if args.delta_update_mode == "disk" and not args.local_checkpoint_dir:
         p.error("--local-checkpoint-dir is required in disk mode")

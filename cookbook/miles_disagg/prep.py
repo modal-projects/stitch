@@ -45,7 +45,11 @@ def prepare_checkpoints(exp, prep_volume) -> None:
 
     prep_volume.reload()
     tag = exp.MODEL_TAG
-    bf16_dir, fp8_dir, nvfp4_dir = f"{PREP_PATH}/{tag}/bf16", f"{PREP_PATH}/{tag}/fp8", f"{PREP_PATH}/{tag}/nvfp4"
+    bf16_dir, fp8_dir, nvfp4_dir = (
+        f"{PREP_PATH}/{tag}/bf16",
+        f"{PREP_PATH}/{tag}/fp8",
+        f"{PREP_PATH}/{tag}/nvfp4",
+    )
     served_format = getattr(exp, "SERVED_CHECKPOINT_FORMAT", "nvfp4")
     if served_format not in {"bf16", "fp8", "nvfp4"}:
         raise SystemExit(f"unsupported SERVED_CHECKPOINT_FORMAT={served_format!r}")
@@ -57,7 +61,17 @@ def prepare_checkpoints(exp, prep_volume) -> None:
     def _build_bf16(out: str) -> None:
         if is_int4:
             print("dequantizing INT4 source -> bf16 masters (GPU)...", flush=True)
-            subprocess.run(["python", f"{tools}/convert_kimi_int4_to_bf16.py", "--model-dir", src, "--output-dir", out], check=True)
+            subprocess.run(
+                [
+                    "python",
+                    f"{tools}/convert_kimi_int4_to_bf16.py",
+                    "--model-dir",
+                    src,
+                    "--output-dir",
+                    out,
+                ],
+                check=True,
+            )
         else:
             _copy_tree("bf16 masters", src, out)
         _strip_stale_quant_config(os.path.join(out, "config.json"))
@@ -97,9 +111,24 @@ def prepare_checkpoints(exp, prep_volume) -> None:
         carveouts += ["--num-layers-at-start-in-bf16", str(n)]
     if (n := getattr(exp.miles, "num_layers_at_end_in_bf16", None)) is not None:
         carveouts += ["--num-layers-at-end-in-bf16", str(n)]
+
     def _build_nvfp4(out: str) -> None:
-        print("building nvfp4 served base from bf16 masters (GPU conversion)...", flush=True)
-        subprocess.run(["python", f"{tools}/convert_hf_to_nvfp4.py", "--model-dir", bf16_dir, "--save-dir", out, *carveouts], check=True)
+        print(
+            "building nvfp4 served base from bf16 masters (GPU conversion)...",
+            flush=True,
+        )
+        subprocess.run(
+            [
+                "python",
+                f"{tools}/convert_hf_to_nvfp4.py",
+                "--model-dir",
+                bf16_dir,
+                "--save-dir",
+                out,
+                *carveouts,
+            ],
+            check=True,
+        )
 
     _staged(nvfp4_dir, _build_nvfp4)
     prep_volume.commit()
@@ -111,15 +140,24 @@ def prepare_torch_dist(exp, prep_volume, *, rank: int, master_addr: str) -> None
     clustered torchrun conversion (large MoE won't fit an 8-way split)."""
     prep_volume.reload()
     tag = exp.MODEL_TAG
-    bf16_dir, torch_dist_dir = f"{PREP_PATH}/{tag}/bf16", f"{PREP_PATH}/{tag}/torch_dist"
-    if os.path.exists(os.path.join(torch_dist_dir, "latest_checkpointed_iteration.txt")):
+    bf16_dir, torch_dist_dir = (
+        f"{PREP_PATH}/{tag}/bf16",
+        f"{PREP_PATH}/{tag}/torch_dist",
+    )
+    if os.path.exists(
+        os.path.join(torch_dist_dir, "latest_checkpointed_iteration.txt")
+    ):
         print(f"reusing existing torch_dist {torch_dist_dir}")
         return
     if not exp.miles.miles_model_script:
         raise SystemExit("prepare_torch_dist requires miles_model_script (MODEL_ARGS)")
     nodes = exp.modal.torch_dist_prep_nodes
     use_wrapper = nodes > 1 and getattr(exp, "USE_MODAL_TORCH_DIST_WRAPPER", False)
-    convert = TORCH_DIST_CONVERT_WRAPPER if use_wrapper else f"{MILES_ROOT}/tools/convert_hf_to_torch_dist.py"
+    convert = (
+        TORCH_DIST_CONVERT_WRAPPER
+        if use_wrapper
+        else f"{MILES_ROOT}/tools/convert_hf_to_torch_dist.py"
+    )
     inner = (
         f"source {MILES_ROOT}/{exp.miles.miles_model_script} && "
         f"PYTHONPATH={MEGATRON_PATH} torchrun"
@@ -132,7 +170,10 @@ def prepare_torch_dist(exp, prep_volume, *, rank: int, master_addr: str) -> None
     env = {**os.environ}
     if use_wrapper:
         env["SKIP_RELEASE_RENAME"] = "1"
-    print(f"converting bf16 masters -> torch_dist ref_load ({nodes}-node torchrun, rank {rank})...", flush=True)
+    print(
+        f"converting bf16 masters -> torch_dist ref_load ({nodes}-node torchrun, rank {rank})...",
+        flush=True,
+    )
     subprocess.run(["bash", "-c", inner], check=True, env=env)
     # Every node commits its own distcp shards (disjoint files merge on the Volume);
     # a rank-0-only commit would drop the other nodes' shards.
@@ -145,13 +186,17 @@ def prepare_torch_dist(exp, prep_volume, *, rank: int, master_addr: str) -> None
 # sglang base-seed's profiled knee). 16 MiB reads run at full mount speed while bounding memory.
 _COPY_WORKERS = int(os.environ.get("PREP_COPY_WORKERS", "8"))
 _COPY_CHUNK = 16 << 20
-_COPY_LOG_STEP_GB = 50  # one progress line per this many GB, so a multi-TB copy isn't a silent stall
+_COPY_LOG_STEP_GB = (
+    50  # one progress line per this many GB, so a multi-TB copy isn't a silent stall
+)
 
 
 def _copy_tree(label: str, src: str, dst: str) -> None:
     """Copy a checkpoint dir, dereferencing the HF cache's blob symlinks into real files (the old
     ``cp -aL``), but across a thread pool for the ~5x and with throttled GB/GB + rate progress."""
-    src_files = [p for p in Path(src).rglob("*") if p.is_file()]  # is_file() follows symlinks
+    src_files = [
+        p for p in Path(src).rglob("*") if p.is_file()
+    ]  # is_file() follows symlinks
     total_gb = sum(p.stat().st_size for p in src_files) / 1e9
     progress = {"done_gb": 0.0, "next_log_gb": _COPY_LOG_STEP_GB}
     lock = threading.Lock()
@@ -160,7 +205,10 @@ def _copy_tree(label: str, src: str, dst: str) -> None:
     def copy_one(p: Path) -> None:
         out = Path(dst) / p.relative_to(src)
         out.parent.mkdir(parents=True, exist_ok=True)
-        with open(p, "rb") as fsrc, open(out, "wb") as fdst:  # open() follows the symlink to the real blob
+        with (
+            open(p, "rb") as fsrc,
+            open(out, "wb") as fdst,
+        ):  # open() follows the symlink to the real blob
             while chunk := fsrc.read(_COPY_CHUNK):
                 fdst.write(chunk)
         with lock:
@@ -168,11 +216,16 @@ def _copy_tree(label: str, src: str, dst: str) -> None:
             done = progress["done_gb"]
             if done >= progress["next_log_gb"] or done >= total_gb:
                 rate = done / max(time.monotonic() - start, 1e-3)
-                print(f"copying {label}: {done:.0f}/{total_gb:.0f} GB ({100 * done / max(total_gb, 1e-9):.0f}%), {rate:.1f} GB/s", flush=True)
+                print(
+                    f"copying {label}: {done:.0f}/{total_gb:.0f} GB ({100 * done / max(total_gb, 1e-9):.0f}%), {rate:.1f} GB/s",
+                    flush=True,
+                )
                 progress["next_log_gb"] += _COPY_LOG_STEP_GB
 
     os.makedirs(dst, exist_ok=True)
-    with ThreadPoolExecutor(max_workers=min(_COPY_WORKERS, len(src_files) or 1)) as pool:
+    with ThreadPoolExecutor(
+        max_workers=min(_COPY_WORKERS, len(src_files) or 1)
+    ) as pool:
         list(pool.map(copy_one, src_files))
     print(f"copied {label}: {total_gb:.0f} GB", flush=True)
 
@@ -214,5 +267,9 @@ def _is_int4(model_dir: str) -> bool:
     with open(cfg_path) as f:
         cfg = json.load(f) or {}
     # VLMs (Kimi K2.x) nest the quant config under text_config.
-    qc = (cfg.get("text_config") or {}).get("quantization_config") or cfg.get("quantization_config") or {}
+    qc = (
+        (cfg.get("text_config") or {}).get("quantization_config")
+        or cfg.get("quantization_config")
+        or {}
+    )
     return qc.get("quant_method") == "compressed-tensors"

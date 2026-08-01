@@ -11,13 +11,17 @@ from pathlib import Path
 HF_CACHE_PATH = Path("/root/.cache/huggingface")
 DATA_PATH = Path("/data")
 CHECKPOINTS_PATH = Path("/checkpoints")
-PREP_PATH = Path("/prep")  # <PREP>/<tag>/{bf16 masters, served base, torch_dist ref_load}
+PREP_PATH = Path(
+    "/prep"
+)  # <PREP>/<tag>/{bf16 masters, served base, torch_dist ref_load}
 DRAFT_PATH = Path("/draft")
-SGLANG_CACHE_PATH = "/root/.cache/sglang"  # sglang kernel/JIT cache; survives cold starts
+SGLANG_CACHE_PATH = (
+    "/root/.cache/sglang"  # sglang kernel/JIT cache; survives cold starts
+)
 
 # Ports.
 SIDECAR_PORT = 8000  # the container's public port
-SGLANG_PORT = 8001   # the private sglang server behind the sidecar
+SGLANG_PORT = 8001  # the private sglang server behind the sidecar
 RAY_PORT = 6379
 
 # Timeouts.
