@@ -74,7 +74,9 @@ class _Miles(MilesConfig):
     rollout_endpoint_url = None
     use_miles_router = True
 
-    custom_rollout_request_hook_path = "cookbook.common.hooks.gated_rollout_request_hook"
+    custom_rollout_request_hook_path = (
+        "cookbook.common.hooks.gated_rollout_request_hook"
+    )
     custom_config_path = {
         "rollout_request_weight_version_mode": "min",
         "rollout_request_weight_version_lag": 1,
@@ -96,7 +98,10 @@ class _Miles(MilesConfig):
                 "transformer_engine_config_type": "TEQuantizationParams",
                 "training_recipe": {"fp4_quantization_recipe": "nvfp4"},
             },
-            "bf16": {"transformer_engine_config_type": "TEQuantizationParams", "training_recipe": {}},
+            "bf16": {
+                "transformer_engine_config_type": "TEQuantizationParams",
+                "training_recipe": {},
+            },
         },
         "matchers": {
             "routed_experts_fc1_nvfp4": {
@@ -111,7 +116,12 @@ class _Miles(MilesConfig):
                 "pattern": "*.mlp.experts.linear_fc2",
                 "config": "nvfp4",
             },
-            "default_bf16": {"type": "glob", "enabled": True, "pattern": "*", "config": "bf16"},
+            "default_bf16": {
+                "type": "glob",
+                "enabled": True,
+                "pattern": "*",
+                "config": "bf16",
+            },
         },
     }
     # 2 layers: layer 0 is dense (FIRST_K_DENSE_REPLACE=1) -> bf16; layer 1 is MoE

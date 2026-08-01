@@ -63,10 +63,17 @@ def serve_startup(
     warmup = {
         "model": model_name,
         "messages": [{"role": "user", "content": "Reply with exactly OK."}],
-        "max_tokens": 8, "temperature": 0, "chat_template_kwargs": {"enable_thinking": False},
+        "max_tokens": 8,
+        "temperature": 0,
+        "chat_template_kwargs": {"enable_thinking": False},
     }
-    warmup_chat_completions(port=SGLANG_PORT, payload=warmup, successful_requests=2,
-                            request_timeout=120.0, max_attempts_per_request=3)
+    warmup_chat_completions(
+        port=SGLANG_PORT,
+        payload=warmup,
+        successful_requests=2,
+        request_timeout=120.0,
+        max_attempts_per_request=3,
+    )
     replica.sidecar = process.start_sidecar(
         sidecar_port=SIDECAR_PORT,
         sglang_port=SGLANG_PORT,
@@ -83,7 +90,9 @@ def serve_startup(
     # blocking here on /health (503 until the reconciler's first catch-up) is the only thing that keeps a
     # not-yet-synced replica out of rotation. Fresh boot (no pointer) clears at once; a mid-run joiner
     # waits until it has applied the live version, bounded by startup_timeout.
-    process.wait_http(f"http://127.0.0.1:{SIDECAR_PORT}/health", replica.sidecar, startup_timeout)
+    process.wait_http(
+        f"http://127.0.0.1:{SIDECAR_PORT}/health", replica.sidecar, startup_timeout
+    )
 
     def engine_health() -> str | None:
         # Weight staging can make the engine health endpoint briefly stale.
@@ -91,7 +100,11 @@ def serve_startup(
         error = replica.endpoint.health_check()
         if error is None:
             return None
-        return None if sync_in_progress(f"http://127.0.0.1:{SIDECAR_PORT}/server_info") else error
+        return (
+            None
+            if sync_in_progress(f"http://127.0.0.1:{SIDECAR_PORT}/server_info")
+            else error
+        )
 
     import modal.experimental
 

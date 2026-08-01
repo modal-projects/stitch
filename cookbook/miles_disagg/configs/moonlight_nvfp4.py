@@ -66,16 +66,22 @@ class _Miles(MilesConfig):
     model_name = "deepseekv3"  # bridge dispatch: Moonlight is DeepSeek-V3 arch
 
     actor_num_nodes = 1
-    actor_num_gpus_per_node = 4  # 1 node x 4 B200 trainer (matches the proven moonlight recipe)
+    actor_num_gpus_per_node = (
+        4  # 1 node x 4 B200 trainer (matches the proven moonlight recipe)
+    )
     num_gpus_per_node = 4
     colocate = False  # disk-delta is incompatible with --colocate
     rollout_num_gpus = 0  # publish-only forces this
-    rollout_num_gpus_per_engine = 1  # B200:1 per rollout container (Moonlight NVFP4 is tiny)
+    rollout_num_gpus_per_engine = (
+        1  # B200:1 per rollout container (Moonlight NVFP4 is tiny)
+    )
     rollout_endpoint_url = None
     use_miles_router = True
 
     # Staleness gate; the knobs ride in custom_config_path (read by the hook, not miles core).
-    custom_rollout_request_hook_path = "cookbook.common.hooks.gated_rollout_request_hook"
+    custom_rollout_request_hook_path = (
+        "cookbook.common.hooks.gated_rollout_request_hook"
+    )
     custom_config_path = {
         "rollout_request_weight_version_mode": "min",
         "rollout_request_weight_version_lag": 1,
@@ -107,7 +113,9 @@ class _Miles(MilesConfig):
     eval_interval = None
 
     num_rollout = 20
-    save_interval = 1000  # megatron requires it; > num_rollout so the smoke skips megatron saves
+    save_interval = (
+        1000  # megatron requires it; > num_rollout so the smoke skips megatron saves
+    )
     rollout_batch_size = 32
     rollout_max_response_len = 4096  # fits within the 8192 context (prompt + response)
     rollout_temperature = 0.8

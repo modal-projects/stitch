@@ -55,7 +55,9 @@ class _Slime(SlimeConfig):
     rollout_num_gpus_per_engine = 1  # 1xH200 per rollout container (MLA -> cheap KV)
     rollout_endpoint_url = None
     # Staleness gate: pin each request to latest_published - lag; over-stale replicas 409 -> retry.
-    custom_rollout_request_hook_path = "cookbook.common.hooks.gated_rollout_request_hook"
+    custom_rollout_request_hook_path = (
+        "cookbook.common.hooks.gated_rollout_request_hook"
+    )
     rollout_request_weight_version_mode = "min"
     rollout_request_weight_version_lag = 1
     rollout_request_retry_attempts = 240

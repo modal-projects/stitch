@@ -71,12 +71,14 @@ class _Slime(SlimeConfig):
     actor_num_nodes = 32  # 32x8 = 256 GPUs
     actor_num_gpus_per_node = 8
     colocate = False
-    rollout_num_gpus = 0                 # external rollout: the framework runs no local engines
-    rollout_num_gpus_per_engine = 4      # B200:4 per rollout container (native INT4 fits)
-    rollout_endpoint_url = None          # filled at launch from the pool gateway
+    rollout_num_gpus = 0  # external rollout: the framework runs no local engines
+    rollout_num_gpus_per_engine = 4  # B200:4 per rollout container (native INT4 fits)
+    rollout_endpoint_url = None  # filled at launch from the pool gateway
 
     # The three plug points stitch fills (slime's publish hook key is custom_delta_pre_push_path):
-    custom_rollout_request_hook_path = "cookbook.common.hooks.gated_rollout_request_hook"
+    custom_rollout_request_hook_path = (
+        "cookbook.common.hooks.gated_rollout_request_hook"
+    )
     custom_delta_pre_push_path = "cookbook.common.hooks.commit_and_wake"
     rollout_request_weight_version_mode = "min"
     rollout_request_weight_version_lag = 1
@@ -90,7 +92,9 @@ class _Slime(SlimeConfig):
     update_weight_transport = "disk"
     update_weight_delta_encoding = "xor"
     update_weight_delta_checksum = "xxh3-128"
-    update_weight_disk_dir = DELTA_BULLETIN_ROOT  # run-scoped at launch to <root>/<run_id>
+    update_weight_disk_dir = (
+        DELTA_BULLETIN_ROOT  # run-scoped at launch to <root>/<run_id>
+    )
 
     prompt_data = f"{DATA_PATH}/dapo-math-17k/dapo-math-17k.jsonl"
     input_key = "prompt"
@@ -108,7 +112,9 @@ class _Slime(SlimeConfig):
     rollout_top_p = 1.0
     n_samples_per_prompt = 8
     over_sampling_batch_size = 256
-    dynamic_sampling_filter_path = "slime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std"
+    dynamic_sampling_filter_path = (
+        "slime.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std"
+    )
     num_steps_per_rollout = 4
     balance_data = True
     sglang_server_concurrency = 256

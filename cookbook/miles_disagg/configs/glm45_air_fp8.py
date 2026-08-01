@@ -27,7 +27,9 @@ USE_MODAL_TORCH_DIST_WRAPPER = True
 DISABLE_HF_XET = True
 DISABLE_HF_TRANSFER = True
 
-MEGATRON_RUNTIME_PATCHES = ["/root/cookbook/miles_disagg/patches/megatron-r3-dispatch.patch"]
+MEGATRON_RUNTIME_PATCHES = [
+    "/root/cookbook/miles_disagg/patches/megatron-r3-dispatch.patch"
+]
 
 SGLANG_SERVER_ARGS = {
     # Use the no-GDS fastsafetensors path on hosts without nvidia-fs.
@@ -68,12 +70,14 @@ class _Miles(MilesConfig):
     actor_num_gpus_per_node = 8
     num_gpus_per_node = 8
     colocate = False
-    rollout_num_gpus = 0                 # external rollout: framework runs no local engines
+    rollout_num_gpus = 0  # external rollout: framework runs no local engines
     rollout_num_gpus_per_engine = 4
-    rollout_endpoint_url = None          # filled at launch from the pool gateway
+    rollout_endpoint_url = None  # filled at launch from the pool gateway
     use_miles_router = True
 
-    custom_rollout_request_hook_path = "cookbook.common.hooks.gated_rollout_request_hook"
+    custom_rollout_request_hook_path = (
+        "cookbook.common.hooks.gated_rollout_request_hook"
+    )
     custom_update_weight_post_write_path = "cookbook.common.hooks.commit_and_wake"
     custom_config_path = {
         "rollout_request_weight_version_mode": "min",
@@ -89,7 +93,9 @@ class _Miles(MilesConfig):
     update_weight_transfer_mode = "disk-delta"
     update_weight_delta_encoding = "xor"
     update_weight_delta_checksum = "xxh3-128"
-    update_weight_disk_dir = DELTA_BULLETIN_ROOT  # run-scoped at launch to <root>/<run_id>
+    update_weight_disk_dir = (
+        DELTA_BULLETIN_ROOT  # run-scoped at launch to <root>/<run_id>
+    )
 
     prompt_data = f"{DATA_PATH}/dapo-math-17k/dapo-math-17k.jsonl"
     input_key = "prompt"
@@ -170,7 +176,7 @@ modal = ModalConfig(
     gpu="H200",
     trainer_memory_mib=(1024, 2 * 1024 * 1024),
     rollout_min_containers=2,
-    rollout_max_containers=4,   # start at 2; scale to 4 mid-run to exercise elastic join
+    rollout_max_containers=4,  # start at 2; scale to 4 mid-run to exercise elastic join
     rollout_target_inputs=32,
     proxy_regions=["us-west"],
     rollout_ephemeral_disk_mib=524_288,

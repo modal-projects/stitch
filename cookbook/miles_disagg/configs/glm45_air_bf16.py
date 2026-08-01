@@ -21,7 +21,9 @@ DISABLE_HF_TRANSFER = True
 SIDECAR_COMMIT_MODE = "in_place"
 SIDECAR_FLUSH_CACHE_ON_COMMIT = False
 SGLANG_DELTA_UPDATE_MODE = "cpu"
-MEGATRON_RUNTIME_PATCHES = ["/root/cookbook/miles_disagg/patches/megatron-r3-dispatch.patch"]
+MEGATRON_RUNTIME_PATCHES = [
+    "/root/cookbook/miles_disagg/patches/megatron-r3-dispatch.patch"
+]
 
 
 SGLANG_SERVER_ARGS = {
@@ -80,7 +82,9 @@ class _Miles(MilesConfig):
     rollout_endpoint_url = None
     use_miles_router = True
 
-    custom_rollout_request_hook_path = "cookbook.common.hooks.gated_rollout_request_hook"
+    custom_rollout_request_hook_path = (
+        "cookbook.common.hooks.gated_rollout_request_hook"
+    )
     custom_config_path = {
         "rollout_request_weight_version_mode": "min",
         "rollout_request_weight_version_lag": 1,

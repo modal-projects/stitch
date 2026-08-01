@@ -69,7 +69,9 @@ def wait_http(url: str, process: subprocess.Popen | None, timeout: int) -> None:
     last_error: str | None = None
     while time.time() < deadline:
         if process is not None and process.poll() is not None:
-            raise RuntimeError(f"process exited while waiting for {url}: code={process.returncode}")
+            raise RuntimeError(
+                f"process exited while waiting for {url}: code={process.returncode}"
+            )
         try:
             with urllib.request.urlopen(url, timeout=5) as resp:
                 if 200 <= resp.status < 500:
@@ -99,18 +101,26 @@ def apply_git_patches(patch_paths: list[str], repo_dir: str, label: str) -> None
     for patch_path in patch_paths:
         if not os.path.exists(patch_path):
             raise FileNotFoundError(f"{label} not found: {patch_path}")
-        check = subprocess.run(["git", "-C", repo_dir, "apply", "--check", patch_path], capture_output=True, text=True)
+        check = subprocess.run(
+            ["git", "-C", repo_dir, "apply", "--check", patch_path],
+            capture_output=True,
+            text=True,
+        )
         if check.returncode == 0:
             subprocess.run(["git", "-C", repo_dir, "apply", patch_path], check=True)
             print(f"[{label}] applied {patch_path}", flush=True)
             continue
         reverse = subprocess.run(
-            ["git", "-C", repo_dir, "apply", "--reverse", "--check", patch_path], capture_output=True, text=True
+            ["git", "-C", repo_dir, "apply", "--reverse", "--check", patch_path],
+            capture_output=True,
+            text=True,
         )
         if reverse.returncode == 0:
             print(f"[{label}] already applied {patch_path}", flush=True)
             continue
-        raise RuntimeError(f"cannot apply {label} {patch_path}\ncheck: {check.stderr}\nreverse: {reverse.stderr}")
+        raise RuntimeError(
+            f"cannot apply {label} {patch_path}\ncheck: {check.stderr}\nreverse: {reverse.stderr}"
+        )
 
 
 def start_host_mem_monitor(interval_s: int = 20) -> None:
@@ -140,7 +150,10 @@ def start_host_mem_monitor(interval_s: int = 20) -> None:
         while True:
             total, avail = _meminfo()
             if i == 0 or avail < 500 or i % heartbeat == 0:
-                print(f"[hostmem] {host} used={total - avail:.0f}GiB avail={avail:.0f}GiB total={total:.0f}GiB", flush=True)
+                print(
+                    f"[hostmem] {host} used={total - avail:.0f}GiB avail={avail:.0f}GiB total={total:.0f}GiB",
+                    flush=True,
+                )
             i += 1
             time.sleep(interval_s)
 
