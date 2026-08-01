@@ -77,6 +77,8 @@ image = trainer_image.build_trainer_image(
     experiment=EXPERIMENT,
     run_id=RUN_ID,
     miles_local=MILES_LOCAL_DIR,
+    extra_pip_packages=getattr(exp, "TRAINER_EXTRA_PIP_PACKAGES", ()),
+    image_run_commands=getattr(exp, "TRAINER_IMAGE_RUN_COMMANDS", ()),
 )
 server_image = serving_image.build_serving_image(
     hf_cache_path=str(HF_CACHE_PATH),
@@ -201,6 +203,11 @@ _MULTINODE = miles_cfg.n_train_nodes > 1
     cloud=modal_cfg.cloud,
     region=modal_cfg.region,
     volumes=train_volumes,
+    secrets=(
+        [modal.Secret.from_name("wandb-secret")]
+        if getattr(miles_cfg, "use_wandb", False)
+        else []
+    ),
     ephemeral_disk=modal_cfg.trainer_ephemeral_disk_mib,
     timeout=24 * 60 * MINUTES,
     startup_timeout=20 * MINUTES,
