@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from cookbook.common.config import ModalConfig
-from cookbook.common.constants import CHECKPOINTS_PATH, DATA_PATH
+from cookbook.common.constants import CHECKPOINTS_PATH, DATA_PATH, DRAFT_PATH
 from cookbook.miles_disagg.config import MilesConfig
 from cookbook.miles_disagg.swebench_pro import (
     DATASET_REVISION,
@@ -38,6 +38,8 @@ BF16_CHECKPOINT_PATH = CHECKPOINTS_PATH / "glm5-2-bf16"
 ROLLOUT_CHECKPOINT_PATH = CHECKPOINTS_PATH / "glm5-2-nvfp4"
 TORCH_DIST_CHECKPOINT_PATH = CHECKPOINTS_PATH / "glm5-2-torch-dist"
 SWEBENCH_PRO_PATH = DATA_PATH / "datasets" / "swebench-pro" / DATASET_REVISION
+DFLASH_VOLUME = "dflash-checkpoints"
+DFLASH_CHECKPOINT_PATH = DRAFT_PATH / "zai-org/GLM-5.2/dflash/draft-step-103000"
 SERVED_CHECKPOINT_FORMAT = "nvfp4"
 CHECKPOINT_PREP_REQUIRES_GPU = True
 MATERIALIZE_BF16_MASTERS = False
@@ -46,6 +48,8 @@ USE_MODAL_TORCH_DIST_WRAPPER = True
 TRAINER_NODES = 16
 GPUS_PER_TRAINER_NODE = 8
 ROLLOUT_GPUS_PER_ENGINE = 4
+ROLLOUT_BATCH_SIZE = 32
+N_SAMPLES_PER_PROMPT = 8
 ROLLOUT_TO_TRAINER_GPU_RATIO = 1
 ROLLOUT_INPUTS_PER_ENGINE = 24
 ROLLOUT_ENGINES = (
@@ -69,23 +73,21 @@ NVFP4_TRAINING_ENV = {
     "NVTE_USE_FAST_MATH": "0",
     "NVTE_NVFP4_4OVER6": "all",
     "NVTE_NVFP4_4OVER6_E4M3_USE_256": "all",
-    "NVTE_NVFP4_4OVER6_ERR_MODE": "MSE",
+    "NVTE_NVFP4_4OVER6_ERR_MODE": "MAE",
     "NVTE_NVFP4_4OVER6_ERR_USE_FAST_MATH": "0",
 }
 NVFP4_SERVING_ENV = {
     "FLASHINFER_NVFP4_4OVER6": "1",
     "FLASHINFER_NVFP4_4OVER6_E4M3_USE_256": "1",
-    "FLASHINFER_NVFP4_4OVER6_ERR_MODE": "MSE",
+    "FLASHINFER_NVFP4_4OVER6_ERR_MODE": "MAE",
     "FLASHINFER_NVFP4_4OVER6_ERR_USE_FAST_MATH": "0",
     "FLASHINFER_DISABLE_FP4_QUANT_FAST_MATH": "1",
     "SGLANG_FLASHINFER_NVFP4_PER_TOKEN_ACTIVATION": "1",
     "TRTLLM_DISABLE_FP4_QUANT_FAST_MATH": "1",
 }
-DSA_TOPK_ENV = {"SGLANG_DSA_TOPK_FLASHINFER_TIE_BREAK": "large"}
 PREP_ENV = NVFP4_TRAINING_ENV
 SGLANG_SERVER_ENV = {
     **NVFP4_SERVING_ENV,
-    **DSA_TOPK_ENV,
     "SGLANG_DSA_PREFILL_DENSE_ATTN_KV_LEN_THRESHOLD": "0",
     "SGLANG_SANITIZE_NAN_LOGITS": "true",
 }
@@ -95,29 +97,48 @@ SIDECAR_FLUSH_CACHE_ON_COMMIT = False
 SGLANG_DELTA_UPDATE_MODE = "cpu"
 
 SGLANG_SERVER_ARGS = {
+    # loading / elastic refit
     "--load-format": "fastsafetensors",
     "--model-loader-extra-config": '{"enable_gds":false}',
     "--enable-cpu-weight-cache": "",
     "--cpu-weight-cache-max-compile-group-gb": "8",
     "--weight-loader-drop-cache-after-load": "",
+    "--dist-timeout": "3600",
+    # model / quant
     "--quantization": "modelopt_fp4",
     "--reasoning-parser": "glm45",
     "--tool-call-parser": "glm47",
-    "--attention-backend": "dsa",
-    "--dsa-decode-backend": "flashmla_kv",
-    "--dsa-prefill-backend": "flashmla_sparse",
-    "--dsa-topk-backend": "flashinfer",
-    "--moe-runner-backend": "flashinfer_trtllm_routed",
-    "--disable-shared-experts-fusion": "",
-    "--dist-timeout": "3600",
-    "--kv-cache-dtype": "fp8_e4m3",
-    "--page-size": "64",
     "--context-length": str(SGLANG_CONTEXT_LENGTH),
-    "--mem-fraction-static": "0.8",
-    "--chunked-prefill-size": "8192",
-    "--schedule-conservativeness": "0.5",
+    # attention — bf16 KV split
+    "--attention-backend": "dsa",
+    "--dsa-prefill-backend": "flashmla_sparse",
+    "--dsa-decode-backend": "trtllm",
+    "--dsa-topk-backend": "sgl-kernel",
+    # MoE
+    "--moe-runner-backend": "flashinfer_trtllm_routed",
+    # memory / batching
+    "--mem-fraction-static": "0.80",
+    "--chunked-prefill-size": "16384",
+    "--max-running-requests": "32",
+    "--schedule-conservativeness": "1.0",
     "--schedule-policy": "lpm",
-    "--skip-server-warmup": "",
+    "--cuda-graph-config": (
+        '{"decode":{"backend":"full","max_bs":32,'
+        '"bs":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32]}}'
+    ),
+    # speculative
+    "--speculative-algorithm": "DFLASH",
+    "--speculative-attention-mode": "decode",
+    "--speculative-dflash-block-size": "8",
+    "--speculative-num-draft-tokens": "8",
+    "--speculative-num-steps": "1",
+    "--speculative-eagle-topk": "1",
+    "--speculative-draft-attention-backend": "flashinfer",
+    "--speculative-draft-load-format": "safetensors",
+    "--speculative-draft-model-path": str(DFLASH_CHECKPOINT_PATH),
+    "--speculative-draft-model-quantization": "unquant",
+    "--speculative-draft-window-size": "4096",
+    # RL
     "--enable-return-routed-experts": "",
 }
 
@@ -128,7 +149,9 @@ modal = ModalConfig(
     # CPU mode retains both the canonical checkpoint and TP rank images.
     rollout_memory_mib=(1024 * 1024, 3 * 1024 * 1024),
     rollout_min_containers=ROLLOUT_ENGINES,
+    rollout_max_containers=ROLLOUT_ENGINES,
     rollout_target_inputs=ROLLOUT_INPUTS_PER_ENGINE,
+    draft_volume=DFLASH_VOLUME,
     routing_region="us-west",
     # cpu updates stage nothing local; disk is runtime + spill only.
     rollout_ephemeral_disk_mib=524_288,
@@ -251,8 +274,8 @@ class _Miles(MilesConfig):
 
     num_rollout = 300
     save_interval = 10
-    rollout_batch_size = 32
-    n_samples_per_prompt = 8
+    rollout_batch_size = ROLLOUT_BATCH_SIZE
+    n_samples_per_prompt = N_SAMPLES_PER_PROMPT
     global_batch_size = 256
     rollout_temperature = 1.0
     rollout_top_p = 1.0
@@ -351,7 +374,6 @@ class _Miles(MilesConfig):
         "MODAL_SWE_AGENT_PROCESSES": "48",
         "MODAL_SWE_AGENT_THREADS_PER_PROCESS": "16",
         **NVFP4_TRAINING_ENV,
-        **DSA_TOPK_ENV,
     }
 
     def prepare_data(self) -> None:

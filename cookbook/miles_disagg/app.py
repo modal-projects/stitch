@@ -133,7 +133,11 @@ app = modal.App(APP_NAME)
 
 SGLANG_SERVER_ARGS = {
     "--served-model-name": miles_cfg.hf_checkpoint,
-    "--cuda-graph-max-bs-decode": str(ROLLOUT_CONCURRENCY),
+    **(
+        {}
+        if "--cuda-graph-config" in exp.SGLANG_SERVER_ARGS
+        else {"--cuda-graph-max-bs-decode": str(ROLLOUT_CONCURRENCY)}
+    ),
     "--max-running-requests": str(ROLLOUT_CONCURRENCY),
     "--trust-remote-code": "",
     **exp.SGLANG_SERVER_ARGS,
@@ -152,7 +156,11 @@ SGLANG_SERVER_ARGS = {
         str(CHECKPOINTS_PATH): checkpoint_volume,
         str(STITCH_PATH): run_volume,
         SGLANG_CACHE_PATH: sglang_cache_volume,
-        **({str(DRAFT_PATH): draft_volume} if draft_volume is not None else {}),
+        **(
+            {str(DRAFT_PATH): draft_volume.read_only()}
+            if draft_volume is not None
+            else {}
+        ),
     },
     min_containers=modal_cfg.rollout_min_containers,
     max_containers=modal_cfg.rollout_max_containers,
