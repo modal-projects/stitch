@@ -26,33 +26,27 @@ class ModalFlashPool(Pool):
         self.app_name = app_name
         self.cls_name = cls_name
 
-    def _cls(self):
+    def _server(self):
         import modal
 
-        try:
-            return modal.Cls.from_name(self.app_name, self.cls_name)
-        except Exception as exc:  # NotFoundError etc.
-            raise RuntimeError(
-                f"cannot resolve {self.app_name}.{self.cls_name} — is the Server pool deployed?"
-            ) from exc
+        return modal.Server.from_name(self.app_name, self.cls_name)
 
     def gateway_url(self) -> str:
-        return self._pick_gateway(self._cls()._experimental_get_flash_urls())
+        return self._require_gateway(self._server().get_url())
 
     async def gateway_url_async(self) -> str:
-        return self._pick_gateway(await self._cls()._experimental_get_flash_urls.aio())
+        return self._require_gateway(await self._server().get_url.aio())
 
-    def _pick_gateway(self, urls) -> str:
-        if not urls:
+    def _require_gateway(self, url: str | None) -> str:
+        if not url:
             raise RuntimeError(
-                f"no Flash gateway URL for {self.app_name}.{self.cls_name} — deploy the app first"
+                f"no gateway URL for {self.app_name}.{self.cls_name} — deploy the app first"
             )
-        return str(urls[0]).rstrip("/")
+        return str(url).rstrip("/")
 
     def discover_replicas(self) -> list[str]:
         import modal.experimental
 
-        self._cls()  # resolve first: clear error if not deployed
         return _replica_urls(
             modal.experimental.flash_get_containers(self.app_name, self.cls_name)
         )
@@ -60,10 +54,10 @@ class ModalFlashPool(Pool):
     async def discover_replicas_async(self) -> list[str]:
         import modal.experimental
 
-        self._cls()  # resolve first: clear error if not deployed
         return _replica_urls(
             await modal.experimental.flash_get_containers.aio(
-                self.app_name, self.cls_name
+                self.app_name,
+                self.cls_name,
             )
         )
 
@@ -104,14 +98,13 @@ class ModalFlashPool(Pool):
             await asyncio.gather(*(wake_one(url) for url in replicas))
 
     def scale(self, *, min: int | None = None, max: int | None = None) -> None:
-        fn = self._cls()._get_class_service_function()
         kwargs: dict[str, int] = {}
         if min is not None:
             kwargs["min_containers"] = min
         if max is not None:
             kwargs["max_containers"] = max
         if kwargs:
-            fn.update_autoscaler(**kwargs)
+            self._server().update_autoscaler(**kwargs)
 
 
 def _replica_urls(containers) -> list[str]:

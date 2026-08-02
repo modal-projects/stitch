@@ -176,7 +176,6 @@ modal = ModalConfig(
     rollout_min_containers=2,
     rollout_max_containers=4,  # start at 2; scale to 4 mid-run to exercise elastic join
     rollout_target_inputs=32,
-    proxy_regions=["us-west"],
     rollout_ephemeral_disk_mib=524_288,
     rollout_memory_mib=(512 * 1024, 2 * 1024 * 1024),
     torch_dist_prep_nodes=4,

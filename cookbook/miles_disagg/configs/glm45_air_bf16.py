@@ -48,7 +48,6 @@ modal = ModalConfig(
     trainer_memory_mib=(1024, int(2 * 1024 * 1024)),
     rollout_min_containers=1,
     rollout_target_inputs=32,
-    proxy_regions=["us-west"],
     # cpu persist ≈ 2x the 207.5 GiB canonical checkpoint; request covers staging + serving baseline.
     rollout_memory_mib=(1024 * 1024, 3 * 1024 * 1024),
     # cpu updates stage nothing local; disk is runtime + spill only.

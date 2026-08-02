@@ -52,7 +52,6 @@ modal = ModalConfig(
     rollout_min_containers=1,
     # cpu persist ≈ 2x the ~10 GiB canonical checkpoint; request covers staging + serving baseline.
     rollout_memory_mib=(64 * 1024, 256 * 1024),
-    proxy_regions=["us-west"],
 )
 
 
