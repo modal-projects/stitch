@@ -1,0 +1,145 @@
+"""Profile one GLM-5.2 NVFP4 delta weight update on Modal.
+
+CPU destination:
+
+    MODAL_FUNCTION_RUNTIME=runc uv run --extra modal modal run -d \
+      tools/profiling/glm5_2_nvfp4_delta_weight_update.py
+
+Disk destination:
+
+    MODAL_FUNCTION_RUNTIME=runc uv run --extra modal modal run -d \
+      tools/profiling/glm5_2_nvfp4_delta_weight_update.py \
+      --update-mode disk
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import modal
+
+from cookbook.common.constants import CHECKPOINTS_PATH
+from cookbook.common.serving_image import build_serving_image
+from cookbook.miles_disagg.configs import glm5_2_nvfp4 as model
+from tools.profiling._delta_weight_update import (
+    WeightUpdateSpec,
+    modal_runtime_label,
+    parse_update_mode,
+    run_delta_weight_update,
+)
+from tools.profiling._synthetic_delta import (
+    SyntheticDeltaSpec,
+    prepare_standard_delta,
+    synthetic_delta_profile_id,
+)
+
+APP_NAME = "profile-glm5-2-nvfp4-delta-weight-update"
+EXPERIMENT = "glm5_2_nvfp4"
+DELTA_MOUNT = "/synthetic-delta"
+_PIPELINE_LAYER_ENDS = (14, 22, 30, 38, 46, 54, 62, 78)
+DELTA_SPEC = SyntheticDeltaSpec(
+    checkpoint_format="nvfp4",
+    quantized_value_density=0.00375,
+    high_precision_value_density=0.01,
+    output_shards=model.miles.pipeline_model_parallel_size,
+    output_shard_layout="miles-pp8-layer-placement-v1",
+    # MTP is present in the immutable serving checkpoint but is not trained.
+    immutable_prefixes=("model.layers.78.",),
+)
+DELTA_ID = f"glm5-2/{model.SOURCE_REVISION}/{synthetic_delta_profile_id(DELTA_SPEC)}"
+DELTA_SOURCE_DIR = f"{DELTA_MOUNT}/{DELTA_ID}"
+LOCAL_TARGET_CHECKPOINT_DIR = "/local-checkpoint/glm5-2-nvfp4/target"
+SGLANG_CACHE_PATH = "/root/.cache/sglang"
+
+app = modal.App(APP_NAME)
+checkpoint_volume = modal.Volume.from_name("miles-checkpoints", version=2)
+delta_volume = modal.Volume.from_name(
+    "stitch-synthetic-deltas",
+    create_if_missing=True,
+    version=2,
+)
+sglang_cache_volume = modal.Volume.from_name(
+    "sglang-cache",
+    create_if_missing=True,
+    version=2,
+)
+serving_image = build_serving_image(
+    hf_cache_path="/root/.cache/huggingface",
+    experiment=EXPERIMENT,
+    extra_env=model.SGLANG_SERVER_ENV,
+).add_local_dir(
+    str(Path(__file__).resolve().parents[1]),
+    remote_path="/root/tools",
+    ignore=["**/__pycache__", "**/*.pyc"],
+)
+
+
+def _pipeline_shard_for_tensor(name: str) -> int:
+    if name == "model.embed_tokens.weight":
+        return 0
+    if name in {"lm_head.weight", "model.norm.weight"}:
+        return len(_PIPELINE_LAYER_ENDS) - 1
+    prefix = "model.layers."
+    if not name.startswith(prefix):
+        raise ValueError(f"no pipeline placement for tensor {name!r}")
+    layer = int(name[len(prefix) :].partition(".")[0])
+    for stage, layer_end in enumerate(_PIPELINE_LAYER_ENDS):
+        if layer < layer_end:
+            return stage
+    raise ValueError(f"layer {layer} is outside the target-model pipeline")
+
+
+@app.function(
+    image=serving_image,
+    cpu=64,
+    memory=(64 * 1024, 512 * 1024),
+    volumes={
+        str(CHECKPOINTS_PATH): checkpoint_volume.read_only(),
+        DELTA_MOUNT: delta_volume,
+    },
+    timeout=6 * 60 * 60,
+)
+def prepare_delta() -> dict:
+    return prepare_standard_delta(
+        str(model.ROLLOUT_CHECKPOINT_PATH),
+        DELTA_SOURCE_DIR,
+        spec=DELTA_SPEC,
+        commit=delta_volume.commit,
+        output_shard_for_tensor=_pipeline_shard_for_tensor,
+    )
+
+
+@app.function(
+    image=serving_image,
+    gpu=f"{model.modal.gpu}:{model.ROLLOUT_GPUS_PER_ENGINE}",
+    cpu=64,
+    memory=model.modal.rollout_memory_mib,
+    ephemeral_disk=2 * 1024 * 1024,
+    volumes={
+        str(CHECKPOINTS_PATH): checkpoint_volume.read_only(),
+        DELTA_MOUNT: delta_volume.read_only(),
+        SGLANG_CACHE_PATH: sglang_cache_volume,
+    },
+    timeout=6 * 60 * 60,
+)
+def benchmark(update_mode: str, runtime: str, sample_id: str) -> dict:
+    return run_delta_weight_update(
+        WeightUpdateSpec(
+            model_name="GLM-5.2 mixed NVFP4/BF16",
+            base_checkpoint_dir=str(model.ROLLOUT_CHECKPOINT_PATH),
+            local_target_checkpoint_dir=LOCAL_TARGET_CHECKPOINT_DIR,
+            server_args=model.SGLANG_SERVER_ARGS,
+            tp_size=model.ROLLOUT_GPUS_PER_ENGINE,
+        ),
+        source_dir=DELTA_SOURCE_DIR,
+        target_version=1,
+        update_mode=parse_update_mode(update_mode),
+        runtime=runtime,
+        sample_id=sample_id,
+    )
+
+
+@app.local_entrypoint()
+def main(update_mode: str = "cpu", sample_id: str = "1") -> None:
+    prepare_delta.remote()
+    benchmark.remote(parse_update_mode(update_mode), modal_runtime_label(), sample_id)
