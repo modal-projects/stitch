@@ -31,7 +31,6 @@ TRAINER_IMAGE_RUN_COMMANDS = (
     "--index-url https://flashinfer.ai/whl/cu130 "
     "flashinfer-jit-cache==0.6.15.post1+cu130",
 )
-
 SOURCE_MODEL = "zai-org/GLM-5.2"
 SOURCE_REVISION = "b4734de4facf877f85769a911abafc5283eab3d9"
 BF16_CHECKPOINT_PATH = CHECKPOINTS_PATH / "glm5-2-bf16"
@@ -63,6 +62,8 @@ MAX_SEQ_LEN = 65_536
 # SGLang's request boundary needs a small physical-context margin. Miles still
 # truncates every trainable session to MAX_SEQ_LEN.
 SGLANG_CONTEXT_LENGTH = MAX_SEQ_LEN + 8
+# This metric changes exported NVFP4 bytes, so prep, training, and serving must agree.
+NVFP4_4OVER6_ERR_MODE = "MSE"
 
 NVFP4_TRAINING_ENV = {
     "NVTE_NVFP4_DISABLE_2D_QUANTIZATION": "1",
@@ -73,13 +74,13 @@ NVFP4_TRAINING_ENV = {
     "NVTE_USE_FAST_MATH": "0",
     "NVTE_NVFP4_4OVER6": "all",
     "NVTE_NVFP4_4OVER6_E4M3_USE_256": "all",
-    "NVTE_NVFP4_4OVER6_ERR_MODE": "MAE",
+    "NVTE_NVFP4_4OVER6_ERR_MODE": NVFP4_4OVER6_ERR_MODE,
     "NVTE_NVFP4_4OVER6_ERR_USE_FAST_MATH": "0",
 }
 NVFP4_SERVING_ENV = {
     "FLASHINFER_NVFP4_4OVER6": "1",
     "FLASHINFER_NVFP4_4OVER6_E4M3_USE_256": "1",
-    "FLASHINFER_NVFP4_4OVER6_ERR_MODE": "MAE",
+    "FLASHINFER_NVFP4_4OVER6_ERR_MODE": NVFP4_4OVER6_ERR_MODE,
     "FLASHINFER_NVFP4_4OVER6_ERR_USE_FAST_MATH": "0",
     "FLASHINFER_DISABLE_FP4_QUANT_FAST_MATH": "1",
     "SGLANG_FLASHINFER_NVFP4_PER_TOKEN_ACTIVATION": "1",
