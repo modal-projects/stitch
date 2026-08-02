@@ -22,11 +22,6 @@ DISABLE_HF_TRANSFER = True
 SIDECAR_COMMIT_MODE = "in_place"
 SIDECAR_FLUSH_CACHE_ON_COMMIT = False
 SGLANG_DELTA_UPDATE_MODE = "cpu"
-MEGATRON_RUNTIME_PATCHES = [
-    "/root/cookbook/miles_disagg/patches/megatron-r3-dispatch.patch"
-]
-
-
 SGLANG_SERVER_ARGS = {
     # Use the no-GDS fastsafetensors path on hosts without nvidia-fs.
     "--load-format": "fastsafetensors",

@@ -54,11 +54,6 @@ ROLLOUT_CHECKPOINT_PATH = CHECKPOINTS_PATH / "qwen3-30b-a3b-nvfp4-46"
 SIDECAR_COMMIT_MODE = "in_place"
 SIDECAR_FLUSH_CACHE_ON_COMMIT = False
 SGLANG_DELTA_UPDATE_MODE = "cpu"
-# R3 routing-replay needs the dropless Megatron dispatch fix at startup.
-MEGATRON_RUNTIME_PATCHES = [
-    "/root/cookbook/miles_disagg/patches/megatron-r3-dispatch.patch",
-]
-
 # ── Trainer/sampler 4/6 + NVFP4 quantizer contract ────────────────────────────
 # Both sides must agree on: 4/6 on, MAE candidate-error mode, e4m3-max 256 under 4/6,
 # fast math off. The NVTE_* side drives TE (training, export, and the served-base

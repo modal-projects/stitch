@@ -22,12 +22,6 @@ TORCH_DIST_CHECKPOINT_PATH = CHECKPOINTS_PATH / "kimi-k2-6-torch-dist"
 SIDECAR_COMMIT_MODE = "in_place"
 SIDECAR_FLUSH_CACHE_ON_COMMIT = False
 SGLANG_DELTA_UPDATE_MODE = "cpu"
-# R3 routing-replay needs the dropless Megatron dispatch fix at startup.
-MEGATRON_RUNTIME_PATCHES = [
-    "/root/cookbook/miles_disagg/patches/megatron-r3-dispatch.patch",
-]
-
-
 # mem-fraction / context-length are starting points — measure on a warm B200:4.
 SGLANG_SERVER_ARGS = {
     # Use the no-GDS fastsafetensors path on hosts without nvidia-fs.

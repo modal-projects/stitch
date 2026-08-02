@@ -26,12 +26,6 @@ CHECKPOINT_PREP_REQUIRES_GPU = False
 SIDECAR_COMMIT_MODE = "in_place"
 SIDECAR_FLUSH_CACHE_ON_COMMIT = False
 SGLANG_DELTA_UPDATE_MODE = "cpu"
-# R3 routing-replay needs the dropless Megatron dispatch fix at startup.
-MEGATRON_RUNTIME_PATCHES = [
-    "/root/cookbook/miles_disagg/patches/megatron-r3-dispatch.patch",
-]
-
-
 SGLANG_SERVER_ARGS = {
     # Use the no-GDS fastsafetensors path on hosts without nvidia-fs.
     "--load-format": "fastsafetensors",

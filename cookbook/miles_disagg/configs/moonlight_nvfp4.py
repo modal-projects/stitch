@@ -21,12 +21,6 @@ ROLLOUT_CHECKPOINT_PATH = CHECKPOINTS_PATH / "moonlight-nvfp4"
 SIDECAR_COMMIT_MODE = "in_place"
 SIDECAR_FLUSH_CACHE_ON_COMMIT = False
 SGLANG_DELTA_UPDATE_MODE = "cpu"
-# R3 routing-replay needs the dropless Megatron dispatch fix at startup.
-MEGATRON_RUNTIME_PATCHES = [
-    "/root/cookbook/miles_disagg/patches/megatron-r3-dispatch.patch",
-]
-
-
 # No --quantization flag — NVFP4 comes from the served checkpoint's quant config.
 # mem-fraction / context-length are starting points; measure.
 SGLANG_SERVER_ARGS = {

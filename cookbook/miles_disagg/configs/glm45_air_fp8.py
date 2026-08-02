@@ -28,10 +28,6 @@ USE_MODAL_TORCH_DIST_WRAPPER = True
 DISABLE_HF_XET = True
 DISABLE_HF_TRANSFER = True
 
-MEGATRON_RUNTIME_PATCHES = [
-    "/root/cookbook/miles_disagg/patches/megatron-r3-dispatch.patch"
-]
-
 SGLANG_SERVER_ARGS = {
     # Use the no-GDS fastsafetensors path on hosts without nvidia-fs.
     "--load-format": "fastsafetensors",
