@@ -41,7 +41,7 @@ All persistent storage uses Modal Volume v2:
 | --- | --- | --- |
 | `huggingface-cache` | `/root/.cache/huggingface` | Pinned source-model downloads |
 | `miles-checkpoints` or `slime-checkpoints` | `/checkpoints` | Immutable prepared model layouts |
-| `miles-data` or `slime-data` | `/data` | Immutable dataset revisions |
+| `miles-data` or `slime-data` | `/data` | Pinned datasets |
 | `stitch-<framework>-<model>` | `/stitch` | Run-scoped publications, checkpoints, and logs |
 | `sglang-cache` | `/root/.cache/sglang` | Compiled SGLang kernels |
 | Configured draft Volume | `/draft` | Optional external speculative draft |
@@ -72,17 +72,15 @@ pointer. A future checkpoint resume starts a new run and reads the previous
 run's `checkpoints/` rather than appending to its update chain.
 
 Datasets are independent of models and runs. Miles mounts the shared
-`miles-data` Volume at `/data`; Slime uses `slime-data`. Each immutable dataset
-revision has its own directory:
+`miles-data` Volume at `/data`; Slime uses `slime-data`. Each dataset has a
+stable directory; `manifest.json` records its pinned source revision.
 
 ```text
 /data/
-└── datasets/
-    └── <dataset>/
-        └── <revision>/
-            ├── manifest.json
-            ├── <trainer-input>
-            └── <dataset-specific-assets>/
+└── <dataset>/
+    ├── manifest.json
+    ├── <trainer-input>
+    └── <dataset-specific-assets>/
 ```
 
 Miles:
@@ -133,7 +131,8 @@ uv run --extra modal python -m cookbook.common.smoke \
 
 ## Profile an update
 
-The model profilers support `--update-mode disk|cpu`:
+The model profilers prepare their pinned base checkpoint and synthetic delta,
+then run with `--update-mode disk|cpu`:
 
 ```bash
 uv run --extra modal modal run -d \
@@ -141,9 +140,10 @@ uv run --extra modal modal run -d \
   --update-mode cpu
 ```
 
-They generate during staging, pause the engine to activate the target, validate
-the new version, and report timing and resource use. SGLang rejects
-logprob-returning requests when DFlash or DSPARK is enabled, so those profiles
+Prepared artifacts are reused. The profilers generate during staging, pause
+the engine to activate the target, validate the new version, and report timing
+and resource use. The pinned SGLang runtime returns aligned verifier logprobs
+for DFlash. DSpark still rejects logprob-returning requests, so its profiles
 compare repeated deterministic text instead of token IDs and logprobs.
 
 The K3 profiler downloads the pinned public checkpoint and constructs a
