@@ -47,12 +47,14 @@ TRAINER_NODES = 16
 GPUS_PER_TRAINER_NODE = 8
 ROLLOUT_GPUS_PER_ENGINE = 4
 ROLLOUT_TO_TRAINER_GPU_RATIO = 1
+ROLLOUT_INPUTS_PER_ENGINE = 24
 ROLLOUT_ENGINES = (
     TRAINER_NODES
     * GPUS_PER_TRAINER_NODE
     * ROLLOUT_TO_TRAINER_GPU_RATIO
     // ROLLOUT_GPUS_PER_ENGINE
 )
+ROLLOUT_CONCURRENT_SAMPLES = ROLLOUT_ENGINES * ROLLOUT_INPUTS_PER_ENGINE
 MAX_SEQ_LEN = 65_536
 # SGLang's request boundary needs a small physical-context margin. Miles still
 # truncates every trainable session to MAX_SEQ_LEN.
@@ -91,10 +93,6 @@ SGLANG_SERVER_ENV = {
 SIDECAR_COMMIT_MODE = "in_place"
 SIDECAR_FLUSH_CACHE_ON_COMMIT = False
 SGLANG_DELTA_UPDATE_MODE = "cpu"
-# R3 routing-replay needs the dropless Megatron dispatch fix at startup.
-MEGATRON_RUNTIME_PATCHES = [
-    "/root/cookbook/miles_disagg/patches/megatron-r3-dispatch.patch",
-]
 
 SGLANG_SERVER_ARGS = {
     "--load-format": "fastsafetensors",
@@ -117,8 +115,6 @@ SGLANG_SERVER_ARGS = {
     "--context-length": str(SGLANG_CONTEXT_LENGTH),
     "--mem-fraction-static": "0.8",
     "--chunked-prefill-size": "8192",
-    "--max-running-requests": "128",
-    "--cuda-graph-max-bs-decode": "64",
     "--schedule-conservativeness": "0.5",
     "--schedule-policy": "lpm",
     "--skip-server-warmup": "",
@@ -132,8 +128,7 @@ modal = ModalConfig(
     # CPU mode retains both the canonical checkpoint and TP rank images.
     rollout_memory_mib=(1024 * 1024, 3 * 1024 * 1024),
     rollout_min_containers=ROLLOUT_ENGINES,
-    rollout_max_containers=ROLLOUT_ENGINES,
-    rollout_target_inputs=32,
+    rollout_target_inputs=ROLLOUT_INPUTS_PER_ENGINE,
     routing_region="us-west",
     # cpu updates stage nothing local; disk is runtime + spill only.
     rollout_ephemeral_disk_mib=524_288,
@@ -170,6 +165,8 @@ class _Miles(MilesConfig):
     num_gpus_per_node = GPUS_PER_TRAINER_NODE
     rollout_num_gpus = 0
     rollout_num_gpus_per_engine = ROLLOUT_GPUS_PER_ENGINE
+    # An opaque endpoint has one Miles-side semaphore for the complete fleet.
+    sglang_server_concurrency = ROLLOUT_CONCURRENT_SAMPLES
     rollout_endpoint_url = None
 
     custom_rollout_request_hook_path = (
@@ -238,7 +235,8 @@ class _Miles(MilesConfig):
     rollout_shuffle = True
     balance_data = True
 
-    rollout_function_path = "miles.rollout.fully_async_rollout.FullyAsyncRolloutFn"
+    fully_async = True
+    rollout_sample_completion_backfill = True
     custom_rollout_log_function_path = "modal_swe_metrics.log_rollout_data"
     custom_generate_function_path = (
         "miles.rollout.generate_hub.agentic_tool_call.generate"
@@ -256,15 +254,13 @@ class _Miles(MilesConfig):
     rollout_batch_size = 32
     n_samples_per_prompt = 8
     global_batch_size = 256
-    rollout_temperature = 0.8
+    rollout_temperature = 1.0
     rollout_top_p = 1.0
     rollout_max_response_len = 8192
     max_seq_len = MAX_SEQ_LEN
     use_dynamic_global_batch_size = True
     max_weight_staleness = 6
-    async_max_concurrent_samples = 768
-    async_max_active_groups = 108
-    async_trajectory_timeout_seconds = 10800
+    async_max_concurrent_samples = ROLLOUT_CONCURRENT_SAMPLES
 
     use_rollout_routing_replay = True
     use_fault_tolerance = True
@@ -332,6 +328,8 @@ class _Miles(MilesConfig):
         ),
         "CUDA_DEVICE_MAX_CONNECTIONS": "1",
         "NCCL_NVLS_ENABLE": "1",
+        # GLM-5 uses interleaved, not NeoX-style, rotary pairs in the DSA indexer.
+        "INDEXER_ROPE_NEOX_STYLE": "0",
         "RAY_health_check_timeout_ms": "60000",
         "MILES_EXPERIMENTAL_ROLLOUT_REFACTOR": "1",
         "AGENT_MODEL_NAME": "model",
