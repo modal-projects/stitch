@@ -8,6 +8,7 @@ def test_training_image_matches_the_working_flashinfer_runtime() -> None:
     commands = "\n".join(config.TRAINER_IMAGE_RUN_COMMANDS)
 
     assert trainer_image.MILES_IMAGE_TAG == "radixark/miles:dev-202607290235"
+    assert config.MILES_REPO_REF == "7cdfcf78c8f7ab3f2111dafe9881aa99b716a0c5"
     assert "flashinfer-python==0.6.15.post1" in commands
     assert "flashinfer-cubin==0.6.15.post1" in commands
     assert "flashinfer-jit-cache==0.6.15.post1+cu130" in commands

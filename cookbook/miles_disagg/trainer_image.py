@@ -37,6 +37,7 @@ def build_trainer_image(
     hf_cache_path: str,
     experiment: str,
     run_id: str | None = None,
+    miles_repo_ref: str = MILES_REPO_REF,
     miles_local: str | None = None,
     extra_pip_packages: tuple[str, ...] = (),
     image_run_commands: tuple[str, ...] = (),
@@ -60,7 +61,7 @@ def build_trainer_image(
         .run_commands(
             f"rm -rf {MILES_ROOT}"
             f" && git clone {MILES_REPO_URL} {MILES_ROOT}"
-            f" && cd {MILES_ROOT} && git fetch origin {MILES_REPO_REF} && git checkout FETCH_HEAD"
+            f" && cd {MILES_ROOT} && git fetch origin {miles_repo_ref} && git checkout FETCH_HEAD"
             f" && python3 -m pip install --no-deps -e {MILES_ROOT}"
         )
         .add_local_file(

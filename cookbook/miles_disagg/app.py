@@ -76,6 +76,7 @@ image = trainer_image.build_trainer_image(
     hf_cache_path=str(HF_CACHE_PATH),
     experiment=EXPERIMENT,
     run_id=RUN_ID,
+    miles_repo_ref=getattr(exp, "MILES_REPO_REF", trainer_image.MILES_REPO_REF),
     miles_local=MILES_LOCAL_DIR,
     extra_pip_packages=getattr(exp, "TRAINER_EXTRA_PIP_PACKAGES", ()),
     image_run_commands=getattr(exp, "TRAINER_IMAGE_RUN_COMMANDS", ()),

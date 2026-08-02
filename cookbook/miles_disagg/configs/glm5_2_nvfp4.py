@@ -12,6 +12,9 @@ from cookbook.miles_disagg.swebench_pro import (
 
 APP_NAME = "stitch-glm5-2-nvfp4"
 EXPERIMENT_VOLUME_NAME = "stitch-miles-glm5-2-nvfp4"
+# This experiment layers Stitch integration onto Miles' fully-async SWE runtime.
+# Other cookbook experiments keep the standard Miles pin in trainer_image.py.
+MILES_REPO_REF = "7cdfcf78c8f7ab3f2111dafe9881aa99b716a0c5"
 LOCAL_CHECKPOINT_PATH = None
 TRAINER_EXTRA_PIP_PACKAGES = (
     "harbor[modal,huggingface]==0.20.0",
