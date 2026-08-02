@@ -1,12 +1,15 @@
-"""Profile one Kimi K2.6 NVFP4 delta weight update on Modal.
+"""Profile one GLM-5.2 NVFP4 delta weight update on Modal.
 
-The entrypoint prepares the pinned serving checkpoint with the Miles NVFP4
-recipe, builds a standardized element-wise synthetic delta, and runs one
-verified update.
+CPU destination:
 
     MODAL_FUNCTION_RUNTIME=runc uv run --extra modal modal run -d \
-      tools/profiling/kimi_k2_6_nvfp4_delta_weight_update.py \
-      --update-mode cpu
+      tools/profiling/glm5_2_nvfp4_delta_weight_update.py
+
+Disk destination:
+
+    MODAL_FUNCTION_RUNTIME=runc uv run --extra modal modal run -d \
+      tools/profiling/glm5_2_nvfp4_delta_weight_update.py \
+      --update-mode disk
 """
 
 from __future__ import annotations
@@ -18,7 +21,7 @@ import modal
 from cookbook.common.constants import CHECKPOINTS_PATH, HF_CACHE_PATH
 from cookbook.common.serving_image import build_serving_image
 from cookbook.miles_disagg import prep, trainer_image
-from cookbook.miles_disagg.configs import kimi_k2_6_nvfp4 as model
+from cookbook.miles_disagg.configs import glm5_2_nvfp4 as model
 from tools.profiling._delta_weight_update import (
     WeightUpdateSpec,
     modal_runtime_label,
@@ -31,47 +34,23 @@ from tools.profiling._synthetic_delta import (
     synthetic_delta_profile_id,
 )
 
-APP_NAME = "profile-kimi-k2-6-nvfp4-delta-weight-update"
-EXPERIMENT = "kimi_k2_6_nvfp4"
+APP_NAME = "profile-glm5-2-nvfp4-delta-weight-update"
+EXPERIMENT = "glm5_2_nvfp4"
 DELTA_MOUNT = "/synthetic-delta"
+_PIPELINE_LAYER_ENDS = (14, 22, 30, 38, 46, 54, 62, 78)
 DELTA_SPEC = SyntheticDeltaSpec(
     checkpoint_format="nvfp4",
-    quantized_value_density=0.003,
+    quantized_value_density=0.00375,
     high_precision_value_density=0.01,
-    # Text-only RL leaves the vision encoder and projector fixed.
-    immutable_prefixes=("vision_tower.", "mm_projector."),
+    output_shards=model.miles.pipeline_model_parallel_size,
+    output_shard_layout="miles-pp8-layer-placement-v1",
+    # MTP is present in the immutable serving checkpoint but is not trained.
+    immutable_prefixes=("model.layers.78.",),
 )
-DELTA_ID = f"kimi-k2-6/{model.SOURCE_REVISION}/{synthetic_delta_profile_id(DELTA_SPEC)}"
+DELTA_ID = f"glm5-2/{model.SOURCE_REVISION}/{synthetic_delta_profile_id(DELTA_SPEC)}"
 DELTA_SOURCE_DIR = f"{DELTA_MOUNT}/{DELTA_ID}"
-BASE_CHECKPOINT_DIR = str(model.ROLLOUT_CHECKPOINT_PATH)
-LOCAL_CHECKPOINT_ROOT = "/local-checkpoint/kimi-k2-6-nvfp4"
-LOCAL_TARGET_CHECKPOINT_DIR = f"{LOCAL_CHECKPOINT_ROOT}/target"
-LOCAL_CANONICAL_CHECKPOINT_DIR = f"{LOCAL_CHECKPOINT_ROOT}/canonical"
+LOCAL_TARGET_CHECKPOINT_DIR = "/local-checkpoint/glm5-2-nvfp4/target"
 SGLANG_CACHE_PATH = "/root/.cache/sglang"
-
-SGLANG_SERVER_ARGS = {
-    "--served-model-name": model.SOURCE_MODEL,
-    "--load-format": "fastsafetensors",
-    "--model-loader-extra-config": '{"enable_gds":false}',
-    "--weight-loader-drop-cache-after-load": "",
-    "--cpu-weight-cache-canonical-checkpoint-dir": LOCAL_CANONICAL_CHECKPOINT_DIR,
-    "--trust-remote-code": "",
-    "--tool-call-parser": "kimi_k2",
-    "--reasoning-parser": "kimi_k2",
-    "--dist-timeout": "3600",
-    "--kv-cache-dtype": "fp8_e4m3",
-    "--attention-backend": "tokenspeed_mla",
-    "--context-length": "32768",
-    "--mem-fraction-static": "0.80",
-    "--chunked-prefill-size": "16384",
-    "--schedule-conservativeness": "0.5",
-    "--schedule-policy": "lpm",
-    "--max-running-requests": "32",
-    "--decode-log-interval": "100",
-    "--cuda-graph-max-bs-decode": "32",
-    "--random-seed": "42",
-    "--skip-server-warmup": "",
-}
 
 app = modal.App(APP_NAME)
 hf_cache_volume = modal.Volume.from_name(
@@ -81,23 +60,46 @@ checkpoint_volume = modal.Volume.from_name(
     "miles-checkpoints", create_if_missing=True, version=2
 )
 delta_volume = modal.Volume.from_name(
-    "stitch-synthetic-deltas", create_if_missing=True, version=2
+    "stitch-synthetic-deltas",
+    create_if_missing=True,
+    version=2,
 )
 sglang_cache_volume = modal.Volume.from_name(
-    "sglang-cache", create_if_missing=True, version=2
+    "sglang-cache",
+    create_if_missing=True,
+    version=2,
 )
 prep_image = trainer_image.build_trainer_image(
     hf_cache_path=str(HF_CACHE_PATH),
     experiment=EXPERIMENT,
+    miles_repo_ref=model.MILES_REPO_REF,
+    extra_pip_packages=model.TRAINER_EXTRA_PIP_PACKAGES,
+    image_run_commands=model.TRAINER_IMAGE_RUN_COMMANDS,
 )
 serving_image = build_serving_image(
     hf_cache_path=str(HF_CACHE_PATH),
     experiment=EXPERIMENT,
+    extra_env=model.SGLANG_SERVER_ENV,
 ).add_local_dir(
     str(Path(__file__).resolve().parents[1]),
     remote_path="/root/tools",
     ignore=["**/__pycache__", "**/*.pyc"],
 )
+
+
+def _pipeline_shard_for_tensor(name: str) -> int:
+    if name == "model.embed_tokens.weight":
+        return 0
+    if name in {"lm_head.weight", "model.norm.weight"}:
+        return len(_PIPELINE_LAYER_ENDS) - 1
+    prefix = "model.layers."
+    if not name.startswith(prefix):
+        raise ValueError(f"no pipeline placement for tensor {name!r}")
+    layer = int(name[len(prefix) :].partition(".")[0])
+    for stage, layer_end in enumerate(_PIPELINE_LAYER_ENDS):
+        if layer < layer_end:
+            return stage
+    raise ValueError(f"layer {layer} is outside the target-model pipeline")
 
 
 @app.function(
@@ -127,34 +129,35 @@ def prepare_base() -> None:
 )
 def prepare_delta() -> dict:
     return prepare_standard_delta(
-        BASE_CHECKPOINT_DIR,
+        str(model.ROLLOUT_CHECKPOINT_PATH),
         DELTA_SOURCE_DIR,
         spec=DELTA_SPEC,
         commit=delta_volume.commit,
+        output_shard_for_tensor=_pipeline_shard_for_tensor,
     )
 
 
 @app.function(
     image=serving_image,
-    gpu="B300:4",
+    gpu=f"{model.modal.gpu}:{model.ROLLOUT_GPUS_PER_ENGINE}",
     cpu=64,
-    memory=(1024 * 1024, 3 * 1024 * 1024),
-    # Disk mode retains both the immutable base and a complete mutable target.
-    ephemeral_disk=1_572_864,
+    memory=model.modal.rollout_memory_mib,
+    ephemeral_disk=2 * 1024 * 1024,
     volumes={
         str(CHECKPOINTS_PATH): checkpoint_volume.read_only(),
         DELTA_MOUNT: delta_volume.read_only(),
         SGLANG_CACHE_PATH: sglang_cache_volume,
     },
-    timeout=4 * 60 * 60,
+    timeout=6 * 60 * 60,
 )
 def benchmark(update_mode: str, runtime: str, sample_id: str) -> dict:
     return run_delta_weight_update(
         WeightUpdateSpec(
-            model_name="Kimi K2.6 NVFP4",
-            base_checkpoint_dir=BASE_CHECKPOINT_DIR,
+            model_name="GLM-5.2 mixed NVFP4/BF16",
+            base_checkpoint_dir=str(model.ROLLOUT_CHECKPOINT_PATH),
             local_target_checkpoint_dir=LOCAL_TARGET_CHECKPOINT_DIR,
-            server_args=SGLANG_SERVER_ARGS,
+            server_args=model.SGLANG_SERVER_ARGS,
+            tp_size=model.ROLLOUT_GPUS_PER_ENGINE,
         ),
         source_dir=DELTA_SOURCE_DIR,
         target_version=1,
