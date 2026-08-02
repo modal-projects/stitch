@@ -503,8 +503,9 @@ def run_delta_weight_update(
         speculative_algorithm = spec.server_args.get(
             "--speculative-algorithm", ""
         ).upper()
-        # These SGLang speculative workers reject return_logprob requests.
-        fingerprint_logprobs = speculative_algorithm not in {"DFLASH", "DSPARK"}
+        # DSpark rejects return_logprob requests. The pinned SGLang runtime
+        # supports aligned verifier logprobs for DFlash.
+        fingerprint_logprobs = speculative_algorithm != "DSPARK"
         baseline_fingerprint = _generate(
             url,
             fingerprint=True,
