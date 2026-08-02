@@ -23,7 +23,8 @@ SIDECAR_COMMIT_MODE = "in_place"
 SIDECAR_FLUSH_CACHE_ON_COMMIT = False
 SGLANG_DELTA_UPDATE_MODE = "cpu"
 MEGATRON_RUNTIME_PATCHES = [
-    "/root/cookbook/miles_disagg/patches/megatron-r3-dispatch.patch"
+    "/root/cookbook/miles_disagg/patches/megatron-r3-dispatch.patch",
+    "/root/cookbook/miles_disagg/patches/megatron-hdo-dp-reshardable-step.patch",
 ]
 
 

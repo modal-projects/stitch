@@ -57,6 +57,7 @@ SGLANG_DELTA_UPDATE_MODE = "cpu"
 # R3 routing-replay needs the dropless Megatron dispatch fix at startup.
 MEGATRON_RUNTIME_PATCHES = [
     "/root/cookbook/miles_disagg/patches/megatron-r3-dispatch.patch",
+    "/root/cookbook/miles_disagg/patches/megatron-hdo-dp-reshardable-step.patch",
 ]
 
 # ── Trainer/sampler 4/6 + NVFP4 quantizer contract ────────────────────────────
