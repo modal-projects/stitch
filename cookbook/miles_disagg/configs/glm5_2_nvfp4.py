@@ -75,6 +75,7 @@ NVFP4_SERVING_ENV = {
     "FLASHINFER_NVFP4_4OVER6_E4M3_USE_256": "1",
     "FLASHINFER_NVFP4_4OVER6_ERR_MODE": "MSE",
     "FLASHINFER_NVFP4_4OVER6_ERR_USE_FAST_MATH": "0",
+    "FLASHINFER_DISABLE_FP4_QUANT_FAST_MATH": "1",
     "SGLANG_FLASHINFER_NVFP4_PER_TOKEN_ACTIVATION": "1",
     "TRTLLM_DISABLE_FP4_QUANT_FAST_MATH": "1",
 }
@@ -128,7 +129,7 @@ modal = ModalConfig(
     gpu="B300",
     region="us",
     trainer_memory_mib=(1024 * 1024, 3 * 1024 * 1024),
-    # cpu persist ≈ 862 GiB measured (canonical + TP rank images), ~995 GB observed after staging.
+    # CPU mode retains both the canonical checkpoint and TP rank images.
     rollout_memory_mib=(1024 * 1024, 3 * 1024 * 1024),
     rollout_min_containers=ROLLOUT_ENGINES,
     rollout_max_containers=ROLLOUT_ENGINES,
@@ -195,8 +196,9 @@ class _Miles(MilesConfig):
     fp4_format = "e2m1"
     fp4_recipe = "nvfp4"
     first_last_layers_bf16 = True
+    # GLM-5.2 has three dense layers; keep those and the final 15% (12/78) in BF16.
     num_layers_at_start_in_bf16 = 3
-    num_layers_at_end_in_bf16 = 0
+    num_layers_at_end_in_bf16 = 12
     te_precision_config_file = {
         "configs": {
             "nvfp4": {
