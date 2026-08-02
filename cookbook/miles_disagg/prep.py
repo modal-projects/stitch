@@ -132,6 +132,8 @@ def prepare_checkpoints(exp, checkpoint_volume) -> None:
         carveouts += ["--num-layers-at-start-in-bf16", str(n)]
     if (n := getattr(exp.miles, "num_layers_at_end_in_bf16", None)) is not None:
         carveouts += ["--num-layers-at-end-in-bf16", str(n)]
+    if layers := getattr(exp.miles, "extra_high_precision_layers_hf", None):
+        carveouts += ["--extra-high-precision-layers-hf", *layers]
 
     def _build_nvfp4(out: str) -> None:
         print(

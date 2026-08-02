@@ -142,7 +142,6 @@ SGLANG_SERVER_ARGS = {
 @app.server(
     image=server_image,
     gpu=f"{modal_cfg.gpu}:{slime_cfg.rollout_num_gpus_per_engine}",
-    cpu=modal_cfg.rollout_cpu,
     cloud=modal_cfg.cloud,
     compute_region=modal_cfg.region,
     volumes={
@@ -198,7 +197,6 @@ _MULTINODE = slime_cfg.n_train_nodes > 1
 @app.cls(
     image=image,
     gpu=f"{modal_cfg.gpu}:{slime_cfg.actor_num_gpus_per_node}",
-    cpu=modal_cfg.trainer_cpu,
     memory=modal_cfg.trainer_memory_mib,
     cloud=modal_cfg.cloud,
     region=modal_cfg.region,

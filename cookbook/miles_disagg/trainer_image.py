@@ -18,7 +18,7 @@ from cookbook.common import trainer_image as common_trainer_image
 
 # Dated tag, never `latest`: Modal caches from_registry per tag string and won't re-pull
 # a moved mutable tag, so `latest` silently serves whatever was first pulled.
-MILES_IMAGE_TAG = "radixark/miles:dev-202607260602"
+MILES_IMAGE_TAG = "radixark/miles:dev-202607290235"
 MILES_REPO_URL = "https://github.com/modal-projects/miles.git"
 MILES_REPO_REF = "1eb7520018446cb94b7406715f66dff1a271b53b"  # stitch-weight-sync-v0516
 
@@ -37,7 +37,10 @@ def build_trainer_image(
     hf_cache_path: str,
     experiment: str,
     run_id: str | None = None,
+    miles_repo_ref: str = MILES_REPO_REF,
     miles_local: str | None = None,
+    extra_pip_packages: tuple[str, ...] = (),
+    image_run_commands: tuple[str, ...] = (),
     copy_source: bool = False,
 ) -> modal.Image:
     """The miles trainer image: RDMA/EFA userspace + the pinned miles fork + the
@@ -58,13 +61,17 @@ def build_trainer_image(
         .run_commands(
             f"rm -rf {MILES_ROOT}"
             f" && git clone {MILES_REPO_URL} {MILES_ROOT}"
-            f" && cd {MILES_ROOT} && git fetch origin {MILES_REPO_REF} && git checkout FETCH_HEAD"
+            f" && cd {MILES_ROOT} && git fetch origin {miles_repo_ref} && git checkout FETCH_HEAD"
             f" && python3 -m pip install --no-deps -e {MILES_ROOT}"
         )
         .add_local_file(
             str(_TORCH_DIST_WRAPPER_SRC), TORCH_DIST_CONVERT_WRAPPER, copy=True
         )
     )
+    if extra_pip_packages:
+        image = image.pip_install(*extra_pip_packages)
+    if image_run_commands:
+        image = image.run_commands(*image_run_commands)
     image = common_trainer_image.add_common_layers(
         image,
         experiment=experiment,
