@@ -31,6 +31,10 @@ TRAINER_IMAGE_RUN_COMMANDS = (
     "--index-url https://flashinfer.ai/whl/cu130 "
     "flashinfer-jit-cache==0.6.15.post1+cu130",
 )
+MEGATRON_RUNTIME_PATCHES = [
+    "/root/cookbook/miles_disagg/patches/megatron-hdo-dp-reshardable-step.patch",
+]
+
 SOURCE_MODEL = "zai-org/GLM-5.2"
 SOURCE_REVISION = "b4734de4facf877f85769a911abafc5283eab3d9"
 BF16_CHECKPOINT_PATH = CHECKPOINTS_PATH / "glm5-2-bf16"
