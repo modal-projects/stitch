@@ -5,10 +5,7 @@ from __future__ import annotations
 from cookbook.common.config import ModalConfig
 from cookbook.common.constants import CHECKPOINTS_PATH, DATA_PATH, DRAFT_PATH
 from cookbook.miles_disagg.config import MilesConfig
-from cookbook.miles_disagg.swebench_pro import (
-    DATASET_REVISION,
-    prepare_swebench_pro,
-)
+from cookbook.miles_disagg.swebench_pro import prepare_swebench_pro
 
 APP_NAME = "stitch-glm5-2-nvfp4"
 EXPERIMENT_VOLUME_NAME = "stitch-miles-glm5-2-nvfp4"
@@ -40,7 +37,7 @@ SOURCE_REVISION = "b4734de4facf877f85769a911abafc5283eab3d9"
 BF16_CHECKPOINT_PATH = CHECKPOINTS_PATH / "glm5-2-bf16"
 ROLLOUT_CHECKPOINT_PATH = CHECKPOINTS_PATH / "glm5-2-nvfp4"
 TORCH_DIST_CHECKPOINT_PATH = CHECKPOINTS_PATH / "glm5-2-torch-dist"
-SWEBENCH_PRO_PATH = DATA_PATH / "datasets" / "swebench-pro" / DATASET_REVISION
+SWEBENCH_PRO_PATH = DATA_PATH / "swebench-pro"
 DFLASH_VOLUME = "dflash-checkpoints"
 DFLASH_CHECKPOINT_PATH = DRAFT_PATH / "zai-org/GLM-5.2/dflash/draft-step-103000"
 SERVED_CHECKPOINT_FORMAT = "nvfp4"

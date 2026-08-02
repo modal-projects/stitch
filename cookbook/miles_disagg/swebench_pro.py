@@ -8,7 +8,6 @@ import shlex
 import subprocess
 from pathlib import Path
 
-DATASET_REVISION = "7ab5114912baf22bb098818e604c02fe7ad2c11f"
 EVALUATOR_REVISION = "ca10a60a5fcae51e6948ffe1485d4153d421e6c5"
 
 
@@ -167,6 +166,7 @@ def prepare_swebench_pro(data_root: Path) -> Path:
     """Write the pinned 731-task benchmark and return its prompt JSONL path."""
     from datasets import load_dataset
 
+    source_revision = "7ab5114912baf22bb098818e604c02fe7ad2c11f"
     tasks_root = data_root / "tasks"
     source_root = data_root / "SWE-bench_Pro-os"
     data_root.mkdir(parents=True, exist_ok=True)
@@ -174,7 +174,7 @@ def prepare_swebench_pro(data_root: Path) -> Path:
 
     source_rows = load_dataset(
         "ScaleAI/SWE-bench_Pro",
-        revision=DATASET_REVISION,
+        revision=source_revision,
         split="test",
     )
     if len(source_rows) != 731:
@@ -252,7 +252,7 @@ def prepare_swebench_pro(data_root: Path) -> Path:
                     "sandbox_cwd": "/app",
                     "agent_name": "mini-swe-agent",
                     "source_dataset": "ScaleAI/SWE-bench_Pro",
-                    "source_revision": DATASET_REVISION,
+                    "source_revision": source_revision,
                     "split": "test",
                     "repo": source["repo"],
                     "repo_language": source["repo_language"],
@@ -266,7 +266,7 @@ def prepare_swebench_pro(data_root: Path) -> Path:
         json.dumps(
             {
                 "source": "ScaleAI/SWE-bench_Pro",
-                "dataset_revision": DATASET_REVISION,
+                "dataset_revision": source_revision,
                 "evaluator": "scaleapi/SWE-bench_Pro-os",
                 "evaluator_revision": EVALUATOR_REVISION,
                 "split": "test",
