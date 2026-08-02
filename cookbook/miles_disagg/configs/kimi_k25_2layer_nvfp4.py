@@ -51,7 +51,6 @@ modal = ModalConfig(
     rollout_min_containers=1,
     # cpu persist ≈ 2x the 15.3 GiB canonical checkpoint; request covers staging + serving baseline.
     rollout_memory_mib=(128 * 1024, 512 * 1024),
-    proxy_regions=["us-west"],
     # 2-layer model fits 1 GPU for the torch_dist conversion (pp=world_size <= 2).
     torch_dist_prep_nodes=1,
     torch_dist_prep_gpus_per_node=1,

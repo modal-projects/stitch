@@ -56,7 +56,6 @@ modal = ModalConfig(
     rollout_target_inputs=256,
     # cpu persist ≈ 2x the ~550 GiB INT4 canonical checkpoint (same class as the miles NVFP4 config).
     rollout_memory_mib=(1536 * 1024, 3 * 1024 * 1024),
-    proxy_regions=["us-west"],
 )
 
 

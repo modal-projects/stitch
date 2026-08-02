@@ -65,7 +65,6 @@ modal = ModalConfig(
     rollout_target_inputs=32,
     # cpu persist ≈ 862 GiB measured (canonical + TP rank images), ~995 GB observed after staging.
     rollout_memory_mib=(1024 * 1024, 3 * 1024 * 1024),
-    proxy_regions=["us-west"],
     # cpu updates stage nothing local; disk is runtime + spill only.
     rollout_ephemeral_disk_mib=524_288,
     trainer_ephemeral_disk_mib=2_097_152,

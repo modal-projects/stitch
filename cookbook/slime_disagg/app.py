@@ -137,14 +137,14 @@ SGLANG_SERVER_ARGS = {
 }
 
 
-# The rollout Server: a thin module-level class (Modal requires @app.cls at global scope)
-# whose enter/exit delegate to the shared common.server logic. sglang + the stitch sidecar.
-@app.cls(
+# The rollout Server is a thin module-level class whose lifecycle delegates to the
+# shared common.server logic: sglang plus the stitch sidecar.
+@app.server(
     image=server_image,
     gpu=f"{modal_cfg.gpu}:{slime_cfg.rollout_num_gpus_per_engine}",
     cpu=modal_cfg.rollout_cpu,
     cloud=modal_cfg.cloud,
-    region=modal_cfg.region,
+    compute_region=modal_cfg.region,
     volumes={
         str(HF_CACHE_PATH): hf_cache_volume,
         str(CHECKPOINTS_PATH): checkpoint_volume,
@@ -154,19 +154,17 @@ SGLANG_SERVER_ARGS = {
     },
     min_containers=modal_cfg.rollout_min_containers,
     max_containers=modal_cfg.rollout_max_containers,
-    timeout=40 * MINUTES,
+    target_concurrency=ROLLOUT_CONCURRENCY,
     scaledown_window=15 * MINUTES,
     ephemeral_disk=modal_cfg.rollout_ephemeral_disk_mib,
     memory=modal_cfg.rollout_memory_mib,
     include_source=False,
-)
-@modal.experimental.http_server(
     port=SIDECAR_PORT,
-    proxy_regions=modal_cfg.proxy_regions,
-    exit_grace_period=25,
+    routing_region=modal_cfg.routing_region,
+    unauthenticated=True,
+    exit_grace_period=60 * MINUTES,
     startup_timeout=SERVER_STARTUP_TIMEOUT,
 )
-@modal.concurrent(target_inputs=ROLLOUT_CONCURRENCY)
 class Server:
     @modal.enter()
     def startup(self) -> None:

@@ -507,7 +507,7 @@ wheels = [
 
 [[package]]
 name = "modal"
-version = "1.5.1.dev10"
+version = "1.5.4.dev11"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
@@ -524,9 +524,9 @@ dependencies = [
     { name = "typing-extensions" },
     { name = "watchfiles" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/df/d8/a411a2ab084a73bc028835a5f5e37217e26c1d711841a84640aa8f91bf68/modal-1.5.1.dev10.tar.gz", hash = "sha256:c36c15e1a60e031ab34ac9ee9109786a0363bf888ccc5ae4aeff6d795a94e81e", size = 787356, upload-time = "2026-06-19T01:29:55.396Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/92/fb/8e6f3fe3eac24cce398a7107efd1b3b1202848ea2cd2423522b62afdc78b/modal-1.5.4.dev11.tar.gz", hash = "sha256:64ce19f28f5136d07f5fbd8438ad8644b682ba0799be2c58b03f684fc2001cb9", size = 852557, upload-time = "2026-08-02T00:56:40.476Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ec/8f/dec98992d3f6cec2c43a2a0b06b7129f230c0179f3217ed1708fd53ac727/modal-1.5.1.dev10-py3-none-any.whl", hash = "sha256:8f87d256fae3a4a75502bf3eac9fdf5e8a89d355e5cfa8dbe61d99fc5354dec2", size = 898275, upload-time = "2026-06-19T01:29:52.473Z" },
+    { url = "https://files.pythonhosted.org/packages/95/4b/8907b96e9cad1af131a894f738eff7881be62b584e808b861355f28e7513/modal-1.5.4.dev11-py3-none-any.whl", hash = "sha256:fe8ac9c7c14887e240ad4d1d283505f39a0c9894c70ecf3691c620fdb1a9d0f6", size = 968325, upload-time = "2026-08-02T00:56:38.891Z" },
 ]
 
 [[package]]
@@ -1012,7 +1012,7 @@ requires-dist = [
     { name = "fastapi", marker = "extra == 'sglang'" },
     { name = "httpx", marker = "extra == 'modal'" },
     { name = "httpx", marker = "extra == 'sglang'" },
-    { name = "modal", marker = "extra == 'modal'", specifier = ">=1.5.1.dev9" },
+    { name = "modal", marker = "extra == 'modal'", specifier = ">=1.5.4.dev11" },
 ]
 provides-extras = ["modal", "sglang"]
 
@@ -1020,7 +1020,7 @@ provides-extras = ["modal", "sglang"]
 dev = [
     { name = "fastapi" },
     { name = "httpx" },
-    { name = "modal", specifier = ">=1.5.1.dev9" },
+    { name = "modal", specifier = ">=1.5.4.dev11" },
     { name = "pytest" },
     { name = "ruff", specifier = "==0.15.1" },
 ]

@@ -59,7 +59,6 @@ modal = ModalConfig(
     rollout_min_containers=4,
     rollout_max_containers=4,
     rollout_target_inputs=32,
-    proxy_regions=["us-west"],
     # Local disk holds runtime files and spill; CPU delta updates do not
     # materialize a target checkpoint.
     rollout_ephemeral_disk_mib=524_288,
