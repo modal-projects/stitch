@@ -18,8 +18,9 @@ from pathlib import Path
 
 import modal
 
-from cookbook.common.constants import CHECKPOINTS_PATH
+from cookbook.common.constants import CHECKPOINTS_PATH, HF_CACHE_PATH
 from cookbook.common.serving_image import build_serving_image
+from cookbook.miles_disagg import prep, trainer_image
 from cookbook.miles_disagg.configs import glm5_2_nvfp4 as model
 from tools.profiling._delta_weight_update import (
     WeightUpdateSpec,
@@ -52,7 +53,12 @@ LOCAL_TARGET_CHECKPOINT_DIR = "/local-checkpoint/glm5-2-nvfp4/target"
 SGLANG_CACHE_PATH = "/root/.cache/sglang"
 
 app = modal.App(APP_NAME)
-checkpoint_volume = modal.Volume.from_name("miles-checkpoints", version=2)
+hf_cache_volume = modal.Volume.from_name(
+    "huggingface-cache", create_if_missing=True, version=2
+)
+checkpoint_volume = modal.Volume.from_name(
+    "miles-checkpoints", create_if_missing=True, version=2
+)
 delta_volume = modal.Volume.from_name(
     "stitch-synthetic-deltas",
     create_if_missing=True,
@@ -63,8 +69,15 @@ sglang_cache_volume = modal.Volume.from_name(
     create_if_missing=True,
     version=2,
 )
+prep_image = trainer_image.build_trainer_image(
+    hf_cache_path=str(HF_CACHE_PATH),
+    experiment=EXPERIMENT,
+    miles_repo_ref=model.MILES_REPO_REF,
+    extra_pip_packages=model.TRAINER_EXTRA_PIP_PACKAGES,
+    image_run_commands=model.TRAINER_IMAGE_RUN_COMMANDS,
+)
 serving_image = build_serving_image(
-    hf_cache_path="/root/.cache/huggingface",
+    hf_cache_path=str(HF_CACHE_PATH),
     experiment=EXPERIMENT,
     extra_env=model.SGLANG_SERVER_ENV,
 ).add_local_dir(
@@ -87,6 +100,21 @@ def _pipeline_shard_for_tensor(name: str) -> int:
         if layer < layer_end:
             return stage
     raise ValueError(f"layer {layer} is outside the target-model pipeline")
+
+
+@app.function(
+    image=prep_image,
+    gpu=f"{model.modal.gpu}:1",
+    memory=model.modal.trainer_memory_mib,
+    volumes={
+        str(HF_CACHE_PATH): hf_cache_volume,
+        str(CHECKPOINTS_PATH): checkpoint_volume,
+    },
+    secrets=[modal.Secret.from_name("huggingface-secret")],
+    timeout=6 * 60 * 60,
+)
+def prepare_base() -> None:
+    prep.prepare_checkpoints(model, checkpoint_volume)
 
 
 @app.function(
@@ -141,5 +169,6 @@ def benchmark(update_mode: str, runtime: str, sample_id: str) -> dict:
 
 @app.local_entrypoint()
 def main(update_mode: str = "cpu", sample_id: str = "1") -> None:
+    prepare_base.remote()
     prepare_delta.remote()
     benchmark.remote(parse_update_mode(update_mode), modal_runtime_label(), sample_id)

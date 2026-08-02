@@ -1,16 +1,12 @@
 """Profile one Kimi K2.6 NVFP4 delta weight update on Modal.
 
-CPU destination with Modal's default runtime:
-
-    uv run --extra modal modal run -d \
-      tools/profiling/kimi_k2_6_nvfp4_delta_weight_update.py \
-      --update-mode cpu
-
-Disk destination with the runc runtime:
+The entrypoint prepares the pinned serving checkpoint with the Miles NVFP4
+recipe, builds a standardized element-wise synthetic delta, and runs one
+verified update.
 
     MODAL_FUNCTION_RUNTIME=runc uv run --extra modal modal run -d \
       tools/profiling/kimi_k2_6_nvfp4_delta_weight_update.py \
-      --update-mode disk
+      --update-mode cpu
 """
 
 from __future__ import annotations
@@ -19,33 +15,42 @@ from pathlib import Path
 
 import modal
 
+from cookbook.common.constants import CHECKPOINTS_PATH, HF_CACHE_PATH
 from cookbook.common.serving_image import build_serving_image
+from cookbook.miles_disagg import prep, trainer_image
+from cookbook.miles_disagg.configs import kimi_k2_6_nvfp4 as model
 from tools.profiling._delta_weight_update import (
     WeightUpdateSpec,
     modal_runtime_label,
     parse_update_mode,
     run_delta_weight_update,
 )
+from tools.profiling._synthetic_delta import (
+    SyntheticDeltaSpec,
+    prepare_standard_delta,
+    synthetic_delta_profile_id,
+)
 
 APP_NAME = "profile-kimi-k2-6-nvfp4-delta-weight-update"
 EXPERIMENT = "kimi_k2_6_nvfp4"
-BASE_VOLUME_NAME = "miles-prep-checkpoints"
-DELTA_VOLUME_NAME = "stitch-delta-kimi-k2-6-nvfp4"
-SGLANG_CACHE_VOLUME_NAME = "sglang-cache"
-
-BASE_MOUNT = "/prep"
-BASE_CHECKPOINT_DIR = "/prep/kimi-k2-6/nvfp4"
-DELTA_MOUNT = "/delta-bulletin"
-SGLANG_CACHE_MOUNT = "/root/.cache/sglang"
+DELTA_MOUNT = "/synthetic-delta"
+DELTA_SPEC = SyntheticDeltaSpec(
+    checkpoint_format="nvfp4",
+    quantized_value_density=0.003,
+    high_precision_value_density=0.01,
+    # Text-only RL leaves the vision encoder and projector fixed.
+    immutable_prefixes=("vision_tower.", "mm_projector."),
+)
+DELTA_ID = f"kimi-k2-6/{model.SOURCE_REVISION}/{synthetic_delta_profile_id(DELTA_SPEC)}"
+DELTA_SOURCE_DIR = f"{DELTA_MOUNT}/{DELTA_ID}"
+BASE_CHECKPOINT_DIR = str(model.ROLLOUT_CHECKPOINT_PATH)
 LOCAL_CHECKPOINT_ROOT = "/local-checkpoint/kimi-k2-6-nvfp4"
 LOCAL_TARGET_CHECKPOINT_DIR = f"{LOCAL_CHECKPOINT_ROOT}/target"
 LOCAL_CANONICAL_CHECKPOINT_DIR = f"{LOCAL_CHECKPOINT_ROOT}/canonical"
-
-DEFAULT_RUN_ID = "520c51f61535"
-DEFAULT_TARGET_VERSION = 1
+SGLANG_CACHE_PATH = "/root/.cache/sglang"
 
 SGLANG_SERVER_ARGS = {
-    "--served-model-name": "moonshotai/Kimi-K2.6",
+    "--served-model-name": model.SOURCE_MODEL,
     "--load-format": "fastsafetensors",
     "--model-loader-extra-config": '{"enable_gds":false}',
     "--weight-loader-drop-cache-after-load": "",
@@ -69,11 +74,24 @@ SGLANG_SERVER_ARGS = {
 }
 
 app = modal.App(APP_NAME)
-base_volume = modal.Volume.from_name(BASE_VOLUME_NAME, version=2)
-delta_volume = modal.Volume.from_name(DELTA_VOLUME_NAME, version=2)
-sglang_cache_volume = modal.Volume.from_name(SGLANG_CACHE_VOLUME_NAME, version=2)
-image = build_serving_image(
-    hf_cache_path="/root/.cache/huggingface",
+hf_cache_volume = modal.Volume.from_name(
+    "huggingface-cache", create_if_missing=True, version=2
+)
+checkpoint_volume = modal.Volume.from_name(
+    "miles-checkpoints", create_if_missing=True, version=2
+)
+delta_volume = modal.Volume.from_name(
+    "stitch-synthetic-deltas", create_if_missing=True, version=2
+)
+sglang_cache_volume = modal.Volume.from_name(
+    "sglang-cache", create_if_missing=True, version=2
+)
+prep_image = trainer_image.build_trainer_image(
+    hf_cache_path=str(HF_CACHE_PATH),
+    experiment=EXPERIMENT,
+)
+serving_image = build_serving_image(
+    hf_cache_path=str(HF_CACHE_PATH),
     experiment=EXPERIMENT,
 ).add_local_dir(
     str(Path(__file__).resolve().parents[1]),
@@ -83,28 +101,54 @@ image = build_serving_image(
 
 
 @app.function(
-    image=image,
+    image=prep_image,
+    gpu=f"{model.modal.gpu}:1",
+    memory=model.modal.trainer_memory_mib,
+    volumes={
+        str(HF_CACHE_PATH): hf_cache_volume,
+        str(CHECKPOINTS_PATH): checkpoint_volume,
+    },
+    secrets=[modal.Secret.from_name("huggingface-secret")],
+    timeout=6 * 60 * 60,
+)
+def prepare_base() -> None:
+    prep.prepare_checkpoints(model, checkpoint_volume)
+
+
+@app.function(
+    image=serving_image,
+    cpu=64,
+    memory=(64 * 1024, 512 * 1024),
+    volumes={
+        str(CHECKPOINTS_PATH): checkpoint_volume.read_only(),
+        DELTA_MOUNT: delta_volume,
+    },
+    timeout=6 * 60 * 60,
+)
+def prepare_delta() -> dict:
+    return prepare_standard_delta(
+        BASE_CHECKPOINT_DIR,
+        DELTA_SOURCE_DIR,
+        spec=DELTA_SPEC,
+        commit=delta_volume.commit,
+    )
+
+
+@app.function(
+    image=serving_image,
     gpu="B300:4",
     cpu=64,
     memory=(1024 * 1024, 3 * 1024 * 1024),
-    # Disk mode retains both the 595 GB immutable base and a complete mutable
-    # target. Keep enough local capacity for both plus filesystem headroom.
+    # Disk mode retains both the immutable base and a complete mutable target.
     ephemeral_disk=1_572_864,
     volumes={
-        BASE_MOUNT: base_volume,
-        DELTA_MOUNT: delta_volume,
-        SGLANG_CACHE_MOUNT: sglang_cache_volume,
+        str(CHECKPOINTS_PATH): checkpoint_volume.read_only(),
+        DELTA_MOUNT: delta_volume.read_only(),
+        SGLANG_CACHE_PATH: sglang_cache_volume,
     },
     timeout=4 * 60 * 60,
 )
-def benchmark(
-    run_id: str,
-    target_version: int,
-    update_mode: str,
-    runtime: str,
-    sample_id: str,
-) -> dict:
-    delta_volume.reload()
+def benchmark(update_mode: str, runtime: str, sample_id: str) -> dict:
     return run_delta_weight_update(
         WeightUpdateSpec(
             model_name="Kimi K2.6 NVFP4",
@@ -112,8 +156,8 @@ def benchmark(
             local_target_checkpoint_dir=LOCAL_TARGET_CHECKPOINT_DIR,
             server_args=SGLANG_SERVER_ARGS,
         ),
-        source_dir=f"{DELTA_MOUNT}/{run_id}",
-        target_version=target_version,
+        source_dir=DELTA_SOURCE_DIR,
+        target_version=1,
         update_mode=parse_update_mode(update_mode),
         runtime=runtime,
         sample_id=sample_id,
@@ -121,16 +165,7 @@ def benchmark(
 
 
 @app.local_entrypoint()
-def main(
-    run_id: str = DEFAULT_RUN_ID,
-    target_version: int = DEFAULT_TARGET_VERSION,
-    update_mode: str = "cpu",
-    sample_id: str = "1",
-) -> None:
-    benchmark.remote(
-        run_id,
-        target_version,
-        parse_update_mode(update_mode),
-        modal_runtime_label(),
-        sample_id,
-    )
+def main(update_mode: str = "cpu", sample_id: str = "1") -> None:
+    prepare_base.remote()
+    prepare_delta.remote()
+    benchmark.remote(parse_update_mode(update_mode), modal_runtime_label(), sample_id)

@@ -131,7 +131,8 @@ uv run --extra modal python -m cookbook.common.smoke \
 
 ## Profile an update
 
-The model profilers support `--update-mode disk|cpu`:
+The model profilers prepare their pinned base checkpoint and synthetic delta,
+then run with `--update-mode disk|cpu`:
 
 ```bash
 uv run --extra modal modal run -d \
@@ -139,8 +140,9 @@ uv run --extra modal modal run -d \
   --update-mode cpu
 ```
 
-They generate during staging, pause the engine to activate the target, validate
-the new version, and report timing and resource use. SGLang rejects
+Prepared artifacts are reused. The profilers generate during staging, pause
+the engine to activate the target, validate the new version, and report timing
+and resource use. SGLang rejects
 logprob-returning requests when DFlash or DSPARK is enabled, so those profiles
 compare repeated deterministic text instead of token IDs and logprobs.
 
