@@ -31,7 +31,8 @@ DISABLE_HF_XET = True
 DISABLE_HF_TRANSFER = True
 
 MEGATRON_RUNTIME_PATCHES = [
-    "/root/cookbook/miles_disagg/patches/megatron-r3-dispatch.patch"
+    "/root/cookbook/miles_disagg/patches/megatron-r3-dispatch.patch",
+    "/root/cookbook/miles_disagg/patches/megatron-hdo-dp-reshardable-step.patch",
 ]
 
 SGLANG_SERVER_ARGS = {
