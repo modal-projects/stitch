@@ -142,8 +142,8 @@ uv run --extra modal modal run -d \
 
 Prepared artifacts are reused. The profilers generate during staging, pause
 the engine to activate the target, validate the new version, and report timing
-and resource use. SGLang rejects
-logprob-returning requests when DFlash or DSPARK is enabled, so those profiles
+and resource use. The pinned SGLang runtime returns aligned verifier logprobs
+for DFlash. DSpark still rejects logprob-returning requests, so its profiles
 compare repeated deterministic text instead of token IDs and logprobs.
 
 The K3 profiler downloads the pinned public checkpoint and constructs a
