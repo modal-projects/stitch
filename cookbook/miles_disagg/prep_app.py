@@ -42,7 +42,10 @@ miles_cfg = exp.miles
 image = trainer_image.build_trainer_image(
     hf_cache_path=str(HF_CACHE_PATH),
     experiment=EXPERIMENT,
+    miles_repo_ref=getattr(exp, "MILES_REPO_REF", trainer_image.MILES_REPO_REF),
     miles_local=MILES_LOCAL_DIR,
+    extra_pip_packages=getattr(exp, "TRAINER_EXTRA_PIP_PACKAGES", ()),
+    image_run_commands=getattr(exp, "TRAINER_IMAGE_RUN_COMMANDS", ()),
 )
 
 hf_cache_volume = modal.Volume.from_name(
@@ -88,6 +91,7 @@ _TORCH_DIST_MULTINODE = modal_cfg.torch_dist_prep_nodes > 1
         str(HF_CACHE_PATH): hf_cache_volume,
         str(CHECKPOINTS_PATH): checkpoint_volume,
     },
+    memory=modal_cfg.trainer_memory_mib,
     timeout=6 * 60 * MINUTES,
     ephemeral_disk=(
         modal_cfg.torch_dist_prep_ephemeral_disk_mib

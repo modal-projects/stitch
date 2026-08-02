@@ -76,7 +76,10 @@ image = trainer_image.build_trainer_image(
     hf_cache_path=str(HF_CACHE_PATH),
     experiment=EXPERIMENT,
     run_id=RUN_ID,
+    miles_repo_ref=getattr(exp, "MILES_REPO_REF", trainer_image.MILES_REPO_REF),
     miles_local=MILES_LOCAL_DIR,
+    extra_pip_packages=getattr(exp, "TRAINER_EXTRA_PIP_PACKAGES", ()),
+    image_run_commands=getattr(exp, "TRAINER_IMAGE_RUN_COMMANDS", ()),
 )
 server_image = serving_image.build_serving_image(
     hf_cache_path=str(HF_CACHE_PATH),
@@ -130,7 +133,11 @@ app = modal.App(APP_NAME)
 
 SGLANG_SERVER_ARGS = {
     "--served-model-name": miles_cfg.hf_checkpoint,
-    "--cuda-graph-max-bs-decode": str(ROLLOUT_CONCURRENCY),
+    **(
+        {}
+        if "--cuda-graph-config" in exp.SGLANG_SERVER_ARGS
+        else {"--cuda-graph-max-bs-decode": str(ROLLOUT_CONCURRENCY)}
+    ),
     "--max-running-requests": str(ROLLOUT_CONCURRENCY),
     "--trust-remote-code": "",
     **exp.SGLANG_SERVER_ARGS,
@@ -149,7 +156,11 @@ SGLANG_SERVER_ARGS = {
         str(CHECKPOINTS_PATH): checkpoint_volume,
         str(STITCH_PATH): run_volume,
         SGLANG_CACHE_PATH: sglang_cache_volume,
-        **({str(DRAFT_PATH): draft_volume} if draft_volume is not None else {}),
+        **(
+            {str(DRAFT_PATH): draft_volume.read_only()}
+            if draft_volume is not None
+            else {}
+        ),
     },
     min_containers=modal_cfg.rollout_min_containers,
     max_containers=modal_cfg.rollout_max_containers,
@@ -201,6 +212,11 @@ _MULTINODE = miles_cfg.n_train_nodes > 1
     cloud=modal_cfg.cloud,
     region=modal_cfg.region,
     volumes=train_volumes,
+    secrets=(
+        [modal.Secret.from_name("wandb-secret")]
+        if getattr(miles_cfg, "use_wandb", False)
+        else []
+    ),
     ephemeral_disk=modal_cfg.trainer_ephemeral_disk_mib,
     timeout=24 * 60 * MINUTES,
     startup_timeout=20 * MINUTES,
