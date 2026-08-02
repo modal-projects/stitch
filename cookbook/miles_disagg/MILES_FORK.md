@@ -1,14 +1,18 @@
-# Miles fork
+# Miles forks
 
-Stitch’s Miles recipes pin a small fork for opaque rollout-fleet routing and
-canonical disk-delta publication. [`trainer_image.py`](trainer_image.py) is the
-executable source of truth:
+Stitch’s Miles recipes use a dated trainer image and an immutable Miles commit.
+[`trainer_image.py`](trainer_image.py) defines the default:
 
 ```python
-MILES_IMAGE_TAG = "radixark/miles:dev-202607260602"
+MILES_IMAGE_TAG = "radixark/miles:dev-202607290235"
 MILES_REPO_URL = "https://github.com/modal-projects/miles.git"
 MILES_REPO_REF = "1eb7520018446cb94b7406715f66dff1a271b53b"
 ```
+
+An experiment config may override `MILES_REPO_REF` without changing other
+recipes. GLM-5.2 does this because it runs on Miles’ fully-async SWE branch.
+
+## Standard weight-sync branch
 
 The branch `stitch-weight-sync-v0516` is upstream `radixark/miles` main at
 `52403d0e3` plus six commits:
@@ -22,9 +26,25 @@ The branch `stitch-weight-sync-v0516` is upstream `radixark/miles` main at
 | `d814b87c3` | Replace the unused delta progress bar with an explicit baseline-snapshot log. |
 | `1eb752001` | Honor ModelOpt glob exclusions when exporting NVFP4 weights. |
 
-The dated base image supplies Megatron-LM, TransformerEngine, CUDA, and the
-other compiled dependencies. The fork is installed over it with `--no-deps`;
-therefore the image and the upstream Miles revision must remain compatible.
+## GLM-5.2 fully-async SWE branch
+
+`glm5_2_nvfp4.py` pins `stitch-miles-fully-async-swe` at `7cdfcf78c8f7`. The
+branch is `modal/feat/modal-swe-fully-async` at `b6c8286de` plus:
+
+| Commit | Responsibility |
+| --- | --- |
+| `32dd379cc` | Format the fully-async files touched by the integration. |
+| `78c22109d` | Route session rollouts through one external fleet endpoint with request gating and finite timeouts. |
+| `f32272102` | Publish disk deltas without Miles-managed rollout-engine handles. |
+| `c17cadee6` | Match GLM-5.2 router tensor dtypes to the canonical checkpoint. |
+| `7cdfcf78c` | Encode zero-dimensional checkpoint tensors safely. |
+
+This branch is additive and only backs the GLM-5.2 fully-async experiment. It
+does not replace the standard recipe pin.
+
+The dated image supplies Megatron-LM, TransformerEngine, CUDA, and other
+compiled dependencies. Miles is installed over it with `--no-deps`, so the
+image and Miles revision must remain compatible.
 
 ## Responsibilities
 
@@ -48,11 +68,10 @@ layouts as the base checkpoint.
 
 ## Re-porting
 
-When updating Miles:
+When updating a Miles pin:
 
-1. create a new branch from the desired `radixark/miles` main;
-2. reapply the six responsibilities separately, dropping code already
-   available upstream;
+1. start from the intended upstream branch;
+2. reapply only the responsibilities still missing upstream;
 3. keep canonical checkpoint layout changes scoped to `disk-delta`;
 4. use a dated Miles image whose Megatron and TransformerEngine match that
    upstream revision;

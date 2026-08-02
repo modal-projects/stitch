@@ -135,6 +135,10 @@ CPU mode keeps rank-ready images in RAM for the shortest commit:
 Stitch starts step 1 in the background. A published delta waits for that same
 initialization task; it does not start a second cache build. An initialization
 or staging failure is reported and the GPU remains on its prior weights.
+Registering a model-sized rank image as CUDA host memory is also one-time work,
+but can delay active inference on very large models. Initialize the CPU
+destination before routing latency-sensitive traffic when warmup latency
+matters.
 
 CPU mode is delta-only. It rejects FULL publications and cannot reset a patched
 live replica to another run’s v0; the controller must use disk mode or replace
@@ -186,11 +190,12 @@ Measured component sizes are:
 | --- | ---: | ---: | ---: |
 | GLM-4.5-Air FP8 | 4 | 112.6 GB | 27.2 GB × 4 |
 | Kimi K2.6 NVFP4 | 4 | about 595 GB | about 151 GB × 4 |
+| GLM-5.2 mixed NVFP4/BF16 | 4 | 617.6 GB | 156.3 GB × 4 |
 | Kimi K3 MXFP4 | 8 | 1.561 TB | 207.5 GB × 8 |
 
 Allow additional memory for the engine process, delta decoding, and bounded
-loader staging. The supplied recipes request `(512 GiB, 2 TiB)` for GLM and
-`(1 TiB, 3 TiB)` for Kimi K2.6 and Kimi K3, expressed as
+loader staging. The supplied GLM-4.5 recipe requests `(512 GiB, 2 TiB)`;
+GLM-5.2, Kimi K2.6, and Kimi K3 request `(1 TiB, 3 TiB)`, expressed as
 `(request, limit)`.
 
 All runtime storages are prepared and committed. Element-wise sparsity only
