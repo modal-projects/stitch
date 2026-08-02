@@ -302,6 +302,10 @@ class _GenerationProbe:
         return {
             "samples": len(self.samples),
             "errors": self.errors,
+            "weight_versions": sorted(
+                {sample["weight_version"] for sample in self.samples},
+                key=lambda value: "" if value is None else str(value),
+            ),
             "latency_min_s": min(latencies) if latencies else None,
             "latency_median_s": (
                 round(statistics.median(latencies), 6) if latencies else None
@@ -499,8 +503,9 @@ def run_delta_weight_update(
         speculative_algorithm = spec.server_args.get(
             "--speculative-algorithm", ""
         ).upper()
-        # These SGLang speculative workers reject return_logprob requests.
-        fingerprint_logprobs = speculative_algorithm not in {"DFLASH", "DSPARK"}
+        # DSpark rejects return_logprob requests. The pinned SGLang runtime
+        # supports aligned verifier logprobs for DFlash.
+        fingerprint_logprobs = speculative_algorithm != "DSPARK"
         baseline_fingerprint = _generate(
             url,
             fingerprint=True,
@@ -559,6 +564,13 @@ def run_delta_weight_update(
                     "generation was not healthy during destination initialization: "
                     f"{generation.summary()}"
                 )
+            if {sample["weight_version"] for sample in generation.samples} != {
+                baseline_fingerprint["weight_version"]
+            }:
+                raise RuntimeError(
+                    "generation switched weight versions during destination "
+                    f"initialization: {generation.summary()}"
+                )
             if update_mode == "disk":
                 results["destination_init_cache_drop"] = _drop_checkpoint_page_cache(
                     spec.local_target_checkpoint_dir
@@ -595,6 +607,13 @@ def run_delta_weight_update(
             if generation.errors or not generation.samples:
                 raise RuntimeError(
                     f"generation was not healthy during staging: {generation.summary()}"
+                )
+            if {sample["weight_version"] for sample in generation.samples} != {
+                baseline_fingerprint["weight_version"]
+            }:
+                raise RuntimeError(
+                    "generation switched weight versions during staging: "
+                    f"{generation.summary()}"
                 )
 
             commit_started = time.perf_counter()
