@@ -19,6 +19,7 @@ class SGLangEngine(Engine):
         delta_update_mode: Literal["disk", "cpu"] = "disk",
         disk_load_format: str = "auto",
         control_timeout: float = 120.0,
+        weight_staging_timeout: float = 3600.0,
         weight_update_timeout: float = 600.0,
     ) -> None:
         if delta_update_mode not in ("disk", "cpu"):
@@ -34,6 +35,7 @@ class SGLangEngine(Engine):
         self.delta_update_mode = delta_update_mode
         self.disk_load_format = disk_load_format
         self._control_timeout = control_timeout
+        self._weight_staging_timeout = weight_staging_timeout
         self._weight_update_timeout = weight_update_timeout
 
     def base_url(self) -> str:
@@ -164,7 +166,7 @@ class SGLangEngine(Engine):
         await self._post(
             "/stage_weight_update",
             payload,
-            timeout=self._weight_update_timeout,
+            timeout=self._weight_staging_timeout,
             action="weight staging",
         )
 

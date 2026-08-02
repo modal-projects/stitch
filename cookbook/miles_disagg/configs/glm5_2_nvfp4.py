@@ -111,8 +111,9 @@ SGLANG_SERVER_ARGS = {
     "--reasoning-parser": "glm45",
     "--tool-call-parser": "glm47",
     "--context-length": str(SGLANG_CONTEXT_LENGTH),
-    # attention — bf16 KV split
+    # attention — BF16 KV
     "--attention-backend": "dsa",
+    "--kv-cache-dtype": "bfloat16",
     "--dsa-prefill-backend": "flashmla_sparse",
     "--dsa-decode-backend": "trtllm",
     "--dsa-topk-backend": "sgl-kernel",
@@ -136,7 +137,7 @@ SGLANG_SERVER_ARGS = {
     "--speculative-num-steps": "1",
     "--speculative-eagle-topk": "1",
     "--speculative-draft-attention-backend": "flashinfer",
-    "--speculative-draft-load-format": "safetensors",
+    "--speculative-draft-load-format": "fastsafetensors",
     "--speculative-draft-model-path": str(DFLASH_CHECKPOINT_PATH),
     "--speculative-draft-model-quantization": "unquant",
     "--speculative-draft-window-size": "4096",

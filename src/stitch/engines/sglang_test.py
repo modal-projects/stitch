@@ -244,6 +244,28 @@ def test_initialize_update_destination(mode: str) -> None:
     assert requests == [("/stage_weight_update", expected)]
 
 
+def test_staging_and_commit_have_independent_timeouts() -> None:
+    engine = SGLangEngine(
+        "http://engine",
+        "/base",
+        "/ckpt",
+        weight_staging_timeout=3600.0,
+        weight_update_timeout=600.0,
+    )
+    requests = []
+
+    async def fake_post(path, payload, *, timeout=None, action=None):
+        requests.append((path, timeout))
+
+    engine._post = fake_post  # type: ignore[method-assign]
+    asyncio.run(engine.stage(_manifest(VersionKind.DELTA), "/source/weight_v000005"))
+    asyncio.run(engine.commit(_manifest(VersionKind.DELTA)))
+    assert requests == [
+        ("/stage_weight_update", 3600.0),
+        ("/update_weights_from_disk", 600.0),
+    ]
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:
