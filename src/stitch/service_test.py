@@ -75,6 +75,25 @@ class _HangingUpstream:
             raise
 
 
+class _MetricsUpstream:
+    """Return a minimal Prometheus payload and record whether it was requested."""
+
+    def __init__(self) -> None:
+        self.requests: list[tuple[str, str]] = []
+        self.started = asyncio.Event()
+        self.finish = asyncio.Event()
+
+    async def request(self, method: str, url: str, **_kwargs: Any) -> httpx.Response:
+        self.requests.append((method, url))
+        self.started.set()
+        await self.finish.wait()
+        return httpx.Response(
+            200,
+            content=b"# TYPE sglang:num_running_reqs gauge\nsglang:num_running_reqs 0\n",
+            headers={"content-type": "text/plain; version=0.0.4; charset=utf-8"},
+        )
+
+
 async def _asgi_post(
     app: Any, payload: dict[str, Any], *, disconnect_on: asyncio.Event | None = None
 ):
@@ -182,6 +201,44 @@ def test_client_disconnect_cancels_aborts_and_releases_admission(monkeypatch):
         assert upstream.abort_rids == ["rollout-2"]
         assert gate.active_requests == 0
         assert status == 499
+
+    asyncio.run(go())
+
+
+def test_metrics_bypasses_weight_admission_before_first_pointer(monkeypatch):
+    async def go():
+        upstream = _MetricsUpstream()
+        gate = AdmissionGate()
+        app = create_app(gate, _ProxyEngine())  # type: ignore[arg-type]
+        sidecar = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://sidecar"
+        )
+        monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: upstream)
+
+        async with sidecar:
+            blocked = await sidecar.get("/v1/models")
+            request = asyncio.create_task(sidecar.get("/metrics"))
+            await upstream.started.wait()
+
+            async def apply() -> None:
+                pass
+
+            assert gate.active_requests == 0
+            await asyncio.wait_for(
+                gate.commit(apply=apply, on_applied=lambda: None, drain_all=True),
+                timeout=1.0,
+            )
+            assert not request.done()
+
+            upstream.finish.set()
+            response = await request
+
+        assert blocked.status_code == 409
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/plain; version=0.0.4")
+        assert response.content.startswith(b"# TYPE sglang:num_running_reqs gauge")
+        assert upstream.requests == [("GET", "http://local-engine:8001/metrics")]
+        assert gate.active_requests == 0
 
     asyncio.run(go())
 
