@@ -50,14 +50,12 @@ GPUS_PER_TRAINER_NODE = 8
 ROLLOUT_GPUS_PER_ENGINE = 4
 ROLLOUT_BATCH_SIZE = 32
 N_SAMPLES_PER_PROMPT = 8
-ROLLOUT_TO_TRAINER_GPU_RATIO = 1
 ROLLOUT_INPUTS_PER_ENGINE = 24
-ROLLOUT_ENGINES = (
-    TRAINER_NODES
-    * GPUS_PER_TRAINER_NODE
-    * ROLLOUT_TO_TRAINER_GPU_RATIO
-    // ROLLOUT_GPUS_PER_ENGINE
-)
+ROLLOUT_MAX_RUNNING_REQUESTS = 32
+# Bound scheduler-poll and routing skew to the headroom above the routing target.
+# Sustained excess load gets a retryable 503 instead of an unbounded engine queue.
+ROLLOUT_MAX_QUEUED_REQUESTS = ROLLOUT_MAX_RUNNING_REQUESTS - ROLLOUT_INPUTS_PER_ENGINE
+ROLLOUT_ENGINES = 32
 ROLLOUT_CONCURRENT_SAMPLES = ROLLOUT_ENGINES * ROLLOUT_INPUTS_PER_ENGINE
 MAX_SEQ_LEN = 65_536
 # SGLang's request boundary needs a small physical-context margin. Miles still
@@ -122,7 +120,8 @@ SGLANG_SERVER_ARGS = {
     # memory / batching
     "--mem-fraction-static": "0.80",
     "--chunked-prefill-size": "16384",
-    "--max-running-requests": "32",
+    "--max-running-requests": str(ROLLOUT_MAX_RUNNING_REQUESTS),
+    "--max-queued-requests": str(ROLLOUT_MAX_QUEUED_REQUESTS),
     "--schedule-conservativeness": "1.0",
     "--schedule-policy": "lpm",
     "--cuda-graph-config": (
@@ -192,6 +191,8 @@ class _Miles(MilesConfig):
     rollout_num_gpus = 0
     rollout_num_gpus_per_engine = ROLLOUT_GPUS_PER_ENGINE
     # An opaque endpoint has one Miles-side semaphore for the complete fleet.
+    # A saturated engine's 503 retry holds its slot, feeding backpressure into
+    # session generation instead of admitting another trajectory.
     sglang_server_concurrency = ROLLOUT_CONCURRENT_SAMPLES
     rollout_endpoint_url = None
 
