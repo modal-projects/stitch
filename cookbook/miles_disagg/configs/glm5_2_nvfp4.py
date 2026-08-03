@@ -118,7 +118,7 @@ SGLANG_SERVER_ARGS = {
     # MoE
     "--moe-runner-backend": "flashinfer_trtllm_routed",
     # memory / batching
-    "--mem-fraction-static": "0.80",
+    "--mem-fraction-static": "0.85",
     "--chunked-prefill-size": "16384",
     "--max-running-requests": str(ROLLOUT_MAX_RUNNING_REQUESTS),
     "--max-queued-requests": str(ROLLOUT_MAX_QUEUED_REQUESTS),
@@ -146,12 +146,13 @@ SGLANG_SERVER_ARGS = {
 
 modal = ModalConfig(
     gpu="B300",
+    rollout_gpu="B300",
     region="us",
     trainer_memory_mib=(1024 * 1024, 3 * 1024 * 1024),
     # CPU mode retains both the canonical checkpoint and TP rank images.
     rollout_memory_mib=(1024 * 1024, 3 * 1024 * 1024),
     rollout_min_containers=ROLLOUT_ENGINES,
-    rollout_max_containers=ROLLOUT_ENGINES,
+    rollout_max_containers=None,
     rollout_target_inputs=ROLLOUT_INPUTS_PER_ENGINE,
     draft_volume=DFLASH_VOLUME,
     routing_region="us-west",

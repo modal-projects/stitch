@@ -29,7 +29,7 @@ from typing import Any
 import modal
 import modal.experimental
 
-from cookbook.common import launch, ray_cluster, server, serving_image
+from cookbook.common import launch, ray_cluster, router, server, serving_image
 from cookbook.common.constants import (
     CHECKPOINTS_PATH,
     DATA_PATH,
@@ -45,7 +45,7 @@ from cookbook.common.constants import (
 from cookbook.slime_disagg import trainer_image
 from cookbook.slime_disagg.config import YAML_CONFIG_FIELDS, SlimeConfig
 from cookbook.slime_disagg.trainer_image import SLIME_ROOT
-from stitch.pools.modal_flash import ModalFlashPool
+from stitch.pools.modal_flash_lb_temp import ModalFlashLBPool
 
 EXPERIMENT = os.environ[
     "EXPERIMENT_CONFIG"
@@ -141,7 +141,7 @@ SGLANG_SERVER_ARGS = {
 # shared common.server logic: sglang plus the stitch sidecar.
 @app.server(
     image=server_image,
-    gpu=f"{modal_cfg.gpu}:{slime_cfg.rollout_num_gpus_per_engine}",
+    gpu=modal_cfg.rollout_gpus(slime_cfg.rollout_num_gpus_per_engine),
     cloud=modal_cfg.cloud,
     compute_region=modal_cfg.region,
     volumes={
@@ -186,6 +186,66 @@ class Server:
     @modal.exit()
     def stop(self) -> None:
         server.serve_stop(self)
+
+
+# ── Session-routing LB (cookbook/common/router.py) ─────────────────────────────
+# The router is two CPU Flash classes in this same app, so it deploys and dies with
+# the pool; the GPU class keeps ``Server``, rollout traffic enters through ``Router``.
+router_image = router.build_router_image(EXPERIMENT, RUN_ID)
+session_routes = router.session_routes_dict(APP_NAME)
+
+
+@app.server(
+    image=router_image,
+    cpu=2,
+    memory=1024,
+    min_containers=modal_cfg.router_registry_min_containers,
+    routing_region=modal_cfg.routing_region,
+    include_source=False,
+    port=8000,
+    unauthenticated=True,
+)
+class RouterRegistry:
+    """Polls Server replicas' live queue depth; serves the snapshot at /loads."""
+
+    @modal.enter()
+    def enter(self) -> None:
+        router.serve_registry(self, app_name=APP_NAME, upstream_cls="Server")
+
+    @modal.exit()
+    def exit(self) -> None:
+        router.stop_server(self)
+
+
+@app.server(
+    image=router_image,
+    cpu=4,
+    memory=2048,
+    min_containers=modal_cfg.router_min_containers,
+    target_concurrency=modal_cfg.router_target_concurrency,
+    routing_region=modal_cfg.routing_region,
+    include_source=False,
+    port=8000,
+    unauthenticated=True,
+    exit_grace_period=30 * MINUTES,
+)
+class Router:
+    """Front door for rollout traffic: session-affinity routing across Server replicas,
+    with 503 eviction + retry, so a saturated replica sheds sessions instead of
+    attracting them."""
+
+    @modal.enter()
+    def enter(self) -> None:
+        router.serve_router(
+            self,
+            registry_url=RouterRegistry.get_url(),
+            upstream_url=Server.get_url(),
+            session_routes=session_routes,
+        )
+
+    @modal.exit()
+    def exit(self) -> None:
+        router.stop_server(self)
 
 
 # ── Trainer (slime on Ray) ────────────────────────────────────────────────────
@@ -244,7 +304,7 @@ class Trainer:
             return
 
         cfg = SlimeConfig.from_payload(payload)
-        cfg.rollout_endpoint_url = ModalFlashPool(APP_NAME, "Server").gateway_url()
+        cfg.rollout_endpoint_url = ModalFlashLBPool(APP_NAME, "Server").gateway_url()
         # Slime requires this CLI argument; the deployment owns its run-scoped value.
         cfg.update_weight_disk_dir = str(UPDATES_DIR)
         hook_knobs = {
