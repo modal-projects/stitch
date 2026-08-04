@@ -15,7 +15,7 @@ SGLANG_RUNTIME = SGLangRuntime(
     ),
     repository="https://github.com/modal-projects/sglang.git",
     branch="stitch-sglang-kimi-k3",
-    commit="8b508a478730f73eb4419e1a2adde8425732ea95",
+    commit="977e33dd4560463d3a9a981ba3ed764de289e858",
 )
 
 SGLANG_SERVER_ARGS = {
