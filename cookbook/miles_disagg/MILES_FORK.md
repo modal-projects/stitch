@@ -28,16 +28,16 @@ The branch `stitch-weight-sync-v0516` is upstream `radixark/miles` main at
 
 ## GLM-5.2 fully-async SWE branch
 
-`glm5_2_nvfp4.py` pins `stitch-miles-fully-async-swe` at `2879896c0322`. The
-branch is `modal/feat/modal-swe-fully-async` at `5c71d12dd` plus:
+`glm5_2_nvfp4.py` pins `stitch-miles-fully-async-swe` at `de7135830b54`. The
+branch is `modal/feat/modal-swe-fully-async` at `13e39b5bf` plus:
 
 | Commit | Responsibility |
 | --- | --- |
-| `b4217c624` | Format the fully-async files touched by the integration. |
-| `13657f774` | Route session rollouts through one external fleet endpoint with request gating and finite timeouts. |
-| `495d65b92` | Publish disk deltas without Miles-managed rollout-engine handles. |
-| `1b5f67b81` | Match GLM-5.2 router tensor dtypes to the canonical checkpoint. |
-| `2879896c0` | Encode zero-dimensional checkpoint tensors safely. |
+| `0a781cfd5` | Format the fully-async files touched by the integration. |
+| `14b831ba2` | Route session rollouts through one external fleet endpoint with request gating and finite timeouts. |
+| `b568da274` | Publish disk deltas without Miles-managed rollout-engine handles. |
+| `274831db8` | Match GLM-5.2 router tensor dtypes to the canonical checkpoint. |
+| `de7135830` | Encode zero-dimensional checkpoint tensors safely. |
 
 This branch is additive and only backs the GLM-5.2 fully-async experiment. It
 does not replace the standard recipe pin.
