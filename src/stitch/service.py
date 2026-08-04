@@ -147,8 +147,14 @@ def create_app(
             k: v for k, v in request.headers.items() if k.lower() not in _DROP_HEADERS
         }
 
+        # Metrics may be scraped before the first pointer exists. Keep the exporter
+        # available without making scrapes participate in weight commits.
         try:
-            async with reconciler.admit(constraint if is_versioned else None) as served:
+            async with (
+                contextlib.nullcontext()
+                if request.method == "GET" and route == "metrics"
+                else reconciler.admit(constraint if is_versioned else None)
+            ) as served:
                 if is_versioned and payload is not None and served is not None:
                     engine.stamp_request(payload, served)
                 kwargs: dict[str, Any] = {
