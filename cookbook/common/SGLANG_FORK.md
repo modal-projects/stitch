@@ -14,7 +14,7 @@ DEFAULT_SGLANG_RUNTIME = SGLangRuntime(
     image="lmsysorg/sglang:v0.5.16",
     repository="https://github.com/modal-projects/sglang.git",
     branch="stitch-sglang-v0.5.16",
-    commit="1051a95a6ab16773037f8795a51aa03a1664a3b2",
+    commit="0094b725b9adbf19a7035421f295477e69b421aa",
 )
 ```
 
@@ -34,6 +34,7 @@ The branch is upstream v0.5.16 plus:
 | `1a4a4fd6b5` | Return aligned verifier logprobs for DFlash rollout tokens. |
 | `607e107b44` | Store the canonical CPU-cache checkpoint on NVMe and overlap verified persistence with bounded rank-image compilation. |
 | `1051a95a6a` | Balance CPU delta transforms across persistent worker tasks. |
+| `0094b725b9` | Support top-p-only sampling masks through the native generation and chat-completions APIs. |
 
 The image and branch must use the same SGLang release because Stitch overlays
 Python code onto the image’s existing CUDA and C++ extensions.
