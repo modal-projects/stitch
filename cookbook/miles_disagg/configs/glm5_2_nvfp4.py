@@ -304,6 +304,7 @@ class _Miles(MilesConfig):
     context_parallel_size = 4
     expert_model_parallel_size = 16
     expert_tensor_parallel_size = 1
+    distributed_timeout_minutes = 60
     allgather_cp = True
     moe_enable_deepep = True
     moe_token_dispatcher_type = "flex"
