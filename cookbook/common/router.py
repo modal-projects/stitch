@@ -15,11 +15,10 @@ router pins each ``modal-session-id`` to the least-loaded healthy replica via th
 retries on a healthier one, so load spreads instead of sticking.
 
 Deltas from the upstream router: no proxy-auth/api-key secret plumbing (cookbook pools are
-``unauthenticated``), replica discovery reuses ``modal.experimental.flash_get_containers``
-(the same call ``ModalFlashPool`` makes), stdlib logging, and startup tolerates the sibling
-classes still cold-booting (single-app deploys have no boot ordering) instead of dying on
-the first failed poll. The legacy-tuple session-route migration is dropped — per-run route
-dicts start empty.
+``unauthenticated``), replica discovery reuses Stitch's ``ModalFlashPool`` adapter, stdlib
+logging, and startup tolerates the sibling classes still cold-booting (single-app deploys
+have no boot ordering) instead of dying on the first failed poll. The legacy-tuple
+session-route migration is dropped — per-run route dicts start empty.
 """
 
 from __future__ import annotations
@@ -39,8 +38,9 @@ import httpx
 import modal
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import StreamingResponse
-from modal._utils.async_utils import synchronize_api
 from pydantic import BaseModel, TypeAdapter
+
+from stitch.pools.modal_flash import list_flash_containers_async
 
 logger = logging.getLogger(__name__)
 
@@ -75,43 +75,6 @@ def build_router_image(experiment: str, run_id: str) -> modal.Image:
 def session_routes_dict(app_name: str) -> modal.Dict:
     """The run's session→replica affinity store, namespaced to the run app."""
     return modal.Dict.from_name(f"{app_name}-session-routes", create_if_missing=True)
-
-
-async def _list_flash_containers_rpc(app_name: str, cls_name: str) -> list[Any]:
-    from modal.client import _Client
-    from modal.config import config
-    from modal_proto import api_pb2
-
-    client = await _Client.from_env()
-    fn = await client.stub.FunctionGet(
-        api_pb2.FunctionGetRequest(
-            app_name=app_name,
-            object_tag=cls_name,
-            environment_name=config.get("environment") or "",
-        )
-    )
-    resp = await client.stub.FlashContainerList(
-        api_pb2.FlashContainerListRequest(function_id=fn.function_id)
-    )
-    return list(resp.containers)
-
-
-_list_flash_containers_synchronized = synchronize_api(_list_flash_containers_rpc)
-
-
-async def _list_flash_containers(app_name: str, cls_name: str) -> list[Any]:
-    """Live flash containers of an ``@app.server`` class.
-
-    Deliberately not ``modal.experimental.flash_get_containers``: that helper hydrates
-    the class *service-function* tag ``<Cls>.*``, which ``@app.server`` classes don't
-    register — their web function is the plain ``<Cls>`` tag (confirmed by probe:
-    ``FunctionGet('Server')`` resolves while ``'Server.*'`` 404s). Do the two-step the
-    flash-smart-router does: plain-tag FunctionGet, then FlashContainerList by id — and
-    ride the SDK's synchronicity wrapper: a raw ``client.stub`` await on the uvicorn
-    loop never gets its responses pumped (the registry's startup hung on it until
-    Modal restarted the container — a silent crash loop).
-    """
-    return await _list_flash_containers_synchronized.aio(app_name, cls_name)
 
 
 # ── routing state ────────────────────────────────────────────────────────────
@@ -348,7 +311,7 @@ class _RegistryApp(_UvicornApp):
         return queued + running
 
     async def _poll_once(self) -> list[ContainerInfo]:
-        discovered = await _list_flash_containers(self.app_name, self.upstream_cls)
+        discovered = await list_flash_containers_async(self.app_name, self.upstream_cls)
         upstreams = {}
         for container in discovered:
             if isinstance(container, dict):
