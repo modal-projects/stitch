@@ -90,6 +90,9 @@ PREP_ENV = NVFP4_TRAINING_ENV
 SGLANG_SERVER_ENV = {
     **NVFP4_SERVING_ENV,
     "SGLANG_DSA_PREFILL_DENSE_ATTN_KV_LEN_THRESHOLD": "0",
+    "SGLANG_DSA_TOPK_FLASHINFER_TIE_BREAK": "large",
+    # Honor the configured FlashInfer selector during decode as well as prefill.
+    "SGLANG_OPT_USE_TOPK_V2": "0",
     "SGLANG_SANITIZE_NAN_LOGITS": "true",
 }
 
@@ -110,12 +113,12 @@ SGLANG_SERVER_ARGS = {
     "--reasoning-parser": "glm45",
     "--tool-call-parser": "glm47",
     "--context-length": str(SGLANG_CONTEXT_LENGTH),
-    # attention — BF16 KV
+    # attention — FP8 KV
     "--attention-backend": "dsa",
-    "--kv-cache-dtype": "bfloat16",
+    "--kv-cache-dtype": "fp8_e4m3",
     "--dsa-prefill-backend": "flashmla_sparse",
     "--dsa-decode-backend": "trtllm",
-    "--dsa-topk-backend": "sgl-kernel",
+    "--dsa-topk-backend": "flashinfer",
     # MoE
     "--moe-runner-backend": "flashinfer_trtllm_routed",
     # memory / batching
@@ -368,6 +371,7 @@ class _Miles(MilesConfig):
         "NCCL_NVLS_ENABLE": "1",
         # GLM-5 uses interleaved, not NeoX-style, rotary pairs in the DSA indexer.
         "INDEXER_ROPE_NEOX_STYLE": "0",
+        "SGLANG_DSA_TOPK_FLASHINFER_TIE_BREAK": "large",
         "RAY_health_check_timeout_ms": "60000",
         "MILES_EXPERIMENTAL_ROLLOUT_REFACTOR": "1",
         "AGENT_MODEL_NAME": "model",
