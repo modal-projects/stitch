@@ -68,20 +68,39 @@ def _interface_for_ip(ip: str) -> str:
     raise RuntimeError(f"no network interface owns Modal cluster IP {ip}")
 
 
+def _ray_start_command(my_ip: str, *args: str) -> list[str]:
+    # NVSHMEM uses the hostname to identify node-local peers. Modal containers
+    # share a hostname, so Ray and its workers need a per-node UTS hostname.
+    node_hostname = f"stitch-{my_ip.replace('.', '-')}"
+    return [
+        "unshare",
+        "--user",
+        "--map-root-user",
+        "--uts",
+        "bash",
+        "-c",
+        'hostname "$1" && shift && exec "$@"',
+        "stitch-ray-node",
+        node_hostname,
+        "ray",
+        "start",
+        *args,
+    ]
+
+
 def start_ray_head(my_ip: str, n_nodes: int, *, ray_port: int) -> None:
     import ray
 
     try:
         subprocess.run(
-            [
-                "ray",
-                "start",
+            _ray_start_command(
+                my_ip,
                 "--head",
                 f"--node-ip-address={my_ip}",
                 f"--port={ray_port}",
                 "--disable-usage-stats",
                 "--include-dashboard=false",
-            ],
+            ),
             check=True,
             timeout=RAY_START_TIMEOUT,
         )
@@ -113,14 +132,13 @@ def start_ray_head(my_ip: str, n_nodes: int, *, ray_port: int) -> None:
 
 def start_ray_worker(my_ip: str, master_addr: str, *, ray_port: int) -> None:
     subprocess.run(
-        [
-            "ray",
-            "start",
+        _ray_start_command(
+            my_ip,
             f"--node-ip-address={my_ip}",
             "--address",
             f"{master_addr}:{ray_port}",
             "--disable-usage-stats",
-        ],
+        ),
         check=True,
         timeout=RAY_START_TIMEOUT,
     )

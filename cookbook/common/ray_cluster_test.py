@@ -27,6 +27,23 @@ def test_interface_for_ip_rejects_missing_address() -> None:
         ray_cluster._interface_for_ip("10.100.0.2")
 
 
+def test_ray_start_command_sets_per_node_uts_hostname() -> None:
+    assert ray_cluster._ray_start_command("10.100.0.2", "--head") == [
+        "unshare",
+        "--user",
+        "--map-root-user",
+        "--uts",
+        "bash",
+        "-c",
+        'hostname "$1" && shift && exec "$@"',
+        "stitch-ray-node",
+        "stitch-10-100-0-2",
+        "ray",
+        "start",
+        "--head",
+    ]
+
+
 def test_start_ray_node_pins_nvshmem_to_cluster_interface(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
