@@ -100,6 +100,13 @@ def test_claim_run() -> None:
     assert pool.woke == [VersionRef("r2", 0)]
 
 
+def test_claim_run_at_base_is_idempotent() -> None:
+    store, pool = FakeStore(VersionRef("r2", 0)), FakePool()
+    claim_run(store, pool, "r2")
+    assert store._pointer == VersionRef("r2", 0)
+    assert pool.woke == [VersionRef("r2", 0)]
+
+
 def test_claim_rewind_rejected() -> None:
     store = FakeStore(VersionRef("r2", 3))
     try:

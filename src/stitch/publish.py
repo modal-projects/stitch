@@ -49,13 +49,17 @@ def publish_version(
 def claim_run(store: Store, pool: Pool | None, run_id: str) -> None:
     """Start a run at base before its first publish: write the base pointer and wake the
     pool, so every replica (cold or warm on a finished run) resets to base up front. A
-    reused ``run_id`` (the run's per-launch fence token) is a rewind — rejected here so a
-    restart can't leave the pool pinned to a dead incarnation's high-water mark."""
-    decide_pointer_move(
-        store.read_pointer(), VersionRef(run_id, 0)
-    )  # rewind guard (a reused run_id)
+    reused ``run_id`` above base is a rewind, while retrying an interrupted base claim is
+    idempotent."""
+    base = VersionRef(run_id, 0)
+    current = store.read_pointer()
+    if current == base:
+        _wake(pool, base)
+        logger.info("run %s already claimed at base", run_id)
+        return
+    decide_pointer_move(current, base)  # rewind guard (a reused run_id above base)
     store.claim(run_id)
-    _wake(pool, VersionRef(run_id, 0))
+    _wake(pool, base)
     logger.info("claimed run %s at base", run_id)
 
 
