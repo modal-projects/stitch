@@ -434,17 +434,17 @@ class _ProxyApp(_UvicornApp):
         maybe_count = (
             self.count_in_flight(container) if container else contextlib.nullcontext()
         )
-        async with self.client.stream(
-            url=f"{self.upstream_url}/{path}",
-            method=request.method,
-            params=request.query_params,
-            headers=headers,
-            content=body,
-            # Long read timeout: non-streaming completions send nothing until
-            # generation finishes. Connect should still fail fast.
-            timeout=httpx.Timeout(20 * 60, connect=10),
-        ) as response:
-            with maybe_count:
+        with maybe_count:
+            async with self.client.stream(
+                url=f"{self.upstream_url}/{path}",
+                method=request.method,
+                params=request.query_params,
+                headers=headers,
+                content=body,
+                # Long read timeout: non-streaming completions send nothing until
+                # generation finishes. Connect should still fail fast.
+                timeout=httpx.Timeout(20 * 60, connect=10),
+            ) as response:
                 yield response  # first yield: caller inspects status/headers
 
                 start = time.perf_counter()
