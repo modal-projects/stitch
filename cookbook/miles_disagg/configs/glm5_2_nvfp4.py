@@ -17,7 +17,7 @@ TRAINER_EXTRA_PIP_PACKAGES = (
     "harbor[modal,huggingface]==0.20.0",
     "mini-swe-agent==2.4.5",
     "swebench==4.1.0",
-    "modal==1.5.1",
+    "modal==1.5.3",
 )
 TRAINER_IMAGE_RUN_COMMANDS = (
     "uv pip install --system --break-system-packages flashinfer-python==0.6.15.post1",
@@ -277,18 +277,19 @@ class _Miles(MilesConfig):
     session_server_startup_timeout_seconds = 180
     tito_session_mismatch_sample_rate = 0.0625
 
-    num_rollout = 300
+    num_rollout = 500
     save_interval = 10
     rollout_batch_size = ROLLOUT_BATCH_SIZE
     n_samples_per_prompt = N_SAMPLES_PER_PROMPT
     global_batch_size = 256
     rollout_temperature = 1.0
-    rollout_top_p = 1.0
+    rollout_top_p = 0.95
     rollout_max_response_len = 8192
     max_seq_len = MAX_SEQ_LEN
     use_dynamic_global_batch_size = True
     max_weight_staleness = 6
     async_max_concurrent_samples = ROLLOUT_CONCURRENT_SAMPLES
+    eval_interval = None
 
     use_rollout_routing_replay = True
     use_fault_tolerance = True
@@ -333,12 +334,18 @@ class _Miles(MilesConfig):
     advantage_estimator = "grpo"
     eps_clip = 0.2
     eps_clip_high = 0.28
-    use_rollout_logprobs = True
+    use_rollout_logprobs = False
+    use_tis = True
     get_mismatch_metrics = True
     custom_tis_function_path = (
-        "examples.infra_features.train_infer_mismatch_helper.mis."
-        "compute_mis_weights_with_cp"
+        "miles.backends.training_utils.loss_hub.corrections.icepop_function"
     )
+    tis_clip_low = 0.5
+    tis_clip = 5.0
+    kl_coef = 0.0
+    use_kl_loss = False
+    kl_loss_coef = None
+    kl_loss_type = None
     entropy_coef = 0.0
 
     use_wandb = True
@@ -371,13 +378,16 @@ class _Miles(MilesConfig):
         "MODAL_SWE_MODEL_REQUEST_TIMEOUT": "1800",
         "MODAL_SWE_EXEC_TIMEOUT": "120",
         "MODAL_SWE_OUTPUT_HARD_LIMIT_BYTES": str(16 * 1024 * 1024),
-        "MODAL_SWE_SETUP_TIMEOUT": "600",
+        "MODAL_SWE_SETUP_TIMEOUT": "240",
         "MODAL_SWE_VERIFY_TIMEOUT": "3600",
         "MODAL_SWE_INJECT_PYTEST_REPORTER": "0",
         "MODAL_SWE_CPUS": "2",
         "MODAL_SWE_MEMORY_MIB": "16384",
         "MODAL_SWE_AGENT_PROCESSES": "48",
         "MODAL_SWE_AGENT_THREADS_PER_PROCESS": "16",
+        # Bound concurrent schedule/setup operations near the requested 500-wide
+        # control-plane envelope: 48 controller processes * 10 boots = 480.
+        "MODAL_SWE_SANDBOX_BOOT_CONCURRENCY_PER_PROCESS": "10",
         **NVFP4_TRAINING_ENV,
     }
 
