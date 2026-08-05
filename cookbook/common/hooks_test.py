@@ -160,6 +160,28 @@ def test_request_hook_min_lag() -> None:
         assert request["max_retries"] == 900
 
 
+def test_request_hook_reads_local_pointer_without_refresh() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        store = ModalVolumeStore(root, run_id="run-abc")
+        store.advance_pointer(VersionRef("run-abc", 1))
+        hooks._latest = hooks._CachedPointer()
+        original_refresh = ModalVolumeStore.refresh
+
+        def unexpected_refresh(_store) -> None:
+            raise AssertionError(
+                "the trainer-local request gate must not reload the Volume"
+            )
+
+        ModalVolumeStore.refresh = unexpected_refresh
+        try:
+            assert asyncio.run(hooks._latest.get(_args(str(root)), ttl=0)) == 1
+            store.advance_pointer(VersionRef("run-abc", 2))
+            assert asyncio.run(hooks._latest.get(_args(str(root)), ttl=0)) == 2
+        finally:
+            ModalVolumeStore.refresh = original_refresh
+
+
 def test_sample_affinity_key_fallbacks() -> None:
     assert hooks.sample_affinity_key(SimpleNamespace(group_index=7)) == "group-7"
     assert (

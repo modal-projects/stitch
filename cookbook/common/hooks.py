@@ -10,7 +10,6 @@ ModalFlashPool.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 from pathlib import Path
@@ -114,9 +113,11 @@ async def gated_rollout_request_hook(
 
 
 class _CachedPointer:
-    """TTL-cached ``latest`` version. The per-request hook gets no rollout id, so the
-    staleness floor comes from the published pointer (already advanced by the publish
-    hook), cached with a Volume reload so it isn't reloaded once per request."""
+    """TTL-cached ``latest`` version from the trainer's local Volume mount.
+
+    The publish and request hooks are co-located on the trainer head. Cross-host
+    visibility belongs to rollout-replica reconciliation, not request admission.
+    """
 
     def __init__(self) -> None:
         self._version = 0
@@ -141,9 +142,6 @@ class _CachedPointer:
         if now - self._at >= ttl:
             self._at = now
             try:
-                await asyncio.to_thread(
-                    store.refresh
-                )  # reload is blocking; keep the loop free
                 pointer = store.read_pointer()
                 self._version = pointer.version if pointer else 0
             except Exception:  # noqa: BLE001
