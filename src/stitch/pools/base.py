@@ -1,8 +1,9 @@
 """The ``Pool`` port — a client to the running elastic replica pool.
 
-Instances subclass this base: ``pools/modal_flash.py`` (Modal Flash). Add k8s as a new
-subclass. Override ``gateway_url`` and ``discover_replicas``; ``wake`` and ``scale`` are
-optional (their no-op defaults fall back to the replicas' own polling / load-autoscale).
+Instances subclass this base: ``pools/modal_flash.py`` (Modal Flash) and its
+``modal_flash_lb_temp`` variant (the same, fronted by the session-routing LB). Add k8s as a
+new subclass. Override ``gateway_url`` and ``discover_replicas``; ``wake`` and ``scale``
+are optional (their no-op defaults fall back to the replicas' own polling / load-autoscale).
 
 The ``*_async`` variants serve callers running on an event loop (an async control plane,
 ``service.readiness``). Their defaults thread the sync implementation, so every subclass is
