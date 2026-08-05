@@ -51,8 +51,8 @@ GPUS_PER_TRAINER_NODE = 8
 ROLLOUT_GPUS_PER_ENGINE = 4
 ROLLOUT_BATCH_SIZE = 32
 N_SAMPLES_PER_PROMPT = 8
-ROLLOUT_INPUTS_PER_ENGINE = 24
-ROLLOUT_MAX_RUNNING_REQUESTS = 32
+ROLLOUT_INPUTS_PER_ENGINE = 16
+ROLLOUT_MAX_RUNNING_REQUESTS = 24
 # Bound scheduler-poll and routing skew to the headroom above the routing target.
 # Sustained excess load gets a retryable 503 instead of an unbounded engine queue.
 ROLLOUT_MAX_QUEUED_REQUESTS = ROLLOUT_MAX_RUNNING_REQUESTS - ROLLOUT_INPUTS_PER_ENGINE
@@ -113,11 +113,11 @@ SGLANG_SERVER_ARGS = {
     "--reasoning-parser": "glm45",
     "--tool-call-parser": "glm47",
     "--context-length": str(SGLANG_CONTEXT_LENGTH),
-    # attention — FP8 KV
+    # attention — keep KV in FlashMLA sparse prefill's native dtype.
     "--attention-backend": "dsa",
-    "--kv-cache-dtype": "fp8_e4m3",
+    "--kv-cache-dtype": "bfloat16",
     "--dsa-prefill-backend": "flashmla_sparse",
-    "--dsa-decode-backend": "trtllm",
+    "--dsa-decode-backend": "flashmla_kv",
     "--dsa-topk-backend": "flashinfer",
     # MoE
     "--moe-runner-backend": "flashinfer_trtllm_routed",
