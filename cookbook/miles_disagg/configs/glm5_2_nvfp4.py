@@ -30,6 +30,7 @@ TRAINER_IMAGE_RUN_COMMANDS = (
 )
 MEGATRON_RUNTIME_PATCHES = [
     "/root/cookbook/miles_disagg/patches/megatron-hdo-dp-reshardable-step.patch",
+    "/root/cookbook/miles_disagg/patches/megatron-r3-dispatch.patch",
 ]
 
 SOURCE_MODEL = "zai-org/GLM-5.2"
@@ -304,10 +305,11 @@ class _Miles(MilesConfig):
     context_parallel_size = 4
     expert_model_parallel_size = 16
     expert_tensor_parallel_size = 1
+    # Ray materializes fully async batches independently on each trainer node.
+    # Use the configurable process-group timeout instead of DeepEP's fixed host timeout.
     distributed_timeout_minutes = 60
     allgather_cp = True
-    moe_enable_deepep = True
-    moe_token_dispatcher_type = "flex"
+    moe_token_dispatcher_type = "alltoall"
     use_dynamic_batch_size = True
     max_tokens_per_gpu = 16384
     data_pad_size_multiplier = 1024
