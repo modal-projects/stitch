@@ -113,11 +113,11 @@ SGLANG_SERVER_ARGS = {
     "--reasoning-parser": "glm45",
     "--tool-call-parser": "glm47",
     "--context-length": str(SGLANG_CONTEXT_LENGTH),
-    # attention — keep KV in FlashMLA sparse prefill's native dtype.
+    # attention — use Blackwell's native FP8 DSA path for target KV.
     "--attention-backend": "dsa",
-    "--kv-cache-dtype": "bfloat16",
-    "--dsa-prefill-backend": "flashmla_sparse",
-    "--dsa-decode-backend": "flashmla_kv",
+    "--kv-cache-dtype": "fp8_e4m3",
+    "--dsa-prefill-backend": "trtllm",
+    "--dsa-decode-backend": "trtllm",
     "--dsa-topk-backend": "flashinfer",
     # MoE
     "--moe-runner-backend": "flashinfer_trtllm_routed",
