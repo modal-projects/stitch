@@ -28,7 +28,7 @@ The branch `stitch-weight-sync-v0516` is upstream `radixark/miles` main at
 
 ## GLM-5.2 fully-async SWE branch
 
-`glm5_2_nvfp4.py` pins `stitch-miles-fully-async-swe` at `6280a2196ba3`. The
+`glm5_2_nvfp4.py` pins `stitch-miles-fully-async-swe` at `3ddf366ca888`. The
 branch is `modal/feat/modal-swe-fully-async` at `a999ec511` plus:
 
 | Commit | Responsibility |
@@ -39,6 +39,7 @@ branch is `modal/feat/modal-swe-fully-async` at `a999ec511` plus:
 | `7e91d93ad` | Match GLM-5.2 router tensor dtypes to the canonical checkpoint. |
 | `098e4dc78` | Encode zero-dimensional checkpoint tensors safely. |
 | `6280a2196` | Read scalar and version-constraint model-info responses from an external fleet. |
+| `3ddf366ca` | Overlap external disk-delta baseline preparation with the first rollout. |
 
 This branch is additive and only backs the GLM-5.2 fully-async experiment. It
 does not replace the standard recipe pin.
