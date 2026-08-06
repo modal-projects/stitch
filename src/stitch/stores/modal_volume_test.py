@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 from stitch.publish import publish_version
@@ -119,6 +120,40 @@ def test_runs_sharing_a_volume_have_independent_state() -> None:
         assert second.read_pointer() == VersionRef("run-b", 0)
         assert Path(first.materialize(VersionRef("run-a", 1))).is_dir()
         assert not Path(second.materialize(VersionRef("run-b", 1))).exists()
+
+
+def test_upload_directory_maps_run_paths_into_volume(monkeypatch) -> None:
+    uploaded: list[tuple[Path, str]] = []
+
+    class Batch:
+        def put_file(self, local: Path, remote: str) -> None:
+            uploaded.append((Path(local), str(remote)))
+
+    class Volume:
+        @contextmanager
+        def batch_upload(self, *, force: bool):
+            assert force
+            yield Batch()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        mount = Path(tmp) / "stitch"
+        root = mount / "run-a"
+        version = root / "updates" / "weight_v000001"
+        version.mkdir(parents=True)
+        (version / "model-00000.safetensors").write_bytes(b"delta")
+        (version / "model.safetensors.index.json").write_text("{}")
+        monkeypatch.setattr(
+            "stitch.stores.modal_volume._volume", lambda _name: Volume()
+        )
+
+        ModalVolumeStore(root, run_id="run-a", volume_name="weights").upload_directory(
+            version
+        )
+
+    assert [remote for _, remote in uploaded] == [
+        "/run-a/updates/weight_v000001/model-00000.safetensors",
+        "/run-a/updates/weight_v000001/model.safetensors.index.json",
+    ]
 
 
 if __name__ == "__main__":

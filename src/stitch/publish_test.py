@@ -58,6 +58,7 @@ def _version_dir(
         )
     index = {"metadata": meta, "weight_map": {"w": "model-00001.safetensors"}}
     (d / "model.safetensors.index.json").write_text(json.dumps(index))
+    (d / "model-00001.safetensors").write_bytes(b"weights")
     return str(d)
 
 
@@ -91,6 +92,21 @@ def test_publish_rewind_rejected() -> None:
             raise AssertionError("expected PointerRewind")
         except PointerRewind:
             pass
+
+
+def test_publish_rejects_missing_payload_before_pointer_moves() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        store = FakeStore()
+        version_dir = Path(_version_dir(tmp, version=1))
+        (version_dir / "model-00001.safetensors").unlink()
+
+        try:
+            publish_version(store, None, str(version_dir), run_id="r1")
+            raise AssertionError("expected FileNotFoundError")
+        except FileNotFoundError as exc:
+            assert "missing model-00001.safetensors" in str(exc)
+
+        assert store._pointer is None
 
 
 def test_claim_run() -> None:

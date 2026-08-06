@@ -7,6 +7,7 @@ compose the Store and Pool ports, so they work with any backend — no Modal her
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 
 from stitch.pools.base import Pool
@@ -33,6 +34,19 @@ def publish_version(
     then wake the pool. Files land before the pointer moves, so a replica never sees a
     pointer to incomplete bytes."""
     manifest = VersionManifest.from_hf_index(version_dir, run_id=run_id)
+    expected_dir = Path(manifest.ref.identity).name
+    if Path(version_dir).name != expected_dir:
+        raise ValueError(
+            f"checkpoint index identifies {expected_dir!r}, but was published from "
+            f"{Path(version_dir).name!r}"
+        )
+    missing = [
+        name for name in manifest.files if not (Path(version_dir) / name).is_file()
+    ]
+    if missing:
+        raise FileNotFoundError(
+            f"incomplete source version {version_dir}: missing " + ", ".join(missing)
+        )
     decide_pointer_move(store.read_pointer(), manifest.ref)  # rewind guard
     store.publish(manifest, version_dir)
     store.advance_pointer(manifest.ref)
