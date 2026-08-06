@@ -70,7 +70,9 @@ def commit_and_wake(args: Any, published_dir: str, rollout_engines: Any = None) 
     preflights = process.dist_all_gather_object(preflight)
     errors = [error for _, error in preflights if error is not None]
     if errors:
-        raise RuntimeError("checkpoint publication preflight failed:\n" + "\n".join(errors))
+        raise RuntimeError(
+            "checkpoint publication preflight failed:\n" + "\n".join(errors)
+        )
     if any(already_published for already_published, _ in preflights):
         logger.warning("%s is already published; leaving it immutable", published_dir)
         return

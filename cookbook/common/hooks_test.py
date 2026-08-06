@@ -72,6 +72,7 @@ def test_commit_and_wake_publishes() -> None:
             return original_commit(store)
 
         hooks._pool = lambda args: pool  # rank is None in tests -> treated as writer
+
         def gather(value):
             events.append("gather")
             return [value]
