@@ -104,6 +104,20 @@ SIDECAR_COMMIT_MODE = "in_place"
 SIDECAR_FLUSH_CACHE_ON_COMMIT = False
 SGLANG_DELTA_UPDATE_MODE = "cpu"
 
+DFLASH_SERVER_ARGS = {
+    "--speculative-algorithm": "DFLASH",
+    "--speculative-attention-mode": "decode",
+    "--speculative-dflash-block-size": "8",
+    "--speculative-num-draft-tokens": "8",
+    "--speculative-num-steps": "1",
+    "--speculative-eagle-topk": "1",
+    "--speculative-draft-attention-backend": "flashinfer",
+    "--speculative-draft-load-format": "fastsafetensors",
+    "--speculative-draft-model-path": str(DFLASH_CHECKPOINT_PATH),
+    "--speculative-draft-model-quantization": "unquant",
+    "--speculative-draft-window-size": "4096",
+}
+
 SGLANG_SERVER_ARGS = {
     # loading / elastic refit
     "--load-format": "fastsafetensors",
@@ -125,12 +139,10 @@ SGLANG_SERVER_ARGS = {
     "--dsa-decode-backend": "flashmla_kv",
     "--dsa-topk-backend": "flashinfer",
     "--page-size": "64",
-    # Four-GPU analogue of the reference's DP2/EP2 layout; DP attention requires DP=TP.
-    "--enable-dp-attention": "",
-    "--dp-size": str(ROLLOUT_GPUS_PER_ENGINE),
+    # Keep four-way expert parallelism and dense TP1 from the Miles reference.
+    # DFlash does not support DP attention, so TP remains four while DP stays one.
     "--ep-size": str(ROLLOUT_GPUS_PER_ENGINE),
     "--moe-dense-tp-size": "1",
-    "--enable-dp-lm-head": "",
     # MoE
     "--moe-runner-backend": "flashinfer_trtllm_routed",
     "--disable-shared-experts-fusion": "",
@@ -145,19 +157,7 @@ SGLANG_SERVER_ARGS = {
         '{"decode":{"backend":"full","max_bs":32,'
         '"bs":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32]}}'
     ),
-    # DFlash is disabled for reference-parity profiling. Keep the complete block
-    # here so it can be re-enabled as one independently tested change.
-    # "--speculative-algorithm": "DFLASH",
-    # "--speculative-attention-mode": "decode",
-    # "--speculative-dflash-block-size": "8",
-    # "--speculative-num-draft-tokens": "8",
-    # "--speculative-num-steps": "1",
-    # "--speculative-eagle-topk": "1",
-    # "--speculative-draft-attention-backend": "flashinfer",
-    # "--speculative-draft-load-format": "fastsafetensors",
-    # "--speculative-draft-model-path": str(DFLASH_CHECKPOINT_PATH),
-    # "--speculative-draft-model-quantization": "unquant",
-    # "--speculative-draft-window-size": "4096",
+    **DFLASH_SERVER_ARGS,
     # RL
     "--enable-return-routed-experts": "",
 }
@@ -172,7 +172,7 @@ modal = ModalConfig(
     rollout_min_containers=ROLLOUT_ENGINES,
     rollout_max_containers=None,
     rollout_target_inputs=ROLLOUT_INPUTS_PER_ENGINE,
-    # draft_volume=DFLASH_VOLUME,  # Re-enable with the DFlash server-argument block.
+    draft_volume=DFLASH_VOLUME,
     routing_region="us-west",
     # CPU updates use ephemeral disk only for runtime scratch and spill.
     rollout_ephemeral_disk_mib=524_288,
