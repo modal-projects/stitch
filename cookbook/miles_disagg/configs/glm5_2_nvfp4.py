@@ -11,7 +11,7 @@ APP_NAME = "stitch-glm5-2-nvfp4"
 EXPERIMENT_VOLUME_NAME = "stitch-miles-glm5-2-nvfp4"
 # This experiment layers Stitch integration onto Miles' fully-async SWE runtime.
 # Other cookbook experiments keep the standard Miles pin in trainer_image.py.
-MILES_REPO_REF = "897dc73025ff916e557688846795bba267c386c5"
+MILES_REPO_REF = "5be8ae5505f748dffbfaccb9474f0390d4f0f098"
 LOCAL_CHECKPOINT_PATH = None
 TRAINER_EXTRA_PIP_PACKAGES = (
     "harbor[modal,huggingface]==0.20.0",
@@ -316,15 +316,15 @@ class _Miles(MilesConfig):
     use_rollout_routing_replay = True
     use_fault_tolerance = True
 
-    # 128 GPUs: TP8 * PP4 * CP2 * DP2. TP stays within each B300 node; four
-    # balanced DSA-valid stages start on layers 1, 19, 39, and 59.
-    tensor_model_parallel_size = 8
+    # 128 GPUs: TP4 * PP4 * CP8 * DP1. Four balanced DSA-valid stages start on
+    # layers 1, 19, 39, and 59; CP8 keeps long-context activations sharded.
+    tensor_model_parallel_size = 4
     sequence_parallel = True
     pipeline_model_parallel_size = 4
     decoder_first_pipeline_num_layers = 18
     decoder_last_pipeline_num_layers = 20
-    context_parallel_size = 2
-    expert_model_parallel_size = 16
+    context_parallel_size = 8
+    expert_model_parallel_size = 32
     expert_tensor_parallel_size = 1
     # Large clustered initialization and rollout-data materialization can exceed
     # the default process-group timeout.
@@ -332,10 +332,11 @@ class _Miles(MilesConfig):
     allgather_cp = True
     moe_token_dispatcher_type = "alltoall"
     use_dynamic_batch_size = True
-    max_tokens_per_gpu = 32768
+    # Keep the same effective sequence budget as CP2: 8K * CP8 = 64K.
+    max_tokens_per_gpu = 8192
     # Forward-only scoring retains no backward activations, so it can pack
     # twice the training budget without changing the backward memory bound.
-    log_probs_max_tokens_per_gpu = 65536
+    log_probs_max_tokens_per_gpu = 16384
     data_pad_size_multiplier = 1024
     log_probs_chunk_size = 16384
     recompute_granularity = "full"
