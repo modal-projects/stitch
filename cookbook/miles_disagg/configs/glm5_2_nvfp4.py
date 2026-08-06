@@ -11,7 +11,7 @@ APP_NAME = "stitch-glm5-2-nvfp4"
 EXPERIMENT_VOLUME_NAME = "stitch-miles-glm5-2-nvfp4"
 # This experiment layers Stitch integration onto Miles' fully-async SWE runtime.
 # Other cookbook experiments keep the standard Miles pin in trainer_image.py.
-MILES_REPO_REF = "676d6a30111aee9b2a00f872d82dab73ee653026"
+MILES_REPO_REF = "897dc73025ff916e557688846795bba267c386c5"
 LOCAL_CHECKPOINT_PATH = None
 TRAINER_EXTRA_PIP_PACKAGES = (
     "harbor[modal,huggingface]==0.20.0",
@@ -38,6 +38,7 @@ SOURCE_REVISION = "b4734de4facf877f85769a911abafc5283eab3d9"
 BF16_CHECKPOINT_PATH = CHECKPOINTS_PATH / "glm5-2-bf16"
 ROLLOUT_CHECKPOINT_PATH = CHECKPOINTS_PATH / "glm5-2-nvfp4"
 TORCH_DIST_CHECKPOINT_PATH = CHECKPOINTS_PATH / "glm5-2-torch-dist"
+CPU_WEIGHT_CACHE_CANONICAL_DIR = "/local-checkpoint/glm5-2-nvfp4/canonical"
 SWEBENCH_PRO_PATH = DATA_PATH / "swebench-pro"
 DFLASH_VOLUME = "dflash-checkpoints"
 DFLASH_CHECKPOINT_PATH = DRAFT_PATH / "zai-org/GLM-5.2/dflash/draft-step-103000"
@@ -110,6 +111,7 @@ SGLANG_SERVER_ARGS = {
     "--model-loader-extra-config": '{"enable_gds":false}',
     "--enable-cpu-weight-cache": "",
     "--cpu-weight-cache-max-compile-group-gb": "8",
+    "--cpu-weight-cache-canonical-checkpoint-dir": CPU_WEIGHT_CACHE_CANONICAL_DIR,
     "--weight-loader-drop-cache-after-load": "",
     "--dist-timeout": "3600",
     "--watchdog-timeout": "3600",
@@ -167,15 +169,17 @@ modal = ModalConfig(
     rollout_gpu="B300",
     region="us",
     trainer_memory_mib=(1024 * 1024, 3 * 1024 * 1024),
-    # CPU mode retains both the canonical checkpoint and TP rank images.
+    # Rank-ready images require about 717 GB. The optional 618 GB canonical
+    # checkpoint stays on local NVMe so the persistent RAM set fits within
+    # Modal's 1 TiB maximum request; the higher limit covers bounded staging.
     rollout_memory_mib=(1024 * 1024, 3 * 1024 * 1024),
     rollout_min_containers=ROLLOUT_ENGINES,
     rollout_max_containers=None,
     rollout_target_inputs=ROLLOUT_INPUTS_PER_ENGINE,
     # draft_volume=DFLASH_VOLUME,  # Re-enable with the DFlash server-argument block.
     routing_region="us-west",
-    # cpu updates stage nothing local; disk is runtime + spill only.
-    rollout_ephemeral_disk_mib=524_288,
+    # Local NVMe holds the canonical checkpoint plus runtime scratch.
+    rollout_ephemeral_disk_mib=1024 * 1024,
     trainer_ephemeral_disk_mib=2_097_152,
     torch_dist_prep_nodes=4,
     torch_dist_prep_gpus_per_node=8,
@@ -334,10 +338,9 @@ class _Miles(MilesConfig):
     log_probs_max_tokens_per_gpu = 65536
     data_pad_size_multiplier = 1024
     log_probs_chunk_size = 16384
-    # Retain only the high-value activation savings; full-layer recomputation
-    # repeats substantially more forward work during every backward pass.
-    recompute_granularity = "selective"
-    recompute_modules = ["mla_up_proj", "layernorm", "moe_act"]
+    recompute_granularity = "full"
+    recompute_method = "uniform"
+    recompute_num_layers = 1
     attention_dropout = 0.0
     hidden_dropout = 0.0
     accumulate_allreduce_grads_in_fp32 = True
@@ -354,8 +357,6 @@ class _Miles(MilesConfig):
     optimizer_cpu_offload = False
     overlap_cpu_optimizer_d2h_h2d = False
     use_precision_aware_optimizer = True
-    overlap_grad_reduce = True
-    overlap_param_gather = True
 
     advantage_estimator = "grpo"
     eps_clip = 0.2
