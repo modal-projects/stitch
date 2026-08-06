@@ -11,7 +11,7 @@ APP_NAME = "stitch-glm5-2-nvfp4"
 EXPERIMENT_VOLUME_NAME = "stitch-miles-glm5-2-nvfp4"
 # This experiment layers Stitch integration onto Miles' fully-async SWE runtime.
 # Other cookbook experiments keep the standard Miles pin in trainer_image.py.
-MILES_REPO_REF = "110addca6c6e9f144aef4a15152a3b5ee128bb14"
+MILES_REPO_REF = "676d6a30111aee9b2a00f872d82dab73ee653026"
 LOCAL_CHECKPOINT_PATH = None
 TRAINER_EXTRA_PIP_PACKAGES = (
     "harbor[modal,huggingface]==0.20.0",
@@ -112,6 +112,7 @@ SGLANG_SERVER_ARGS = {
     "--cpu-weight-cache-max-compile-group-gb": "8",
     "--weight-loader-drop-cache-after-load": "",
     "--dist-timeout": "3600",
+    "--watchdog-timeout": "3600",
     # model / quant
     "--quantization": "modelopt_fp4",
     "--reasoning-parser": "glm45",
@@ -321,11 +322,12 @@ class _Miles(MilesConfig):
     context_parallel_size = 4
     expert_model_parallel_size = 16
     expert_tensor_parallel_size = 1
-    # Ray materializes fully async batches independently on each trainer node.
-    # Use the configurable process-group timeout instead of DeepEP's fixed host timeout.
+    # Large clustered initialization and rollout-data materialization can exceed
+    # the default process-group timeout.
     distributed_timeout_minutes = 60
     allgather_cp = True
-    moe_token_dispatcher_type = "alltoall"
+    moe_token_dispatcher_type = "flex"
+    moe_enable_deepep = True
     use_dynamic_batch_size = True
     max_tokens_per_gpu = 16384
     # Forward-only scoring retains no backward activations, so it can pack
@@ -385,6 +387,9 @@ class _Miles(MilesConfig):
         ),
         "CUDA_DEVICE_MAX_CONNECTIONS": "1",
         "NCCL_NVLS_ENABLE": "1",
+        "NVSHMEM_DISABLE_NCCL": "1",
+        # Retain NVSHMEM bootstrap details for the first multi-node DeepEP run.
+        "NVSHMEM_DEBUG": "INFO",
         # GLM-5 uses interleaved, not NeoX-style, rotary pairs in the DSA indexer.
         "INDEXER_ROPE_NEOX_STYLE": "0",
         "SGLANG_DSA_TOPK_FLASHINFER_TIE_BREAK": "large",
