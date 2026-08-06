@@ -312,32 +312,32 @@ class _Miles(MilesConfig):
     use_rollout_routing_replay = True
     use_fault_tolerance = True
 
-    # 128 GPUs: TP4 * PP8 * CP4, with one data-parallel replica. The uneven
-    # split keeps every DSA pipeline stage on a layer that computes its index.
-    tensor_model_parallel_size = 4
+    # 128 GPUs: TP8 * PP4 * CP2 * DP2. TP stays within each B300 node; four
+    # balanced DSA-valid stages start on layers 1, 19, 39, and 59.
+    tensor_model_parallel_size = 8
     sequence_parallel = True
-    pipeline_model_parallel_size = 8
-    decoder_first_pipeline_num_layers = 14
-    decoder_last_pipeline_num_layers = 16
-    context_parallel_size = 4
+    pipeline_model_parallel_size = 4
+    decoder_first_pipeline_num_layers = 18
+    decoder_last_pipeline_num_layers = 20
+    context_parallel_size = 2
     expert_model_parallel_size = 16
     expert_tensor_parallel_size = 1
     # Large clustered initialization and rollout-data materialization can exceed
     # the default process-group timeout.
     distributed_timeout_minutes = 60
     allgather_cp = True
-    moe_token_dispatcher_type = "flex"
-    moe_enable_deepep = True
+    moe_token_dispatcher_type = "alltoall"
     use_dynamic_batch_size = True
-    max_tokens_per_gpu = 16384
+    max_tokens_per_gpu = 32768
     # Forward-only scoring retains no backward activations, so it can pack
-    # twice as many tokens without changing the training microbatch schedule.
-    log_probs_max_tokens_per_gpu = 32768
+    # twice the training budget without changing the backward memory bound.
+    log_probs_max_tokens_per_gpu = 65536
     data_pad_size_multiplier = 1024
     log_probs_chunk_size = 16384
-    recompute_granularity = "full"
-    recompute_method = "uniform"
-    recompute_num_layers = 1
+    # Retain only the high-value activation savings; full-layer recomputation
+    # repeats substantially more forward work during every backward pass.
+    recompute_granularity = "selective"
+    recompute_modules = ["mla_up_proj", "layernorm", "moe_act"]
     attention_dropout = 0.0
     hidden_dropout = 0.0
     accumulate_allreduce_grads_in_fp32 = True
@@ -351,9 +351,11 @@ class _Miles(MilesConfig):
     weight_decay = 0.1
     adam_beta1 = 0.9
     adam_beta2 = 0.98
-    optimizer_cpu_offload = True
-    overlap_cpu_optimizer_d2h_h2d = True
+    optimizer_cpu_offload = False
+    overlap_cpu_optimizer_d2h_h2d = False
     use_precision_aware_optimizer = True
+    overlap_grad_reduce = True
+    overlap_param_gather = True
 
     advantage_estimator = "grpo"
     eps_clip = 0.2
@@ -387,9 +389,6 @@ class _Miles(MilesConfig):
         ),
         "CUDA_DEVICE_MAX_CONNECTIONS": "1",
         "NCCL_NVLS_ENABLE": "1",
-        "NVSHMEM_DISABLE_NCCL": "1",
-        # Retain NVSHMEM bootstrap details for the first multi-node DeepEP run.
-        "NVSHMEM_DEBUG": "INFO",
         # GLM-5 uses interleaved, not NeoX-style, rotary pairs in the DSA indexer.
         "INDEXER_ROPE_NEOX_STYLE": "0",
         "SGLANG_DSA_TOPK_FLASHINFER_TIE_BREAK": "large",
