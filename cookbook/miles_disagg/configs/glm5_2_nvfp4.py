@@ -11,7 +11,7 @@ APP_NAME = "stitch-glm5-2-nvfp4"
 EXPERIMENT_VOLUME_NAME = "stitch-miles-glm5-2-nvfp4"
 # This experiment layers Stitch integration onto Miles' fully-async SWE runtime.
 # Other cookbook experiments keep the standard Miles pin in trainer_image.py.
-MILES_REPO_REF = "a320cdbd6627047e4d2e2bda929f8f9d4ee36110"
+MILES_REPO_REF = "110addca6c6e9f144aef4a15152a3b5ee128bb14"
 LOCAL_CHECKPOINT_PATH = None
 TRAINER_EXTRA_PIP_PACKAGES = (
     "harbor[modal,huggingface]==0.20.0",
@@ -89,11 +89,15 @@ NVFP4_SERVING_ENV = {
 PREP_ENV = NVFP4_TRAINING_ENV
 SGLANG_SERVER_ENV = {
     **NVFP4_SERVING_ENV,
+    "SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK": "256",
+    "SGLANG_DSA_FUSE_TOPK": "1",
     "SGLANG_DSA_PREFILL_DENSE_ATTN_KV_LEN_THRESHOLD": "0",
     "SGLANG_DSA_TOPK_FLASHINFER_TIE_BREAK": "large",
-    # Honor the configured FlashInfer selector during decode as well as prefill.
-    "SGLANG_OPT_USE_TOPK_V2": "0",
-    "SGLANG_SANITIZE_NAN_LOGITS": "true",
+    # Not enabled by the Miles reference configuration.
+    # "SGLANG_OPT_USE_TOPK_V2": "0",
+    # "SGLANG_SANITIZE_NAN_LOGITS": "true",
+    "INDEXER_ROPE_NEOX_STYLE": "0",
+    "NVSHMEM_DISABLE_NCCL": "1",
 }
 
 SIDECAR_COMMIT_MODE = "in_place"
@@ -113,14 +117,22 @@ SGLANG_SERVER_ARGS = {
     "--reasoning-parser": "glm45",
     "--tool-call-parser": "glm47",
     "--context-length": str(SGLANG_CONTEXT_LENGTH),
-    # attention — use Blackwell's native FP8 DSA path for target KV.
+    # Match the Miles GLM-5.2 reference serving path.
     "--attention-backend": "dsa",
     "--kv-cache-dtype": "fp8_e4m3",
-    "--dsa-prefill-backend": "trtllm",
-    "--dsa-decode-backend": "trtllm",
+    "--dsa-prefill-backend": "flashmla_sparse",
+    "--dsa-decode-backend": "flashmla_kv",
     "--dsa-topk-backend": "flashinfer",
+    "--page-size": "64",
+    # Four-GPU analogue of the reference's DP2/EP2 layout; DP attention requires DP=TP.
+    "--enable-dp-attention": "",
+    "--dp-size": str(ROLLOUT_GPUS_PER_ENGINE),
+    "--ep-size": str(ROLLOUT_GPUS_PER_ENGINE),
+    "--moe-dense-tp-size": "1",
+    "--enable-dp-lm-head": "",
     # MoE
     "--moe-runner-backend": "flashinfer_trtllm_routed",
+    "--disable-shared-experts-fusion": "",
     # memory / batching
     "--mem-fraction-static": "0.85",
     "--chunked-prefill-size": "16384",
@@ -132,18 +144,19 @@ SGLANG_SERVER_ARGS = {
         '{"decode":{"backend":"full","max_bs":32,'
         '"bs":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32]}}'
     ),
-    # speculative
-    "--speculative-algorithm": "DFLASH",
-    "--speculative-attention-mode": "decode",
-    "--speculative-dflash-block-size": "8",
-    "--speculative-num-draft-tokens": "8",
-    "--speculative-num-steps": "1",
-    "--speculative-eagle-topk": "1",
-    "--speculative-draft-attention-backend": "flashinfer",
-    "--speculative-draft-load-format": "fastsafetensors",
-    "--speculative-draft-model-path": str(DFLASH_CHECKPOINT_PATH),
-    "--speculative-draft-model-quantization": "unquant",
-    "--speculative-draft-window-size": "4096",
+    # DFlash is disabled for reference-parity profiling. Keep the complete block
+    # here so it can be re-enabled as one independently tested change.
+    # "--speculative-algorithm": "DFLASH",
+    # "--speculative-attention-mode": "decode",
+    # "--speculative-dflash-block-size": "8",
+    # "--speculative-num-draft-tokens": "8",
+    # "--speculative-num-steps": "1",
+    # "--speculative-eagle-topk": "1",
+    # "--speculative-draft-attention-backend": "flashinfer",
+    # "--speculative-draft-load-format": "fastsafetensors",
+    # "--speculative-draft-model-path": str(DFLASH_CHECKPOINT_PATH),
+    # "--speculative-draft-model-quantization": "unquant",
+    # "--speculative-draft-window-size": "4096",
     # RL
     "--enable-return-routed-experts": "",
 }
@@ -158,7 +171,7 @@ modal = ModalConfig(
     rollout_min_containers=ROLLOUT_ENGINES,
     rollout_max_containers=None,
     rollout_target_inputs=ROLLOUT_INPUTS_PER_ENGINE,
-    draft_volume=DFLASH_VOLUME,
+    # draft_volume=DFLASH_VOLUME,  # Re-enable with the DFlash server-argument block.
     routing_region="us-west",
     # cpu updates stage nothing local; disk is runtime + spill only.
     rollout_ephemeral_disk_mib=524_288,
@@ -315,6 +328,9 @@ class _Miles(MilesConfig):
     moe_token_dispatcher_type = "alltoall"
     use_dynamic_batch_size = True
     max_tokens_per_gpu = 16384
+    # Forward-only scoring retains no backward activations, so it can pack
+    # twice as many tokens without changing the training microbatch schedule.
+    log_probs_max_tokens_per_gpu = 32768
     data_pad_size_multiplier = 1024
     log_probs_chunk_size = 16384
     recompute_granularity = "full"
