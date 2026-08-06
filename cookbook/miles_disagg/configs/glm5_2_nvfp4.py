@@ -38,7 +38,6 @@ SOURCE_REVISION = "b4734de4facf877f85769a911abafc5283eab3d9"
 BF16_CHECKPOINT_PATH = CHECKPOINTS_PATH / "glm5-2-bf16"
 ROLLOUT_CHECKPOINT_PATH = CHECKPOINTS_PATH / "glm5-2-nvfp4"
 TORCH_DIST_CHECKPOINT_PATH = CHECKPOINTS_PATH / "glm5-2-torch-dist"
-CPU_WEIGHT_CACHE_CANONICAL_DIR = "/local-checkpoint/glm5-2-nvfp4/canonical"
 SWEBENCH_PRO_PATH = DATA_PATH / "swebench-pro"
 DFLASH_VOLUME = "dflash-checkpoints"
 DFLASH_CHECKPOINT_PATH = DRAFT_PATH / "zai-org/GLM-5.2/dflash/draft-step-103000"
@@ -111,7 +110,6 @@ SGLANG_SERVER_ARGS = {
     "--model-loader-extra-config": '{"enable_gds":false}',
     "--enable-cpu-weight-cache": "",
     "--cpu-weight-cache-max-compile-group-gb": "8",
-    "--cpu-weight-cache-canonical-checkpoint-dir": CPU_WEIGHT_CACHE_CANONICAL_DIR,
     "--weight-loader-drop-cache-after-load": "",
     "--dist-timeout": "3600",
     "--watchdog-timeout": "3600",
@@ -169,17 +167,15 @@ modal = ModalConfig(
     rollout_gpu="B300",
     region="us",
     trainer_memory_mib=(1024 * 1024, 3 * 1024 * 1024),
-    # Rank-ready images require about 717 GB. The optional 618 GB canonical
-    # checkpoint stays on local NVMe so the persistent RAM set fits within
-    # Modal's 1 TiB maximum request; the higher limit covers bounded staging.
+    # CPU mode retains the canonical checkpoint and TP rank images in memory.
     rollout_memory_mib=(1024 * 1024, 3 * 1024 * 1024),
     rollout_min_containers=ROLLOUT_ENGINES,
     rollout_max_containers=None,
     rollout_target_inputs=ROLLOUT_INPUTS_PER_ENGINE,
     # draft_volume=DFLASH_VOLUME,  # Re-enable with the DFlash server-argument block.
     routing_region="us-west",
-    # Local NVMe holds the canonical checkpoint plus runtime scratch.
-    rollout_ephemeral_disk_mib=1024 * 1024,
+    # CPU updates use ephemeral disk only for runtime scratch and spill.
+    rollout_ephemeral_disk_mib=524_288,
     trainer_ephemeral_disk_mib=2_097_152,
     torch_dist_prep_nodes=4,
     torch_dist_prep_gpus_per_node=8,
