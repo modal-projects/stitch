@@ -10,6 +10,7 @@ MILES_FORK.md next to this file.
 
 from __future__ import annotations
 
+import shlex
 from pathlib import Path
 
 import modal
@@ -41,6 +42,7 @@ def build_trainer_image(
     miles_local: str | None = None,
     extra_pip_packages: tuple[str, ...] = (),
     image_run_commands: tuple[str, ...] = (),
+    source_patches: tuple[Path, ...] = (),
     copy_source: bool = False,
 ) -> modal.Image:
     """The miles trainer image: RDMA/EFA userspace + the pinned miles fork + the
@@ -58,15 +60,26 @@ def build_trainer_image(
         )
         # A baked HF cache must not shadow the mounted volume.
         .run_commands(f"rm -rf {hf_cache_path}")
-        .run_commands(
-            f"rm -rf {MILES_ROOT}"
-            f" && git clone {MILES_REPO_URL} {MILES_ROOT}"
-            f" && cd {MILES_ROOT} && git fetch origin {miles_repo_ref} && git checkout FETCH_HEAD"
-            f" && python3 -m pip install --no-deps -e {MILES_ROOT}"
-        )
-        .add_local_file(
-            str(_TORCH_DIST_WRAPPER_SRC), TORCH_DIST_CONVERT_WRAPPER, copy=True
-        )
+    )
+    remote_source_patches = []
+    for patch_index, patch_path in enumerate(source_patches):
+        remote_path = f"/root/miles-source-patches/{patch_index:02d}-{patch_path.name}"
+        image = image.add_local_file(str(patch_path), remote_path, copy=True)
+        remote_source_patches.append(remote_path)
+
+    apply_source_patches = "".join(
+        f" && git -C {MILES_ROOT} apply --check {shlex.quote(remote_path)}"
+        f" && git -C {MILES_ROOT} apply {shlex.quote(remote_path)}"
+        for remote_path in remote_source_patches
+    )
+    image = image.run_commands(
+        f"rm -rf {MILES_ROOT}"
+        f" && git clone {MILES_REPO_URL} {MILES_ROOT}"
+        f" && cd {MILES_ROOT} && git fetch origin {miles_repo_ref} && git checkout FETCH_HEAD"
+        f"{apply_source_patches}"
+        f" && python3 -m pip install --no-deps -e {MILES_ROOT}"
+    ).add_local_file(
+        str(_TORCH_DIST_WRAPPER_SRC), TORCH_DIST_CONVERT_WRAPPER, copy=True
     )
     if extra_pip_packages:
         image = image.pip_install(*extra_pip_packages)

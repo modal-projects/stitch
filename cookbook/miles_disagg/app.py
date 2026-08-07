@@ -81,6 +81,7 @@ image = trainer_image.build_trainer_image(
     miles_local=MILES_LOCAL_DIR,
     extra_pip_packages=getattr(exp, "TRAINER_EXTRA_PIP_PACKAGES", ()),
     image_run_commands=getattr(exp, "TRAINER_IMAGE_RUN_COMMANDS", ()),
+    source_patches=getattr(exp, "MILES_SOURCE_PATCHES", ()),
 )
 server_image = serving_image.build_serving_image(
     hf_cache_path=str(HF_CACHE_PATH),
