@@ -14,7 +14,7 @@ DEFAULT_SGLANG_RUNTIME = SGLangRuntime(
     image="lmsysorg/sglang:v0.5.16",
     repository="https://github.com/modal-projects/sglang.git",
     branch="stitch-sglang-v0.5.16",
-    commit="7b09ce9f77c2290d5271c545d5b8b988c0479584",
+    commit="e02a07c905f3336cea3b532751bd8e2250185533",
 )
 ```
 
@@ -36,6 +36,8 @@ The branch is upstream v0.5.16 plus:
 | `1051a95a6a` | Balance CPU delta transforms across persistent worker tasks. |
 | `0094b725b9` | Support top-p-only sampling masks through the native generation and chat-completions APIs. |
 | `7b09ce9f77` | Return aligned top-p sampling masks for tokens accepted by DFlash SpecV2. |
+| `a50de4fe3e` | Monitor data-parallel scheduler subprocesses and fail when one exits. |
+| `e02a07c905` | Preserve routed-expert and indexer top-k state-capture outputs through DFlash. |
 
 The default Modal image also applies
 [`sglang-dflash-prefill-attention-tp-padding.patch`](patches/sglang-dflash-prefill-attention-tp-padding.patch)

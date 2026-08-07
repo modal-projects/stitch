@@ -38,7 +38,7 @@ DEFAULT_SGLANG_RUNTIME = SGLangRuntime(
     image="lmsysorg/sglang:v0.5.16",
     repository="https://github.com/modal-projects/sglang.git",
     branch="stitch-sglang-v0.5.16",
-    commit="7b09ce9f77c2290d5271c545d5b8b988c0479584",
+    commit="e02a07c905f3336cea3b532751bd8e2250185533",
     source_patches=(DFLASH_PREFILL_ATTN_TP_PADDING_PATCH,),
 )
 
