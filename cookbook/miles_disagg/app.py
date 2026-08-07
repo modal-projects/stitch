@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import shutil
 import subprocess
 import tempfile
 from types import SimpleNamespace
@@ -80,6 +81,7 @@ image = trainer_image.build_trainer_image(
     miles_local=MILES_LOCAL_DIR,
     extra_pip_packages=getattr(exp, "TRAINER_EXTRA_PIP_PACKAGES", ()),
     image_run_commands=getattr(exp, "TRAINER_IMAGE_RUN_COMMANDS", ()),
+    source_patches=getattr(exp, "MILES_SOURCE_PATCHES", ()),
 )
 server_image = serving_image.build_serving_image(
     hf_cache_path=str(HF_CACHE_PATH),
@@ -365,18 +367,21 @@ class Trainer:
         )
         print(f"Command: {cmd}")
         log_path = str(RUN_DIR / "train.log")
-        os.makedirs(os.path.dirname(log_path), exist_ok=True)
-        teed = f"set -o pipefail; ({cmd}) 2>&1 | tee {log_path}"  # tee to a committed log; survives the app-logs buffer
-        try:
-            subprocess.run(["bash", "-lc", teed], check=True)
-        finally:
+        with tempfile.TemporaryDirectory() as log_dir:
+            local_log_path = os.path.join(log_dir, "train.log")
+            teed = f"set -o pipefail; ({cmd}) 2>&1 | tee {local_log_path}"
             try:
-                run_volume.commit()
-                print(
-                    f"Train log committed to {exp.EXPERIMENT_VOLUME_NAME} at {log_path}"
-                )
-            except Exception as exc:  # noqa: BLE001
-                print(f"WARNING: could not commit train log: {exc}")
+                subprocess.run(["bash", "-lc", teed], check=True)
+            finally:
+                try:
+                    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+                    shutil.copyfile(local_log_path, log_path)
+                    run_volume.commit()
+                    print(
+                        f"Train log committed to {exp.EXPERIMENT_VOLUME_NAME} at {log_path}"
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    print(f"WARNING: could not commit train log: {exc}")
 
 
 # ── Entrypoints (preparation lives in a separate app: cookbook.miles_disagg.prep_app) ──

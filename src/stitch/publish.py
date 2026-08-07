@@ -7,6 +7,7 @@ compose the Store and Pool ports, so they work with any backend — no Modal her
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 
 from stitch.pools.base import Pool
@@ -33,6 +34,19 @@ def publish_version(
     then wake the pool. Files land before the pointer moves, so a replica never sees a
     pointer to incomplete bytes."""
     manifest = VersionManifest.from_hf_index(version_dir, run_id=run_id)
+    expected_dir = Path(manifest.ref.identity).name
+    if Path(version_dir).name != expected_dir:
+        raise ValueError(
+            f"checkpoint index identifies {expected_dir!r}, but was published from "
+            f"{Path(version_dir).name!r}"
+        )
+    missing = [
+        name for name in manifest.files if not (Path(version_dir) / name).is_file()
+    ]
+    if missing:
+        raise FileNotFoundError(
+            f"incomplete source version {version_dir}: missing " + ", ".join(missing)
+        )
     decide_pointer_move(store.read_pointer(), manifest.ref)  # rewind guard
     store.publish(manifest, version_dir)
     store.advance_pointer(manifest.ref)
@@ -49,13 +63,17 @@ def publish_version(
 def claim_run(store: Store, pool: Pool | None, run_id: str) -> None:
     """Start a run at base before its first publish: write the base pointer and wake the
     pool, so every replica (cold or warm on a finished run) resets to base up front. A
-    reused ``run_id`` (the run's per-launch fence token) is a rewind — rejected here so a
-    restart can't leave the pool pinned to a dead incarnation's high-water mark."""
-    decide_pointer_move(
-        store.read_pointer(), VersionRef(run_id, 0)
-    )  # rewind guard (a reused run_id)
+    reused ``run_id`` above base is a rewind, while retrying an interrupted base claim is
+    idempotent."""
+    base = VersionRef(run_id, 0)
+    current = store.read_pointer()
+    if current == base:
+        _wake(pool, base)
+        logger.info("run %s already claimed at base", run_id)
+        return
+    decide_pointer_move(current, base)  # rewind guard (a reused run_id above base)
     store.claim(run_id)
-    _wake(pool, VersionRef(run_id, 0))
+    _wake(pool, base)
     logger.info("claimed run %s at base", run_id)
 
 

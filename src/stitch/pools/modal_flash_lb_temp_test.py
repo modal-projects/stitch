@@ -7,6 +7,7 @@ import asyncio
 import sys
 import types
 
+import stitch.pools.modal_flash as modal_flash
 from stitch.pools.modal_flash_lb_temp import ModalFlashLBPool
 
 
@@ -33,22 +34,18 @@ def _run_with_fake_modal(urls: dict, containers: list, fn) -> None:
             types.SimpleNamespace(get_url=_SyncAsync(urls.get((app, cls)))),
         )[1]
     )
-    experimental_stub = types.ModuleType("modal.experimental")
-    experimental_stub.flash_get_containers = lambda app, cls: containers
-    modal_stub.experimental = experimental_stub
-    originals = {
-        name: sys.modules.get(name) for name in ("modal", "modal.experimental")
-    }
+    original_modal = sys.modules.get("modal")
+    original_list = modal_flash.list_flash_containers
     sys.modules["modal"] = modal_stub
-    sys.modules["modal.experimental"] = experimental_stub
+    modal_flash.list_flash_containers = lambda app, cls: containers
     try:
         fn(lookups)
     finally:
-        for name, original in originals.items():
-            if original is None:
-                del sys.modules[name]
-            else:
-                sys.modules[name] = original
+        modal_flash.list_flash_containers = original_list
+        if original_modal is None:
+            del sys.modules["modal"]
+        else:
+            sys.modules["modal"] = original_modal
 
 
 def test_gateway_defaults_to_router_cls_in_same_app() -> None:

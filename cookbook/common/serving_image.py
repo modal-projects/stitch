@@ -15,6 +15,13 @@ from pathlib import Path
 
 import modal
 
+_COMMON_DIR = Path(__file__).resolve().parent
+_COOKBOOK_DIR = _COMMON_DIR.parent
+
+DFLASH_PREFILL_ATTN_TP_PADDING_PATCH = (
+    _COMMON_DIR / "patches/sglang-dflash-prefill-attention-tp-padding.patch"
+)
+
 
 @dataclass(frozen=True)
 class SGLangRuntime:
@@ -24,16 +31,16 @@ class SGLangRuntime:
     repository: str
     branch: str
     commit: str
+    source_patches: tuple[Path, ...] = ()
 
 
 DEFAULT_SGLANG_RUNTIME = SGLangRuntime(
     image="lmsysorg/sglang:v0.5.16",
     repository="https://github.com/modal-projects/sglang.git",
     branch="stitch-sglang-v0.5.16",
-    commit="7b09ce9f77c2290d5271c545d5b8b988c0479584",
+    commit="e02a07c905f3336cea3b532751bd8e2250185533",
+    source_patches=(DFLASH_PREFILL_ATTN_TP_PADDING_PATCH,),
 )
-
-_COOKBOOK_DIR = Path(__file__).resolve().parent.parent
 
 _SERVING_ENV = {
     "HF_XET_HIGH_PERFORMANCE": "1",
@@ -56,13 +63,28 @@ def build_serving_image(
     runtime: SGLangRuntime = DEFAULT_SGLANG_RUNTIME,
 ) -> modal.Image:
     """Build the rollout-pool image for one experiment config."""
+    image = modal.Image.from_registry(runtime.image)
+    remote_patches = []
+    for index, source_patch in enumerate(runtime.source_patches):
+        remote_patch = f"/tmp/stitch-sglang-patch-{index}.patch"
+        image = image.add_local_file(
+            str(source_patch), remote_patch, copy=True
+        )
+        remote_patches.append(remote_patch)
+
+    apply_patch_commands = "".join(
+        " && git -C /tmp/stitch-sglang-overlay apply --check " + remote_patch
+        + " && git -C /tmp/stitch-sglang-overlay apply " + remote_patch
+        for remote_patch in remote_patches
+    )
+
     return (
-        modal.Image.from_registry(runtime.image)
-        .run_commands(
+        image.run_commands(
             "rm -rf /tmp/stitch-sglang-overlay"
             f" && git clone --filter=blob:none --single-branch --branch {runtime.branch}"
             f" {runtime.repository} /tmp/stitch-sglang-overlay"
             f" && git -C /tmp/stitch-sglang-overlay checkout --detach {runtime.commit}"
+            f"{apply_patch_commands}"
             " && rm -rf /sgl-workspace/sglang/python/sglang"
             " && cp -a /tmp/stitch-sglang-overlay/python/. /sgl-workspace/sglang/python/"
             " && rm -rf /tmp/stitch-sglang-overlay"

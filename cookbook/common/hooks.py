@@ -10,16 +10,16 @@ ModalFlashPool.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
+import traceback
 from pathlib import Path
 from typing import Any
 
 from stitch.pools.modal_flash import ModalFlashPool
 from stitch.publish import claim_run, constrain_request, publish_version
 from stitch.stores.modal_volume import ModalVolumeStore
-from stitch.types import PointerRewind
+from stitch.types import PointerRewind, VersionRef
 
 from . import process
 
@@ -42,27 +42,77 @@ def sample_affinity_key(sample: Any) -> str | None:
 def commit_and_wake(args: Any, published_dir: str, rollout_engines: Any = None) -> None:
     """Bridge the framework's disk-delta publish to the stitch store. The framework fires this
     at each durability boundary: a version dir (``weight_vNNNNNN``, holding the HF index) and —
-    at baseline/pointer commit — the run dir. Every rank flushes its writes, then version-dir
-    calls rendezvous before rank 0 advances the pointer. Keying on the dir name (not on reading
-    an index) keeps run-dir calls a clean no-op, not a missing-file crash."""
+    at baseline/pointer commit — the run dir. Version files are uploaded by explicit path so
+    distributed rank-local shards merge in the authoritative Volume; rank 0 refreshes and
+    validates the complete checkpoint before advancing the pointer. Keying on the dir name
+    (not on reading an index) keeps run-dir calls a clean no-op, not a missing-file crash."""
     del rollout_engines
     store = _store(args)
-    store.commit()
     if not Path(published_dir).name.startswith("weight_v"):
+        # Baseline cleanup is performed by rank 0 only, so a normal mounted
+        # Volume commit is authoritative here.
+        store.commit()
         return
-    # A successful Volume commit makes only this trainer rank's writes durable.
-    # Do not expose an index that names another rank's shard until every rank's
-    # commit has returned.
-    process.dist_barrier()
-    if process.dist_rank() not in (None, 0):
-        return
-    try:
-        publish_version(store, _pool(args), published_dir, run_id=_run_id(args))
-    except PointerRewind:
-        # A same-run republish (e.g. a retried step) — drop it rather than serve stale.
-        logger.warning(
-            "publish of %s would rewind latest; dropping", published_dir, exc_info=True
+
+    preflight: tuple[bool, str | None] = (False, None)
+    if process.dist_rank() in (None, 0):
+        try:
+            target = VersionRef.parse(f"{_run_id(args)}/{Path(published_dir).name}")
+            current = store.read_pointer()
+            preflight = (
+                current is not None
+                and current.run_id == target.run_id
+                and current.version >= target.version,
+                None,
+            )
+        except Exception:  # noqa: BLE001
+            preflight = (False, f"rank 0:\n{traceback.format_exc()}")
+    preflights = process.dist_all_gather_object(preflight)
+    errors = [error for _, error in preflights if error is not None]
+    if errors:
+        raise RuntimeError(
+            "checkpoint publication preflight failed:\n" + "\n".join(errors)
         )
+    if any(already_published for already_published, _ in preflights):
+        logger.warning("%s is already published; leaving it immutable", published_dir)
+        return
+
+    upload_error = None
+    try:
+        if store.volume_name:
+            store.upload_directory(published_dir)
+        else:
+            store.commit()
+    except Exception:  # noqa: BLE001
+        upload_error = f"rank {process.dist_rank()}:\n{traceback.format_exc()}"
+    _raise_distributed_failures("checkpoint upload", upload_error)
+
+    publish_error = None
+    if process.dist_rank() in (None, 0):
+        try:
+            if store.volume_name:
+                store.refresh()
+            publish_version(store, _pool(args), published_dir, run_id=_run_id(args))
+        except PointerRewind:
+            # A same-run republish (e.g. a retried step) — drop it rather than serve stale.
+            logger.warning(
+                "publish of %s would rewind latest; dropping",
+                published_dir,
+                exc_info=True,
+            )
+        except Exception:  # noqa: BLE001
+            publish_error = f"rank 0:\n{traceback.format_exc()}"
+    _raise_distributed_failures("checkpoint publication", publish_error)
+
+
+def _raise_distributed_failures(phase: str, local_error: str | None) -> None:
+    errors = [
+        error
+        for error in process.dist_all_gather_object(local_error)
+        if error is not None
+    ]
+    if errors:
+        raise RuntimeError(f"{phase} failed:\n" + "\n".join(errors))
 
 
 def claim_pool(args: Any) -> None:
@@ -114,9 +164,11 @@ async def gated_rollout_request_hook(
 
 
 class _CachedPointer:
-    """TTL-cached ``latest`` version. The per-request hook gets no rollout id, so the
-    staleness floor comes from the published pointer (already advanced by the publish
-    hook), cached with a Volume reload so it isn't reloaded once per request."""
+    """TTL-cached ``latest`` version from the trainer's local Volume mount.
+
+    The publish and request hooks are co-located on the trainer head. Cross-host
+    visibility belongs to rollout-replica reconciliation, not request admission.
+    """
 
     def __init__(self) -> None:
         self._version = 0
@@ -141,9 +193,6 @@ class _CachedPointer:
         if now - self._at >= ttl:
             self._at = now
             try:
-                await asyncio.to_thread(
-                    store.refresh
-                )  # reload is blocking; keep the loop free
                 pointer = store.read_pointer()
                 self._version = pointer.version if pointer else 0
             except Exception:  # noqa: BLE001

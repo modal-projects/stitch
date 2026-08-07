@@ -50,6 +50,7 @@ def _write_version(root: Path, ref: VersionRef) -> str:
             }
         )
     )
+    (d / "model-00001.safetensors").write_bytes(b"weights")
     return str(d)
 
 
@@ -58,7 +59,7 @@ def test_commit_and_wake_publishes() -> None:
         root = Path(tmp)
         pool = _FakePool()
         events = []
-        original_barrier = hooks.process.dist_barrier
+        original_gather = hooks.process.dist_all_gather_object
         original_publish = hooks.publish_version
         original_commit = ModalVolumeStore.commit
 
@@ -71,17 +72,22 @@ def test_commit_and_wake_publishes() -> None:
             return original_commit(store)
 
         hooks._pool = lambda args: pool  # rank is None in tests -> treated as writer
-        hooks.process.dist_barrier = lambda: events.append("barrier")
+
+        def gather(value):
+            events.append("gather")
+            return [value]
+
+        hooks.process.dist_all_gather_object = gather
         hooks.publish_version = publish_after_barrier
         ModalVolumeStore.commit = commit_before_barrier
         try:
             vdir = _write_version(root, VersionRef("run-abc", 1))
             hooks.commit_and_wake(_args(str(root)), vdir)
         finally:
-            hooks.process.dist_barrier = original_barrier
+            hooks.process.dist_all_gather_object = original_gather
             hooks.publish_version = original_publish
             ModalVolumeStore.commit = original_commit
-        assert events == ["commit", "barrier", "publish"]
+        assert events == ["gather", "commit", "gather", "publish", "gather"]
         assert ModalVolumeStore(root, run_id="run-abc").read_pointer() == VersionRef(
             "run-abc", 1
         )
@@ -108,6 +114,26 @@ def test_commit_and_wake_baseline_is_noop() -> None:
             hooks.process.dist_barrier = original_barrier
         assert ModalVolumeStore(root, run_id="run-abc").read_pointer() is None
         assert pool.woke == []
+
+
+def test_commit_and_wake_does_not_mutate_an_already_published_version() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        store = ModalVolumeStore(root, run_id="run-abc")
+        store.advance_pointer(VersionRef("run-abc", 1))
+        vdir = _write_version(root, VersionRef("run-abc", 1))
+        original_commit = ModalVolumeStore.commit
+
+        def unexpected_commit(_store) -> None:
+            raise AssertionError("an immutable published version must not be rewritten")
+
+        ModalVolumeStore.commit = unexpected_commit
+        try:
+            hooks.commit_and_wake(_args(str(root)), vdir)
+        finally:
+            ModalVolumeStore.commit = original_commit
+
+        assert store.read_pointer() == VersionRef("run-abc", 1)
 
 
 def test_claim_pool_resets_to_base() -> None:
@@ -158,6 +184,28 @@ def test_request_hook_min_lag() -> None:
         }
         assert request["headers"]["Modal-Session-ID"] == "group-1"
         assert request["max_retries"] == 900
+
+
+def test_request_hook_reads_local_pointer_without_refresh() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        store = ModalVolumeStore(root, run_id="run-abc")
+        store.advance_pointer(VersionRef("run-abc", 1))
+        hooks._latest = hooks._CachedPointer()
+        original_refresh = ModalVolumeStore.refresh
+
+        def unexpected_refresh(_store) -> None:
+            raise AssertionError(
+                "the trainer-local request gate must not reload the Volume"
+            )
+
+        ModalVolumeStore.refresh = unexpected_refresh
+        try:
+            assert asyncio.run(hooks._latest.get(_args(str(root)), ttl=0)) == 1
+            store.advance_pointer(VersionRef("run-abc", 2))
+            assert asyncio.run(hooks._latest.get(_args(str(root)), ttl=0)) == 2
+        finally:
+            ModalVolumeStore.refresh = original_refresh
 
 
 def test_sample_affinity_key_fallbacks() -> None:

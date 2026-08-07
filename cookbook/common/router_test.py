@@ -14,6 +14,7 @@ from cookbook.common.router import (
     RouteEntry,
     RouteEntryList,
     _container_addr,
+    _ProxyApp,
     filter_headers,
     route_session,
     select_least_loaded_container,
@@ -132,6 +133,56 @@ def test_container_addr_normalizes_host_and_port() -> None:
     assert (
         _container_addr(SimpleNamespace(host="h", port=8000, task_id="t")) == "h:8000"
     )
+
+
+def test_upstream_stream_reserves_capacity_before_connecting() -> None:
+    container = _containers(0)["ta-0"]
+
+    class FakeResponse:
+        async def aiter_raw(self):
+            yield b"ok"
+
+    class FakeStream:
+        load_on_enter: int | None = None
+
+        async def __aenter__(self):
+            self.load_on_enter = container.load
+            return FakeResponse()
+
+        async def __aexit__(self, *args):
+            return None
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.stream_context = FakeStream()
+
+        def stream(self, **kwargs):
+            return self.stream_context
+
+    async def run() -> None:
+        app = _ProxyApp(
+            registry_url="https://registry",
+            upstream_url="https://upstream",
+            session_routes=FakeRoutes(),
+        )
+        client = FakeClient()
+        app.client = client
+        stream = app.upstream_stream(
+            SimpleNamespace(method="POST", query_params={}),
+            "v1/chat/completions",
+            {},
+            b"{}",
+            container,
+            "request",
+        )
+
+        await anext(stream)
+        assert client.stream_context.load_on_enter == 1
+        assert container.load == 1
+        assert [chunk async for chunk in stream] == [b"ok"]
+        assert container.load == 0
+
+    asyncio.run(run())
 
 
 if __name__ == "__main__":

@@ -1,0 +1,210 @@
+# Qwen3.6 stores routed experts as batched gate_up_proj/down_proj tensors, while
+# ModelOpt NVFP4 checkpoints and SGLang's quantized FusedMoE loader use per-expert
+# projection names. Expand that layout in both initial conversion and live export.
+# The pinned Stitch SGLang fork also returns DFlash sampling masks aligned with
+# accepted tokens, so permit that verified speculative algorithm with exact top-p
+# mask replay while retaining the guard for all other speculative workers.
+diff --git a/miles/backends/megatron_utils/megatron_to_hf/processors/quantizer_nvfp4.py b/miles/backends/megatron_utils/megatron_to_hf/processors/quantizer_nvfp4.py
+index 0b7a6ef2..8a86c1c0 100644
+--- a/miles/backends/megatron_utils/megatron_to_hf/processors/quantizer_nvfp4.py
++++ b/miles/backends/megatron_utils/megatron_to_hf/processors/quantizer_nvfp4.py
+@@ -12,6 +12,35 @@ GATED_PAIR_SUFFIXES = {
+ }
+
+
++def _expand_batched_expert_params(converted_named_params):
++    """Expand Qwen3.5/3.6 fused expert tensors into ModelOpt's per-expert names."""
++    expanded_params = []
++    for name, weight in converted_named_params:
++        if name.endswith(".mlp.experts.gate_up_proj"):
++            if weight.dim() != 3 or weight.shape[1] % 2:
++                raise ValueError(
++                    f"Expected [experts, 2 * intermediate, hidden] for {name}, got {tuple(weight.shape)}."
++                )
++            prefix = name.removesuffix(".gate_up_proj")
++            gate_weights, up_weights = weight.chunk(2, dim=1)
++            for expert_idx in range(weight.shape[0]):
++                expanded_params.append((f"{prefix}.{expert_idx}.gate_proj.weight", gate_weights[expert_idx]))
++                expanded_params.append((f"{prefix}.{expert_idx}.up_proj.weight", up_weights[expert_idx]))
++        elif name.endswith(".mlp.experts.down_proj"):
++            if weight.dim() != 3:
++                raise ValueError(
++                    f"Expected [experts, hidden, intermediate] for {name}, got {tuple(weight.shape)}."
++                )
++            prefix = name.removesuffix(".down_proj")
++            expanded_params.extend(
++                (f"{prefix}.{expert_idx}.down_proj.weight", weight[expert_idx])
++                for expert_idx in range(weight.shape[0])
++            )
++        else:
++            expanded_params.append((name, weight))
++    return expanded_params
++
++
+ def _get_ignore_rules(quantization_config) -> list[str]:
+     ignore_rules = quantization_config.get("ignore", []) or []
+     if isinstance(ignore_rules, str):
+@@ -97,6 +126,7 @@ def quantize_params_nvfp4(args, megatron_name, converted_named_params, quantizat
+
+
+ def _quantize_moe_params(converted_named_params, ignore_rules):
++    converted_named_params = _expand_batched_expert_params(converted_named_params)
+     gated_candidates = {}
+     for converted_name, param in converted_named_params:
+         base, role = _split_gated_pair_name(converted_name)
+diff --git a/miles/utils/arguments.py b/miles/utils/arguments.py
+index 430f8a61..58324305 100644
+--- a/miles/utils/arguments.py
++++ b/miles/utils/arguments.py
+@@ -2795,10 +2795,11 @@ def miles_validate_args(args):
+                 "--rollout-top-p < 1 cannot be combined with --recompute-logprobs-via-prefill; "
+                 "prefill scoring does not preserve the rollout sampling support"
+             )
+-        if getattr(args, "sglang_speculative_algorithm", None):
++        speculative_algorithm = getattr(args, "sglang_speculative_algorithm", None)
++        if speculative_algorithm and speculative_algorithm.upper() != "DFLASH":
+             raise ValueError(
+                 "--rollout-top-p < 1 exact sampling-mask replay cannot be combined with speculative decoding; "
+-                "current SGLang workers do not return one aligned sampling support per accepted token"
++                "only DFLASH returns one aligned sampling support per accepted token"
+             )
+         if args.sglang_disaggregation_sampling_mask_max_tokens <= 0:
+             raise ValueError("--sglang-disaggregation-sampling-mask-max-tokens must be positive with top-p masking")
+diff --git a/tools/convert_hf_to_nvfp4.py b/tools/convert_hf_to_nvfp4.py
+index 8e72aa93..eade69fc 100644
+--- a/tools/convert_hf_to_nvfp4.py
++++ b/tools/convert_hf_to_nvfp4.py
+@@ -56,6 +56,11 @@ GATED_PAIR_SUFFIXES = {
+     ".w3.weight": "up",
+ }
+
++BATCHED_EXPERT_SUFFIXES = (
++    ".mlp.experts.gate_up_proj",
++    ".mlp.experts.down_proj",
++)
++
+
+ def _is_moe_expert_weight_name(name: str) -> bool:
+     if not name.endswith(".weight"):
+@@ -65,6 +70,37 @@ def _is_moe_expert_weight_name(name: str) -> bool:
+     return any(name.endswith(suffix) for suffix in EXPERT_WEIGHT_SUFFIXES)
+
+
++def _is_batched_expert_weight_name(name: str) -> bool:
++    return any(name.endswith(suffix) for suffix in BATCHED_EXPERT_SUFFIXES)
++
++
++def _expand_batched_expert_params(name: str, weight: torch.Tensor) -> list[tuple[str, torch.Tensor]]:
++    """Expand Qwen3.5/3.6 fused expert tensors into ModelOpt's per-expert names."""
++    if name.endswith(".mlp.experts.gate_up_proj"):
++        if weight.dim() != 3 or weight.shape[1] % 2:
++            raise ValueError(f"Expected [experts, 2 * intermediate, hidden] for {name}, got {tuple(weight.shape)}.")
++        prefix = name.removesuffix(".gate_up_proj")
++        gate_weights, up_weights = weight.chunk(2, dim=1)
++        return [
++            (f"{prefix}.{expert_idx}.{projection}_proj.weight", projection_weights[expert_idx])
++            for expert_idx in range(weight.shape[0])
++            for projection, projection_weights in (("gate", gate_weights), ("up", up_weights))
++        ]
++    if name.endswith(".mlp.experts.down_proj"):
++        if weight.dim() != 3:
++            raise ValueError(f"Expected [experts, hidden, intermediate] for {name}, got {tuple(weight.shape)}.")
++        prefix = name.removesuffix(".down_proj")
++        return [(f"{prefix}.{expert_idx}.down_proj.weight", weight[expert_idx]) for expert_idx in range(weight.shape[0])]
++    return [(name, weight)]
++
++
++def _decoder_layer_prefixes(layer_idx: int) -> tuple[str, str]:
++    return (
++        f"model.layers.{layer_idx}.",
++        f"model.language_model.layers.{layer_idx}.",
++    )
++
++
+ def _get_num_hidden_layers(model_dir: str) -> int:
+     config_path = os.path.join(model_dir, "config.json")
+     if not os.path.exists(config_path):
+@@ -87,7 +123,7 @@ def should_quantize(
+ ) -> bool:
+     if any(substr in name for substr in skip_weight_substrings):
+         return False
+-    if not _is_moe_expert_weight_name(name):
++    if not (_is_moe_expert_weight_name(name) or _is_batched_expert_weight_name(name)):
+         return False
+     if weight.dtype not in (torch.float16, torch.bfloat16, torch.float32):
+         return False
+@@ -269,6 +305,21 @@ def _nvfp4_quantized_entries(
+     }
+
+
++def _quantize_batched_expert_weight(name: str, weight: torch.Tensor) -> dict[str, torch.Tensor]:
++    expanded_params = _expand_batched_expert_params(name, weight)
++    quantized: dict[str, torch.Tensor] = {}
++    if name.endswith(".gate_up_proj"):
++        for gate_param, up_param in zip(expanded_params[::2], expanded_params[1::2], strict=True):
++            gate_output, up_output = nvfp4_quantize_1d_pair(gate_param[1], up_param[1])
++            quantized.update(_nvfp4_quantized_entries(gate_param[0], *gate_output))
++            quantized.update(_nvfp4_quantized_entries(up_param[0], *up_output))
++        return quantized
++
++    for expanded_name, expanded_weight in expanded_params:
++        quantized.update(_nvfp4_quantized_entries(expanded_name, *quantize_nvfp4(expanded_weight)))
++    return quantized
++
++
+ def _load_safetensors_tensor(input_path: str, filename: str, key: str, device: str) -> torch.Tensor:
+     with safetensors.safe_open(os.path.join(input_path, filename), framework="pt", device=device) as f:
+         return f.get_tensor(key)
+@@ -296,8 +347,14 @@ def process_file(
+     head_end_idx = num_layers_at_start_in_bf16
+     tail_start_idx = num_hidden_layers - num_layers_at_end_in_bf16
+     dynamic_skip_layer_prefixes: set[str] = set()
+-    dynamic_skip_layer_prefixes.update({f"model.layers.{i}." for i in range(0, head_end_idx)})
+-    dynamic_skip_layer_prefixes.update({f"model.layers.{i}." for i in range(tail_start_idx, num_hidden_layers)})
++    dynamic_skip_layer_prefixes.update(
++        prefix for layer_idx in range(0, head_end_idx) for prefix in _decoder_layer_prefixes(layer_idx)
++    )
++    dynamic_skip_layer_prefixes.update(
++        prefix
++        for layer_idx in range(tail_start_idx, num_hidden_layers)
++        for prefix in _decoder_layer_prefixes(layer_idx)
++    )
+
+     if num_layers_at_end_in_bf16 > 0 or num_layers_at_start_in_bf16 > 0:
+         modules_to_not_convert.extend(sorted(dynamic_skip_layer_prefixes))
+@@ -318,6 +375,9 @@ def process_file(
+
+             tensor = f.get_tensor(key)
+             if should_quantize(key, tensor, skip_weight_substrings=dynamic_skip_substrings):
++                if _is_batched_expert_weight_name(key):
++                    q_weights.update(_quantize_batched_expert_weight(key, tensor))
++                    continue
+                 base, _role = _split_gated_pair_name(key)
+                 if base in gated_pair_locations:
+                     if base in processed_gated_pairs:
+@@ -350,6 +410,8 @@ def process_file(
+                 qweight, block_scale, weight_scale_2 = quantize_nvfp4(tensor)
+                 q_weights.update(_nvfp4_quantized_entries(key, qweight, block_scale, weight_scale_2))
+             else:
++                if _is_batched_expert_weight_name(key):
++                    modules_to_not_convert.append(key)
+                 if key.endswith(".weight"):
+                     module_name = key[: -len(".weight")]
+                     is_dynamic_bf16 = any(prefix in key for prefix in dynamic_skip_layer_prefixes)
+@@ -389,8 +451,14 @@ def convert_nvfp4(
+     head_end_idx = num_layers_at_start_in_bf16
+     tail_start_idx = num_hidden_layers - num_layers_at_end_in_bf16
+     dynamic_skip_layer_prefixes: set[str] = set()
+-    dynamic_skip_layer_prefixes.update({f"model.layers.{i}." for i in range(0, head_end_idx)})
+-    dynamic_skip_layer_prefixes.update({f"model.layers.{i}." for i in range(tail_start_idx, num_hidden_layers)})
++    dynamic_skip_layer_prefixes.update(
++        prefix for layer_idx in range(0, head_end_idx) for prefix in _decoder_layer_prefixes(layer_idx)
++    )
++    dynamic_skip_layer_prefixes.update(
++        prefix
++        for layer_idx in range(tail_start_idx, num_hidden_layers)
++        for prefix in _decoder_layer_prefixes(layer_idx)
++    )
+     dynamic_skip_substrings = (
+         *extra_high_precision_layers_hf,
+         *sorted(dynamic_skip_layer_prefixes),

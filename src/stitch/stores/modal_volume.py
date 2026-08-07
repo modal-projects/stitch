@@ -11,7 +11,7 @@ from __future__ import annotations
 import contextlib
 import os
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from stitch.stores.base import Store
 from stitch.types import VersionManifest, VersionRef
@@ -87,6 +87,37 @@ class ModalVolumeStore(Store):
         publish hook uses on non-writer ranks; a no-op without a backing volume."""
         if self.volume_name:
             _volume(self.volume_name).commit()
+
+    def upload_directory(self, source_dir: str | Path) -> None:
+        """Upload this host's files into the authoritative Volume namespace.
+
+        A mounted Volume commit publishes the caller's complete local snapshot, so
+        concurrent trainer ranks can overwrite one another even when they wrote
+        different files. The Volume v2 upload API updates explicit paths instead;
+        disjoint rank-local checkpoint shards therefore compose safely before the
+        single publisher advances ``latest``.
+        """
+        if not self.volume_name:
+            return
+        source = Path(source_dir).resolve()
+        root = self.root.resolve()
+        try:
+            source.relative_to(root)
+        except ValueError as exc:
+            raise ValueError(
+                f"upload source must be inside store root {str(root)!r}: {str(source)!r}"
+            ) from exc
+        if not source.is_dir():
+            return
+
+        files = sorted(path for path in source.rglob("*") if path.is_file())
+        if not files:
+            return
+        volume_root = root.parent
+        with _volume(self.volume_name).batch_upload(force=True) as batch:
+            for path in files:
+                remote = PurePosixPath("/") / path.relative_to(volume_root)
+                batch.put_file(path, remote)
 
     def _version_dir(self, ref: VersionRef) -> Path:
         if ref.run_id != self.run_id:

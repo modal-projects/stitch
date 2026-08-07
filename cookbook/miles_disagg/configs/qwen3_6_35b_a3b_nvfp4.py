@@ -1,17 +1,27 @@
-"""Fully async GLM-5.2 NVFP4 GRPO on SWE-bench Pro."""
+"""Fully-async Qwen3.6 NVFP4 DFlash run on SWE-bench Pro.
+
+This keeps the GLM-5.2 experiment's RL behavior—NVFP4 4/6 training and
+serving, routed-expert replay, and exact top-p support replay—but uses the
+single-GPU Qwen3.6 DFlash serving recipe. The run uses one 8-GPU trainer node,
+sixteen rollout GPUs, and remains bounded to ten steps.
+"""
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from cookbook.common.config import ModalConfig
-from cookbook.common.constants import CHECKPOINTS_PATH, DATA_PATH, DRAFT_PATH
+from cookbook.common.constants import CHECKPOINTS_PATH, DATA_PATH
 from cookbook.miles_disagg.config import MilesConfig
 from cookbook.miles_disagg.swebench_pro import prepare_swebench_pro
 
-APP_NAME = "stitch-glm5-2-nvfp4"
-EXPERIMENT_VOLUME_NAME = "stitch-miles-glm5-2-nvfp4"
-# This experiment layers Stitch integration onto Miles' fully-async SWE runtime.
-# Other cookbook experiments keep the standard Miles pin in trainer_image.py.
+APP_NAME = "stitch-qwen3-6-35b-a3b-nvfp4"
+EXPERIMENT_VOLUME_NAME = "stitch-miles-qwen3-6-35b-a3b-nvfp4"
 MILES_REPO_REF = "b1020b5961657ef1bb8c9f56bda49bc12899fa57"
+QWEN36_NVFP4_DFLASH_MILES_PATCH = (
+    Path(__file__).resolve().parents[1] / "patches" / "qwen3_6_nvfp4_dflash.patch"
+)
+MILES_SOURCE_PATCHES = (QWEN36_NVFP4_DFLASH_MILES_PATCH,)
 LOCAL_CHECKPOINT_PATH = None
 TRAINER_EXTRA_PIP_PACKAGES = (
     "harbor[modal,huggingface]==0.20.0",
@@ -33,38 +43,35 @@ MEGATRON_RUNTIME_PATCHES = [
     "/root/cookbook/miles_disagg/patches/megatron-r3-dispatch.patch",
 ]
 
-SOURCE_MODEL = "zai-org/GLM-5.2"
-SOURCE_REVISION = "b4734de4facf877f85769a911abafc5283eab3d9"
-BF16_CHECKPOINT_PATH = CHECKPOINTS_PATH / "glm5-2-bf16"
-ROLLOUT_CHECKPOINT_PATH = CHECKPOINTS_PATH / "glm5-2-nvfp4"
-TORCH_DIST_CHECKPOINT_PATH = CHECKPOINTS_PATH / "glm5-2-torch-dist"
+SOURCE_MODEL = "Qwen/Qwen3.6-35B-A3B"
+SOURCE_REVISION = "995ad96eacd98c81ed38be0c5b274b04031597b0"
+DFLASH_MODEL = "modal-labs/Qwen3.6-35B-A3B-DFlash"
+DFLASH_REVISION = "45197228fd8152743a4566620c7aa4014d35f773"
+BF16_CHECKPOINT_PATH = CHECKPOINTS_PATH / "qwen3-6-35b-a3b-bf16"
+ROLLOUT_CHECKPOINT_PATH = CHECKPOINTS_PATH / "qwen3-6-35b-a3b-nvfp4"
+TORCH_DIST_CHECKPOINT_PATH = CHECKPOINTS_PATH / "qwen3-6-35b-a3b-torch-dist"
 SWEBENCH_PRO_PATH = DATA_PATH / "swebench-pro"
-DFLASH_VOLUME = "dflash-checkpoints"
-DFLASH_CHECKPOINT_PATH = DRAFT_PATH / "zai-org/GLM-5.2/dflash/draft-step-103000"
 SERVED_CHECKPOINT_FORMAT = "nvfp4"
 CHECKPOINT_PREP_REQUIRES_GPU = True
 MATERIALIZE_BF16_MASTERS = False
-USE_MODAL_TORCH_DIST_WRAPPER = True
 
-TRAINER_NODES = 16
+TRAINER_NODES = 1
 GPUS_PER_TRAINER_NODE = 8
-ROLLOUT_GPUS_PER_ENGINE = 4
+ROLLOUT_GPUS_PER_ENGINE = 1
 ROLLOUT_BATCH_SIZE = 32
 N_SAMPLES_PER_PROMPT = 8
-ROLLOUT_INPUTS_PER_ENGINE = 16
-ROLLOUT_MAX_RUNNING_REQUESTS = 24
-# Bound scheduler-poll and routing skew to the headroom above the routing target.
-# Sustained excess load gets a retryable 503 instead of an unbounded engine queue.
-ROLLOUT_MAX_QUEUED_REQUESTS = ROLLOUT_MAX_RUNNING_REQUESTS - ROLLOUT_INPUTS_PER_ENGINE
-ROLLOUT_ENGINES = 32
+GLOBAL_BATCH_SIZE = ROLLOUT_BATCH_SIZE * N_SAMPLES_PER_PROMPT
+ROLLOUT_INPUTS_PER_ENGINE = 8
+ROLLOUT_MAX_RUNNING_REQUESTS = 32
+ROLLOUT_MAX_QUEUED_REQUESTS = 8
+ROLLOUT_ENGINES = 16
 ROLLOUT_CONCURRENT_SAMPLES = ROLLOUT_ENGINES * ROLLOUT_INPUTS_PER_ENGINE
-MAX_SEQ_LEN = 65_536
-# SGLang's request boundary needs a small physical-context margin. Miles still
-# truncates every trainable session to MAX_SEQ_LEN.
+MAX_SEQ_LEN = 16_384
 SGLANG_CONTEXT_LENGTH = MAX_SEQ_LEN + 8
-# This metric changes exported NVFP4 bytes, so prep, training, and serving must agree.
-NVFP4_4OVER6_ERR_MODE = "MSE"
 
+# This metric changes the packed weights, so prep, live export, and serving
+# must use one contract. It deliberately matches the GLM-5.2 branch recipe.
+NVFP4_4OVER6_ERR_MODE = "MSE"
 NVFP4_TRAINING_ENV = {
     "NVTE_NVFP4_DISABLE_2D_QUANTIZATION": "1",
     "NVTE_NVFP4_DISABLE_RHT": "1",
@@ -89,37 +96,16 @@ NVFP4_SERVING_ENV = {
 PREP_ENV = NVFP4_TRAINING_ENV
 SGLANG_SERVER_ENV = {
     **NVFP4_SERVING_ENV,
-    "SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK": "256",
-    "SGLANG_DSA_FUSE_TOPK": "1",
-    "SGLANG_DSA_PREFILL_DENSE_ATTN_KV_LEN_THRESHOLD": "0",
-    "SGLANG_DSA_TOPK_FLASHINFER_TIE_BREAK": "large",
-    # Not enabled by the Miles reference configuration.
-    # "SGLANG_OPT_USE_TOPK_V2": "0",
-    # "SGLANG_SANITIZE_NAN_LOGITS": "true",
-    "INDEXER_ROPE_NEOX_STYLE": "0",
-    "NVSHMEM_DISABLE_NCCL": "1",
+    "SGLANG_ENABLE_OVERLAP_PLAN_STREAM": "1",
+    "SGLANG_ENABLE_RELOAD_LOAD_PLAN": "1",
 }
 
 SIDECAR_COMMIT_MODE = "in_place"
 SIDECAR_FLUSH_CACHE_ON_COMMIT = False
 SGLANG_DELTA_UPDATE_MODE = "cpu"
 
-# DFLASH_SERVER_ARGS = {
-#     "--speculative-algorithm": "DFLASH",
-#     "--speculative-attention-mode": "decode",
-#     "--speculative-dflash-block-size": "8",
-#     "--speculative-num-draft-tokens": "8",
-#     "--speculative-num-steps": "1",
-#     "--speculative-eagle-topk": "1",
-#     "--speculative-draft-attention-backend": "flashinfer",
-#     "--speculative-draft-load-format": "fastsafetensors",
-#     "--speculative-draft-model-path": str(DFLASH_CHECKPOINT_PATH),
-#     "--speculative-draft-model-quantization": "unquant",
-#     "--speculative-draft-window-size": "4096",
-# }
-
 SGLANG_SERVER_ARGS = {
-    # loading / elastic refit
+    # Loading and elastic weight refits.
     "--load-format": "fastsafetensors",
     "--model-loader-extra-config": '{"enable_gds":false}',
     "--enable-cpu-weight-cache": "",
@@ -127,82 +113,69 @@ SGLANG_SERVER_ARGS = {
     "--weight-loader-drop-cache-after-load": "",
     "--dist-timeout": "3600",
     "--watchdog-timeout": "3600",
-    # model / quant
+    # Qwen3.6 and its hybrid attention stack.
     "--quantization": "modelopt_fp4",
-    "--reasoning-parser": "glm45",
-    "--tool-call-parser": "glm47",
+    "--reasoning-parser": "qwen3",
+    "--tool-call-parser": "qwen3_coder",
     "--context-length": str(SGLANG_CONTEXT_LENGTH),
-    # Match the Miles GLM-5.2 reference serving path.
-    "--attention-backend": "dsa",
-    "--kv-cache-dtype": "fp8_e4m3",
-    "--dsa-prefill-backend": "flashmla_sparse",
-    "--dsa-decode-backend": "flashmla_kv",
-    "--dsa-topk-backend": "flashinfer",
-    "--page-size": "64",
-    # Keep four-way expert parallelism and dense TP1 from the Miles reference.
-    # DFlash does not support DP attention, so TP remains four while DP stays one.
-    # Four-GPU analogue of the reference's DP2/EP2 layout; DP attention requires DP=TP.
-    "--enable-dp-attention": "",
-    "--dp-size": str(ROLLOUT_GPUS_PER_ENGINE),
-    "--ep-size": str(ROLLOUT_GPUS_PER_ENGINE),
-    "--moe-dense-tp-size": "1",
-    "--enable-dp-lm-head": "",
-    # MoE
+    "--attention-backend": "trtllm_mha",
+    "--linear-attn-prefill-backend": "flashinfer",
+    "--linear-attn-decode-backend": "flashinfer",
+    "--mamba-radix-cache-strategy": "extra_buffer",
+    # Shared expert remains BF16; routed experts use NVFP4 and emit R3 metadata.
     "--moe-runner-backend": "flashinfer_trtllm_routed",
     "--disable-shared-experts-fusion": "",
-    # memory / batching
+    "--enable-return-routed-experts": "",
+    # The public draft's single-GPU DFlash recipe.
+    "--speculative-algorithm": "DFLASH",
+    "--speculative-draft-model-path": DFLASH_MODEL,
+    "--speculative-draft-model-revision": DFLASH_REVISION,
+    "--speculative-dflash-block-size": "8",
+    "--speculative-draft-attention-backend": "fa4",
+    # Bounded rollout scheduling and graph capture.
     "--mem-fraction-static": "0.8",
-    "--chunked-prefill-size": "16384",
+    "--chunked-prefill-size": "8192",
     "--max-running-requests": str(ROLLOUT_MAX_RUNNING_REQUESTS),
     "--max-queued-requests": str(ROLLOUT_MAX_QUEUED_REQUESTS),
     "--schedule-conservativeness": "1.0",
     "--schedule-policy": "lpm",
-    "--cuda-graph-config": (
-        '{"decode":{"backend":"full","max_bs":32,'
-        '"bs":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32]}}'
-    ),
-    # **DFLASH_SERVER_ARGS,
-    # RL
-    "--enable-return-routed-experts": "",
+    "--cuda-graph-max-bs-decode": "32",
+    "--cuda-graph-backend-prefill": "tc_piecewise",
+    "--enable-flashinfer-allreduce-fusion": "",
 }
 
 modal = ModalConfig(
-    gpu="B300",
-    rollout_gpu="B300",
+    gpu="B200",
+    rollout_gpu="B200",
     region="us",
-    trainer_memory_mib=(1024 * 1024, 3 * 1024 * 1024),
-    # CPU mode retains the canonical checkpoint and TP rank images in memory.
-    rollout_memory_mib=(1024 * 1024, 3 * 1024 * 1024),
+    trainer_memory_mib=(512 * 1024, 1024 * 1024),
+    rollout_memory_mib=(128 * 1024, 512 * 1024),
     rollout_min_containers=ROLLOUT_ENGINES,
-    rollout_max_containers=None,
+    rollout_max_containers=ROLLOUT_ENGINES,
     rollout_target_inputs=ROLLOUT_INPUTS_PER_ENGINE,
-    draft_volume=DFLASH_VOLUME,
     routing_region="us-west",
-    # CPU updates use ephemeral disk only for runtime scratch and spill.
-    rollout_ephemeral_disk_mib=524_288,
-    trainer_ephemeral_disk_mib=2_097_152,
-    torch_dist_prep_nodes=4,
+    rollout_ephemeral_disk_mib=262_144,
+    trainer_ephemeral_disk_mib=524_288,
+    torch_dist_prep_nodes=1,
     torch_dist_prep_gpus_per_node=8,
     torch_dist_convert_extra_args=(
         "--tensor-model-parallel-size 1 "
-        "--pipeline-model-parallel-size 4 "
-        "--expert-model-parallel-size 8 "
-        "--decoder-first-pipeline-num-layers 18 "
-        "--decoder-last-pipeline-num-layers 20"
+        "--pipeline-model-parallel-size 1 "
+        "--expert-model-parallel-size 8"
     ),
-    torch_dist_prep_ephemeral_disk_mib=2_097_152,
+    torch_dist_prep_ephemeral_disk_mib=524_288,
 )
 
 
 class _Miles(MilesConfig):
-    miles_model_script = "scripts/models/glm5.2-744B-A40B.sh"
+    miles_model_script = "scripts/models/qwen3.6-35B-A3B.sh"
     async_mode = True
 
     hf_checkpoint = str(ROLLOUT_CHECKPOINT_PATH)
     ref_load = str(TORCH_DIST_CHECKPOINT_PATH)
     megatron_to_hf_mode = "raw"
-    model_name = "glm_moe_dsa"
-    extra_high_precision_layers_hf = [".shared_experts."]
+    model_name = "qwen3_6"
+    extra_high_precision_layers_hf = [".shared_expert."]
     extra_high_precision_layers_megatron = [
         ".shared_experts.linear_fc1",
         ".shared_experts.linear_fc2",
@@ -213,10 +186,9 @@ class _Miles(MilesConfig):
     num_gpus_per_node = GPUS_PER_TRAINER_NODE
     rollout_num_gpus = 0
     rollout_num_gpus_per_engine = ROLLOUT_GPUS_PER_ENGINE
-    # An opaque endpoint has one Miles-side semaphore for the complete fleet.
-    # A saturated engine's 503 retry holds its slot, feeding backpressure into
-    # session generation instead of admitting another trajectory.
     sglang_server_concurrency = ROLLOUT_CONCURRENT_SAMPLES
+    sglang_speculative_algorithm = "DFLASH"
+    sglang_disaggregation_sampling_mask_max_tokens = 4096
     rollout_endpoint_url = None
 
     custom_rollout_request_hook_path = (
@@ -225,7 +197,7 @@ class _Miles(MilesConfig):
     custom_config_path = {
         "rollout_request_weight_version_mode": "min",
         "rollout_request_weight_version_lag": 1,
-        "rollout_request_retry_attempts": 1200,
+        "rollout_request_retry_attempts": 600,
         "rollout_request_retry_sleep": 1.0,
         "rollout_session_affinity_header": "Modal-Session-ID",
         "rollout_request_timeout_secs": 300,
@@ -242,10 +214,11 @@ class _Miles(MilesConfig):
     bf16 = True
     fp4_format = "e2m1"
     fp4_recipe = "nvfp4"
+    fp4_param_gather = False
     first_last_layers_bf16 = True
-    # GLM-5.2 has three dense layers; keep those and the final 15% (12/78) in BF16.
-    num_layers_at_start_in_bf16 = 3
-    num_layers_at_end_in_bf16 = 12
+    num_layers_at_start_in_bf16 = 0
+    # Keep the final 15% (6/40) in BF16, plus the shared expert above.
+    num_layers_at_end_in_bf16 = 6
     te_precision_config_file = {
         "configs": {
             "nvfp4": {
@@ -293,52 +266,43 @@ class _Miles(MilesConfig):
     )
     custom_agent_function_path = "modal_swe_agent_function.run"
     custom_rm_path = "modal_swe_agent_function.reward_func"
-    tito_model = "glm47"
+    tito_model = "qwen35"
     use_session_server = True
-    session_server_port = [30000, 30064]
+    session_server_port = [30000, 30016]
     session_server_startup_timeout_seconds = 180
-    tito_session_mismatch_sample_rate = 0.0625
+    tito_session_mismatch_sample_rate = 0.125
 
-    num_rollout = 500
-    save_interval = 10
+    num_rollout = 10
+    save_interval = None
     rollout_batch_size = ROLLOUT_BATCH_SIZE
     n_samples_per_prompt = N_SAMPLES_PER_PROMPT
-    global_batch_size = 256
+    global_batch_size = GLOBAL_BATCH_SIZE
     rollout_temperature = 1.0
     rollout_top_p = 0.95
     rollout_max_response_len = 8192
     max_seq_len = MAX_SEQ_LEN
     use_dynamic_global_batch_size = True
-    max_weight_staleness = 6
+    max_weight_staleness = 2
     async_max_concurrent_samples = ROLLOUT_CONCURRENT_SAMPLES
     eval_interval = None
 
     use_rollout_routing_replay = True
     use_fault_tolerance = True
 
-    # 128 GPUs: TP4 * PP4 * CP8 * DP1. Four balanced DSA-valid stages start on
-    # layers 1, 19, 39, and 59; CP8 keeps long-context activations sharded.
-    tensor_model_parallel_size = 4
+    # TP1/PP1/CP1 with one trainer GPU for each of the eight expert shards.
+    tensor_model_parallel_size = 1
     sequence_parallel = True
-    pipeline_model_parallel_size = 4
-    decoder_first_pipeline_num_layers = 18
-    decoder_last_pipeline_num_layers = 20
-    context_parallel_size = 8
-    expert_model_parallel_size = 32
+    pipeline_model_parallel_size = 1
+    context_parallel_size = 1
+    expert_model_parallel_size = 8
     expert_tensor_parallel_size = 1
-    # Large clustered initialization and rollout-data materialization can exceed
-    # the default process-group timeout.
     distributed_timeout_minutes = 60
-    allgather_cp = True
     moe_token_dispatcher_type = "alltoall"
     use_dynamic_batch_size = True
-    # Keep the same effective sequence budget as CP2: 8K * CP8 = 64K.
-    max_tokens_per_gpu = 8192
-    # Forward-only scoring retains no backward activations, so it can pack
-    # twice the training budget without changing the backward memory bound.
-    log_probs_max_tokens_per_gpu = 16384
+    max_tokens_per_gpu = MAX_SEQ_LEN
+    log_probs_max_tokens_per_gpu = MAX_SEQ_LEN
     data_pad_size_multiplier = 1024
-    log_probs_chunk_size = 16384
+    log_probs_chunk_size = MAX_SEQ_LEN
     recompute_granularity = "full"
     recompute_method = "uniform"
     recompute_num_layers = 1
@@ -347,7 +311,6 @@ class _Miles(MilesConfig):
     accumulate_allreduce_grads_in_fp32 = True
     attention_softmax_in_fp32 = True
     attention_backend = "flash"
-    miles_dsa_topk_backend = "flashinfer"
 
     optimizer = "adam"
     lr = 1e-6
@@ -355,8 +318,8 @@ class _Miles(MilesConfig):
     weight_decay = 0.1
     adam_beta1 = 0.9
     adam_beta2 = 0.98
-    optimizer_cpu_offload = False
-    overlap_cpu_optimizer_d2h_h2d = False
+    optimizer_cpu_offload = True
+    overlap_cpu_optimizer_d2h_h2d = True
     use_precision_aware_optimizer = True
 
     advantage_estimator = "grpo"
@@ -378,11 +341,11 @@ class _Miles(MilesConfig):
 
     use_wandb = True
     wandb_project = "fully-async-rl-modal"
-    wandb_group = "glm5-2-nvfp4-swebench-pro"
+    wandb_group = "qwen3-6-35b-a3b-nvfp4-swebench-pro-smoke"
     disable_wandb_random_suffix = True
     use_prometheus = True
     prometheus_port = 9090
-    prometheus_run_name = "glm5-2-nvfp4-swebench-pro"
+    prometheus_run_name = "qwen3-6-35b-a3b-nvfp4-swebench-pro-smoke"
 
     environment = {
         "PYTHONPATH": (
@@ -391,9 +354,7 @@ class _Miles(MilesConfig):
         ),
         "CUDA_DEVICE_MAX_CONNECTIONS": "1",
         "NCCL_NVLS_ENABLE": "1",
-        # GLM-5 uses interleaved, not NeoX-style, rotary pairs in the DSA indexer.
-        "INDEXER_ROPE_NEOX_STYLE": "0",
-        "SGLANG_DSA_TOPK_FLASHINFER_TIE_BREAK": "large",
+        "NVSHMEM_DISABLE_NCCL": "1",
         "RAY_health_check_timeout_ms": "60000",
         "MILES_EXPERIMENTAL_ROLLOUT_REFACTOR": "1",
         "AGENT_MODEL_NAME": "model",
@@ -401,8 +362,9 @@ class _Miles(MilesConfig):
         "MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT": "1",
         "LITELLM_LOG": "ERROR",
         "MODAL_SWE_TASKS_DIR": f"{SWEBENCH_PRO_PATH}/tasks",
+        # The sandbox runtime is model-independent; reuse the already-deployed app.
         "MODAL_SWE_SANDBOX_APP": "glm5-2-nvfp4-swebench-pro-sandbox",
-        "MODAL_SWE_MAX_STEPS": "256",
+        "MODAL_SWE_MAX_STEPS": "128",
         "MODAL_SWE_EPISODE_TIMEOUT": "7200",
         "MODAL_SWE_MODEL_REQUEST_TIMEOUT": "1800",
         "MODAL_SWE_EXEC_TIMEOUT": "120",
@@ -412,11 +374,9 @@ class _Miles(MilesConfig):
         "MODAL_SWE_INJECT_PYTEST_REPORTER": "0",
         "MODAL_SWE_CPUS": "2",
         "MODAL_SWE_MEMORY_MIB": "16384",
-        "MODAL_SWE_AGENT_PROCESSES": "48",
-        "MODAL_SWE_AGENT_THREADS_PER_PROCESS": "16",
-        # Bound concurrent schedule/setup operations near the requested 500-wide
-        # control-plane envelope: 48 controller processes * 10 boots = 480.
-        "MODAL_SWE_SANDBOX_BOOT_CONCURRENCY_PER_PROCESS": "10",
+        "MODAL_SWE_AGENT_PROCESSES": "8",
+        "MODAL_SWE_AGENT_THREADS_PER_PROCESS": "8",
+        "MODAL_SWE_SANDBOX_BOOT_CONCURRENCY_PER_PROCESS": "2",
         **NVFP4_TRAINING_ENV,
     }
 
