@@ -35,7 +35,7 @@ MEGATRON_RUNTIME_PATCHES = [
 
 TRAINER_NODES = 2
 GPUS_PER_TRAINER_NODE = 8
-ROLLOUT_GPUS_PER_ENGINE = 2
+ROLLOUT_GPUS_PER_ENGINE = 1
 ROLLOUT_MIN_CONTAINERS = 24
 ROLLOUT_INPUTS_PER_ENGINE = 16
 ROLLOUT_CONCURRENT_SAMPLES = 544
@@ -50,8 +50,7 @@ SGLANG_SERVER_ENV = {
     "SGLANG_SANITIZE_NAN_LOGITS": "true",
 }
 SGLANG_SERVER_ARGS = {
-    "--load-format": "fastsafetensors",
-    "--model-loader-extra-config": '{"enable_gds":false}',
+    "--load-format": "auto",
     "--enable-cpu-weight-cache": "",
     "--cpu-weight-cache-max-compile-group-gb": "8",
     "--weight-loader-drop-cache-after-load": "",
