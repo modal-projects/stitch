@@ -14,6 +14,8 @@ from __future__ import annotations
 import asyncio
 import logging
 from concurrent.futures import ThreadPoolExecutor
+from functools import cache
+from typing import Any
 
 from stitch.pools.base import Pool
 from stitch.types import VersionRef
@@ -45,20 +47,11 @@ class ModalFlashPool(Pool):
         return str(url).rstrip("/")
 
     def discover_replicas(self) -> list[str]:
-        import modal.experimental
-
-        return _replica_urls(
-            modal.experimental.flash_get_containers(self.app_name, self.cls_name)
-        )
+        return _replica_urls(list_flash_containers(self.app_name, self.cls_name))
 
     async def discover_replicas_async(self) -> list[str]:
-        import modal.experimental
-
         return _replica_urls(
-            await modal.experimental.flash_get_containers.aio(
-                self.app_name,
-                self.cls_name,
-            )
+            await list_flash_containers_async(self.app_name, self.cls_name)
         )
 
     def wake(self, replicas: list[str], ref: VersionRef) -> None:
@@ -105,6 +98,46 @@ class ModalFlashPool(Pool):
             kwargs["max_containers"] = max
         if kwargs:
             self._server().update_autoscaler(**kwargs)
+
+
+async def _list_flash_containers_rpc(app_name: str, cls_name: str) -> list[Any]:
+    from modal.client import _Client
+    from modal.config import config
+    from modal_proto import api_pb2
+
+    client = await _Client.from_env()
+    fn = await client.stub.FunctionGet(
+        api_pb2.FunctionGetRequest(
+            app_name=app_name,
+            object_tag=cls_name,
+            environment_name=config.get("environment") or "",
+        )
+    )
+    response = await client.stub.FlashContainerList(
+        api_pb2.FlashContainerListRequest(function_id=fn.function_id)
+    )
+    return list(response.containers)
+
+
+@cache
+def _flash_container_lister():
+    from modal._utils.async_utils import synchronize_api
+
+    return synchronize_api(_list_flash_containers_rpc)
+
+
+def list_flash_containers(app_name: str, cls_name: str) -> list[Any]:
+    """Return live containers for an ``@app.server`` function.
+
+    Modal's experimental helper resolves ``<Class>.*``, while ``@app.server``
+    registers the plain ``<Class>`` tag. Resolve that function first, then list
+    its Flash containers by function id.
+    """
+    return _flash_container_lister()(app_name, cls_name)
+
+
+async def list_flash_containers_async(app_name: str, cls_name: str) -> list[Any]:
+    return await _flash_container_lister().aio(app_name, cls_name)
 
 
 def _replica_urls(containers) -> list[str]:
