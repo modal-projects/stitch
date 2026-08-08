@@ -15,8 +15,6 @@ from pathlib import Path
 
 import modal
 
-_COOKBOOK_DIR = Path(__file__).resolve().parent.parent
-
 
 @dataclass(frozen=True)
 class SGLangRuntime:
@@ -34,6 +32,8 @@ DEFAULT_SGLANG_RUNTIME = SGLangRuntime(
     branch="stitch-sglang-v0.5.16",
     commit="af563ae597c62ef975821a4e410dc4ef34148bee",
 )
+
+_COOKBOOK_DIR = Path(__file__).resolve().parent.parent
 
 _SERVING_ENV = {
     "HF_XET_HIGH_PERFORMANCE": "1",
@@ -56,10 +56,9 @@ def build_serving_image(
     runtime: SGLangRuntime = DEFAULT_SGLANG_RUNTIME,
 ) -> modal.Image:
     """Build the rollout-pool image for one experiment config."""
-    image = modal.Image.from_registry(runtime.image)
-
     return (
-        image.run_commands(
+        modal.Image.from_registry(runtime.image)
+        .run_commands(
             "rm -rf /tmp/stitch-sglang-overlay"
             f" && git clone --filter=blob:none --single-branch --branch {runtime.branch}"
             f" {runtime.repository} /tmp/stitch-sglang-overlay"

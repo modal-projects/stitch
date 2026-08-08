@@ -139,9 +139,7 @@ SGLANG_SERVER_ARGS = {
     "--dsa-decode-backend": "flashmla_kv",
     "--dsa-topk-backend": "flashinfer",
     "--page-size": "64",
-    # Keep four-way expert parallelism and dense TP1 from the Miles reference.
-    # DFlash does not support DP attention, so TP remains four while DP stays one.
-    # Four-GPU analogue of the reference's DP2/EP2 layout; DP attention requires DP=TP.
+    # One attention-DP and expert-parallel rank per GPU; dense MoE paths remain TP1.
     "--enable-dp-attention": "",
     "--dp-size": str(ROLLOUT_GPUS_PER_ENGINE),
     "--ep-size": str(ROLLOUT_GPUS_PER_ENGINE),
