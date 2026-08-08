@@ -8,6 +8,8 @@ from cookbook.miles_disagg import trainer_image as miles_trainer_image
 from cookbook.slime_disagg import trainer_image as slime_trainer_image
 
 
+# Cross-integration coverage lives at the cookbook boundary so ``cookbook.common``
+# never imports the trainer-specific packages that consume it.
 class _OrderingImage:
     """Small Modal Image ordering model: build layers may not follow runtime mounts."""
 
@@ -75,10 +77,10 @@ def test_sources_remain_fast_runtime_mounts_by_default(
 
 
 @pytest.mark.parametrize(
-    ("trainer_image", "local_source_arg", "local_source"),
+    ("trainer_image", "local_source_arg", "local_source", "trainer_root"),
     [
-        (miles_trainer_image, "miles_local", "/local/miles"),
-        (slime_trainer_image, "slime_local", "/local/slime"),
+        (miles_trainer_image, "miles_local", "/local/miles", "/root/miles"),
+        (slime_trainer_image, "slime_local", "/local/slime", "/root/slime"),
     ],
     ids=["miles", "slime"],
 )
@@ -87,6 +89,7 @@ def test_copy_source_image_can_be_extended_after_local_fork_overlay(
     trainer_image: Any,
     local_source_arg: str,
     local_source: str,
+    trainer_root: str,
 ) -> None:
     image = _build(
         monkeypatch,
@@ -99,4 +102,4 @@ def test_copy_source_image_can_be_extended_after_local_fork_overlay(
     assert not image.has_runtime_mount
     image.env({"TRAINER_GPU": "B300"})
     image.add_local_file("patch", "/root/patch", copy=True)
-    image.run_commands("cd /root/miles && git apply /root/patch")
+    image.run_commands(f"cd {trainer_root} && git apply /root/patch")

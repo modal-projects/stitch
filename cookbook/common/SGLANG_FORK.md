@@ -47,13 +47,12 @@ Models that require another upstream SGLang line set `SGLANG_RUNTIME` in their
 configuration. The image, fork branch, and immutable commit stay together so
 the Python overlay remains ABI-compatible with the image.
 
-[`kimi_k3_mxfp4.py`](../miles_disagg/configs/kimi_k3_mxfp4.py) pins the public
-K3 image and `stitch-sglang-kimi-k3` fork. That fork ports the
-same weight-sync responsibilities onto SGLang’s public `kimi-k3` branch; other
-recipes continue to use the v0.5.16 default. Its K3-native loader narrows expert
-lookup, batches safe copies, scopes post-load work to loaded modules, and
-transforms Blackwell MXFP4 runtime layouts on GPU before caching rank-ready host
-images.
+Kimi K3 MXFP4 recipes pin the public K3 image and `stitch-sglang-kimi-k3` fork.
+That fork ports the same weight-sync responsibilities onto SGLang’s public
+`kimi-k3` branch; other recipes continue to use the v0.5.16 default. Its
+K3-native loader narrows expert lookup, batches safe copies, scopes post-load
+work to loaded modules, and transforms Blackwell MXFP4 runtime layouts on GPU
+before caching rank-ready host images.
 
 ## API
 

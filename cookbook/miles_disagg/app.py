@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -348,8 +349,13 @@ class Trainer:
             "run_id": RUN_ID,
         }
         cfg.custom_config_path = custom_config
-        launch.resolve_config(cfg, tempfile.mkdtemp(), YAML_CONFIG_FIELDS)
-        cmd = launch.build_train_cmd(cfg, MILES_ROOT, "miles_model_script")
+        launch.resolve_config(
+            cfg,
+            tempfile.mkdtemp(),
+            checkpoint_fields=("hf_checkpoint", "load", "ref_load", "critic_load"),
+            yaml_fields=YAML_CONFIG_FIELDS,
+        )
+        cmd = _build_train_cmd(cfg)
 
         # Claim the pool before miles publishes: reset every replica to base for this run.
         from cookbook.common import hooks
@@ -381,6 +387,18 @@ class Trainer:
                     )
                 except Exception as exc:  # noqa: BLE001
                     print(f"WARNING: could not commit train log: {exc}")
+
+
+def _build_train_cmd(cfg: MilesConfig) -> str:
+    train_script = f"{MILES_ROOT}/{'train_async.py' if cfg.async_mode else 'train.py'}"
+    model_script = cfg.miles_model_script
+    if model_script:
+        inner = (
+            f"source {MILES_ROOT}/{model_script} && "
+            f"python3 {train_script} ${{MODEL_ARGS[@]}} {shlex.join(cfg.cli_args())}"
+        )
+        return f"bash -c {shlex.quote(inner)}"
+    return f"python3 {train_script} {shlex.join(cfg.cli_args())}"
 
 
 # ── Entrypoints (preparation lives in a separate app: cookbook.miles_disagg.prep_app) ──

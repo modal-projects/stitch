@@ -1,8 +1,7 @@
-"""``ModalConfig`` — the Modal-infrastructure half of an experiment config, shared by
-every recipe (GPU model, region, rollout-pool sizing, prep topology).
+"""``ModalConfig`` — the shared Modal-infrastructure half of an experiment config.
 
-The framework *training* config (``MilesConfig`` / ``SlimeConfig``) is self-contained in
-each framework's subdir; only this infra grouping is common.
+Training arguments remain in each trainer integration; GPU selection, region, rollout-pool
+sizing, and preparation topology live here.
 """
 
 from __future__ import annotations
