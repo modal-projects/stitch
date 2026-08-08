@@ -96,6 +96,27 @@ EXPERIMENT_CONFIG=glm45_air_fp8 \
   uv run --extra modal python -m cookbook.miles_disagg.launch
 ```
 
+The GLM-4.7-Flash SWE-bench Pro recipe provisions two eight-GPU H200 trainer
+nodes and 48 rollout GPUs as twelve TP4 engines. Prepare its immutable assets in
+dependency order, then launch an isolated run:
+
+```bash
+export EXPERIMENT_CONFIG=glm47_flash_swebench_pro
+
+uv run --extra modal modal run -d \
+  -m cookbook.miles_disagg.prep_app::prepare_checkpoints
+uv run --extra modal modal run -d \
+  -m cookbook.miles_disagg.prep_app::prepare_torch_dist
+uv run --extra modal modal run -d \
+  -m cookbook.miles_disagg.prep_app::prepare_dataset
+uv run --extra modal python -m cookbook.miles_disagg.launch
+```
+
+Checkpoint preparation pins and materializes the BF16 Hugging Face source;
+torch-dist preparation converts that source for the two-node trainer. Dataset
+preparation writes the pinned SWE-bench Pro prompts, task environments, and
+verifiers. Each step is idempotent.
+
 Slime:
 
 ```bash
