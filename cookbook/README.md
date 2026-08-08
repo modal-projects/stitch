@@ -97,8 +97,8 @@ EXPERIMENT_CONFIG=glm45_air_fp8 \
 ```
 
 The GLM-4.7-Flash SWE-bench Pro recipe provisions two eight-GPU H200 trainer
-nodes and 48 rollout GPUs as twelve TP4 engines. Prepare its immutable assets in
-dependency order, then launch an isolated run:
+nodes and keeps 24 single-H200 rollout engines warm, with uncapped autoscaling.
+Prepare its immutable assets in dependency order, then launch an isolated run:
 
 ```bash
 export EXPERIMENT_CONFIG=glm47_flash_swebench_pro

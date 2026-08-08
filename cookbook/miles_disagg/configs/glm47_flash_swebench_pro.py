@@ -35,14 +35,12 @@ MEGATRON_RUNTIME_PATCHES = [
 
 TRAINER_NODES = 2
 GPUS_PER_TRAINER_NODE = 8
-ROLLOUT_GPUS_PER_ENGINE = 4
-ROLLOUT_ENGINES = 12
+ROLLOUT_GPUS_PER_ENGINE = 2
+ROLLOUT_MIN_CONTAINERS = 24
+ROLLOUT_INPUTS_PER_ENGINE = 16
 ROLLOUT_CONCURRENT_SAMPLES = 544
-ROLLOUT_INPUTS_PER_ENGINE = (
-    ROLLOUT_CONCURRENT_SAMPLES + ROLLOUT_ENGINES - 1
-) // ROLLOUT_ENGINES
-ROLLOUT_MAX_RUNNING_REQUESTS = 64
-ROLLOUT_MAX_QUEUED_REQUESTS = ROLLOUT_MAX_RUNNING_REQUESTS - ROLLOUT_INPUTS_PER_ENGINE
+ROLLOUT_MAX_RUNNING_REQUESTS = 24
+ROLLOUT_MAX_QUEUED_REQUESTS = 4  # backpressure
 MAX_SEQ_LEN = 65_536
 
 SIDECAR_COMMIT_MODE = "in_place"
@@ -62,16 +60,11 @@ SGLANG_SERVER_ARGS = {
     "--reasoning-parser": "glm45",
     "--tool-call-parser": "glm47",
     "--context-length": str(MAX_SEQ_LEN + 8),
-    "--enable-dp-attention": "",
-    "--dp-size": str(ROLLOUT_GPUS_PER_ENGINE),
-    "--ep-size": str(ROLLOUT_GPUS_PER_ENGINE),
-    "--moe-dense-tp-size": "1",
-    "--enable-dp-lm-head": "",
-    "--mem-fraction-static": "0.8",
+    "--mem-fraction-static": "0.85",
     "--chunked-prefill-size": "8192",
     "--max-running-requests": str(ROLLOUT_MAX_RUNNING_REQUESTS),
     "--max-queued-requests": str(ROLLOUT_MAX_QUEUED_REQUESTS),
-    "--cuda-graph-max-bs-decode": "64",
+    "--cuda-graph-max-bs-decode": str(ROLLOUT_MAX_RUNNING_REQUESTS),
     "--enable-metrics": "",
     "--enable-metrics-for-all-schedulers": "",
     "--decode-log-interval": "1000",
@@ -84,10 +77,10 @@ modal = ModalConfig(
     rollout_gpu="H200",
     cloud="aws",
     trainer_memory_mib=(1024 * 1024, 2 * 1024 * 1024),
-    # Two TP4 engines can share an eight-GPU host within the 2 TiB host budget.
+    # One BF16 engine fits on a single H200; keep CPU headroom for the weight cache.
     rollout_memory_mib=(512 * 1024, 1024 * 1024),
-    rollout_min_containers=ROLLOUT_ENGINES,
-    rollout_max_containers=ROLLOUT_ENGINES,
+    rollout_min_containers=ROLLOUT_MIN_CONTAINERS,
+    rollout_max_containers=None,
     rollout_target_inputs=ROLLOUT_INPUTS_PER_ENGINE,
     rollout_ephemeral_disk_mib=524_288,
     trainer_ephemeral_disk_mib=1_048_576,
