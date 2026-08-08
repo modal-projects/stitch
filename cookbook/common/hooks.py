@@ -39,10 +39,10 @@ def sample_affinity_key(sample: Any) -> str | None:
 def commit_and_wake(args: Any, published_dir: str, rollout_engines: Any = None) -> None:
     """Bridge the framework's disk-delta publish to the stitch store. The framework fires this
     at each durability boundary: a version dir (``weight_vNNNNNN``, holding the HF index) and —
-    at baseline/pointer commit — the run dir. Every rank commits its mounted writes; after all
-    commits succeed, rank 0 refreshes and validates the complete checkpoint before advancing
-    the pointer. Keying on the dir name (not on reading an index) keeps run-dir calls a clean
-    no-op, not a missing-file crash."""
+    at baseline/pointer commit — the run dir. Every container commits its shared mount once;
+    after all commits succeed, rank 0 refreshes and validates the complete checkpoint before
+    advancing the pointer. Keying on the dir name (not on reading an index) keeps run-dir calls
+    a clean no-op, not a missing-file crash."""
     del rollout_engines
     store = _store(args)
     if not Path(published_dir).name.startswith("weight_v"):
@@ -75,10 +75,11 @@ def commit_and_wake(args: Any, published_dir: str, rollout_engines: Any = None) 
         return
 
     commit_error = None
-    try:
-        store.commit()
-    except Exception:  # noqa: BLE001
-        commit_error = f"rank {process.dist_rank()}:\n{traceback.format_exc()}"
+    if process.dist_is_container_leader():
+        try:
+            store.commit()
+        except Exception:  # noqa: BLE001
+            commit_error = f"rank {process.dist_rank()}:\n{traceback.format_exc()}"
     _raise_distributed_failures("checkpoint commit", commit_error)
 
     publish_error = None

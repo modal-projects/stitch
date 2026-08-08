@@ -60,6 +60,7 @@ def test_commit_and_wake_publishes() -> None:
         pool = _FakePool()
         events = []
         original_gather = hooks.process.dist_all_gather_object
+        original_container_leader = hooks.process.dist_is_container_leader
         original_publish = hooks.publish_version
         original_commit = ModalVolumeStore.commit
         original_refresh = ModalVolumeStore.refresh
@@ -83,6 +84,7 @@ def test_commit_and_wake_publishes() -> None:
             return [value]
 
         hooks.process.dist_all_gather_object = gather
+        hooks.process.dist_is_container_leader = lambda: True
         hooks.publish_version = publish_after_refresh
         ModalVolumeStore.commit = commit_before_refresh
         ModalVolumeStore.refresh = refresh_after_commit
@@ -91,6 +93,7 @@ def test_commit_and_wake_publishes() -> None:
             hooks.commit_and_wake(_args(str(root)), vdir)
         finally:
             hooks.process.dist_all_gather_object = original_gather
+            hooks.process.dist_is_container_leader = original_container_leader
             hooks.publish_version = original_publish
             ModalVolumeStore.commit = original_commit
             ModalVolumeStore.refresh = original_refresh
@@ -106,6 +109,32 @@ def test_commit_and_wake_publishes() -> None:
             "run-abc", 1
         )
         assert pool.woke == [VersionRef("run-abc", 1)]
+
+
+def test_commit_and_wake_commits_once_per_container() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        original_rank = hooks.process.dist_rank
+        original_gather = hooks.process.dist_all_gather_object
+        original_container_leader = hooks.process.dist_is_container_leader
+        original_commit = ModalVolumeStore.commit
+
+        hooks.process.dist_rank = lambda: 1
+        hooks.process.dist_all_gather_object = lambda value: [value]
+        hooks.process.dist_is_container_leader = lambda: False
+
+        def unexpected_commit(_store) -> None:
+            raise AssertionError("a non-leader rank must not commit the shared mount")
+
+        ModalVolumeStore.commit = unexpected_commit
+        try:
+            vdir = _write_version(root, VersionRef("run-abc", 1))
+            hooks.commit_and_wake(_args(str(root)), vdir)
+        finally:
+            hooks.process.dist_rank = original_rank
+            hooks.process.dist_all_gather_object = original_gather
+            hooks.process.dist_is_container_leader = original_container_leader
+            ModalVolumeStore.commit = original_commit
 
 
 def test_commit_and_wake_baseline_is_noop() -> None:
@@ -209,7 +238,9 @@ def test_request_hook_reads_shared_mount_without_reload() -> None:
         original_refresh = ModalVolumeStore.refresh
 
         def unexpected_refresh(_store) -> None:
-            raise AssertionError("the request gate must not reload the publisher's mount")
+            raise AssertionError(
+                "the request gate must not reload the publisher's mount"
+            )
 
         ModalVolumeStore.refresh = unexpected_refresh
         try:
