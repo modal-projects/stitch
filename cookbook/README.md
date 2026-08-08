@@ -171,15 +171,34 @@ rollout pool, starts training, and prints the app name and stop command.
 
 ## Scale and inspect a run
 
+There are two ways to adjust the scale and overall throughput of the rollout pool;
+updating the autoscaler, and redeploying with a different engine config.
+Both are important to be able to modulate the rollouts production rate in a finegrained
+way.
+
+
+### Redeploying with different autoscaling / engine config
+
+All config values related to the performance of the elastic rollouts server pool are
+in the main config file. The relevant values are `max-running-requests`,
+`max-queued-requests`, `rollout_min_containers`, `rollout_max_containers`, and
+`rollout_target_inputs`.
+
+Inducing backpressure from the rollout pool can be done by capping the amount of
+running or queued requests in the engine. Changing these, or any sglang-level
+config values in the middle of a training run requires a rolling redeploy, e.g.
 ```bash
-uv run --extra modal python -c \
-  "from stitch.pools.modal_flash import ModalFlashPool; ModalFlashPool('<app-name>', 'Server').scale(min=4, max=4)"
+EXPERIMENT_CONFIG=glm47_flash_swebench_pro RUN_ID=8d7200a4 \
+    uv run modal deploy -m cookbook.miles_disagg.app
 ```
 
-`min` is the number of rollout replicas kept running; `max` is the autoscaling
-ceiling. Setting both to `4` pins the fleet at four replicas. New replicas
-remain outside rotation until they load the base and catch up. Verify the
-gateway and every live replica with:
+The default deployment strategy is rolling, i.e. blue-green rollover of rollout
+containers. Note: `EXPERIMENT_CONFIG` and `RUN_ID` must be consistent with an active
+or live training run in order to do a rolling redeploy of the rollout pool.
+
+### Inspecting a deployed pool
+
+Verify the gateway and every live replica with:
 
 ```bash
 uv run --extra modal python -m cookbook.common.smoke \
