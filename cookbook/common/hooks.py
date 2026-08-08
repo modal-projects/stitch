@@ -7,9 +7,6 @@ run coordinates from the trainer's argument namespace and composes the Stitch co
 
 from __future__ import annotations
 
-import asyncio
-import fcntl
-import hashlib
 import logging
 import time
 import traceback
@@ -42,10 +39,10 @@ def sample_affinity_key(sample: Any) -> str | None:
 def commit_and_wake(args: Any, published_dir: str, rollout_engines: Any = None) -> None:
     """Bridge the framework's disk-delta publish to the stitch store. The framework fires this
     at each durability boundary: a version dir (``weight_vNNNNNN``, holding the HF index) and —
-    at baseline/pointer commit — the run dir. Every rank commits its mounted writes; after all
-    commits succeed, rank 0 refreshes and validates the complete checkpoint before advancing
-    the pointer. Keying on the dir name (not on reading an index) keeps run-dir calls a clean
-    no-op, not a missing-file crash."""
+    at baseline/pointer commit — the run dir. Every container commits its shared mount once;
+    after all commits succeed, rank 0 refreshes and validates the complete checkpoint before
+    advancing the pointer. Keying on the dir name (not on reading an index) keeps run-dir calls
+    a clean no-op, not a missing-file crash."""
     del rollout_engines
     store = _store(args)
     if not Path(published_dir).name.startswith("weight_v"):
@@ -78,10 +75,11 @@ def commit_and_wake(args: Any, published_dir: str, rollout_engines: Any = None) 
         return
 
     commit_error = None
-    try:
-        store.commit()
-    except Exception:  # noqa: BLE001
-        commit_error = f"rank {process.dist_rank()}:\n{traceback.format_exc()}"
+    if process.dist_is_container_leader():
+        try:
+            store.commit()
+        except Exception:  # noqa: BLE001
+            commit_error = f"rank {process.dist_rank()}:\n{traceback.format_exc()}"
     _raise_distributed_failures("checkpoint commit", commit_error)
 
     publish_error = None
@@ -160,18 +158,17 @@ async def gated_rollout_request_hook(
 
 
 class _CachedPointer:
-    """TTL-cached durable ``latest`` version for request admission.
+    """TTL-cached ``latest`` version from the trainer's local Volume mount.
 
-    Publication runs on trainer ranks while request hooks may run in separate processes,
-    so their Volume mounts can have independent visibility. Co-located request processes
-    share a file-locked refresh lease to reload at most once per TTL.
+    The publisher and session-server request hooks share the trainer-head mount. Reloading
+    it here can discard a version that the publisher is still writing; cross-host refresh
+    belongs to rollout-replica reconciliation.
     """
 
     def __init__(self) -> None:
         self._version = 0
         self._at = -1e9
         self._store: ModalVolumeStore | None = None
-        self._lock = asyncio.Lock()
 
     async def get(self, args: Any, ttl: float = 2.0) -> int:
         store = self._store
@@ -188,13 +185,8 @@ class _CachedPointer:
             self._version = 0
             self._at = -1e9
         now = time.monotonic()
-        if now - self._at < ttl:
-            return self._version
-        async with self._lock:
-            if time.monotonic() - self._at < ttl:
-                return self._version
+        if now - self._at >= ttl:
             try:
-                await asyncio.to_thread(_refresh_mount, store, ttl)
                 pointer = store.read_pointer()
                 self._version = pointer.version if pointer else 0
             except Exception:  # noqa: BLE001
@@ -203,43 +195,8 @@ class _CachedPointer:
                     self._version,
                     exc_info=True,
                 )
-            finally:
-                self._at = time.monotonic()
+            self._at = time.monotonic()
         return self._version
-
-
-def _refresh_mount(store: ModalVolumeStore, ttl: float) -> None:
-    """Refresh a mounted Volume at most once per container and TTL.
-
-    A trainer may run many request-hook processes in one container. They share the mount
-    and this local ``flock`` lease, so one process reloads while the others reuse the
-    resulting view. Separate containers get their own lease and refresh independently.
-    """
-    if not store.volume_name:
-        store.refresh()
-        return
-
-    key = hashlib.sha256(
-        f"{store.volume_name}\0{store.root}\0{store.run_id}".encode()
-    ).hexdigest()[:16]
-    lease_dir = Path("/tmp/stitch-volume-refresh")
-    lease_dir.mkdir(parents=True, exist_ok=True)
-    with (lease_dir / f"{key}.lock").open("a+", encoding="utf-8") as lease:
-        fcntl.flock(lease, fcntl.LOCK_EX)
-        lease.seek(0)
-        try:
-            refreshed_at = float(lease.read() or "-inf")
-        except ValueError:
-            refreshed_at = float("-inf")
-        if time.monotonic() - refreshed_at < ttl:
-            return
-        try:
-            store.refresh()
-        finally:
-            lease.seek(0)
-            lease.truncate()
-            lease.write(str(time.monotonic()))
-            lease.flush()
 
 
 _latest = _CachedPointer()

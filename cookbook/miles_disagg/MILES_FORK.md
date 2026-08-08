@@ -28,8 +28,9 @@ The branch `stitch-weight-sync-v0516` is upstream `radixark/miles` main at
 
 ## GLM-5.2 fully-async SWE branch
 
-`glm5_2_nvfp4.py` pins `stitch-miles-fully-async-swe` at `b1020b596`. The
-Stitch branch is stacked on `modal/feat/modal-swe-fully-async` at `d0c11a412`.
+The GLM-5.2 and GLM-4.7 fully-async SWE recipes pin
+`stitch-miles-fully-async-swe` at `b1020b596`. The Stitch branch is stacked on
+`modal/feat/modal-swe-fully-async` at `d0c11a412`.
 
 The fully-async branch owns behavior that is useful without Stitch:
 
@@ -52,8 +53,8 @@ The Stitch branch adds only the external-fleet integration:
 | `23b262bca` | Overlap the external fleet's initial delta snapshot with the first rollout. |
 | `b1020b596` | Sort imports in the external-fleet adapter. |
 
-This branch is additive and only backs the GLM-5.2 fully-async experiment. It
-does not replace the standard recipe pin.
+This branch is additive and only backs fully-async SWE experiments. It does not
+replace the standard recipe pin.
 
 The dated image supplies Megatron-LM, TransformerEngine, CUDA, and other
 compiled dependencies. Miles is installed over it with `--no-deps`, so the

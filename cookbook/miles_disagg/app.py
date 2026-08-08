@@ -340,6 +340,8 @@ class Trainer:
             cfg.save = cfg.save_hf = None
         else:
             cfg.save = str(RUN_DIR / "checkpoints")
+            if save_hf := getattr(cfg, "save_hf", None):
+                cfg.save_hf = str(RUN_DIR / save_hf)
         # miles setattr's every key onto args for the hooks.
         custom_config = {
             **(cfg.custom_config_path or {}),

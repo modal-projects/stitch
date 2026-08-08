@@ -83,6 +83,21 @@ stable directory; `manifest.json` records its pinned source revision.
     └── <dataset-specific-assets>/
 ```
 
+Create the named secrets once in the Modal environment where the job will run.
+The Hugging Face secret is mounted by preparation jobs; the W&B secret is
+mounted only when a recipe sets `use_wandb = True`.
+
+```bash
+export MODAL_ENVIRONMENT=<environment>
+export HF_TOKEN=<token>
+export WANDB_API_KEY=<key>
+
+uv run --extra modal modal secret create \
+  huggingface-secret HF_TOKEN="$HF_TOKEN"
+uv run --extra modal modal secret create \
+  wandb-secret WANDB_API_KEY="$WANDB_API_KEY"
+```
+
 Miles:
 
 ```bash
@@ -95,6 +110,50 @@ EXPERIMENT_CONFIG=glm45_air_fp8 \
 EXPERIMENT_CONFIG=glm45_air_fp8 \
   uv run --extra modal python -m cookbook.miles_disagg.launch
 ```
+
+The GLM-4.7-Flash SWE-bench Pro recipe provisions two eight-GPU H200 trainer
+nodes and keeps 24 single-H200 rollout engines warm, with uncapped autoscaling.
+Prepare its immutable assets in dependency order, then launch an isolated run:
+
+```bash
+export EXPERIMENT_CONFIG=glm47_flash_swebench_pro
+
+uv run --extra modal modal run -d \
+  -m cookbook.miles_disagg.prep_app::prepare_checkpoints
+uv run --extra modal modal run -d \
+  -m cookbook.miles_disagg.prep_app::prepare_torch_dist
+uv run --extra modal modal run -d \
+  -m cookbook.miles_disagg.prep_app::prepare_dataset
+uv run --extra modal python -m cookbook.miles_disagg.launch
+```
+
+Checkpoint preparation pins and materializes the BF16 Hugging Face source;
+torch-dist preparation converts that source for the two-node trainer. Dataset
+preparation writes the pinned SWE-bench Pro prompts, task environments, and
+verifiers. Each step is idempotent. The launcher generates an eight-character
+run ID; keep its printed app name to inspect, scale, or stop that run. Follow
+the live logs with:
+
+```bash
+uv run --extra modal modal app logs -f <app-name>
+```
+
+### GLM-4.7 Flash: what to expect
+
+These are steady-state measurements on H200s. Cold replica initialization,
+fleet replacement, and checkpoint-save steps are excluded.
+
+| Stage | Sample | Mean | p50 | p95 |
+| --- | ---: | ---: | ---: | ---: |
+| Trainer XOR delta encode and publish | 10 updates | 15.0 s | 13.6 s | 22.4 s |
+| Replica preparation while serving | 58 replica updates | 15.8 s | 15.6 s | 18.0 s |
+| Engine pause to activate weights | 58 replica updates | 0.75 s | 0.58 s | 1.13 s |
+
+The ten trainer updates changed 0.252% of rollout-visible bytes on average and
+produced 0.469 GB compressed deltas. The complete steady-state path is roughly
+30–35 seconds per update, while only the final activation pauses inference.
+The run published 25 consecutive versions, and exact-version smoke checks
+passed through v25.
 
 Slime:
 
@@ -112,15 +171,34 @@ rollout pool, starts training, and prints the app name and stop command.
 
 ## Scale and inspect a run
 
+There are two ways to adjust the scale and overall throughput of the rollout pool;
+updating the autoscaler, and redeploying with a different engine config.
+Both are important to be able to modulate the rollouts production rate in a finegrained
+way.
+
+
+### Redeploying with different autoscaling / engine config
+
+All config values related to the performance of the elastic rollouts server pool are
+in the main config file. The relevant values are `max-running-requests`,
+`max-queued-requests`, `rollout_min_containers`, `rollout_max_containers`, and
+`rollout_target_inputs`.
+
+Inducing backpressure from the rollout pool can be done by capping the amount of
+running or queued requests in the engine. Changing these, or any sglang-level
+config values in the middle of a training run requires a rolling redeploy, e.g.
 ```bash
-uv run --extra modal python -c \
-  "from stitch.pools.modal_flash import ModalFlashPool; ModalFlashPool('<app-name>', 'Server').scale(min=4, max=4)"
+EXPERIMENT_CONFIG=glm47_flash_swebench_pro RUN_ID=8d7200a4 \
+    uv run modal deploy -m cookbook.miles_disagg.app
 ```
 
-`min` is the number of rollout replicas kept running; `max` is the autoscaling
-ceiling. Setting both to `4` pins the fleet at four replicas. New replicas
-remain outside rotation until they load the base and catch up. Verify the
-gateway and every live replica with:
+The default deployment strategy is rolling, i.e. blue-green rollover of rollout
+containers. Note: `EXPERIMENT_CONFIG` and `RUN_ID` must be consistent with an active
+or live training run in order to do a rolling redeploy of the rollout pool.
+
+### Inspecting a deployed pool
+
+Verify the gateway and every live replica with:
 
 ```bash
 uv run --extra modal python -m cookbook.common.smoke \
@@ -150,7 +228,7 @@ The K3 profiler downloads the pinned public checkpoint and constructs a
 checksummed XOR publication covering every checkpoint tensor:
 
 ```bash
-MODAL_FUNCTION_RUNTIME=runc uv run --extra modal modal run -d \
+uv run --extra modal modal run -d \
   tools/profiling/kimi_k3_mxfp4_delta_weight_update.py \
   --update-mode cpu
 ```
