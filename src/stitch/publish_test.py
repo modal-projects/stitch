@@ -16,6 +16,7 @@ class FakeStore(Store):
     def __init__(self, pointer: VersionRef | None = None) -> None:
         self._pointer = pointer
         self.published: list = []
+        self.claim_calls = 0
 
     def read_pointer(self):
         return self._pointer
@@ -27,6 +28,7 @@ class FakeStore(Store):
         self._pointer = ref
 
     def claim(self, run_id):
+        self.claim_calls += 1
         self._pointer = VersionRef(run_id, 0)
 
 
@@ -113,6 +115,7 @@ def test_claim_run() -> None:
     store, pool = FakeStore(), FakePool()
     claim_run(store, pool, "r2")
     assert store._pointer == VersionRef("r2", 0)
+    assert store.claim_calls == 1
     assert pool.woke == [VersionRef("r2", 0)]
 
 
@@ -120,6 +123,7 @@ def test_claim_run_at_base_is_idempotent() -> None:
     store, pool = FakeStore(VersionRef("r2", 0)), FakePool()
     claim_run(store, pool, "r2")
     assert store._pointer == VersionRef("r2", 0)
+    assert store.claim_calls == 1
     assert pool.woke == [VersionRef("r2", 0)]
 
 

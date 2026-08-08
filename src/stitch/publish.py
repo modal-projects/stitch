@@ -68,6 +68,9 @@ def claim_run(store: Store, pool: Pool | None, run_id: str) -> None:
     base = VersionRef(run_id, 0)
     current = store.read_pointer()
     if current == base:
+        # Re-write the same pointer so a retry also retries its durability
+        # boundary after an interrupted/ambiguous backend write.
+        store.claim(run_id)
         _wake(pool, base)
         logger.info("run %s already claimed at base", run_id)
         return
