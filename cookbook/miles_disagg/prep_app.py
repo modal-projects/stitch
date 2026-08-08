@@ -62,9 +62,6 @@ app = modal.App(f"{exp.APP_NAME}-prep")
 checkpoint_gpu = (
     f"{modal_cfg.gpu}:1" if getattr(exp, "CHECKPOINT_PREP_REQUIRES_GPU", True) else None
 )
-checkpoint_memory = (
-    modal_cfg.checkpoint_prep_memory_mib or modal_cfg.trainer_memory_mib
-)
 
 
 @app.function(
@@ -74,7 +71,7 @@ checkpoint_memory = (
         str(HF_CACHE_PATH): hf_cache_volume,
         str(CHECKPOINTS_PATH): checkpoint_volume,
     },
-    memory=checkpoint_memory,
+    memory=modal_cfg.trainer_memory_mib,
     timeout=6 * 60 * MINUTES,
     secrets=[modal.Secret.from_name("huggingface-secret")],
     include_source=False,

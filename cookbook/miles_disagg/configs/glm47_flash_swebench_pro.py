@@ -74,7 +74,6 @@ modal = ModalConfig(
     rollout_gpu="H200",
     cloud="aws",
     trainer_memory_mib=(1024 * 1024, 2 * 1024 * 1024),
-    checkpoint_prep_memory_mib=(128 * 1024, 256 * 1024),
     rollout_memory_mib=(512 * 1024, 1024 * 1024),
     rollout_min_containers=ROLLOUT_MIN_CONTAINERS,
     rollout_max_containers=None,
