@@ -200,28 +200,25 @@ def test_request_hook_min_lag() -> None:
         assert request["max_retries"] == 900
 
 
-def test_request_hooks_share_one_container_refresh() -> None:
+def test_request_hook_reads_shared_mount_without_reload() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         store = ModalVolumeStore(root, run_id="run-abc")
         store.advance_pointer(VersionRef("run-abc", 1))
-        first = hooks._CachedPointer()
-        second = hooks._CachedPointer()
+        pointer = hooks._CachedPointer()
         original_refresh = ModalVolumeStore.refresh
-        refreshes = 0
 
-        def count_refresh(_store) -> None:
-            nonlocal refreshes
-            refreshes += 1
+        def unexpected_refresh(_store) -> None:
+            raise AssertionError("the request gate must not reload the publisher's mount")
 
-        ModalVolumeStore.refresh = count_refresh
+        ModalVolumeStore.refresh = unexpected_refresh
         try:
             args = _args(str(root), experiment_volume_name="weights")
-            assert asyncio.run(first.get(args, ttl=60)) == 1
-            assert asyncio.run(second.get(args, ttl=60)) == 1
+            assert asyncio.run(pointer.get(args, ttl=0)) == 1
+            store.advance_pointer(VersionRef("run-abc", 2))
+            assert asyncio.run(pointer.get(args, ttl=0)) == 2
         finally:
             ModalVolumeStore.refresh = original_refresh
-        assert refreshes == 1
 
 
 def test_sample_affinity_key_fallbacks() -> None:
