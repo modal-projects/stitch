@@ -1,4 +1,4 @@
-"""Validate the GLM-5.2 DFlash attention-TP padding image hotfix on Modal."""
+"""Validate GLM-5.2 DFlash prefill with attention-TP padding on Modal."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from cookbook.common.constants import (
 from cookbook.common.serving_image import build_serving_image
 from cookbook.miles_disagg.configs import glm5_2_nvfp4 as model
 
-APP_NAME = "probe-glm5-2-dflash-padding-hotfix"
+APP_NAME = "probe-glm5-2-dflash-prefill-padding"
 PORT = 8000
 
 app = modal.App(APP_NAME)
@@ -53,7 +53,7 @@ def _probe_server_args() -> dict[str, str]:
 
 @app.function(image=serving_image, cpu=2, memory=4096, timeout=15 * 60)
 def preflight() -> str:
-    """Confirm that the source patch is present and rejects non-padding gaps."""
+    """Confirm that the pinned runtime trims only attention-TP padding."""
     import torch
     from sglang.srt.speculative.dflash_worker_v2 import (
         _trim_dflash_prefill_hidden_states,

@@ -14,7 +14,7 @@ DEFAULT_SGLANG_RUNTIME = SGLangRuntime(
     image="lmsysorg/sglang:v0.5.16",
     repository="https://github.com/modal-projects/sglang.git",
     branch="stitch-sglang-v0.5.16",
-    commit="e02a07c905f3336cea3b532751bd8e2250185533",
+    commit="af563ae597c62ef975821a4e410dc4ef34148bee",
 )
 ```
 
@@ -38,15 +38,7 @@ The branch is upstream v0.5.16 plus:
 | `7b09ce9f77` | Return aligned top-p sampling masks for tokens accepted by DFlash SpecV2. |
 | `a50de4fe3e` | Monitor data-parallel scheduler subprocesses and fail when one exits. |
 | `e02a07c905` | Preserve routed-expert and indexer top-k state-capture outputs through DFlash. |
-
-The default Modal image also applies
-[`sglang-dflash-prefill-attention-tp-padding.patch`](patches/sglang-dflash-prefill-attention-tp-padding.patch)
-after checking out the immutable commit. DFlash captures the target model's
-full prefill hidden states, which include up to `attention_tp_size - 1`
-trailing alignment rows. The patch removes only that exact alignment suffix
-before writing the unpadded draft KV locations and continues to reject every
-other shape mismatch. Remove the image patch once the fork pin contains the
-equivalent fix.
+| `af563ae597` | Remove attention-TP alignment rows before materializing DFlash prefill KV state. |
 
 The image and branch must use the same SGLang release because Stitch overlays
 Python code onto the image’s existing CUDA and C++ extensions.
