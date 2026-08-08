@@ -140,8 +140,8 @@ uv run --extra modal modal app logs -f <app-name>
 
 ### GLM-4.7 Flash: what to expect
 
-These are steady-state measurements from run `8d7200a4` on H200s. Cold replica
-initialization, fleet replacement, and checkpoint-save steps are excluded.
+These are steady-state measurements on H200s. Cold replica initialization,
+fleet replacement, and checkpoint-save steps are excluded.
 
 | Stage | Sample | Mean | p50 | p95 |
 | --- | ---: | ---: | ---: | ---: |
