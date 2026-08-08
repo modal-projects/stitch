@@ -21,7 +21,6 @@ SWEBENCH_PRO_PATH = DATA_PATH / "swebench-pro"
 SERVED_CHECKPOINT_FORMAT = "bf16"
 CHECKPOINT_PREP_REQUIRES_GPU = False
 CHECKPOINT_PREP_MEMORY_MIB = (128 * 1024, 256 * 1024)
-SAVE_HF_CHECKPOINTS = True
 
 TRAINER_EXTRA_PIP_PACKAGES = (
     "harbor[modal,huggingface]==0.20.0",
@@ -156,6 +155,7 @@ class _Miles(MilesConfig):
 
     num_rollout = 500
     save_interval = 20
+    save_hf = "hf_checkpoints/weight_v{rollout_id:06d}"
     rollout_batch_size = 32
     n_samples_per_prompt = 8
     global_batch_size = 256
