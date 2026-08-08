@@ -12,6 +12,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from typing import Any
 
 SIDECAR_MODULE = "cookbook.common.sidecar"
 
@@ -181,3 +182,17 @@ def dist_barrier() -> None:
 
     if dist.is_available() and dist.is_initialized():
         dist.barrier()
+
+
+def dist_all_gather_object(value: Any) -> list[Any]:
+    """Gather one small control-plane value from every distributed rank."""
+    try:
+        import torch.distributed as dist
+    except ImportError:
+        return [value]
+
+    if not (dist.is_available() and dist.is_initialized()):
+        return [value]
+    values: list[Any] = [None] * dist.get_world_size()
+    dist.all_gather_object(values, value)
+    return values
