@@ -76,7 +76,6 @@ modal = ModalConfig(
     rollout_gpu="H200",
     cloud="aws",
     trainer_memory_mib=(1024 * 1024, 2 * 1024 * 1024),
-    # One BF16 engine fits on a single H200; keep CPU headroom for the weight cache.
     rollout_memory_mib=(512 * 1024, 1024 * 1024),
     rollout_min_containers=ROLLOUT_MIN_CONTAINERS,
     rollout_max_containers=None,
