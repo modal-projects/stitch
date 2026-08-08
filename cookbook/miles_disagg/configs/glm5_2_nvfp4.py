@@ -11,7 +11,7 @@ APP_NAME = "stitch-glm5-2-nvfp4"
 EXPERIMENT_VOLUME_NAME = "stitch-miles-glm5-2-nvfp4"
 # This experiment layers Stitch integration onto Miles' fully-async SWE runtime.
 # Other cookbook experiments keep the standard Miles pin in trainer_image.py.
-MILES_REPO_REF = "6280a2196ba3f20dbe669b415383f9b842cae32f"
+MILES_REPO_REF = "b1020b5961657ef1bb8c9f56bda49bc12899fa57"
 LOCAL_CHECKPOINT_PATH = None
 TRAINER_EXTRA_PIP_PACKAGES = (
     "harbor[modal,huggingface]==0.20.0",
@@ -30,6 +30,7 @@ TRAINER_IMAGE_RUN_COMMANDS = (
 )
 MEGATRON_RUNTIME_PATCHES = [
     "/root/cookbook/miles_disagg/patches/megatron-hdo-dp-reshardable-step.patch",
+    "/root/cookbook/miles_disagg/patches/megatron-r3-dispatch.patch",
 ]
 
 SOURCE_MODEL = "zai-org/GLM-5.2"
@@ -50,8 +51,8 @@ GPUS_PER_TRAINER_NODE = 8
 ROLLOUT_GPUS_PER_ENGINE = 4
 ROLLOUT_BATCH_SIZE = 32
 N_SAMPLES_PER_PROMPT = 8
-ROLLOUT_INPUTS_PER_ENGINE = 24
-ROLLOUT_MAX_RUNNING_REQUESTS = 32
+ROLLOUT_INPUTS_PER_ENGINE = 16
+ROLLOUT_MAX_RUNNING_REQUESTS = 24
 # Bound scheduler-poll and routing skew to the headroom above the routing target.
 # Sustained excess load gets a retryable 503 instead of an unbounded engine queue.
 ROLLOUT_MAX_QUEUED_REQUESTS = ROLLOUT_MAX_RUNNING_REQUESTS - ROLLOUT_INPUTS_PER_ENGINE
@@ -88,13 +89,34 @@ NVFP4_SERVING_ENV = {
 PREP_ENV = NVFP4_TRAINING_ENV
 SGLANG_SERVER_ENV = {
     **NVFP4_SERVING_ENV,
+    "SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK": "256",
+    "SGLANG_DSA_FUSE_TOPK": "1",
     "SGLANG_DSA_PREFILL_DENSE_ATTN_KV_LEN_THRESHOLD": "0",
-    "SGLANG_SANITIZE_NAN_LOGITS": "true",
+    "SGLANG_DSA_TOPK_FLASHINFER_TIE_BREAK": "large",
+    # Not enabled by the Miles reference configuration.
+    # "SGLANG_OPT_USE_TOPK_V2": "0",
+    # "SGLANG_SANITIZE_NAN_LOGITS": "true",
+    "INDEXER_ROPE_NEOX_STYLE": "0",
+    "NVSHMEM_DISABLE_NCCL": "1",
 }
 
 SIDECAR_COMMIT_MODE = "in_place"
 SIDECAR_FLUSH_CACHE_ON_COMMIT = False
 SGLANG_DELTA_UPDATE_MODE = "cpu"
+
+# DFLASH_SERVER_ARGS = {
+#     "--speculative-algorithm": "DFLASH",
+#     "--speculative-attention-mode": "decode",
+#     "--speculative-dflash-block-size": "8",
+#     "--speculative-num-draft-tokens": "8",
+#     "--speculative-num-steps": "1",
+#     "--speculative-eagle-topk": "1",
+#     "--speculative-draft-attention-backend": "flashinfer",
+#     "--speculative-draft-load-format": "fastsafetensors",
+#     "--speculative-draft-model-path": str(DFLASH_CHECKPOINT_PATH),
+#     "--speculative-draft-model-quantization": "unquant",
+#     "--speculative-draft-window-size": "4096",
+# }
 
 SGLANG_SERVER_ARGS = {
     # loading / elastic refit
@@ -104,21 +126,30 @@ SGLANG_SERVER_ARGS = {
     "--cpu-weight-cache-max-compile-group-gb": "8",
     "--weight-loader-drop-cache-after-load": "",
     "--dist-timeout": "3600",
+    "--watchdog-timeout": "3600",
     # model / quant
     "--quantization": "modelopt_fp4",
     "--reasoning-parser": "glm45",
     "--tool-call-parser": "glm47",
     "--context-length": str(SGLANG_CONTEXT_LENGTH),
-    # attention — BF16 KV
+    # Match the Miles GLM-5.2 reference serving path.
     "--attention-backend": "dsa",
-    "--kv-cache-dtype": "bfloat16",
+    "--kv-cache-dtype": "fp8_e4m3",
     "--dsa-prefill-backend": "flashmla_sparse",
-    "--dsa-decode-backend": "trtllm",
-    "--dsa-topk-backend": "sgl-kernel",
+    "--dsa-decode-backend": "flashmla_kv",
+    "--dsa-topk-backend": "flashinfer",
+    "--page-size": "64",
+    # One attention-DP and expert-parallel rank per GPU; dense MoE paths remain TP1.
+    "--enable-dp-attention": "",
+    "--dp-size": str(ROLLOUT_GPUS_PER_ENGINE),
+    "--ep-size": str(ROLLOUT_GPUS_PER_ENGINE),
+    "--moe-dense-tp-size": "1",
+    "--enable-dp-lm-head": "",
     # MoE
     "--moe-runner-backend": "flashinfer_trtllm_routed",
+    "--disable-shared-experts-fusion": "",
     # memory / batching
-    "--mem-fraction-static": "0.85",
+    "--mem-fraction-static": "0.8",
     "--chunked-prefill-size": "16384",
     "--max-running-requests": str(ROLLOUT_MAX_RUNNING_REQUESTS),
     "--max-queued-requests": str(ROLLOUT_MAX_QUEUED_REQUESTS),
@@ -128,18 +159,7 @@ SGLANG_SERVER_ARGS = {
         '{"decode":{"backend":"full","max_bs":32,'
         '"bs":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32]}}'
     ),
-    # speculative
-    "--speculative-algorithm": "DFLASH",
-    "--speculative-attention-mode": "decode",
-    "--speculative-dflash-block-size": "8",
-    "--speculative-num-draft-tokens": "8",
-    "--speculative-num-steps": "1",
-    "--speculative-eagle-topk": "1",
-    "--speculative-draft-attention-backend": "flashinfer",
-    "--speculative-draft-load-format": "fastsafetensors",
-    "--speculative-draft-model-path": str(DFLASH_CHECKPOINT_PATH),
-    "--speculative-draft-model-quantization": "unquant",
-    "--speculative-draft-window-size": "4096",
+    # **DFLASH_SERVER_ARGS,
     # RL
     "--enable-return-routed-experts": "",
 }
@@ -149,14 +169,14 @@ modal = ModalConfig(
     rollout_gpu="B300",
     region="us",
     trainer_memory_mib=(1024 * 1024, 3 * 1024 * 1024),
-    # CPU mode retains both the canonical checkpoint and TP rank images.
+    # CPU mode retains the canonical checkpoint and TP rank images in memory.
     rollout_memory_mib=(1024 * 1024, 3 * 1024 * 1024),
     rollout_min_containers=ROLLOUT_ENGINES,
     rollout_max_containers=None,
     rollout_target_inputs=ROLLOUT_INPUTS_PER_ENGINE,
     draft_volume=DFLASH_VOLUME,
     routing_region="us-west",
-    # cpu updates stage nothing local; disk is runtime + spill only.
+    # CPU updates use ephemeral disk only for runtime scratch and spill.
     rollout_ephemeral_disk_mib=524_288,
     trainer_ephemeral_disk_mib=2_097_152,
     torch_dist_prep_nodes=4,
@@ -294,21 +314,27 @@ class _Miles(MilesConfig):
     use_rollout_routing_replay = True
     use_fault_tolerance = True
 
-    # 128 GPUs: TP4 * PP8 * CP4, with one data-parallel replica. The uneven
-    # split keeps every DSA pipeline stage on a layer that computes its index.
+    # 128 GPUs: TP4 * PP4 * CP8 * DP1. Four balanced DSA-valid stages start on
+    # layers 1, 19, 39, and 59; CP8 keeps long-context activations sharded.
     tensor_model_parallel_size = 4
     sequence_parallel = True
-    pipeline_model_parallel_size = 8
-    decoder_first_pipeline_num_layers = 14
-    decoder_last_pipeline_num_layers = 16
-    context_parallel_size = 4
-    expert_model_parallel_size = 16
+    pipeline_model_parallel_size = 4
+    decoder_first_pipeline_num_layers = 18
+    decoder_last_pipeline_num_layers = 20
+    context_parallel_size = 8
+    expert_model_parallel_size = 32
     expert_tensor_parallel_size = 1
+    # Large clustered initialization and rollout-data materialization can exceed
+    # the default process-group timeout.
+    distributed_timeout_minutes = 60
     allgather_cp = True
-    moe_enable_deepep = True
-    moe_token_dispatcher_type = "flex"
+    moe_token_dispatcher_type = "alltoall"
     use_dynamic_batch_size = True
-    max_tokens_per_gpu = 16384
+    # Keep the same effective sequence budget as CP2: 8K * CP8 = 64K.
+    max_tokens_per_gpu = 8192
+    # Forward-only scoring retains no backward activations, so it can pack
+    # twice the training budget without changing the backward memory bound.
+    log_probs_max_tokens_per_gpu = 16384
     data_pad_size_multiplier = 1024
     log_probs_chunk_size = 16384
     recompute_granularity = "full"
@@ -327,8 +353,8 @@ class _Miles(MilesConfig):
     weight_decay = 0.1
     adam_beta1 = 0.9
     adam_beta2 = 0.98
-    optimizer_cpu_offload = True
-    overlap_cpu_optimizer_d2h_h2d = True
+    optimizer_cpu_offload = False
+    overlap_cpu_optimizer_d2h_h2d = False
     use_precision_aware_optimizer = True
 
     advantage_estimator = "grpo"
@@ -365,6 +391,7 @@ class _Miles(MilesConfig):
         "NCCL_NVLS_ENABLE": "1",
         # GLM-5 uses interleaved, not NeoX-style, rotary pairs in the DSA indexer.
         "INDEXER_ROPE_NEOX_STYLE": "0",
+        "SGLANG_DSA_TOPK_FLASHINFER_TIE_BREAK": "large",
         "RAY_health_check_timeout_ms": "60000",
         "MILES_EXPERIMENTAL_ROLLOUT_REFACTOR": "1",
         "AGENT_MODEL_NAME": "model",
