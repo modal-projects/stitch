@@ -19,6 +19,10 @@ ROLLOUT_CHECKPOINT_PATH = BF16_CHECKPOINT_PATH
 TORCH_DIST_CHECKPOINT_PATH = CHECKPOINTS_PATH / "glm4-7-flash-torch-dist"
 SWEBENCH_PRO_PATH = DATA_PATH / "swebench-pro"
 SERVED_CHECKPOINT_FORMAT = "bf16"
+PREP_ENV = {
+    "CONVERT_KEEP_PP1": "1",  # Miles otherwise expands PP1 to the torchrun world.
+    "CUDA_DEVICE_MAX_CONNECTIONS": "1",  # Required by Megatron TP/CP.
+}
 
 TRAINER_EXTRA_PIP_PACKAGES = (
     "harbor[modal,huggingface]==0.20.0",
