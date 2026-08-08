@@ -83,6 +83,21 @@ stable directory; `manifest.json` records its pinned source revision.
     └── <dataset-specific-assets>/
 ```
 
+Create the named secrets once in the Modal environment where the job will run.
+The Hugging Face secret is mounted by preparation jobs; the W&B secret is
+mounted only when a recipe sets `use_wandb = True`.
+
+```bash
+export MODAL_ENVIRONMENT=<environment>
+export HF_TOKEN=<token>
+export WANDB_API_KEY=<key>
+
+uv run --extra modal modal secret create \
+  huggingface-secret HF_TOKEN="$HF_TOKEN"
+uv run --extra modal modal secret create \
+  wandb-secret WANDB_API_KEY="$WANDB_API_KEY"
+```
+
 Miles:
 
 ```bash
@@ -115,7 +130,30 @@ uv run --extra modal python -m cookbook.miles_disagg.launch
 Checkpoint preparation pins and materializes the BF16 Hugging Face source;
 torch-dist preparation converts that source for the two-node trainer. Dataset
 preparation writes the pinned SWE-bench Pro prompts, task environments, and
-verifiers. Each step is idempotent.
+verifiers. Each step is idempotent. The launcher generates an eight-character
+run ID; keep its printed app name to inspect, scale, or stop that run. Follow
+the live logs with:
+
+```bash
+uv run --extra modal modal app logs -f <app-name>
+```
+
+### GLM-4.7 Flash: what to expect
+
+These are steady-state measurements from run `8d7200a4` on H200s. Cold replica
+initialization, fleet replacement, and checkpoint-save steps are excluded.
+
+| Stage | Sample | Mean | p50 | p95 |
+| --- | ---: | ---: | ---: | ---: |
+| Trainer XOR delta encode and publish | 10 updates | 15.0 s | 13.6 s | 22.4 s |
+| Replica preparation while serving | 58 replica updates | 15.8 s | 15.6 s | 18.0 s |
+| Engine pause to activate weights | 58 replica updates | 0.75 s | 0.58 s | 1.13 s |
+
+The ten trainer updates changed 0.252% of rollout-visible bytes on average and
+produced 0.469 GB compressed deltas. The complete steady-state path is roughly
+30–35 seconds per update, while only the final activation pauses inference.
+The run published 25 consecutive versions, and exact-version smoke checks
+passed through v25.
 
 Slime:
 
@@ -171,7 +209,7 @@ The K3 profiler downloads the pinned public checkpoint and constructs a
 checksummed XOR publication covering every checkpoint tensor:
 
 ```bash
-MODAL_FUNCTION_RUNTIME=runc uv run --extra modal modal run -d \
+uv run --extra modal modal run -d \
   tools/profiling/kimi_k3_mxfp4_delta_weight_update.py \
   --update-mode cpu
 ```
