@@ -20,7 +20,6 @@ TORCH_DIST_CHECKPOINT_PATH = CHECKPOINTS_PATH / "glm4-7-flash-torch-dist"
 SWEBENCH_PRO_PATH = DATA_PATH / "swebench-pro"
 SERVED_CHECKPOINT_FORMAT = "bf16"
 CHECKPOINT_PREP_REQUIRES_GPU = False
-CHECKPOINT_PREP_MEMORY_MIB = (128 * 1024, 256 * 1024)
 
 TRAINER_EXTRA_PIP_PACKAGES = (
     "harbor[modal,huggingface]==0.20.0",
@@ -75,6 +74,7 @@ modal = ModalConfig(
     rollout_gpu="H200",
     cloud="aws",
     trainer_memory_mib=(1024 * 1024, 2 * 1024 * 1024),
+    checkpoint_prep_memory_mib=(128 * 1024, 256 * 1024),
     rollout_memory_mib=(512 * 1024, 1024 * 1024),
     rollout_min_containers=ROLLOUT_MIN_CONTAINERS,
     rollout_max_containers=None,

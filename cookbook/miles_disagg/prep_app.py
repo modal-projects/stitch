@@ -62,8 +62,8 @@ app = modal.App(f"{exp.APP_NAME}-prep")
 checkpoint_gpu = (
     f"{modal_cfg.gpu}:1" if getattr(exp, "CHECKPOINT_PREP_REQUIRES_GPU", True) else None
 )
-checkpoint_memory = getattr(
-    exp, "CHECKPOINT_PREP_MEMORY_MIB", modal_cfg.trainer_memory_mib
+checkpoint_memory = (
+    modal_cfg.checkpoint_prep_memory_mib or modal_cfg.trainer_memory_mib
 )
 
 
