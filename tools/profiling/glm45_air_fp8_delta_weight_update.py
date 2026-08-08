@@ -5,7 +5,7 @@ element-wise synthetic delta, and runs one verified update.
 
     MODAL_FUNCTION_RUNTIME=runc uv run --extra modal modal run -d \
       tools/profiling/glm45_air_fp8_delta_weight_update.py \
-      --update-mode cpu
+      --update-mode cpu --canonical-storage memory
 """
 
 from __future__ import annotations
@@ -23,6 +23,8 @@ from cookbook.miles_disagg.configs import glm45_air_fp8 as model
 from tools.profiling._delta_weight_update import (
     WeightUpdateSpec,
     modal_runtime_label,
+    parse_canonical_storage,
+    parse_update_destination,
     parse_update_mode,
     run_delta_weight_update,
 )
@@ -49,6 +51,7 @@ DELTA_ID = (
 DELTA_SOURCE_DIR = f"{DELTA_MOUNT}/{DELTA_ID}"
 BASE_CHECKPOINT_DIR = str(model.ROLLOUT_CHECKPOINT_PATH)
 LOCAL_TARGET_CHECKPOINT_DIR = "/local-checkpoint/glm45-air-fp8/target"
+LOCAL_CANONICAL_CHECKPOINT_DIR = "/local-checkpoint/glm45-air-fp8/canonical"
 SGLANG_CACHE_PATH = "/root/.cache/sglang"
 SOURCE_MARKER = ".stitch-source.json"
 
@@ -180,24 +183,43 @@ def prepare_delta() -> dict:
     },
     timeout=2 * 60 * 60,
 )
-def benchmark(update_mode: str, runtime: str, sample_id: str) -> dict:
+def benchmark(
+    update_mode: str,
+    canonical_storage: str | None,
+    runtime: str,
+    sample_id: str,
+) -> dict:
     return run_delta_weight_update(
         WeightUpdateSpec(
             model_name="GLM-4.5-Air FP8",
             base_checkpoint_dir=BASE_CHECKPOINT_DIR,
             local_target_checkpoint_dir=LOCAL_TARGET_CHECKPOINT_DIR,
+            local_canonical_checkpoint_dir=LOCAL_CANONICAL_CHECKPOINT_DIR,
             server_args=SGLANG_SERVER_ARGS,
         ),
         source_dir=DELTA_SOURCE_DIR,
         target_version=1,
         update_mode=parse_update_mode(update_mode),
+        canonical_storage=parse_canonical_storage(canonical_storage),
         runtime=runtime,
         sample_id=sample_id,
     )
 
 
 @app.local_entrypoint()
-def main(update_mode: str = "cpu", sample_id: str = "1") -> None:
-    prepare_base.remote()
-    prepare_delta.remote()
-    benchmark.remote(parse_update_mode(update_mode), modal_runtime_label(), sample_id)
+def main(
+    update_mode: str = "disk",
+    canonical_storage: str | None = None,
+    sample_id: str = "1",
+    skip_preparation: bool = False,
+) -> None:
+    mode, storage = parse_update_destination(update_mode, canonical_storage)
+    if not skip_preparation:
+        prepare_base.remote()
+        prepare_delta.remote()
+    benchmark.remote(
+        mode,
+        storage,
+        modal_runtime_label(),
+        sample_id,
+    )

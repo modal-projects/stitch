@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 UpdateMode = Literal["disk", "cpu"]
+CanonicalStorage = Literal["memory", "disk"]
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,7 @@ class WeightUpdateSpec:
     model_name: str
     base_checkpoint_dir: str
     local_target_checkpoint_dir: str
+    local_canonical_checkpoint_dir: str
     server_args: dict[str, str]
     tp_size: int = 4
     port: int = 8001
@@ -37,14 +39,27 @@ class WeightUpdateSpec:
 def server_args_for_mode(
     server_args: dict[str, str],
     update_mode: UpdateMode,
+    canonical_storage: CanonicalStorage | None,
+    canonical_checkpoint_dir: str,
 ) -> dict[str, str]:
     """Return direct SGLang arguments for one update mode."""
 
     result = dict(server_args)
     if update_mode == "cpu":
+        if canonical_storage not in {"memory", "disk"}:
+            raise ValueError(
+                "canonical_storage must be 'memory' or 'disk' for CPU updates"
+            )
         result["--enable-cpu-weight-cache"] = ""
         result.setdefault("--cpu-weight-cache-max-compile-group-gb", "8")
+        result.pop("--cpu-weight-cache-canonical-checkpoint-dir", None)
+        if canonical_storage == "disk":
+            result["--cpu-weight-cache-canonical-checkpoint-dir"] = (
+                canonical_checkpoint_dir
+            )
     elif update_mode == "disk":
+        if canonical_storage is not None:
+            raise ValueError("canonical_storage applies only to CPU updates")
         result.pop("--enable-cpu-weight-cache", None)
         result.pop("--cpu-weight-cache-max-compile-group-gb", None)
         result.pop("--cpu-weight-cache-canonical-checkpoint-dir", None)
@@ -57,6 +72,25 @@ def parse_update_mode(value: str) -> UpdateMode:
     if value not in {"disk", "cpu"}:
         raise ValueError("update_mode must be 'disk' or 'cpu'")
     return value
+
+
+def parse_canonical_storage(value: str | None) -> CanonicalStorage | None:
+    if value not in {None, "memory", "disk"}:
+        raise ValueError("canonical_storage must be 'memory' or 'disk'")
+    return value
+
+
+def parse_update_destination(
+    update_mode: str,
+    canonical_storage: str | None,
+) -> tuple[UpdateMode, CanonicalStorage | None]:
+    mode = parse_update_mode(update_mode)
+    storage = parse_canonical_storage(canonical_storage)
+    if mode == "cpu" and storage is None:
+        raise ValueError("CPU updates require --canonical-storage memory or disk")
+    if mode == "disk" and storage is not None:
+        raise ValueError("--canonical-storage applies only to CPU updates")
+    return mode, storage
 
 
 def modal_runtime_label() -> str:
@@ -446,6 +480,7 @@ def run_delta_weight_update(
     source_dir: str,
     target_version: int,
     update_mode: UpdateMode,
+    canonical_storage: CanonicalStorage | None,
     runtime: str,
     sample_id: str,
 ) -> dict[str, Any]:
@@ -471,6 +506,7 @@ def run_delta_weight_update(
         "source_dir": source_dir,
         "target_version": target_version,
         "update_mode": update_mode,
+        "canonical_storage": canonical_storage,
         "runtime": runtime,
         "sample_id": sample_id,
         "tp_size": spec.tp_size,
@@ -483,7 +519,12 @@ def run_delta_weight_update(
         model_path=spec.base_checkpoint_dir,
         worker_port=spec.port,
         tp=spec.tp_size,
-        extra_server_args=server_args_for_mode(spec.server_args, update_mode),
+        extra_server_args=server_args_for_mode(
+            spec.server_args,
+            update_mode,
+            canonical_storage,
+            spec.local_canonical_checkpoint_dir,
+        ),
         # Allow for a cold, model-sized initial load. Destination initialization
         # is measured separately after the endpoint begins serving.
         health_timeout=2 * 60 * 60,
