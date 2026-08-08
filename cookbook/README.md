@@ -1,96 +1,33 @@
 # Cookbook
 
-The cookbook contains working Modal deployments for Miles and Slime trainers
-with SGLang rollout engines. Select a model through `EXPERIMENT_CONFIG`.
+The cookbook contains runnable Modal deployments that connect Miles or Slime
+trainers to elastic SGLang rollout pools through Stitch. Recipes define the
+model, trainer, rollout fleet, data, and weight-update policy; the shared
+infrastructure handles preparation, isolated runs, and pool lifecycle.
 
-## Choose an update mode
+## Common workflow
 
-Each recipe sets `SGLANG_DELTA_UPDATE_MODE`:
+### 1. Select a recipe
 
-| Mode | Prepared state | During engine pause | Use when |
-| --- | --- | --- | --- |
-| `disk` | Complete checkpoint on local storage | Reload from disk | Host RAM is constrained or the trainer publishes full checkpoints |
-| `cpu` | Rank-ready images in RAM; canonical checkpoint in RAM or on local storage | Copy the images to GPU | Updates are deltas and minimizing the pause justifies rank-image RAM |
-
-Both modes reconstruct and checksum the complete target in canonical checkpoint
-space. CPU mode accepts deltas only and requires a new replica for a new
-lineage. Disk mode accepts full checkpoints and deltas and can reset a live
-replica.
-
-Every bundled recipe serves `cpu` updates except the Kimi K3 example, which
-stays on `disk` pending its own benchmark (`cpu` dominated on every model
-family benchmarked so far). The profiling scripts exercise both modes.
-Memory sizing and SGLang details are in
-[`SGLANG_FORK.md`](common/SGLANG_FORK.md).
-
-## External speculative drafts
-
-Set `modal.draft_volume` and, when needed, `modal.draft_volume_env`. The server
-mounts the volume at `/draft`; set `--speculative-draft-model-path` to the
-checkpoint below it.
-
-Draft weights remain fixed while target weights update. Their acceptance rate
-may change as the target evolves. Updating both atomically requires restarting
-the replica. Bundled MTP heads do not need a separate volume.
-
-## Prepare and launch
-
-All persistent storage uses Modal Volume v2:
-
-| Volume | Mount | Contents |
-| --- | --- | --- |
-| `huggingface-cache` | `/root/.cache/huggingface` | Pinned source-model downloads |
-| `miles-checkpoints` or `slime-checkpoints` | `/checkpoints` | Immutable prepared model layouts |
-| `miles-data` or `slime-data` | `/data` | Pinned datasets |
-| `stitch-<framework>-<model>` | `/stitch` | Run-scoped publications, checkpoints, and logs |
-| `sglang-cache` | `/root/.cache/sglang` | Compiled SGLang kernels |
-| Configured draft Volume | `/draft` | Optional external speculative draft |
-
-Prepared model layouts are immutable artifacts with explicit paths. For
-example, the Miles GLM-5.2 config uses:
-
-```text
-/checkpoints/
-├── glm5-2-nvfp4/
-└── glm5-2-torch-dist/
-```
-
-Each config also owns one `stitch-<framework>-<model>` Volume mounted at
-`/stitch`. Its root contains only run-scoped state:
-
-```text
-/stitch/
-└── <run-id>/
-    ├── latest
-    ├── updates/weight_vNNNNNN/
-    ├── checkpoints/
-    └── train.log
-```
-
-The training framework owns `updates/`; Stitch owns the `latest` commit
-pointer. A future checkpoint resume starts a new run and reads the previous
-run's `checkpoints/` rather than appending to its update chain.
-
-Datasets are independent of models and runs. Miles mounts the shared
-`miles-data` Volume at `/data`; Slime uses `slime-data`. Each dataset has a
-stable directory; `manifest.json` records its pinned source revision.
-
-```text
-/data/
-└── <dataset>/
-    ├── manifest.json
-    ├── <trainer-input>
-    └── <dataset-specific-assets>/
-```
-
-Create the named secrets once in the Modal environment where the job will run.
-The Hugging Face secret is mounted by preparation jobs; the W&B secret is
-mounted only when a recipe sets `use_wandb = True`.
+Set `EXPERIMENT_CONFIG` to a module in `miles_disagg/configs` or
+`slime_disagg/configs`:
 
 ```bash
-export MODAL_ENVIRONMENT=<environment>
-export HF_TOKEN=<token>
-export WANDB_API_KEY=<key>
+export EXPERIMENT_CONFIG=your_config_name
+export MODAL_ENVIRONMENT=your_environment
+```
+
+The selected config is the authority for model revisions, Volume names,
+hardware, scaling, and trainer arguments.
+
+### 2. Create credentials
+
+Create the secrets required by the selected recipe once in its Modal
+environment:
+
+```bash
+export HF_TOKEN=your_hugging_face_token
+export WANDB_API_KEY=your_wandb_api_key
 
 uv run --extra modal modal secret create \
   huggingface-secret HF_TOKEN="$HF_TOKEN"
@@ -98,22 +35,104 @@ uv run --extra modal modal secret create \
   wandb-secret WANDB_API_KEY="$WANDB_API_KEY"
 ```
 
-Miles:
+Preparation jobs use `huggingface-secret`. Recipes that enable W&B logging use
+`wandb-secret`.
+
+### 3. Prepare immutable inputs
+
+Miles recipes expose checkpoint, TorchDist, and dataset preparation:
 
 ```bash
-EXPERIMENT_CONFIG=glm45_air_fp8 \
-  uv run --extra modal modal run -d -m cookbook.miles_disagg.prep_app::prepare_checkpoints
-EXPERIMENT_CONFIG=glm45_air_fp8 \
-  uv run --extra modal modal run -d -m cookbook.miles_disagg.prep_app::prepare_torch_dist
-EXPERIMENT_CONFIG=glm45_air_fp8 \
-  uv run --extra modal modal run -d -m cookbook.miles_disagg.prep_app::prepare_dataset
-EXPERIMENT_CONFIG=glm45_air_fp8 \
-  uv run --extra modal python -m cookbook.miles_disagg.launch
+uv run --extra modal modal run -d \
+  -m cookbook.miles_disagg.prep_app::prepare_checkpoints
+uv run --extra modal modal run -d \
+  -m cookbook.miles_disagg.prep_app::prepare_torch_dist
+uv run --extra modal modal run -d \
+  -m cookbook.miles_disagg.prep_app::prepare_dataset
 ```
 
-The GLM-4.7-Flash SWE-bench Pro recipe provisions two eight-GPU H200 trainer
-nodes and keeps 24 single-H200 rollout engines warm, with uncapped autoscaling.
-Prepare its immutable assets in dependency order, then launch an isolated run:
+Slime recipes expose model and dataset preparation:
+
+```bash
+uv run --extra modal modal run -d \
+  -m cookbook.slime_disagg.prep_app::download_model
+uv run --extra modal modal run -d \
+  -m cookbook.slime_disagg.prep_app::prepare_dataset
+```
+
+Preparation is idempotent. A complete artifact is reused; an incomplete one
+fails rather than becoming a launch input. Model preparation must finish before
+dependent format conversion. Dataset preparation is independent.
+
+### 4. Launch an isolated run
+
+Use the launcher for the selected trainer:
+
+```bash
+# Miles
+uv run --extra modal python -m cookbook.miles_disagg.launch
+
+# Slime
+uv run --extra modal python -m cookbook.slime_disagg.launch
+```
+
+The launcher creates an eight-character run ID, deploys a run-scoped rollout
+pool, waits for its gateway, and starts the trainer. It prints the app name and
+stop command. Repeating the command creates a separate run and checkpoint
+lineage.
+
+### 5. Inspect or change a live run
+
+Follow logs using the app name printed by the launcher:
+
+```bash
+export APP_NAME=your_app_name
+uv run --extra modal modal app logs -f "$APP_NAME"
+```
+
+Verify that the gateway and every live replica serve an expected version:
+
+```bash
+export MODEL_NAME=/checkpoints/your_model
+
+uv run --extra modal python -m cookbook.common.smoke \
+  --app-name "$APP_NAME" \
+  --model-name "$MODEL_NAME" \
+  --weight-version 10
+```
+
+Rollout capacity is controlled by `rollout_min_containers`,
+`rollout_max_containers`, and `rollout_target_inputs`. Engine concurrency and
+backpressure are controlled by `--max-running-requests` and
+`--max-queued-requests` in the recipe.
+
+After changing fleet or SGLang settings, redeploy the active run with the same
+experiment and run ID:
+
+```bash
+EXPERIMENT_CONFIG=your_config_name RUN_ID=your_run_id \
+  uv run --extra modal modal deploy -m cookbook.miles_disagg.app
+```
+
+Modal rolls replicas to the new configuration without changing the run's
+checkpoint lineage.
+
+## GLM-4.7 Flash example
+
+`glm47_flash_swebench_pro` is a complete example of the workflow above. It runs
+fully asynchronous Miles training on SWE-bench Pro.
+
+| Component | Configuration |
+| --- | --- |
+| Trainer | 2 nodes × 8 H200 GPUs |
+| Rollout | 20 warm replicas × 1 H200 GPU, with autoscaling above the warm fleet |
+| Model | `zai-org/GLM-4.7-Flash`, pinned BF16 revision |
+| Dataset | SWE-bench Pro, including task environments and verifiers |
+| Weight sync | Checksummed XOR deltas with CPU preparation and in-place activation |
+
+The config is
+[`glm47_flash_swebench_pro.py`](miles_disagg/configs/glm47_flash_swebench_pro.py).
+After creating the shared secrets, prepare and launch it with:
 
 ```bash
 export EXPERIMENT_CONFIG=glm47_flash_swebench_pro
@@ -127,18 +146,11 @@ uv run --extra modal modal run -d \
 uv run --extra modal python -m cookbook.miles_disagg.launch
 ```
 
-Checkpoint preparation pins and materializes the BF16 Hugging Face source;
-torch-dist preparation converts that source for the two-node trainer. Dataset
-preparation writes the pinned SWE-bench Pro prompts, task environments, and
-verifiers. Each step is idempotent. The launcher generates an eight-character
-run ID; keep its printed app name to inspect, scale, or stop that run. Follow
-the live logs with:
+Checkpoint preparation materializes the pinned BF16 model. TorchDist
+preparation converts it for the two-node trainer. Dataset preparation writes
+the pinned prompts, task environments, verifiers, and source manifest.
 
-```bash
-uv run --extra modal modal app logs -f <app-name>
-```
-
-### GLM-4.7 Flash: what to expect
+### Weight-update performance
 
 These are steady-state measurements on H200s. Cold replica initialization,
 fleet replacement, and checkpoint-save steps are excluded.
@@ -149,65 +161,87 @@ fleet replacement, and checkpoint-save steps are excluded.
 | Replica preparation while serving | 58 replica updates | 15.8 s | 15.6 s | 18.0 s |
 | Engine pause to activate weights | 58 replica updates | 0.75 s | 0.58 s | 1.13 s |
 
-The ten trainer updates changed 0.252% of rollout-visible bytes on average and
+The trainer updates changed 0.252% of rollout-visible bytes on average and
 produced 0.469 GB compressed deltas. The complete steady-state path is roughly
-30–35 seconds per update, while only the final activation pauses inference.
-The run published 25 consecutive versions, and exact-version smoke checks
-passed through v25.
+30–35 seconds per update; only activation pauses inference. Validation
+published 25 consecutive versions, with exact-version smoke checks through
+v25.
 
-Slime:
+## Weight-update modes
 
-```bash
-EXPERIMENT_CONFIG=kimi_k2_6_int4 \
-  uv run --extra modal modal run -d -m cookbook.slime_disagg.prep_app::download_model
-EXPERIMENT_CONFIG=kimi_k2_6_int4 \
-  uv run --extra modal modal run -d -m cookbook.slime_disagg.prep_app::prepare_dataset
-EXPERIMENT_CONFIG=kimi_k2_6_int4 \
-  uv run --extra modal python -m cookbook.slime_disagg.launch
+Each recipe sets `SGLANG_DELTA_UPDATE_MODE`:
+
+| Mode | Prepared state | During engine pause | Use when |
+| --- | --- | --- | --- |
+| `disk` | Complete checkpoint on local storage | Reload from disk | Host RAM is constrained or the trainer publishes full checkpoints |
+| `cpu` | Rank-ready images in RAM; canonical checkpoint in RAM or on local storage | Copy the images to GPU | Updates are deltas and minimizing the pause justifies rank-image RAM |
+
+Both modes reconstruct and checksum the complete target in canonical checkpoint
+space. CPU mode accepts deltas only and requires a new replica for a new
+lineage. Disk mode accepts full checkpoints and deltas and can reset a live
+replica.
+
+Every bundled recipe serves `cpu` updates except Kimi K3, which uses `disk`.
+The profiling scripts exercise both modes. Memory sizing and SGLang details are
+in [`SGLANG_FORK.md`](common/SGLANG_FORK.md).
+
+## Persistent storage
+
+All persistent storage uses Modal Volume v2:
+
+| Volume | Mount | Contents |
+| --- | --- | --- |
+| `huggingface-cache` | `/root/.cache/huggingface` | Pinned source-model downloads |
+| `miles-checkpoints` or `slime-checkpoints` | `/checkpoints` | Immutable prepared model layouts |
+| `miles-data` or `slime-data` | `/data` | Pinned datasets |
+| `stitch-<framework>-<model>` | `/stitch` | Run-scoped publications, checkpoints, and logs |
+| `sglang-cache` | `/root/.cache/sglang` | Compiled SGLang kernels |
+| Configured draft Volume | `/draft` | Optional external speculative draft |
+
+Prepared model layouts have stable paths. For example:
+
+```text
+/checkpoints/
+├── glm4-7-flash-bf16/
+└── glm4-7-flash-torch-dist/
 ```
 
-Preparation is idempotent. The launcher creates an isolated run, waits for the
-rollout pool, starts training, and prints the app name and stop command.
+Each experiment Volume contains only run-scoped state:
 
-## Scale and inspect a run
-
-There are two ways to adjust the scale and overall throughput of the rollout pool;
-updating the autoscaler, and redeploying with a different engine config.
-Both are important to be able to modulate the rollouts production rate in a finegrained
-way.
-
-
-### Redeploying with different autoscaling / engine config
-
-All config values related to the performance of the elastic rollouts server pool are
-in the main config file. The relevant values are `max-running-requests`,
-`max-queued-requests`, `rollout_min_containers`, `rollout_max_containers`, and
-`rollout_target_inputs`.
-
-Inducing backpressure from the rollout pool can be done by capping the amount of
-running or queued requests in the engine. Changing these, or any sglang-level
-config values in the middle of a training run requires a rolling redeploy, e.g.
-```bash
-EXPERIMENT_CONFIG=glm47_flash_swebench_pro RUN_ID=8d7200a4 \
-    uv run modal deploy -m cookbook.miles_disagg.app
+```text
+/stitch/
+└── <run-id>/
+    ├── latest
+    ├── updates/weight_vNNNNNN/
+    ├── checkpoints/
+    └── train.log
 ```
 
-The default deployment strategy is rolling, i.e. blue-green rollover of rollout
-containers. Note: `EXPERIMENT_CONFIG` and `RUN_ID` must be consistent with an active
-or live training run in order to do a rolling redeploy of the rollout pool.
+The training framework owns `updates/`; Stitch owns the `latest` commit
+pointer. A resumed checkpoint starts a new run and reads the previous run's
+`checkpoints/` rather than appending to its update chain.
 
-### Inspecting a deployed pool
+Datasets are independent of models and runs:
 
-Verify the gateway and every live replica with:
-
-```bash
-uv run --extra modal python -m cookbook.common.smoke \
-  --app-name <app-name> \
-  --model-name /checkpoints/glm45-air-fp8 \
-  --weight-version 10
+```text
+/data/
+└── <dataset>/
+    ├── manifest.json
+    ├── <trainer-input>
+    └── <dataset-specific-assets>/
 ```
 
-## Profile an update
+## External speculative drafts
+
+Set `modal.draft_volume` and, when needed, `modal.draft_volume_env`. The server
+mounts the volume at `/draft`; set `--speculative-draft-model-path` to the
+checkpoint below it.
+
+Draft weights remain fixed while target weights update. Their acceptance rate
+may change as the target evolves. Updating both atomically requires restarting
+the replica. Bundled MTP heads do not need a separate volume.
+
+## Profile a weight update
 
 The model profilers prepare their pinned base checkpoint and synthetic delta,
 then run with `--update-mode disk|cpu`:
