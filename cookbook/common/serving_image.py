@@ -1,10 +1,10 @@
-"""The weight-sync sglang SERVING image — shared by every recipe.
+"""The trainer-agnostic weight-sync SGLang image shared by every recipe.
 
-Trainer-agnostic: no trainer package is installed (the delta apply lives in the engine behind
-``/stage_weight_update``), so miles and slime serve on the identical image; precision comes
-from the served checkpoint, not a ``--quantization`` flag. The fork pin carries asynchronous
-weight staging, correct quantized weight loading, and the optional CPU delta cache. See
-``SGLANG_FORK.md`` for the patch stack and how to re-port onto a newer sglang release.
+No trainer package is installed: delta application lives in the engine behind
+``/stage_weight_update``. Precision comes from the served checkpoint, not a
+``--quantization`` flag. The fork pin carries asynchronous weight staging, correct
+quantized weight loading, and the optional CPU delta cache. See ``SGLANG_FORK.md`` for
+the patch stack and how to re-port onto a newer SGLang release.
 """
 
 from __future__ import annotations

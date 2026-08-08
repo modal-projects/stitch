@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import shlex
 import subprocess
 import tempfile
 from types import SimpleNamespace
@@ -316,8 +317,13 @@ class Trainer:
         cfg.custom_config_path = (
             hook_knobs  # materialized to a YAML path below; keep the mapping for claim
         )
-        launch.resolve_config(cfg, tempfile.mkdtemp(), YAML_CONFIG_FIELDS)
-        cmd = launch.build_train_cmd(cfg, SLIME_ROOT, "slime_model_script")
+        launch.resolve_config(
+            cfg,
+            tempfile.mkdtemp(),
+            checkpoint_fields=("hf_checkpoint", "load", "ref_load", "critic_load"),
+            yaml_fields=YAML_CONFIG_FIELDS,
+        )
+        cmd = _build_train_cmd(cfg)
 
         # Claim the pool before slime publishes: reset every replica to base for this run.
         from cookbook.common import hooks
@@ -333,6 +339,18 @@ class Trainer:
         )
         print(f"Command: {cmd}")
         subprocess.run(["bash", "-lc", cmd], check=True)
+
+
+def _build_train_cmd(cfg: SlimeConfig) -> str:
+    train_script = f"{SLIME_ROOT}/{'train_async.py' if cfg.async_mode else 'train.py'}"
+    model_script = cfg.slime_model_script
+    if model_script:
+        inner = (
+            f"source {SLIME_ROOT}/{model_script} && "
+            f"python3 {train_script} ${{MODEL_ARGS[@]}} {shlex.join(cfg.cli_args())}"
+        )
+        return f"bash -c {shlex.quote(inner)}"
+    return f"python3 {train_script} {shlex.join(cfg.cli_args())}"
 
 
 # ── Entrypoints (preparation lives in a separate app: cookbook.slime_disagg.prep_app) ──

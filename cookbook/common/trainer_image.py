@@ -22,7 +22,7 @@ def add_common_layers(
     """Append the framework-agnostic trainer layers: the trainer-side delta ENCODER's codecs
     (needed even under --no-deps), the HF-download env (``EXPERIMENT_CONFIG``/``RUN_ID`` so a
     container's re-import selects the same experiment/run as the deploy), and the stitch + cookbook
-    source so the trainer, Ray actors, and the sidecar subprocess resolve their imports.
+    source so trainer workers and the sidecar subprocess resolve their imports.
 
     ``copy_source=True`` bakes those sources into image layers.  Callers that need to append
     build steps must opt into that mode because Modal intentionally rejects build steps after a

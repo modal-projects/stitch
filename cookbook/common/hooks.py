@@ -1,11 +1,8 @@
-"""Shared framework-hook logic (miles and slime both write the same HF-delta layout to
-a Modal Volume and wake a Modal Flash pool, so the logic is one place).
+"""Shared trainer hooks for publishing HF weight updates and routing rollout requests.
 
-Each run config points its hook paths straight at this module (e.g.
-``custom_delta_pre_push_path = "cookbook.common.hooks.commit_and_wake"``). Each hook reads
-the run's coordinates off the trainer's ``args`` namespace (the framework ``setattr``s its
-``custom_config_path`` onto it) and calls the stitch core against a ModalVolumeStore +
-ModalFlashPool.
+Trainer integrations point their lifecycle callbacks at this module. Each hook reads the
+run coordinates from the trainer's argument namespace and composes the Stitch core with a
+``ModalVolumeStore`` and ``ModalFlashPool``.
 """
 
 from __future__ import annotations
@@ -165,9 +162,9 @@ async def gated_rollout_request_hook(
 class _CachedPointer:
     """TTL-cached durable ``latest`` version for request admission.
 
-    Publication runs on trainer ranks while request hooks run in rollout/session-server
-    processes, so their Volume mounts have independent visibility. Co-located request
-    processes share a file-locked refresh lease to reload at most once per TTL.
+    Publication runs on trainer ranks while request hooks may run in separate processes,
+    so their Volume mounts can have independent visibility. Co-located request processes
+    share a file-locked refresh lease to reload at most once per TTL.
     """
 
     def __init__(self) -> None:
@@ -214,7 +211,7 @@ class _CachedPointer:
 def _refresh_mount(store: ModalVolumeStore, ttl: float) -> None:
     """Refresh a mounted Volume at most once per container and TTL.
 
-    Miles may run many session-server processes in one container. They share the mount
+    A trainer may run many request-hook processes in one container. They share the mount
     and this local ``flock`` lease, so one process reloads while the others reuse the
     resulting view. Separate containers get their own lease and refresh independently.
     """
@@ -283,6 +280,6 @@ def _run_id(args: Any) -> str:
     run_id = getattr(args, "run_id", None)
     if not run_id:
         raise ValueError(
-            "run_id is required (pass it via custom_config_path) — it is the run's fence token"
+            "run_id is required in the trainer hook arguments — it is the run's fence token"
         )
     return str(run_id)
