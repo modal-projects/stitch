@@ -196,3 +196,22 @@ def dist_all_gather_object(value: Any) -> list[Any]:
     values: list[Any] = [None] * dist.get_world_size()
     dist.all_gather_object(values, value)
     return values
+
+
+def dist_is_container_leader() -> bool:
+    """Return whether this rank owns container-scoped side effects.
+
+    Distributed trainer ranks are separate processes, but ranks hosted by one
+    Modal container share its mounted Volumes. Elect the lowest global rank in
+    each container so a container-scoped operation runs once per mount.
+    """
+    rank = dist_rank()
+    if rank is None:
+        return True
+    container_id = os.environ.get("MODAL_TASK_ID")
+    container_ids = dist_all_gather_object(container_id)
+    if not all(container_ids):
+        # Preserve the previous one-commit-per-rank behavior when the runtime
+        # cannot prove which processes share a mount.
+        return True
+    return rank == container_ids.index(container_id)

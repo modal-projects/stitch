@@ -14,7 +14,7 @@ DEFAULT_SGLANG_RUNTIME = SGLangRuntime(
     image="lmsysorg/sglang:v0.5.16",
     repository="https://github.com/modal-projects/sglang.git",
     branch="stitch-sglang-v0.5.16",
-    commit="af563ae597c62ef975821a4e410dc4ef34148bee",
+    commit="a73ea9507fb981462768dbc5e869bdfeb5c48116",
 )
 ```
 
@@ -39,6 +39,9 @@ The branch is upstream v0.5.16 plus:
 | `a50de4fe3e` | Monitor data-parallel scheduler subprocesses and fail when one exits. |
 | `e02a07c905` | Preserve routed-expert and indexer top-k state-capture outputs through DFlash. |
 | `af563ae597` | Remove attention-TP alignment rows before materializing DFlash prefill KV state. |
+| `270c78efaa` | Resolve exact and prefix aborts that arrive while requests are still held by the tokenizer. |
+| `325abb5afa` | Keep a tokenizer-held abort result alive until its request waiter consumes it. |
+| `a73ea9507f` | Accept top-p sampling-mask requests preserved in compatibility metadata by typed routers. |
 
 The image and branch must use the same SGLang release because Stitch overlays
 Python code onto the image’s existing CUDA and C++ extensions.
