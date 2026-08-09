@@ -66,6 +66,7 @@ SGLANG_SERVER_ARGS = {
     "--tool-call-parser": "kimi_k2",
     "--reasoning-parser": "kimi_k2",
     "--dist-timeout": "3600",
+    "--watchdog-timeout": "3600",
     "--kv-cache-dtype": "fp8_e4m3",
     "--attention-backend": "tokenspeed_mla",
     "--context-length": "32768",
