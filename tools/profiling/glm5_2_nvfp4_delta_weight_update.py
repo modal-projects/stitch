@@ -104,7 +104,6 @@ sglang_cache_volume = modal.Volume.from_name(
 prep_image = trainer_image.build_trainer_image(
     hf_cache_path=str(HF_CACHE_PATH),
     experiment=EXPERIMENT,
-    miles_repo_ref=model.MILES_REPO_REF,
     extra_pip_packages=model.TRAINER_EXTRA_PIP_PACKAGES,
     image_run_commands=model.TRAINER_IMAGE_RUN_COMMANDS,
 ).add_local_dir(

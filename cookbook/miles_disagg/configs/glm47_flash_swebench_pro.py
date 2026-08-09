@@ -9,7 +9,6 @@ from cookbook.miles_disagg.swebench_pro import prepare_swebench_pro
 
 APP_NAME = "stitch-glm47-flash-swebench-pro"
 EXPERIMENT_VOLUME_NAME = "stitch-miles-glm47-flash-swebench-pro"
-MILES_REPO_REF = "b1020b5961657ef1bb8c9f56bda49bc12899fa57"
 LOCAL_CHECKPOINT_PATH = None
 
 SOURCE_MODEL = "zai-org/GLM-4.7-Flash"
@@ -142,7 +141,9 @@ class _Miles(MilesConfig):
     balance_data = True
 
     fully_async = True
-    rollout_sample_completion_backfill = True
+    # Free submission capacity as individual trajectories finish instead of
+    # waiting for every sibling in their prompt group.
+    rollout_submission_granularity = "sample"
     custom_rollout_log_function_path = "modal_swe_metrics.log_rollout_data"
     custom_generate_function_path = (
         "miles.rollout.generate_hub.agentic_tool_call.generate"
@@ -150,10 +151,11 @@ class _Miles(MilesConfig):
     custom_agent_function_path = "modal_swe_agent_function.run"
     custom_rm_path = "modal_swe_agent_function.reward_func"
     tito_model = "glm47"
-    use_session_server = True
+    use_session_server = "v2"
+    session_sample_picker_path = "modal_swe_agent_function.pick_latest_leaf"
+    session_sample_postprocessor_path = "modal_swe_agent_function.postprocess_samples"
     session_server_port = [30000, 30064]
     session_server_startup_timeout_seconds = 180
-    tito_session_mismatch_sample_rate = 0.0625
 
     num_rollout = 500
     save_interval = 20
@@ -167,6 +169,8 @@ class _Miles(MilesConfig):
     max_seq_len = MAX_SEQ_LEN
     max_weight_staleness = 6
     async_max_concurrent_samples = ROLLOUT_CONCURRENT_SAMPLES
+    async_data_buffer_capacity_factor = 3.0
+    async_unused_samples_handler = "drop"
     eval_interval = None
 
     use_rollout_routing_replay = True
