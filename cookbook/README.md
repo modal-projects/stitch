@@ -244,12 +244,14 @@ the replica. Bundled MTP heads do not need a separate volume.
 ## Profile a weight update
 
 The model profilers prepare their pinned base checkpoint and synthetic delta,
-then run with `--update-mode disk|cpu`:
+then run with `--update-mode disk|cpu`. CPU runs also select
+`--canonical-storage memory|disk`; `disk` uses host-local NVMe.
 
 ```bash
 uv run --extra modal modal run -d \
   tools/profiling/glm45_air_fp8_delta_weight_update.py \
-  --update-mode cpu
+  --update-mode cpu \
+  --canonical-storage memory
 ```
 
 Prepared artifacts are reused. The profilers generate during staging, pause
@@ -259,10 +261,12 @@ for DFlash. DSpark still rejects logprob-returning requests, so its profiles
 compare repeated deterministic text instead of token IDs and logprobs.
 
 The K3 profiler downloads the pinned public checkpoint and constructs a
-checksummed XOR publication covering every checkpoint tensor:
+checksummed XOR publication over mutable, rollout-visible values. The fixed
+vision tower and projector are excluded.
 
 ```bash
 uv run --extra modal modal run -d \
   tools/profiling/kimi_k3_mxfp4_delta_weight_update.py \
-  --update-mode cpu
+  --update-mode cpu \
+  --canonical-storage disk
 ```
