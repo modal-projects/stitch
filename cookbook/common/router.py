@@ -10,7 +10,7 @@ Why it exists: with a per-container queue bound (sglang ``--max-queued-requests`
 own sticky routing turns the first saturated replicas into 503 attractors — sessions stuck
 on a full replica keep retrying it while the rest of the pool starves. Here, the registry
 polls every replica's live queue depth (``/v1/loads`` + a ``/health`` zombie check); the
-router pins each ``modal-session-id`` to the least-loaded healthy replica via the
+router pins each ``modal-session-id`` to a healthy replica with spare capacity via the
 ``modal-flash-upstream`` header, and a 503 from a pinned replica evicts it from rotation and
 retries on a healthier one, so load spreads instead of sticking.
 
@@ -131,18 +131,29 @@ def filter_headers(headers: dict[str, str]) -> dict[str, str]:
     return {k: v for k, v in headers.items() if k.lower() not in removed}
 
 
-def select_least_loaded_container(
-    containers: dict[str, ContainerInfo],
+def select_underloaded_container(
+    containers: dict[str, ContainerInfo], overload_threshold: int
 ) -> ContainerInfo:
-    minimum = min(c.load for c in containers.values())
-    return random.choice([c for c in containers.values() if c.load == minimum])
+    """Spread new sessions across replicas with headroom.
+
+    Registry loads are snapshots shared by multiple router replicas. Selecting the exact
+    minimum makes every router converge on a newly ready zero-load replica before the next
+    snapshot, creating a thundering herd. Random choice from the healthy underloaded set
+    preserves load shedding without requiring distributed per-request reservations.
+    """
+    candidates = [
+        container
+        for container in containers.values()
+        if container.load < overload_threshold
+    ]
+    return random.choice(candidates or list(containers.values()))
 
 
 async def route_session(
     session_routes: modal.Dict, session_id: str, containers: dict[str, ContainerInfo]
 ) -> ContainerInfo:
     """Pick the replica for one session: the most-recently-used of its known replicas
-    that isn't overloaded, else the pool's least-loaded. A replica is overloaded when its
+    that isn't overloaded, else a random replica with headroom. A replica is overloaded when its
     load is ≥50% above the pool's mean (floored), so a hot replica sheds new session
     traffic without a hard capacity number. Mutates and persists the session's routes."""
     current_time = time.time()
@@ -184,7 +195,7 @@ async def route_session(
             await save_routes()
             return container
 
-    selected = select_least_loaded_container(containers)
+    selected = select_underloaded_container(containers, overload_threshold)
     reason = (
         f"previous upstreams [{', '.join(entry.task_id for entry in routes)}] overloaded"
         f" (load >= {overload_threshold})"
