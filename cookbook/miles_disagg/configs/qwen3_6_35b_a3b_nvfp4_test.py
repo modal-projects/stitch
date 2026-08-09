@@ -37,9 +37,24 @@ def test_training_keeps_nvfp4_routing_replay_and_top_p_masking() -> None:
     assert miles.custom_config_path["rollout_request_retry_attempts"] == 1200
     assert miles.actor_num_nodes == 1
     assert miles.rollout_num_gpus_per_engine == 1
-    assert config.modal.rollout_min_containers == 16
-    assert config.modal.rollout_max_containers == 16
     assert config.TORCH_DIST_CHECKPOINT_PATH.name.endswith("global-experts-v2")
+
+
+def test_rollout_capacity_matches_the_elastic_agent_pool() -> None:
+    miles = config.miles
+    agent_processes = int(miles.environment["MODAL_SWE_AGENT_PROCESSES"])
+    agent_threads = int(
+        miles.environment["MODAL_SWE_AGENT_THREADS_PER_PROCESS"]
+    )
+
+    assert config.modal.rollout_min_containers == 4
+    assert config.modal.rollout_max_containers is None
+    assert config.modal.rollout_target_inputs == 8
+    assert config.modal.rollout_scaledown_window_seconds == 180
+    assert miles.async_max_concurrent_samples == 192
+    assert miles.sglang_server_concurrency == 192
+    assert agent_processes * agent_threads == miles.async_max_concurrent_samples
+    assert miles.async_max_concurrent_samples % miles.n_samples_per_prompt == 0
 
 
 def test_quantizer_contract_matches_across_prep_training_and_serving() -> None:

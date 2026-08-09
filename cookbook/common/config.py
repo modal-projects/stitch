@@ -30,6 +30,9 @@ class ModalConfig:
     # Flash autoscaler target: keep well below sglang engine concurrency so Flash adds
     # containers instead of packing requests until KV saturates.
     rollout_target_inputs: int | None = None
+    # Keep recently-idle rollout engines warm for this many seconds. A shorter window
+    # reacts faster to fully-async training's alternating rollout and weight-update load.
+    rollout_scaledown_window_seconds: int = 15 * 60
     routing_region: str = "us-east"
     # Session-routing LB deployed alongside the pool (cookbook/common/router.py):
     # registry replica floor, proxy replica floor, and the proxy's autoscale target.

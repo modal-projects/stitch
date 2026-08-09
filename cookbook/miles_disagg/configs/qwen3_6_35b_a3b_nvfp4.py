@@ -3,7 +3,7 @@
 This keeps the GLM-5.2 experiment's RL behavior—NVFP4 4/6 training and
 serving, routed-expert replay, and exact top-p support replay—but uses the
 single-GPU Qwen3.6 DFlash serving recipe. The run uses one 8-GPU trainer node,
-sixteen rollout GPUs, and remains bounded to ten steps.
+an elastic rollout fleet, and remains bounded to ten steps.
 """
 
 from __future__ import annotations
@@ -68,8 +68,16 @@ GLOBAL_BATCH_SIZE = ROLLOUT_BATCH_SIZE * N_SAMPLES_PER_PROMPT
 ROLLOUT_INPUTS_PER_ENGINE = 8
 ROLLOUT_MAX_RUNNING_REQUESTS = 32
 ROLLOUT_MAX_QUEUED_REQUESTS = 8
-ROLLOUT_ENGINES = 16
-ROLLOUT_CONCURRENT_SAMPLES = ROLLOUT_ENGINES * ROLLOUT_INPUTS_PER_ENGINE
+ROLLOUT_MIN_ENGINES = 4
+ROLLOUT_SCALEDOWN_WINDOW_SECONDS = 180
+
+# The validation run kept 124-126 of 128 trajectory slots occupied while the
+# 64-thread agent pool added 61-80 seconds of dispatch queueing per batch. At the
+# observed phase mix, 192 live episodes should drive roughly 16 rollout engines at
+# the eight-input autoscaler target and balance an approximately 85-second train step.
+ROLLOUT_CONCURRENT_SAMPLES = 192
+ROLLOUT_AGENT_PROCESSES = 12
+ROLLOUT_AGENT_THREADS_PER_PROCESS = 16
 MAX_SEQ_LEN = 16_384
 SGLANG_CONTEXT_LENGTH = MAX_SEQ_LEN + 8
 
@@ -167,9 +175,10 @@ modal = ModalConfig(
     region="us",
     trainer_memory_mib=(512 * 1024, 1024 * 1024),
     rollout_memory_mib=(128 * 1024, 512 * 1024),
-    rollout_min_containers=ROLLOUT_ENGINES,
-    rollout_max_containers=ROLLOUT_ENGINES,
+    rollout_min_containers=ROLLOUT_MIN_ENGINES,
+    rollout_max_containers=None,
     rollout_target_inputs=ROLLOUT_INPUTS_PER_ENGINE,
+    rollout_scaledown_window_seconds=ROLLOUT_SCALEDOWN_WINDOW_SECONDS,
     routing_region="us-west",
     rollout_ephemeral_disk_mib=524_288,
     trainer_ephemeral_disk_mib=524_288,
@@ -396,8 +405,10 @@ class _Miles(MilesConfig):
         "MODAL_SWE_INJECT_PYTEST_REPORTER": "0",
         "MODAL_SWE_CPUS": "2",
         "MODAL_SWE_MEMORY_MIB": "16384",
-        "MODAL_SWE_AGENT_PROCESSES": "8",
-        "MODAL_SWE_AGENT_THREADS_PER_PROCESS": "8",
+        "MODAL_SWE_AGENT_PROCESSES": str(ROLLOUT_AGENT_PROCESSES),
+        "MODAL_SWE_AGENT_THREADS_PER_PROCESS": str(
+            ROLLOUT_AGENT_THREADS_PER_PROCESS
+        ),
         "MODAL_SWE_SANDBOX_BOOT_CONCURRENCY_PER_PROCESS": "2",
         **NVFP4_TRAINING_ENV,
     }
