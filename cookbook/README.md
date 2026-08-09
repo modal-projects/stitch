@@ -124,7 +124,7 @@ fully asynchronous Miles training on SWE-bench Pro.
 
 | Component | Configuration |
 | --- | --- |
-| Trainer | 2 nodes × 8 H200 GPUs |
+| Trainer | 4 nodes × 8 H200 GPUs |
 | Rollout | 20 warm replicas × 1 H200 GPU, with autoscaling above the warm fleet |
 | Model | `zai-org/GLM-4.7-Flash`, pinned BF16 revision |
 | Dataset | SWE-bench Pro, including task environments and verifiers |
@@ -147,7 +147,7 @@ uv run --extra modal python -m cookbook.miles_disagg.launch
 ```
 
 Checkpoint preparation materializes the pinned BF16 model. TorchDist
-preparation converts it for the two-node trainer. Dataset preparation writes
+preparation converts it for the four-node trainer. Dataset preparation writes
 the pinned prompts, task environments, verifiers, and source manifest.
 
 ### Weight-update performance

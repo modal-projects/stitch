@@ -33,7 +33,7 @@ MEGATRON_RUNTIME_PATCHES = [
     "/root/cookbook/miles_disagg/patches/megatron-hdo-dp-reshardable-step.patch",
 ]
 
-TRAINER_NODES = 2
+TRAINER_NODES = 4
 GPUS_PER_TRAINER_NODE = 8
 ROLLOUT_GPUS_PER_ENGINE = 1
 ROLLOUT_MIN_CONTAINERS = 20
