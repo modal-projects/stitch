@@ -15,7 +15,8 @@ import sys
 
 from stitch.engines.sglang import SGLangEngine
 from stitch.service import serve
-from stitch.stores.modal_volume import ModalVolumeStore
+
+from . import storage
 
 
 def _configure_logging() -> None:
@@ -38,7 +39,14 @@ def main() -> None:
     p.add_argument("--local-checkpoint-dir")
     p.add_argument("--delta-update-mode", choices=["disk", "cpu"], required=True)
     p.add_argument("--disk-load-format", default="auto")
+    p.add_argument(
+        "--store-backend",
+        choices=[storage.MODAL_VOLUME, storage.S3],
+        default=storage.MODAL_VOLUME,
+    )
     p.add_argument("--volume-name", default="")
+    p.add_argument("--s3-root", default="")
+    p.add_argument("--s3-endpoint-url", default="")
     p.add_argument("--commit-mode", choices=["in_place", "quiesce"], default="in_place")
     p.add_argument("--flush-cache-on-commit", action="store_true")
     p.add_argument("--run-id", required=True)
@@ -51,10 +59,13 @@ def main() -> None:
     if args.delta_update_mode == "disk" and not args.local_checkpoint_dir:
         p.error("--local-checkpoint-dir is required in disk mode")
 
-    store = ModalVolumeStore(
-        args.bulletin_root,
+    store = storage.create_store(
+        args.store_backend,
+        local_root=args.bulletin_root,
         volume_name=args.volume_name or None,
         run_id=args.run_id,
+        s3_root=args.s3_root or None,
+        s3_endpoint_url=args.s3_endpoint_url or None,
     )
     engine = SGLangEngine(
         args.upstream,

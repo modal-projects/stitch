@@ -100,6 +100,24 @@ the rollout fleet, and validate an update. Fork pins and re-porting notes are
 in [`SGLANG_FORK.md`](cookbook/common/SGLANG_FORK.md) and
 [`MILES_FORK.md`](cookbook/miles_disagg/MILES_FORK.md).
 
+The S3 backend uses the same run-scoped layout and store behavior as the Modal
+Volume backend. Point its root at one run's prefix and provide a local cache for
+materialized versions:
+
+```python
+from stitch.stores.s3 import S3Store
+
+store = S3Store(
+    f"s3://my-bucket/stitch-runs/{run_id}",
+    cache_dir=f"/tmp/stitch/{run_id}",
+    run_id=run_id,
+)
+```
+
+Install its lazy boto3 dependency with `pip install 'stitch[s3]'`. Standard AWS
+credential and region resolution applies; `endpoint_url` can select an
+S3-compatible service.
+
 ## Development
 
 ```bash

@@ -8,6 +8,7 @@ the temp root) and only ``_pool`` is faked. Run directly:
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import tempfile
 from pathlib import Path
@@ -17,6 +18,7 @@ import pytest
 
 from cookbook.common import hooks
 from stitch.stores.modal_volume import ModalVolumeStore
+from stitch.stores.s3 import S3Store
 from stitch.types import VersionRef
 
 
@@ -29,6 +31,28 @@ class _FakePool:
 
     def wake(self, replicas, ref):
         self.woke.append(ref)
+
+
+class _FakeS3:
+    class exceptions:  # noqa: N801 - mirrors boto3's client.exceptions namespace
+        class NoSuchKey(Exception):
+            pass
+
+    def __init__(self) -> None:
+        self.objects: dict[tuple[str, str], bytes] = {}
+
+    def put_object(self, *, Bucket: str, Key: str, Body: bytes) -> None:
+        self.objects[(Bucket, Key)] = Body
+
+    def get_object(self, *, Bucket: str, Key: str) -> dict[str, io.BytesIO]:
+        try:
+            value = self.objects[(Bucket, Key)]
+        except KeyError:
+            raise self.exceptions.NoSuchKey from None
+        return {"Body": io.BytesIO(value)}
+
+    def upload_file(self, filename: str, bucket: str, key: str) -> None:
+        self.objects[(bucket, key)] = Path(filename).read_bytes()
 
 
 def _args(root: str, run_id: str = "run-abc", **extra):
@@ -135,6 +159,38 @@ def test_commit_and_wake_commits_once_per_container() -> None:
             hooks.process.dist_all_gather_object = original_gather
             hooks.process.dist_is_container_leader = original_container_leader
             ModalVolumeStore.commit = original_commit
+
+
+def test_commit_and_wake_publishes_to_s3_after_staging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = _FakeS3()
+    pool = _FakePool()
+    create_store = hooks.storage.create_store
+
+    def create_store_with_client(*args, **kwargs):
+        store = create_store(*args, **kwargs)
+        if isinstance(store, S3Store):
+            store._client = client
+        return store
+
+    monkeypatch.setattr(hooks.storage, "create_store", create_store_with_client)
+    monkeypatch.setattr(hooks, "_pool", lambda _args: pool)
+    args = _args(
+        str(tmp_path),
+        stitch_store_backend="s3",
+        stitch_s3_root="s3://bucket/experiments/run-abc",
+    )
+    version_dir = _write_version(tmp_path, VersionRef("run-abc", 1))
+
+    hooks.commit_and_wake(args, version_dir)
+
+    assert hooks._store(args).read_pointer() == VersionRef("run-abc", 1)
+    assert pool.woke == [VersionRef("run-abc", 1)]
+    assert (
+        "bucket",
+        "experiments/run-abc/updates/weight_v000001/model-00001.safetensors",
+    ) in client.objects
 
 
 def test_commit_and_wake_baseline_is_noop() -> None:

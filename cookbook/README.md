@@ -38,7 +38,34 @@ uv run --extra modal modal secret create \
 Preparation jobs use `huggingface-secret`. Recipes that enable W&B logging use
 `wandb-secret`.
 
-### 3. Prepare immutable inputs
+### 3. Choose a checkpoint store
+
+By default, runs publish updates through their experiment's Modal Volume. To
+make S3 the source of truth instead, create a Secret containing a run-root base
+and either standard AWS credentials or an assumable role:
+
+```bash
+uv run --extra modal modal secret create -e "$MODAL_ENVIRONMENT" stitch-s3 \
+  S3_ROOT=s3://your-bucket/stitch \
+  AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
+  AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
+  AWS_REGION="$AWS_REGION"
+```
+
+Then include these variables when launching or redeploying a run:
+
+```bash
+export STITCH_STORE_BACKEND=s3
+export STITCH_S3_SECRET_NAME=stitch-s3
+```
+
+Each run receives an isolated prefix below `S3_ROOT`. Trainers retain their
+Modal Volume as a multi-host staging area for checkpoint shards and logs, but
+`latest` and the version chain are published to S3; rollout replicas download
+from S3 into their ephemeral local cache. A Secret with `AWS_ROLE_ARN` can be
+used instead of static keys when the role trusts Modal's OIDC identity.
+
+### 4. Prepare immutable inputs
 
 Miles recipes expose checkpoint, TorchDist, and dataset preparation:
 
@@ -64,7 +91,7 @@ Preparation is idempotent. A complete artifact is reused; an incomplete one
 fails rather than becoming a launch input. Model preparation must finish before
 dependent format conversion. Dataset preparation is independent.
 
-### 4. Launch an isolated run
+### 5. Launch an isolated run
 
 Use the launcher for the selected trainer:
 
@@ -113,7 +140,7 @@ normally. Stop it with Ctrl-C. It is off by default and requires
 `save_interval`, `save_hf`, and optimizer/RNG checkpointing. A fresh run becomes
 resumable after its first complete Megatron/Hugging Face checkpoint pair.
 
-### 5. Inspect or change a live run
+### 6. Inspect or change a live run
 
 Follow logs using the app name printed by the launcher:
 

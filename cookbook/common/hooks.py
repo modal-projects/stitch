@@ -2,7 +2,7 @@
 
 Trainer integrations point their lifecycle callbacks at this module. Each hook reads the
 run coordinates from the trainer's argument namespace and composes the Stitch core with a
-``ModalVolumeStore`` and ``ModalFlashPool``.
+configured Store and ``ModalFlashPool``.
 """
 
 from __future__ import annotations
@@ -15,10 +15,11 @@ from typing import Any
 
 from stitch.pools.modal_flash import ModalFlashPool
 from stitch.publish import claim_run, constrain_request, publish_version
+from stitch.stores.base import Store
 from stitch.stores.modal_volume import ModalVolumeStore
 from stitch.types import PointerRewind, VersionRef
 
-from . import process
+from . import process, storage
 from .constants import MODAL_SESSION_ID_HEADER
 
 logger = logging.getLogger(__name__)
@@ -46,10 +47,12 @@ def commit_and_wake(args: Any, published_dir: str, rollout_engines: Any = None) 
     a clean no-op, not a missing-file crash."""
     del rollout_engines
     store = _store(args)
+    staging_store = _staging_store(args)
     if not Path(published_dir).name.startswith("weight_v"):
         # Baseline cleanup is performed by rank 0 only, so a normal mounted
-        # Volume commit is authoritative here.
-        store.commit()
+        # Volume commit is authoritative here even when S3 is the publication
+        # store: the Volume remains the framework's multi-host staging area.
+        staging_store.commit()
         return
 
     publication_state: tuple[bool, str | None] = (False, None)
@@ -78,7 +81,7 @@ def commit_and_wake(args: Any, published_dir: str, rollout_engines: Any = None) 
     commit_error = None
     if process.dist_is_container_leader():
         try:
-            store.commit()
+            staging_store.commit()
         except Exception:  # noqa: BLE001
             commit_error = f"rank {process.dist_rank()}:\n{traceback.format_exc()}"
     _raise_distributed_failures("checkpoint commit", commit_error)
@@ -86,7 +89,7 @@ def commit_and_wake(args: Any, published_dir: str, rollout_engines: Any = None) 
     publish_error = None
     if process.dist_rank() in (None, 0):
         try:
-            store.refresh()
+            staging_store.refresh()
             publish_version(store, _pool(args), published_dir, run_id=_run_id(args))
         except PointerRewind:
             # A same-run republish (e.g. a retried step) — drop it rather than serve stale.
@@ -161,30 +164,25 @@ async def gated_rollout_request_hook(
 
 
 class _CachedPointer:
-    """TTL-cached ``latest`` version from the trainer's local Volume mount.
+    """TTL-cached ``latest`` version from the trainer's configured store.
 
-    The publisher and session-server request hooks share the trainer-head mount. Reloading
-    it here can discard a version that the publisher is still writing; cross-host refresh
-    belongs to rollout-replica reconciliation.
+    The publisher and request hooks share one store client. Refreshing here can
+    disrupt a Volume publisher that is still writing, while S3 needs no refresh;
+    cross-host refresh belongs to rollout-replica reconciliation.
     """
 
     def __init__(self) -> None:
         self._version = 0
         self._at = -1e9
-        self._store: ModalVolumeStore | None = None
+        self._store: Store | None = None
+        self._store_key: tuple[str | None, ...] | None = None
 
     async def get(self, args: Any, ttl: float = 2.0) -> int:
         store = self._store
-        root = Path(_transport_root(args))
-        run_id = _run_id(args)
-        volume = getattr(args, "experiment_volume_name", None)
-        if (
-            store is None
-            or store.root != root
-            or store.run_id != run_id
-            or store.volume_name != (volume or None)
-        ):
+        store_key = _store_key(args)
+        if store is None or self._store_key != store_key:
             store = self._store = _store(args)
+            self._store_key = store_key
             self._version = 0
             self._at = -1e9
         now = time.monotonic()
@@ -206,12 +204,34 @@ _latest = _CachedPointer()
 
 
 # ── args → run coordinates ───────────────────────────────────────────────────────
-def _store(args: Any) -> ModalVolumeStore:
+def _store(args: Any) -> Store:
+    return storage.create_store(
+        str(getattr(args, "stitch_store_backend", storage.MODAL_VOLUME)),
+        local_root=_transport_root(args),
+        run_id=_run_id(args),
+        volume_name=getattr(args, "experiment_volume_name", None) or None,
+        s3_root=getattr(args, "stitch_s3_root", None) or None,
+        s3_endpoint_url=getattr(args, "stitch_s3_endpoint_url", None) or None,
+    )
+
+
+def _staging_store(args: Any) -> ModalVolumeStore:
     volume = getattr(args, "experiment_volume_name", None)
     return ModalVolumeStore(
         _transport_root(args),
         volume_name=volume or None,
         run_id=_run_id(args),
+    )
+
+
+def _store_key(args: Any) -> tuple[str | None, ...]:
+    return (
+        str(getattr(args, "stitch_store_backend", storage.MODAL_VOLUME)),
+        _transport_root(args),
+        _run_id(args),
+        getattr(args, "experiment_volume_name", None) or None,
+        getattr(args, "stitch_s3_root", None) or None,
+        getattr(args, "stitch_s3_endpoint_url", None) or None,
     )
 
 

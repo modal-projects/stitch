@@ -5,6 +5,7 @@ delta-encoder codecs, the HF-download env, and the stitch + cookbook source moun
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 
 import modal
@@ -17,6 +18,7 @@ def add_common_layers(
     *,
     experiment: str,
     run_id: str | None = None,
+    extra_env: Mapping[str, str] | None = None,
     copy_source: bool = False,
 ) -> modal.Image:
     """Append the framework-agnostic trainer layers: the trainer-side delta ENCODER's codecs
@@ -36,6 +38,7 @@ def add_common_layers(
             {
                 "HF_XET_HIGH_PERFORMANCE": "1",
                 "HF_HUB_ENABLE_HF_TRANSFER": "1",
+                **(extra_env or {}),
                 "EXPERIMENT_CONFIG": experiment,
                 **({"RUN_ID": run_id} if run_id else {}),
             }

@@ -2,7 +2,7 @@
 
 ``EXPERIMENT_CONFIG`` selects a config module under ``cookbook.miles_disagg.configs``. The
 Server (sglang + stitch sidecar) is the shared common one; the Trainer runs miles on Ray
-and publishes XOR deltas through a Modal Volume the pool syncs from.
+and publishes XOR deltas through the configured checkpoint store.
 
 Prepare the checkpoints once first (a separate app, so prep never spins up the rollout Server
 floor — see ``cookbook.miles_disagg.prep_app``), then launch a run with one command — it mints a
@@ -31,7 +31,7 @@ from typing import Any
 import modal
 import modal.experimental
 
-from cookbook.common import launch, ray_cluster, router, server, serving_image
+from cookbook.common import launch, ray_cluster, router, server, serving_image, storage
 from cookbook.common.constants import (
     CHECKPOINTS_PATH,
     DATA_PATH,
@@ -87,6 +87,8 @@ RUN_ID = os.environ["RUN_ID"]
 APP_NAME = f"{exp.APP_NAME}-{RUN_ID}"
 RUN_DIR = STITCH_PATH / RUN_ID
 UPDATES_DIR = RUN_DIR / "updates"
+STORE_DEPLOYMENT = storage.StoreDeployment.from_environment()
+STORE_SECRETS = STORE_DEPLOYMENT.modal_secrets()
 
 # Flash autoscaler target / sglang concurrency cap: explicit target_inputs, else engine concurrency.
 ROLLOUT_CONCURRENCY = (
@@ -101,17 +103,23 @@ image = trainer_image.build_trainer_image(
     run_id=RUN_ID,
     miles_repo_ref=getattr(exp, "MILES_REPO_REF", trainer_image.MILES_REPO_REF),
     miles_local=MILES_LOCAL_DIR,
-    extra_pip_packages=getattr(exp, "TRAINER_EXTRA_PIP_PACKAGES", ()),
+    extra_pip_packages=(
+        *getattr(exp, "TRAINER_EXTRA_PIP_PACKAGES", ()),
+        *STORE_DEPLOYMENT.extra_packages,
+    ),
     image_run_commands=getattr(exp, "TRAINER_IMAGE_RUN_COMMANDS", ()),
+    extra_env=STORE_DEPLOYMENT.image_environment,
 )
 # Server containers re-import this module, so persist this attempt's resume point.
 server_image = serving_image.build_serving_image(
     hf_cache_path=str(HF_CACHE_PATH),
     experiment=EXPERIMENT,
     run_id=RUN_ID,
+    extra_packages=STORE_DEPLOYMENT.extra_packages,
     extra_env={
         **(getattr(exp, "SGLANG_SERVER_ENV", None) or {}),
         RESUME_POINT_ENV: os.environ.get(RESUME_POINT_ENV, ""),
+        **STORE_DEPLOYMENT.image_environment,
     },
     runtime=getattr(exp, "SGLANG_RUNTIME", serving_image.DEFAULT_SGLANG_RUNTIME),
 )
@@ -181,7 +189,11 @@ SGLANG_SERVER_ARGS = {
     volumes={
         str(HF_CACHE_PATH): hf_cache_volume,
         str(CHECKPOINTS_PATH): checkpoint_volume,
-        str(STITCH_PATH): run_volume,
+        **(
+            {str(STITCH_PATH): run_volume}
+            if STORE_DEPLOYMENT.backend == storage.MODAL_VOLUME
+            else {}
+        ),
         SGLANG_CACHE_PATH: sglang_cache_volume,
         **(
             {str(DRAFT_PATH): draft_volume.read_only()}
@@ -195,6 +207,7 @@ SGLANG_SERVER_ARGS = {
     scaledown_window=15 * MINUTES,
     ephemeral_disk=modal_cfg.rollout_ephemeral_disk_mib,
     memory=modal_cfg.rollout_memory_mib,
+    secrets=STORE_SECRETS,
     include_source=False,
     port=SIDECAR_PORT,
     routing_region=modal_cfg.routing_region,
@@ -205,6 +218,8 @@ SGLANG_SERVER_ARGS = {
 class Server:
     @modal.enter()
     def startup(self) -> None:
+        STORE_DEPLOYMENT.bootstrap_credentials()
+        store_config = STORE_DEPLOYMENT.hook_config(APP_NAME)
         server.serve_startup(
             self,
             model_name=_rollout_boot_checkpoint(),
@@ -215,7 +230,10 @@ class Server:
             bulletin_root=str(RUN_DIR),
             local_checkpoint_dir=exp.LOCAL_CHECKPOINT_PATH,
             delta_update_mode=exp.SGLANG_DELTA_UPDATE_MODE,
+            store_backend=store_config["stitch_store_backend"],
             volume_name=exp.EXPERIMENT_VOLUME_NAME,
+            s3_root=store_config.get("stitch_s3_root"),
+            s3_endpoint_url=store_config.get("stitch_s3_endpoint_url"),
             commit_mode=exp.SIDECAR_COMMIT_MODE,
             run_id=RUN_ID,
             flush_cache_on_commit=exp.SIDECAR_FLUSH_CACHE_ON_COMMIT,
@@ -230,7 +248,11 @@ class Server:
 # ── Session-routing LB (cookbook/common/router.py) ─────────────────────────────
 # The router is two CPU Flash classes in this same app, so it deploys and dies with
 # the pool; the GPU class keeps ``Server``, rollout traffic enters through ``Router``.
-router_image = router.build_router_image(EXPERIMENT, RUN_ID)
+router_image = router.build_router_image(
+    EXPERIMENT,
+    RUN_ID,
+    extra_env=STORE_DEPLOYMENT.image_environment,
+)
 session_routes = router.session_routes_dict(APP_NAME)
 
 
@@ -301,11 +323,14 @@ _MULTINODE = miles_cfg.n_train_nodes > 1
     cloud=modal_cfg.cloud,
     region=modal_cfg.region,
     volumes=train_volumes,
-    secrets=(
-        [modal.Secret.from_name("wandb-secret")]
-        if getattr(miles_cfg, "use_wandb", False)
-        else []
-    ),
+    secrets=[
+        *STORE_SECRETS,
+        *(
+            [modal.Secret.from_name("wandb-secret")]
+            if getattr(miles_cfg, "use_wandb", False)
+            else []
+        ),
+    ],
     ephemeral_disk=modal_cfg.trainer_ephemeral_disk_mib,
     timeout=24 * 60 * MINUTES,
     startup_timeout=20 * MINUTES,
@@ -326,6 +351,7 @@ class Trainer:
     def start_ray(self) -> None:
         from cookbook.common import process
 
+        STORE_DEPLOYMENT.bootstrap_credentials()
         rank, master_addr, my_ip = ray_cluster.get_modal_cluster_context(
             miles_cfg.n_train_nodes
         )
@@ -381,6 +407,7 @@ class Trainer:
         # miles setattr's every key onto args for the hooks.
         custom_config = {
             **(cfg.custom_config_path or {}),
+            **STORE_DEPLOYMENT.hook_config(APP_NAME),
             "experiment_volume_name": exp.EXPERIMENT_VOLUME_NAME,
             "rollout_modal_flash_app_name": APP_NAME,
             "rollout_modal_flash_server_cls_name": "Server",

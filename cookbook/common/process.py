@@ -26,7 +26,10 @@ def start_sidecar(
     local_checkpoint_dir: str | None,
     delta_update_mode: str,
     disk_load_format: str,
+    store_backend: str,
     volume_name: str,
+    s3_root: str | None,
+    s3_endpoint_url: str | None,
     run_id: str,
     boot_version: int,
     commit_mode: str,
@@ -52,6 +55,8 @@ def start_sidecar(
         delta_update_mode,
         "--disk-load-format",
         disk_load_format,
+        "--store-backend",
+        store_backend,
         "--volume-name",
         volume_name,
         "--run-id",
@@ -61,6 +66,10 @@ def start_sidecar(
         "--commit-mode",
         commit_mode,
     ]
+    if s3_root is not None:
+        cmd.extend(["--s3-root", s3_root])
+    if s3_endpoint_url is not None:
+        cmd.extend(["--s3-endpoint-url", s3_endpoint_url])
     if local_checkpoint_dir is not None:
         cmd.extend(["--local-checkpoint-dir", local_checkpoint_dir])
     if flush_cache_on_commit:
