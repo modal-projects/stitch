@@ -54,6 +54,7 @@ def test_quantizer_contract_matches_across_prep_training_and_serving() -> None:
     )
     assert config.MILES_SOURCE_PATCHES == (config.QWEN36_NVFP4_DFLASH_MILES_PATCH,)
     patch = config.QWEN36_NVFP4_DFLASH_MILES_PATCH.read_text()
+    assert "if processor and isinstance(prompt, list):" in patch
     assert "return _expand_batched_expert_params(converted_named_params)" in patch
     assert "q_weights.update(dict(_expand_batched_expert_params(key, tensor)))" in patch
     assert "modules_to_not_convert.extend(_batched_expert_module_aliases(key))" in patch

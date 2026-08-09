@@ -51,7 +51,10 @@ def _load_miles_module(name: str, module_path: str):
 
 @app.function(image=trainer_preflight_image, cpu=2, memory=8192, timeout=15 * 60)
 def validate_trainer_contract() -> dict:
+    import tempfile
+
     import torch
+    from miles.utils.data import Dataset
 
     prep_converter = _load_miles_module(
         "qwen36_prep_converter",
@@ -146,6 +149,34 @@ def validate_trainer_contract() -> dict:
     if model.PREP_ENV.get("CONVERT_KEEP_PP1") != "1":
         raise RuntimeError("Qwen torch-dist prep does not preserve PP1 with EP8")
 
+    class _UnusedProcessor:
+        def __call__(self, *args, **kwargs):
+            raise RuntimeError("text-only prompts used the multimodal processor")
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        prompt_path = Path(temp_dir) / "prompts.jsonl"
+        prompt_path.write_text(
+            json.dumps(
+                {
+                    "prompt": "Fix the bug",
+                    "metadata": {"instance_id": "task"},
+                }
+            )
+            + "\n"
+        )
+        dataset = Dataset(
+            str(prompt_path),
+            tokenizer=None,
+            processor=_UnusedProcessor(),
+            max_length=None,
+            prompt_key="prompt",
+            apply_chat_template=False,
+        )
+    if dataset.samples[0].prompt != "Fix the bug":
+        raise RuntimeError("text-only Qwen prompt was not preserved verbatim")
+    if dataset.samples[0].multimodal_inputs is not None:
+        raise RuntimeError("text-only Qwen prompt produced multimodal inputs")
+
     result = {
         "status": "PASS",
         "expanded_expert_tensors": len(live_names),
@@ -155,6 +186,7 @@ def validate_trainer_contract() -> dict:
         "tail_prefixes": tail_prefixes,
         "dflash_top_p_validation": "enabled",
         "torch_dist_topology": "PP1_EP8",
+        "text_prompt_processor_bypass": True,
     }
     print(
         f"VERDICT qwen36_trainer_preflight PASS {json.dumps(result, sort_keys=True)}",

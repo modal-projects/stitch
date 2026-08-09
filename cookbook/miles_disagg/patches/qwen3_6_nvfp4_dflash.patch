@@ -4,6 +4,61 @@
 # The pinned Stitch SGLang fork also returns DFlash sampling masks aligned with
 # accepted tokens, so permit that verified speculative algorithm with exact top-p
 # mask replay while retaining the guard for all other speculative workers.
+# Qwen3.6 loads a multimodal processor even for text-only rollouts. Keep raw
+# SWE-bench prompts on the tokenizer path unless the dataset actually produced a
+# conversation, instead of changing the shared dataset schema for one model.
+diff --git a/miles/utils/data.py b/miles/utils/data.py
+index 85b2ac10..b8ed2e30 100644
+--- a/miles/utils/data.py
++++ b/miles/utils/data.py
+@@ -229,12 +229,9 @@ class Dataset:
+             else:
+                 output_prompt = prompt
+ 
+-            if processor:
++            if processor and isinstance(prompt, list):
+                 from miles.utils.processing_utils import process_vision_info
+ 
+-                assert isinstance(
+-                    prompt, list
+-                ), f"prompt must be a list when processor is not None, got {type(prompt)} instead"
+                 multimodal_inputs = process_vision_info(prompt, processor)
+             else:
+                 multimodal_inputs = None
+diff --git a/tests/fast/utils/test_data.py b/tests/fast/utils/test_data.py
+new file mode 100644
+index 00000000..d2faef32
+--- /dev/null
++++ b/tests/fast/utils/test_data.py
+@@ -0,0 +1,28 @@
++import json
++
++from miles.utils.data import Dataset
++
++
++class _UnusedProcessor:
++    def __call__(self, *args, **kwargs):
++        raise AssertionError("text-only prompts must not use the multimodal processor")
++
++
++def test_text_prompt_bypasses_multimodal_processor(tmp_path) -> None:
++    prompt_path = tmp_path / "prompts.jsonl"
++    prompt_path.write_text(
++        json.dumps({"prompt": "Fix the bug", "metadata": {"instance_id": "task"}})
++        + "\n"
++    )
++
++    dataset = Dataset(
++        str(prompt_path),
++        tokenizer=None,
++        processor=_UnusedProcessor(),
++        max_length=None,
++        prompt_key="prompt",
++        apply_chat_template=False,
++    )
++
++    assert dataset.samples[0].prompt == "Fix the bug"
++    assert dataset.samples[0].multimodal_inputs is None
 diff --git a/miles/backends/megatron_utils/megatron_to_hf/processors/quantizer_nvfp4.py b/miles/backends/megatron_utils/megatron_to_hf/processors/quantizer_nvfp4.py
 index 0b7a6ef2..8a86c1c0 100644
 --- a/miles/backends/megatron_utils/megatron_to_hf/processors/quantizer_nvfp4.py
