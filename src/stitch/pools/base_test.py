@@ -4,7 +4,11 @@ off the event loop, so any sync-only Pool subclass is usable from async callers.
 from __future__ import annotations
 
 import asyncio
+import socket
 import threading
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
+from unittest.mock import patch
 
 from stitch.pools.base import Pool
 from stitch.types import VersionRef
@@ -26,6 +30,42 @@ class _SyncOnlyPool(Pool):
         self.calls.append(("wake", threading.get_ident()))
 
 
+async def _to_thread_without_threadsafe_loop_wakeup(function, /, *args, **kwargs):
+    """Run a function off-loop without relying on the loop's self-pipe.
+
+    Some restricted test sandboxes prohibit socket writes from worker threads.
+    The standard ``asyncio.to_thread`` worker completes there, but cannot wake a
+    sleeping selector. Polling the raw future at event-loop checkpoints keeps
+    this unit test focused on the Pool delegation contract.
+    """
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(function, *args, **kwargs)
+        while not future.done():
+            await asyncio.sleep(0)
+        return future.result()
+
+
+def _worker_thread_can_wake_event_loop() -> bool:
+    """Whether this runtime permits a worker to write to a loop-style self-pipe."""
+    reader, writer = socket.socketpair()
+    errors: list[OSError] = []
+
+    def write() -> None:
+        try:
+            writer.send(b"\0")
+        except OSError as exc:
+            errors.append(exc)
+
+    try:
+        worker = threading.Thread(target=write)
+        worker.start()
+        worker.join()
+        return not errors
+    finally:
+        reader.close()
+        writer.close()
+
+
 def test_async_defaults_delegate_to_sync_impls_off_loop() -> None:
     pool = _SyncOnlyPool()
 
@@ -35,7 +75,15 @@ def test_async_defaults_delegate_to_sync_impls_off_loop() -> None:
         await pool.wake_async(replicas, VersionRef("run", 1))
         return url, replicas
 
-    url, replicas = asyncio.run(drive())  # the loop runs on THIS thread
+    to_thread_patch = (
+        nullcontext()
+        if _worker_thread_can_wake_event_loop()
+        else patch.object(
+            asyncio, "to_thread", _to_thread_without_threadsafe_loop_wakeup
+        )
+    )
+    with to_thread_patch:
+        url, replicas = asyncio.run(drive())  # the loop runs on THIS thread
     assert (url, replicas) == ("https://gw", ["https://r1", "https://r2"])
     assert [name for name, _ in pool.calls] == [
         "gateway_url",
