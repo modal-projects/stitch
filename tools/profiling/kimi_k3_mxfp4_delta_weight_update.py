@@ -1,13 +1,14 @@
 """Download Kimi K3 and validate one complete MXFP4 delta update on Modal.
 
-Disk destination (the Kimi K3 config's declared update mode):
+Disk destination:
 
-    MODAL_FUNCTION_RUNTIME=runc uv run --extra modal modal run -d \
+    uv run --extra modal modal run -d \
       tools/profiling/kimi_k3_mxfp4_delta_weight_update.py
 
-CPU destination with the canonical checkpoint on local storage:
+CPU destination with the canonical checkpoint on local storage (the recipe's
+declared update mode):
 
-    MODAL_FUNCTION_RUNTIME=runc uv run --extra modal modal run -d \
+    uv run --extra modal modal run -d \
       tools/profiling/kimi_k3_mxfp4_delta_weight_update.py \
       --update-mode cpu --canonical-storage disk
 
@@ -19,8 +20,6 @@ disk destination instead of rank-ready CPU staging.
 
 from __future__ import annotations
 
-import json
-import shutil
 from pathlib import Path
 
 import modal
@@ -39,7 +38,11 @@ from tools.profiling._hf_checkpoint import (
     download_snapshot,
     materialize_checkpoint_view,
 )
-from tools.profiling._synthetic_delta import write_full_coverage_delta
+from tools.profiling._synthetic_delta import (
+    SyntheticDeltaSpec,
+    prepare_standard_delta,
+    synthetic_delta_profile_id,
+)
 
 APP_NAME = "profile-kimi-k3-mxfp4-delta-weight-update"
 EXPERIMENT = "kimi_k3_mxfp4"
@@ -49,12 +52,19 @@ HF_SNAPSHOT_DIR = (
     f"{model.ROLLOUT_SOURCE_REVISION}"
 )
 DELTA_MOUNT = "/synthetic-delta"
-DELTA_ID = f"kimi-k3/{model.ROLLOUT_SOURCE_REVISION}/full-coverage-v3"
+DELTA_SPEC = SyntheticDeltaSpec(
+    checkpoint_format="mxfp4",
+    quantized_value_density=0.003,
+    high_precision_value_density=0.01,
+    # Text-only RL leaves the vision encoder and projector fixed.
+    immutable_prefixes=("vision_tower.", "mm_projector."),
+)
+DELTA_ID = (
+    f"kimi-k3/{model.ROLLOUT_SOURCE_REVISION}/{synthetic_delta_profile_id(DELTA_SPEC)}"
+)
 DELTA_SOURCE_DIR = f"{DELTA_MOUNT}/{DELTA_ID}"
 BASE_CHECKPOINT_DIR = "/local-checkpoint/kimi-k3-mxfp4/base"
 LOCAL_TARGET_CHECKPOINT_DIR = "/local-checkpoint/kimi-k3-mxfp4/target"
-# CPU-mode-only overlay: the config is a clean disk config, so the profiler
-# injects the cpu-weight-cache args when profiling the cpu destination.
 CPU_CACHE_GROUP_GB = "16"
 CANONICAL_CHECKPOINT_DIR = "/local-checkpoint/kimi-k3-mxfp4/canonical"
 SGLANG_CACHE_PATH = "/root/.cache/sglang"
@@ -136,25 +146,12 @@ def download_model() -> str:
     timeout=6 * 60 * 60,
 )
 def prepare_delta() -> dict:
-    metadata_path = Path(DELTA_SOURCE_DIR) / "controlled_delta.json"
-    index_path = (
-        Path(DELTA_SOURCE_DIR) / "weight_v000001" / "model.safetensors.index.json"
-    )
-    if metadata_path.is_file() and index_path.is_file():
-        result = json.loads(metadata_path.read_text())
-        print(f"Reusing synthetic delta at {DELTA_SOURCE_DIR}")
-        return result
-
-    shutil.rmtree(DELTA_SOURCE_DIR, ignore_errors=True)
-    Path(DELTA_SOURCE_DIR).mkdir(parents=True)
-    result = write_full_coverage_delta(
+    return prepare_standard_delta(
         HF_SNAPSHOT_DIR,
         DELTA_SOURCE_DIR,
+        spec=DELTA_SPEC,
+        commit=delta_volume.commit,
     )
-    metadata_path.write_text(json.dumps(result, sort_keys=True))
-    delta_volume.commit()
-    print(f"Committed synthetic delta at {DELTA_SOURCE_DIR}")
-    return result
 
 
 @app.function(
