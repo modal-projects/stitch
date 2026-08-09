@@ -43,23 +43,31 @@ recover without becoming part of the trainer's process lifecycle.
 
 ## Measured delta updates
 
-These single-update measurements use the pinned cookbook stack, 64 vCPUs, and
-element-wise XOR deltas. Remote transfer, delta generation, and one-time CPU
-destination initialization are excluded. Preparation runs while inference
-remains available; only activation pauses the engine.
+These are verified single-update measurements from the pinned v0.5.17 cookbook
+stack. The synthetic XOR deltas are element-wise over rollout-visible values
+and change nearly every trained tensor: 0.6% for FP8, 0.3% for Kimi K2.6
+NVFP4, and 0.375% NVFP4 plus 1% BF16 for mixed GLM-5.2. Remote transfer, delta
+generation, and one-time CPU destination initialization are excluded.
+Preparation runs while inference remains available; only activation pauses the
+engine.
 
-| Model | TP | Canonical checkpoint | Preparation | Engine pause | Total update |
+| Model | TP | Destination / canonical storage | Preparation | Engine pause | Total update |
 | --- | ---: | --- | ---: | ---: | ---: |
-| GLM-4.5-Air FP8 | 4 | RAM | 41.2 s | 1.0 s | 42.2 s |
-| Kimi K2.6 NVFP4 | 4 | RAM | 55.6 s | 2.78 s | 58.4 s |
-| Kimi K2.6 NVFP4 | 4 | NVMe | 102.3 s | 2.76 s | 105.1 s |
-| GLM-5.2 all-NVFP4 checkpoint | 4 | RAM | 59.3 s | 2.14 s | 61.5 s |
-| GLM-5.2 mixed NVFP4/BF16 | 4 | RAM | 86.2 s | 3.01 s | 89.2 s |
-| Kimi K3 MXFP4 | 8 | RAM | 122.3 s | 3.82 s | 126.1 s |
-| Kimi K3 MXFP4 | 8 | NVMe | 283.8 s | 3.79 s | 287.5 s |
+| GLM-4.5-Air FP8 | 4 | CPU / RAM | 24.1 s | 1.00 s | 25.1 s |
+| GLM-4.5-Air FP8 | 4 | CPU / NVMe | 84.4 s | 0.99 s | 85.4 s |
+| GLM-4.5-Air FP8 | 4 | Disk target | 36.6 s | 21.1 s | 57.7 s |
+| Kimi K2.6 NVFP4 | 4 | CPU / RAM | 64.9 s | 2.77 s | 67.7 s |
+| Kimi K2.6 NVFP4 | 4 | CPU / NVMe | 374.7 s | 2.76 s | 377.4 s |
+| Kimi K2.6 NVFP4 | 4 | Disk target | 124.7 s | 118.3 s | 243.1 s |
+| GLM-5.2 mixed NVFP4/BF16 | 4 | CPU / RAM | 90.1 s | 3.42 s | 93.6 s |
+| GLM-5.2 mixed NVFP4/BF16 | 4 | CPU / NVMe | 167.7 s | 3.50 s | 171.2 s |
+| GLM-5.2 mixed NVFP4/BF16 | 4 | Disk target | 119.0 s | 283.5 s | 402.5 s |
 
-The mixed GLM-5.2 profile changes 0.375% of rollout-visible NVFP4 values and
-1% of BF16 values; its compressed delta is 10.06 GB.
+These are wall-clock samples, not a hardware distribution. NVMe preparation
+reads and writes a complete canonical checkpoint and therefore tracks the
+assigned host's local-storage bandwidth; the Kimi K2.6 NVMe sample ran on a
+substantially slower local disk than the other rows. The mixed GLM-5.2 delta is
+10.04 GB compressed.
 
 Each profiler reconstructs and checksums the complete target and validates
 generation before, during, and after activation. See

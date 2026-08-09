@@ -11,51 +11,30 @@ default runtime:
 
 ```python
 DEFAULT_SGLANG_RUNTIME = SGLangRuntime(
-    image="lmsysorg/sglang:v0.5.16",
+    image="lmsysorg/sglang:v0.5.17",
     repository="https://github.com/modal-projects/sglang.git",
-    branch="stitch-sglang-v0.5.16",
-    commit="a73ea9507fb981462768dbc5e869bdfeb5c48116",
+    branch="stitch-sglang-v0.5.17",
+    commit="08fed4268841364eada11deb9f5b4591d43304ba",
 )
 ```
 
-The branch is upstream v0.5.16 plus:
+The branch is upstream v0.5.17 plus four independently reviewable layers:
 
-| Commit | Responsibility |
+| Layer | Responsibility |
 | --- | --- |
-| `49031cb24c` | Configure fastsafetensors with or without GDS and honor post-load cache release. |
-| `5f6e1e613f` | Materialize and verify complete targets on host-local disk. |
-| `a7e20596ba` | Restore checkpoint-facing quantized layouts for complete weight loading. |
-| `c867782f3e` | Build verified, rank-ready CPU weight images from canonical targets. |
-| `111a804d2e` | Expose asynchronous disk/CPU staging and CPU-to-GPU target-model commit APIs. |
-| `e0859b7390` | Stream CPU delta lineages through bounded memory. |
-| `77eca472e6` | Fold disk XOR lineages with bounded positional I/O. |
-| `526e0ddca2` | Fail cache-flushing CPU commits before GPU mutation when the engine is busy. |
-| `a562908a10` | Normalize native ModelOpt FP4 expert tensors through their existing loader path. |
-| `1a4a4fd6b5` | Return aligned verifier logprobs for DFlash rollout tokens. |
-| `607e107b44` | Store the canonical CPU-cache checkpoint on NVMe and overlap verified persistence with bounded rank-image compilation. |
-| `1051a95a6a` | Balance CPU delta transforms across persistent worker tasks. |
-| `0094b725b9` | Support top-p-only sampling masks through the native generation and chat-completions APIs. |
-| `7b09ce9f77` | Return aligned top-p sampling masks for tokens accepted by DFlash SpecV2. |
-| `a50de4fe3e` | Monitor data-parallel scheduler subprocesses and fail when one exits. |
-| `e02a07c905` | Preserve routed-expert and indexer top-k state-capture outputs through DFlash. |
-| `af563ae597` | Remove attention-TP alignment rows before materializing DFlash prefill KV state. |
-| `270c78efaa` | Resolve exact and prefix aborts that arrive while requests are still held by the tokenizer. |
-| `325abb5afa` | Keep a tokenizer-held abort result alive until its request waiter consumes it. |
-| `a73ea9507f` | Accept top-p sampling-mask requests preserved in compatibility metadata by typed routers. |
+| Reload lifecycle | Restore checkpoint-facing layouts, run each quantization method's native loader and post-load hooks, and fail closed if a partially mutated model cannot be rolled back. |
+| Verified materialization | Apply and fold complete XOR delta lineages in canonical checkpoint space, verify the published checksum, and durably materialize disk targets. |
+| CPU staging | Build bounded rank-ready host images while serving, optionally keep the canonical checkpoint on local NVMe, then commit every runtime storage in place. |
+| Serving correctness | Preserve routed-expert state and sampling masks across data-parallel and speculative paths and surface scheduler-process failures. |
 
-The image and branch must use the same SGLang release because Stitch overlays
-Python code onto the image’s existing CUDA and C++ extensions.
+The branch history keeps these physical responsibilities in separate commits;
+the immutable pin above is the executable definition of the stack.
 
-Models that require another upstream SGLang line set `SGLANG_RUNTIME` in their
-configuration. The image, fork branch, and immutable commit stay together so
-the Python overlay remains ABI-compatible with the image.
-
-Kimi K3 MXFP4 recipes pin the public K3 image and `stitch-sglang-kimi-k3` fork.
-That fork ports the same weight-sync responsibilities onto SGLang’s public
-`kimi-k3` branch; other recipes continue to use the v0.5.16 default. Its
-K3-native loader narrows expert lookup, batches safe copies, scopes post-load
-work to loaded modules, and transforms Blackwell MXFP4 runtime layouts on GPU
-before caching rank-ready host images.
+The image and immutable source pin stay together so the Python overlay remains
+ABI-compatible with the image's CUDA and C++ extensions. SGLang v0.5.17 includes
+Kimi K3, so all cookbook recipes now use this one runtime line. The fork's MXFP4
+staging path transforms runtime layouts on GPU before caching rank-ready host
+images.
 
 ## API
 
@@ -129,8 +108,10 @@ CPU mode keeps rank-ready images in RAM for the shortest commit:
 1. After v0 begins serving, SGLang allocates one complete rank-ready image per
    local TP rank and either caches one canonical checkpoint per host in RAM or
    materializes it on host-local storage.
-2. It builds v0 through the model’s ordinary weight loader and quantization
-   hooks and verifies that the prepared runtime storages match the active model.
+2. When the base is the boot checkpoint, it captures the already-realized active
+   runtime storages into the rank images instead of repeating a model-sized
+   load. A different base goes through the model's ordinary loader and
+   quantization hooks and must match the requested checkpoint before use.
 3. For every delta lineage, it reconstructs and checksums the canonical target,
    then builds every next rank image while inference continues. The in-memory
    path streams deltas through a bounded work budget; the storage-backed path
@@ -177,8 +158,7 @@ retain those reclaimable pages for later reads.
 
 The group bound limits transient loader work; it does not tune correctness or
 assume a model architecture. An indivisible module larger than the requested
-bound remains intact and is reported. The K3 recipe uses a 16 GiB bound to
-balance its module granularity against transient RAM.
+bound remains intact and is reported.
 
 With the default in-memory canonical checkpoint, persistent host RAM is:
 
@@ -197,7 +177,7 @@ Measured component sizes are:
 | --- | ---: | ---: | ---: |
 | GLM-4.5-Air FP8 | 4 | 112.6 GB | 27.2 GB × 4 |
 | Kimi K2.6 NVFP4 | 4 | about 595 GB | about 151 GB × 4 |
-| GLM-5.2 mixed NVFP4/BF16 | 4 | 617.6 GB | 156.3 GB × 4 |
+| GLM-5.2 mixed NVFP4/BF16 | 4 | 617.6 GB | 179.3 GB × 4 |
 | Kimi K3 MXFP4 | 8 | 1.561 TB | 207.5 GB × 8 |
 
 Allow additional memory for the engine process, delta decoding, and bounded
@@ -205,8 +185,9 @@ loader staging. The supplied GLM-4.5 recipe requests `(512 GiB, 2 TiB)`;
 GLM-5.2, Kimi K2.6, and Kimi K3 request `(1 TiB, 3 TiB)`, expressed as
 `(request, limit)`.
 
-All runtime storages are prepared and committed. Element-wise sparsity only
-reduces the compressed delta transport and XOR work.
+All runtime storages are prepared and committed. Element-wise sparsity reduces
+the compressed delta transport and storage, but not the full-target checksum,
+sharding, runtime-layout conversion, or CPU-to-GPU commit.
 
 ## Correctness
 

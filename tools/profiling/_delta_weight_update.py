@@ -448,6 +448,7 @@ def _print_profile_summary(results: dict[str, Any]) -> None:
             "model",
             "runtime",
             "update_mode",
+            "canonical_storage",
             "sample_id",
             "status",
             "initial_load_s",
