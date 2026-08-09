@@ -125,7 +125,7 @@ fully asynchronous Miles training on SWE-bench Pro.
 | Component | Configuration |
 | --- | --- |
 | Trainer | 4 nodes × 8 H200 GPUs |
-| Rollout | 20 warm replicas × 1 H200 GPU, with autoscaling above the warm fleet |
+| Rollout | 28 warm replicas × 1 H200 GPU, with autoscaling above the warm fleet |
 | Model | `zai-org/GLM-4.7-Flash`, pinned BF16 revision |
 | Dataset | SWE-bench Pro, including task environments and verifiers |
 | Weight sync | Checksummed XOR deltas with CPU preparation and in-place activation |
