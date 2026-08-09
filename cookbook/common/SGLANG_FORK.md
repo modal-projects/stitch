@@ -14,7 +14,7 @@ DEFAULT_SGLANG_RUNTIME = SGLangRuntime(
     image="lmsysorg/sglang:v0.5.17",
     repository="https://github.com/modal-projects/sglang.git",
     branch="stitch-sglang-v0.5.17",
-    commit="d33d895bce3384dc547730c429d160c5dece9540",
+    commit="8e64af56b4ef4dd896f5825d85824dd69de5b04a",
 )
 ```
 
@@ -25,7 +25,7 @@ The branch is upstream v0.5.17 plus four independently reviewable layers:
 | Reload lifecycle | Restore checkpoint-facing layouts, run each quantization method's native loader and post-load hooks, and fail closed if a partially mutated model cannot be rolled back. |
 | Verified materialization | Apply and fold complete XOR delta lineages in canonical checkpoint space, verify the published checksum, and durably materialize disk targets. |
 | CPU staging | Build bounded rank-ready host images while serving, optionally keep the canonical checkpoint on local NVMe, then commit every runtime storage in place. |
-| Serving correctness | Preserve routed-expert state and sampling masks across data-parallel and speculative paths and surface scheduler-process failures. |
+| Serving correctness | Preserve routed-expert state and sampling masks across data-parallel and speculative paths, classify client cancellations, and surface scheduler-process failures. |
 
 The branch history keeps these physical responsibilities in separate commits;
 the immutable pin above is the executable definition of the stack.
