@@ -62,6 +62,7 @@ while inference remains available; only activation pauses the engine.
 | GLM-5.2 mixed NVFP4/BF16 | 4 | CPU / RAM | 90.1 s | 3.42 s | 93.6 s |
 | GLM-5.2 mixed NVFP4/BF16 | 4 | CPU / NVMe | 167.7 s | 3.50 s | 171.2 s |
 | GLM-5.2 mixed NVFP4/BF16 | 4 | Disk target | 119.0 s | 283.5 s | 402.5 s |
+| Kimi K3 MXFP4 | 8 | CPU / RAM | Did not complete | — | — |
 | Kimi K3 MXFP4 | 8 | CPU / NVMe | 1,963.6 s | 3.98 s | 1,967.6 s |
 | Kimi K3 MXFP4 | 8 | Disk target | 516.4 s | 243.3 s | 759.7 s |
 
@@ -71,8 +72,9 @@ assigned host's local-storage bandwidth; the Kimi K2.6 and Kimi K3 NVMe samples
 are therefore host-specific rather than model-only transformation costs. K3's
 canonical checkpoint and eight rank images occupy 3.22 TB before engine and
 staging overhead, so its supplied recipe keeps the canonical checkpoint on
-NVMe. The mixed GLM-5.2 and K3 deltas are 10.04 GB and 24.13 GB compressed,
-respectively.
+NVMe. K3's all-RAM attempt did not complete within a 4 TiB host limit during
+cache construction. The mixed GLM-5.2 and K3 deltas are 10.04 GB and 24.13 GB
+compressed, respectively.
 
 Each profiler reconstructs and checksums the complete target and validates
 generation before, during, and after activation. See
