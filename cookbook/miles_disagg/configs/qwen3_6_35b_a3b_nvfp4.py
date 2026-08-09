@@ -80,6 +80,7 @@ ROLLOUT_AGENT_PROCESSES = 12
 ROLLOUT_AGENT_THREADS_PER_PROCESS = 16
 MAX_SEQ_LEN = 16_384
 SGLANG_CONTEXT_LENGTH = MAX_SEQ_LEN + 8
+SAMPLING_MASK_MAX_TOKENS = 32_768
 
 # This metric changes the packed weights, so prep, live export, and serving
 # must use one contract. It deliberately matches the GLM-5.2 branch recipe.
@@ -146,6 +147,7 @@ SGLANG_SERVER_ARGS = {
     "--moe-runner-backend": "flashinfer_trtllm_routed",
     "--disable-shared-experts-fusion": "",
     "--enable-return-routed-experts": "",
+    "--sampling-mask-max-tokens": str(SAMPLING_MASK_MAX_TOKENS),
     # The public draft's single-GPU DFlash recipe.
     "--speculative-algorithm": "DFLASH",
     "--speculative-draft-model-path": DFLASH_MODEL,
@@ -215,7 +217,7 @@ class _Miles(MilesConfig):
     rollout_num_gpus_per_engine = ROLLOUT_GPUS_PER_ENGINE
     sglang_server_concurrency = ROLLOUT_CONCURRENT_SAMPLES
     sglang_speculative_algorithm = "DFLASH"
-    sglang_disaggregation_sampling_mask_max_tokens = 4096
+    sglang_disaggregation_sampling_mask_max_tokens = SAMPLING_MASK_MAX_TOKENS
     rollout_endpoint_url = None
 
     custom_rollout_request_hook_path = (

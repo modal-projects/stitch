@@ -20,6 +20,7 @@ def test_rollout_combines_qwen_dflash_with_rl_metadata() -> None:
     assert args["--mamba-radix-cache-strategy"] == "extra_buffer"
     assert args["--mem-fraction-static"] == "0.65"
     assert "--enable-return-routed-experts" in args
+    assert args["--sampling-mask-max-tokens"] == "32768"
     assert "--enable-dp-attention" not in args
 
 
@@ -31,6 +32,7 @@ def test_training_keeps_nvfp4_routing_replay_and_top_p_masking() -> None:
     assert miles.fp4_recipe == "nvfp4"
     assert miles.use_rollout_routing_replay is True
     assert miles.rollout_top_p == 0.95
+    assert miles.sglang_disaggregation_sampling_mask_max_tokens == 32_768
     assert miles.input_key == "prompt"
     assert miles.apply_chat_template is False
     assert miles.colocate is False

@@ -223,6 +223,7 @@ def validate_server_args() -> dict:
         "linear_attn_decode_backend": "flashinfer",
         "mamba_ssm_dtype": "bfloat16",
         "mamba_radix_cache_strategy": "extra_buffer",
+        "sampling_mask_max_tokens": model.SAMPLING_MASK_MAX_TOKENS,
     }
     actual = {name: getattr(parsed, name) for name in expected}
     if actual != expected:
