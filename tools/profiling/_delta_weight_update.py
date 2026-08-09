@@ -147,14 +147,19 @@ def _generate(
         }
     ]
     if not fingerprint or not fingerprint_logprobs:
+        request = {
+            "model": model,
+            "messages": messages,
+            "temperature": 0,
+            "max_tokens": 96 if fingerprint else 80,
+        }
+        if fingerprint:
+            # Compare one deterministic DP worker rather than treating normal
+            # cross-rank numerical drift as a weight-update failure.
+            request["routed_dp_rank"] = 0
         response = httpx.post(
             f"{url}/v1/chat/completions",
-            json={
-                "model": model,
-                "messages": messages,
-                "temperature": 0,
-                "max_tokens": 96 if fingerprint else 80,
-            },
+            json=request,
             timeout=300,
             trust_env=False,
         )
@@ -178,6 +183,7 @@ def _generate(
         f"{url}/generate",
         json={
             "text": "Explain why the Moon has phases in exactly three short clauses.",
+            "routed_dp_rank": 0,
             "sampling_params": {
                 "temperature": 0,
                 "max_new_tokens": 48 if fingerprint else 80,
