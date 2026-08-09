@@ -39,6 +39,7 @@ def test_training_keeps_nvfp4_routing_replay_and_top_p_masking() -> None:
     assert miles.rollout_num_gpus_per_engine == 1
     assert config.modal.rollout_min_containers == 16
     assert config.modal.rollout_max_containers == 16
+    assert config.TORCH_DIST_CHECKPOINT_PATH.name.endswith("global-experts-v2")
 
 
 def test_quantizer_contract_matches_across_prep_training_and_serving() -> None:
@@ -60,3 +61,4 @@ def test_quantizer_contract_matches_across_prep_training_and_serving() -> None:
     assert "modules_to_not_convert.extend(_batched_expert_module_aliases(key))" in patch
     assert "tensor = _normalize_checkpoint_dtype(key, tensor)" in patch
     assert 'name.endswith(".linear_attn.A_log")' in patch
+    assert "expert_id = self._global_expert_id(local_expert_id)" in patch

@@ -295,3 +295,75 @@ index 8e72aa93..eade69fc 100644
      dynamic_skip_substrings = (
          *extra_high_precision_layers_hf,
          *sorted(dynamic_skip_layer_prefixes),
+
+diff --git a/miles_plugins/mbridge/qwen3_5.py b/miles_plugins/mbridge/qwen3_5.py
+--- a/miles_plugins/mbridge/qwen3_5.py
++++ b/miles_plugins/mbridge/qwen3_5.py
+@@ -329,5 +329,20 @@ class Qwen3_5Bridge(Qwen2MoEBridge):
+         return super()._weight_name_mapping_mcore_to_hf(mcore_weights_name)
+ 
++    def _global_expert_id(self, local_expert_id: int) -> int:
++        """Map this EP rank's local expert slot to the fused HF tensor row."""
++        num_experts = self.config.num_moe_experts
++        ep_size = self.mpu.ep_size
++        if num_experts % ep_size:
++            raise ValueError(
++                f"num_moe_experts={num_experts} is not divisible by ep_size={ep_size}"
++            )
++        num_local_experts = num_experts // ep_size
++        if not 0 <= local_expert_id < num_local_experts:
++            raise ValueError(
++                f"local expert {local_expert_id} is outside [0, {num_local_experts})"
++            )
++        return self.mpu.ep_rank * num_local_experts + local_expert_id
++
+     def _convert_mtp_param(self, name: str) -> list[str]:
+         """Convert MTP layer parameters from MCore to HF format."""
+         if "mtp.layers." not in name:
+@@ -385,9 +403,14 @@ class Qwen3_5Bridge(Qwen2MoEBridge):
+         if "mlp.experts.linear_fc" in mcore_weights_name and len(hf_weights) == 1:
+             w = hf_weights[0]
+             if w.dim() == 3:
+-                # Extract expert_id from name like "...linear_fc1.weight42"
+-                expert_id = int(mcore_weights_name.split("weight")[-1])
+-                expert_w = w[expert_id]  # (out_features, in_features)
++                local_expert_id = int(mcore_weights_name.split("weight")[-1])
++                expert_id = self._global_expert_id(local_expert_id)
++                if w.shape[0] != self.config.num_moe_experts:
++                    raise ValueError(
++                        f"expected {self.config.num_moe_experts} fused experts, "
++                        f"got shape {tuple(w.shape)}"
++                    )
++                expert_w = w[expert_id]
+                 return expert_w.contiguous()
+ 
+         return super()._weight_to_mcore_format(mcore_weights_name, hf_weights)
+
+diff --git a/tests/fast/backends/megatron_utils/test_qwen3_5_mtp_bridge_mapping.py b/tests/fast/backends/megatron_utils/test_qwen3_5_mtp_bridge_mapping.py
+--- a/tests/fast/backends/megatron_utils/test_qwen3_5_mtp_bridge_mapping.py
++++ b/tests/fast/backends/megatron_utils/test_qwen3_5_mtp_bridge_mapping.py
+@@ -172,6 +172,24 @@ def test_eh_proj_keeps_column_order_when_loading_to_mcore():
+     assert torch.equal(converted, weight)
+ 
+ 
++def test_fused_expert_loading_uses_the_global_ep_expert_id():
++    module = load_bridge_module()
++    bridge = module.Qwen3_5Bridge.__new__(module.Qwen3_5Bridge)
++    bridge.config = types.SimpleNamespace(num_moe_experts=8)
++    bridge.mpu = types.SimpleNamespace(ep_size=2, ep_rank=1)
++    fused_experts = torch.arange(8 * 3 * 2).view(8, 3, 2)
++
++    for name in (
++        "decoder.layers.0.mlp.experts.linear_fc1.weight1",
++        "mtp.layers.0.transformer_layer.mlp.experts.linear_fc1.weight1",
++    ):
++        converted = bridge._weight_to_mcore_format(name, [fused_experts])
++
++        # EP rank 1 owns global experts 4..7, so its local expert 1 is global 5.
++        assert torch.equal(converted, fused_experts[5])
++        assert not torch.equal(converted, fused_experts[1])
++
++
+ def test_build_config_enables_gated_attention_when_transformer_config_supports_it():
+     module = load_bridge_module()
+     bridge = module.Qwen3_5Bridge.__new__(module.Qwen3_5Bridge)
