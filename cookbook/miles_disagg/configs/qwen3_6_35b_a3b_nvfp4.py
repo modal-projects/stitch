@@ -48,7 +48,9 @@ SOURCE_REVISION = "995ad96eacd98c81ed38be0c5b274b04031597b0"
 DFLASH_MODEL = "modal-labs/Qwen3.6-35B-A3B-DFlash"
 DFLASH_REVISION = "45197228fd8152743a4566620c7aa4014d35f773"
 BF16_CHECKPOINT_PATH = CHECKPOINTS_PATH / "qwen3-6-35b-a3b-bf16"
-ROLLOUT_CHECKPOINT_PATH = CHECKPOINTS_PATH / "qwen3-6-35b-a3b-nvfp4"
+ROLLOUT_CHECKPOINT_PATH = (
+    CHECKPOINTS_PATH / "qwen3-6-35b-a3b-nvfp4-routed-bf16-alog-fp32"
+)
 TORCH_DIST_CHECKPOINT_PATH = CHECKPOINTS_PATH / "qwen3-6-35b-a3b-torch-dist"
 SWEBENCH_PRO_PATH = DATA_PATH / "swebench-pro"
 SERVED_CHECKPOINT_FORMAT = "nvfp4"
@@ -93,11 +95,18 @@ NVFP4_SERVING_ENV = {
     "SGLANG_FLASHINFER_NVFP4_PER_TOKEN_ACTIVATION": "1",
     "TRTLLM_DISABLE_FP4_QUANT_FAST_MATH": "1",
 }
-PREP_ENV = NVFP4_TRAINING_ENV
+# Miles' offline converter otherwise promotes PP1 to WORLD_SIZE. Keep PP1 so
+# the one-node conversion can use all eight ranks for expert parallelism.
+PREP_ENV = {
+    **NVFP4_TRAINING_ENV,
+    "CONVERT_KEEP_PP1": "1",
+    "CUDA_DEVICE_MAX_CONNECTIONS": "1",
+}
 SGLANG_SERVER_ENV = {
     **NVFP4_SERVING_ENV,
     "SGLANG_ENABLE_OVERLAP_PLAN_STREAM": "1",
     "SGLANG_ENABLE_RELOAD_LOAD_PLAN": "1",
+    "SGLANG_SANITIZE_NAN_LOGITS": "true",
 }
 
 SIDECAR_COMMIT_MODE = "in_place"
@@ -121,6 +130,7 @@ SGLANG_SERVER_ARGS = {
     "--attention-backend": "trtllm_mha",
     "--linear-attn-prefill-backend": "flashinfer",
     "--linear-attn-decode-backend": "flashinfer",
+    "--mamba-ssm-dtype": "bfloat16",
     "--mamba-radix-cache-strategy": "extra_buffer",
     # Shared expert remains BF16; routed experts use NVFP4 and emit R3 metadata.
     "--moe-runner-backend": "flashinfer_trtllm_routed",
@@ -130,10 +140,11 @@ SGLANG_SERVER_ARGS = {
     "--speculative-algorithm": "DFLASH",
     "--speculative-draft-model-path": DFLASH_MODEL,
     "--speculative-draft-model-revision": DFLASH_REVISION,
+    "--speculative-draft-model-quantization": "unquant",
     "--speculative-dflash-block-size": "8",
     "--speculative-draft-attention-backend": "fa4",
     # Bounded rollout scheduling and graph capture.
-    "--mem-fraction-static": "0.8",
+    "--mem-fraction-static": "0.65",
     "--chunked-prefill-size": "8192",
     "--max-running-requests": str(ROLLOUT_MAX_RUNNING_REQUESTS),
     "--max-queued-requests": str(ROLLOUT_MAX_QUEUED_REQUESTS),
@@ -142,6 +153,10 @@ SGLANG_SERVER_ARGS = {
     "--cuda-graph-max-bs-decode": "32",
     "--cuda-graph-backend-prefill": "tc_piecewise",
     "--enable-flashinfer-allreduce-fusion": "",
+    "--enable-metrics": "",
+    "--enable-metrics-for-all-schedulers": "",
+    "--decode-log-interval": "1000",
+    "--log-level-http": "warning",
 }
 
 modal = ModalConfig(
@@ -154,7 +169,7 @@ modal = ModalConfig(
     rollout_max_containers=ROLLOUT_ENGINES,
     rollout_target_inputs=ROLLOUT_INPUTS_PER_ENGINE,
     routing_region="us-west",
-    rollout_ephemeral_disk_mib=262_144,
+    rollout_ephemeral_disk_mib=524_288,
     trainer_ephemeral_disk_mib=524_288,
     torch_dist_prep_nodes=1,
     torch_dist_prep_gpus_per_node=8,
@@ -184,6 +199,7 @@ class _Miles(MilesConfig):
     actor_num_nodes = TRAINER_NODES
     actor_num_gpus_per_node = GPUS_PER_TRAINER_NODE
     num_gpus_per_node = GPUS_PER_TRAINER_NODE
+    colocate = False
     rollout_num_gpus = 0
     rollout_num_gpus_per_engine = ROLLOUT_GPUS_PER_ENGINE
     sglang_server_concurrency = ROLLOUT_CONCURRENT_SAMPLES
@@ -197,7 +213,7 @@ class _Miles(MilesConfig):
     custom_config_path = {
         "rollout_request_weight_version_mode": "min",
         "rollout_request_weight_version_lag": 1,
-        "rollout_request_retry_attempts": 600,
+        "rollout_request_retry_attempts": 1200,
         "rollout_request_retry_sleep": 1.0,
         "rollout_session_affinity_header": "Modal-Session-ID",
         "rollout_request_timeout_secs": 300,
@@ -255,6 +271,7 @@ class _Miles(MilesConfig):
     prompt_data = f"{SWEBENCH_PRO_PATH}/test.jsonl"
     input_key = "prompt"
     metadata_key = "metadata"
+    apply_chat_template = False
     rollout_shuffle = True
     balance_data = True
 
@@ -311,6 +328,7 @@ class _Miles(MilesConfig):
     accumulate_allreduce_grads_in_fp32 = True
     attention_softmax_in_fp32 = True
     attention_backend = "flash"
+    train_backend = "megatron"
 
     optimizer = "adam"
     lr = 1e-6
@@ -337,6 +355,7 @@ class _Miles(MilesConfig):
     use_kl_loss = False
     kl_loss_coef = None
     kl_loss_type = None
+    observe_training_entropy = True
     entropy_coef = 0.0
 
     use_wandb = True
@@ -356,13 +375,14 @@ class _Miles(MilesConfig):
         "NCCL_NVLS_ENABLE": "1",
         "NVSHMEM_DISABLE_NCCL": "1",
         "RAY_health_check_timeout_ms": "60000",
+        "RAY_health_check_failure_threshold": "30",
         "MILES_EXPERIMENTAL_ROLLOUT_REFACTOR": "1",
         "AGENT_MODEL_NAME": "model",
         "MSWEA_SILENT_STARTUP": "1",
         "MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT": "1",
         "LITELLM_LOG": "ERROR",
         "MODAL_SWE_TASKS_DIR": f"{SWEBENCH_PRO_PATH}/tasks",
-        # The sandbox runtime is model-independent; reuse the already-deployed app.
+        # The sandbox runtime is model-independent; reuse the existing deployed app.
         "MODAL_SWE_SANDBOX_APP": "glm5-2-nvfp4-swebench-pro-sandbox",
         "MODAL_SWE_MAX_STEPS": "128",
         "MODAL_SWE_EPISODE_TIMEOUT": "7200",
