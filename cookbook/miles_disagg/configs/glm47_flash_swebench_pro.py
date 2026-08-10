@@ -9,7 +9,6 @@ from cookbook.miles_disagg.swebench_pro import prepare_swebench_pro
 
 APP_NAME = "stitch-glm47-flash-swebench-pro"
 EXPERIMENT_VOLUME_NAME = "stitch-miles-glm47-flash-swebench-pro"
-MILES_REPO_REF = "b1020b5961657ef1bb8c9f56bda49bc12899fa57"
 LOCAL_CHECKPOINT_PATH = None
 
 SOURCE_MODEL = "zai-org/GLM-4.7-Flash"
@@ -34,12 +33,12 @@ MEGATRON_RUNTIME_PATCHES = [
     "/root/cookbook/miles_disagg/patches/megatron-hdo-dp-reshardable-step.patch",
 ]
 
-TRAINER_NODES = 2
+TRAINER_NODES = 4
 GPUS_PER_TRAINER_NODE = 8
 ROLLOUT_GPUS_PER_ENGINE = 1
-ROLLOUT_MIN_CONTAINERS = 20
 ROLLOUT_INPUTS_PER_ENGINE = 20
-ROLLOUT_CONCURRENT_SAMPLES = 544
+ROLLOUT_CONCURRENT_SAMPLES = 640  # saturates the 40-worker rollout harness
+ROLLOUT_MIN_CONTAINERS = 48  # 48 rollout GPUs at one GPU per engine
 ROLLOUT_MAX_RUNNING_REQUESTS = 28
 ROLLOUT_MAX_QUEUED_REQUESTS = 4  # backpressure
 MAX_SEQ_LEN = 65_536
@@ -70,16 +69,17 @@ SGLANG_SERVER_ARGS = {
     "--decode-log-interval": "1000",
     "--log-level-http": "warning",
     "--enable-return-routed-experts": "",
+    "--sampling-mask-max-tokens": "8192",
 }
 
 modal = ModalConfig(
     gpu="H200",
     rollout_gpu="H200",
     cloud="aws",
-    trainer_memory_mib=(1024 * 1024, 2 * 1024 * 1024),
+    trainer_memory_mib=(1024 * 1024, 3 * 1024 * 1024),
     rollout_memory_mib=(512 * 1024, 1024 * 1024),
     rollout_min_containers=ROLLOUT_MIN_CONTAINERS,
-    rollout_max_containers=None,
+    rollout_max_containers=ROLLOUT_MIN_CONTAINERS,
     rollout_target_inputs=ROLLOUT_INPUTS_PER_ENGINE,
     rollout_ephemeral_disk_mib=524_288,
     trainer_ephemeral_disk_mib=1_048_576,
@@ -99,7 +99,7 @@ modal = ModalConfig(
 
 
 class _Miles(MilesConfig):
-    miles_model_script = "scripts/models/glm4.7-flash.sh"
+    megatron_model_type = "glm4.7-flash"
     async_mode = True
 
     hf_checkpoint = str(ROLLOUT_CHECKPOINT_PATH)
@@ -123,7 +123,6 @@ class _Miles(MilesConfig):
         "rollout_request_weight_version_lag": 1,
         "rollout_request_retry_attempts": 1200,
         "rollout_request_retry_sleep": 1.0,
-        "rollout_session_affinity_header": "Modal-Session-ID",
         "rollout_request_timeout_secs": 300,
     }
 
@@ -142,7 +141,8 @@ class _Miles(MilesConfig):
     balance_data = True
 
     fully_async = True
-    rollout_sample_completion_backfill = True
+    pause_generation_mode = "in_place"
+    rollout_submission_granularity = "sample"
     custom_rollout_log_function_path = "modal_swe_metrics.log_rollout_data"
     custom_generate_function_path = (
         "miles.rollout.generate_hub.agentic_tool_call.generate"
@@ -150,10 +150,11 @@ class _Miles(MilesConfig):
     custom_agent_function_path = "modal_swe_agent_function.run"
     custom_rm_path = "modal_swe_agent_function.reward_func"
     tito_model = "glm47"
-    use_session_server = True
+    use_session_server = "v2"
+    session_sample_picker_path = "modal_swe_agent_function.pick_latest_leaf"
+    session_sample_postprocessor_path = "modal_swe_agent_function.postprocess_samples"
     session_server_port = [30000, 30064]
     session_server_startup_timeout_seconds = 180
-    tito_session_mismatch_sample_rate = 0.0625
 
     num_rollout = 500
     save_interval = 20
@@ -163,10 +164,15 @@ class _Miles(MilesConfig):
     global_batch_size = 256
     rollout_temperature = 1.0
     rollout_top_p = 0.95
+    rollout_top_k = 8192
     rollout_max_response_len = 8192
     max_seq_len = MAX_SEQ_LEN
     max_weight_staleness = 6
     async_max_concurrent_samples = ROLLOUT_CONCURRENT_SAMPLES
+    async_data_buffer_capacity_factor = (
+        0.5  # at most half a batch of completed R3 state
+    )
+    async_unused_samples_handler = "drop"
     eval_interval = None
 
     use_rollout_routing_replay = True

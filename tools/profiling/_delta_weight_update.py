@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 UpdateMode = Literal["disk", "cpu"]
+CanonicalStorage = Literal["memory", "disk"]
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,7 @@ class WeightUpdateSpec:
     model_name: str
     base_checkpoint_dir: str
     local_target_checkpoint_dir: str
+    local_canonical_checkpoint_dir: str
     server_args: dict[str, str]
     tp_size: int = 4
     port: int = 8001
@@ -37,14 +39,27 @@ class WeightUpdateSpec:
 def server_args_for_mode(
     server_args: dict[str, str],
     update_mode: UpdateMode,
+    canonical_storage: CanonicalStorage | None,
+    canonical_checkpoint_dir: str,
 ) -> dict[str, str]:
     """Return direct SGLang arguments for one update mode."""
 
     result = dict(server_args)
     if update_mode == "cpu":
+        if canonical_storage not in {"memory", "disk"}:
+            raise ValueError(
+                "canonical_storage must be 'memory' or 'disk' for CPU updates"
+            )
         result["--enable-cpu-weight-cache"] = ""
         result.setdefault("--cpu-weight-cache-max-compile-group-gb", "8")
+        result.pop("--cpu-weight-cache-canonical-checkpoint-dir", None)
+        if canonical_storage == "disk":
+            result["--cpu-weight-cache-canonical-checkpoint-dir"] = (
+                canonical_checkpoint_dir
+            )
     elif update_mode == "disk":
+        if canonical_storage is not None:
+            raise ValueError("canonical_storage applies only to CPU updates")
         result.pop("--enable-cpu-weight-cache", None)
         result.pop("--cpu-weight-cache-max-compile-group-gb", None)
         result.pop("--cpu-weight-cache-canonical-checkpoint-dir", None)
@@ -57,6 +72,25 @@ def parse_update_mode(value: str) -> UpdateMode:
     if value not in {"disk", "cpu"}:
         raise ValueError("update_mode must be 'disk' or 'cpu'")
     return value
+
+
+def parse_canonical_storage(value: str | None) -> CanonicalStorage | None:
+    if value not in {None, "memory", "disk"}:
+        raise ValueError("canonical_storage must be 'memory' or 'disk'")
+    return value
+
+
+def parse_update_destination(
+    update_mode: str,
+    canonical_storage: str | None,
+) -> tuple[UpdateMode, CanonicalStorage | None]:
+    mode = parse_update_mode(update_mode)
+    storage = parse_canonical_storage(canonical_storage)
+    if mode == "cpu" and storage is None:
+        raise ValueError("CPU updates require --canonical-storage memory or disk")
+    if mode == "disk" and storage is not None:
+        raise ValueError("--canonical-storage applies only to CPU updates")
+    return mode, storage
 
 
 def modal_runtime_label() -> str:
@@ -113,14 +147,19 @@ def _generate(
         }
     ]
     if not fingerprint or not fingerprint_logprobs:
+        request = {
+            "model": model,
+            "messages": messages,
+            "temperature": 0,
+            "max_tokens": 96 if fingerprint else 80,
+        }
+        if fingerprint:
+            # Compare one deterministic DP worker rather than treating normal
+            # cross-rank numerical drift as a weight-update failure.
+            request["routed_dp_rank"] = 0
         response = httpx.post(
             f"{url}/v1/chat/completions",
-            json={
-                "model": model,
-                "messages": messages,
-                "temperature": 0,
-                "max_tokens": 96 if fingerprint else 80,
-            },
+            json=request,
             timeout=300,
             trust_env=False,
         )
@@ -144,6 +183,7 @@ def _generate(
         f"{url}/generate",
         json={
             "text": "Explain why the Moon has phases in exactly three short clauses.",
+            "routed_dp_rank": 0,
             "sampling_params": {
                 "temperature": 0,
                 "max_new_tokens": 48 if fingerprint else 80,
@@ -314,6 +354,51 @@ class _GenerationProbe:
         }
 
 
+class _MemoryProbe:
+    def __init__(self, interval_s: float = 1.0) -> None:
+        self.interval_s = interval_s
+        self.stop = threading.Event()
+        self.samples: list[dict[str, int | str]] = []
+        self.thread = threading.Thread(
+            target=self._run,
+            name="memory-during-weight-stage",
+            daemon=True,
+        )
+
+    def _run(self) -> None:
+        while not self.stop.is_set():
+            self.samples.append(_memory_snapshot())
+            self.stop.wait(self.interval_s)
+
+    def __enter__(self) -> _MemoryProbe:
+        self.thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        self.stop.set()
+        self.thread.join(timeout=max(5.0, 2 * self.interval_s))
+
+    def summary(self) -> dict[str, int | str | None]:
+        numeric_keys = {
+            key
+            for sample in self.samples
+            for key, value in sample.items()
+            if isinstance(value, int)
+        }
+        result: dict[str, int | str | None] = {"samples": len(self.samples)}
+        for key in sorted(numeric_keys):
+            values = [
+                value
+                for sample in self.samples
+                if isinstance(value := sample.get(key), int)
+            ]
+            if key == "MemAvailable_bytes":
+                result[f"{key}_min"] = min(values)
+            else:
+                result[f"{key}_max"] = max(values)
+        return result
+
+
 def _memory_snapshot() -> dict[str, int | str]:
     result: dict[str, int | str] = {}
     cgroup_files = {
@@ -408,12 +493,14 @@ def _print_profile_summary(results: dict[str, Any]) -> None:
             "model",
             "runtime",
             "update_mode",
+            "canonical_storage",
             "sample_id",
             "status",
             "initial_load_s",
             "destination_init_s",
             "destination_init_cpu",
             "generation_during_destination_init",
+            "memory_during_destination_init",
             "stage_s",
             "stage_cpu",
             "commit_rpc_s",
@@ -446,6 +533,7 @@ def run_delta_weight_update(
     source_dir: str,
     target_version: int,
     update_mode: UpdateMode,
+    canonical_storage: CanonicalStorage | None,
     runtime: str,
     sample_id: str,
 ) -> dict[str, Any]:
@@ -471,6 +559,7 @@ def run_delta_weight_update(
         "source_dir": source_dir,
         "target_version": target_version,
         "update_mode": update_mode,
+        "canonical_storage": canonical_storage,
         "runtime": runtime,
         "sample_id": sample_id,
         "tp_size": spec.tp_size,
@@ -483,7 +572,12 @@ def run_delta_weight_update(
         model_path=spec.base_checkpoint_dir,
         worker_port=spec.port,
         tp=spec.tp_size,
-        extra_server_args=server_args_for_mode(spec.server_args, update_mode),
+        extra_server_args=server_args_for_mode(
+            spec.server_args,
+            update_mode,
+            canonical_storage,
+            spec.local_canonical_checkpoint_dir,
+        ),
         # Allow for a cold, model-sized initial load. Destination initialization
         # is measured separately after the endpoint begins serving.
         health_timeout=2 * 60 * 60,
@@ -531,22 +625,28 @@ def run_delta_weight_update(
         with httpx.Client(timeout=None, trust_env=False) as client:
             destination_init_started = time.perf_counter()
             destination_init_cpu_started = _cgroup_cpu_usage_s()
-            with _GenerationProbe(url) as generation:
-                init_payload = {
-                    "base_checkpoint_dir": spec.base_checkpoint_dir,
-                    "target_version": 0,
-                    "destination": update_mode,
-                }
-                if update_mode == "disk":
-                    init_payload["local_checkpoint_dir"] = (
-                        spec.local_target_checkpoint_dir
+            generation = _GenerationProbe(url)
+            memory = _MemoryProbe()
+            try:
+                with generation, memory:
+                    init_payload = {
+                        "base_checkpoint_dir": spec.base_checkpoint_dir,
+                        "target_version": 0,
+                        "destination": update_mode,
+                    }
+                    if update_mode == "disk":
+                        init_payload["local_checkpoint_dir"] = (
+                            spec.local_target_checkpoint_dir
+                        )
+                    initialized = _post(
+                        client,
+                        url,
+                        "/stage_weight_update",
+                        init_payload,
                     )
-                initialized = _post(
-                    client,
-                    url,
-                    "/stage_weight_update",
-                    init_payload,
-                )
+            finally:
+                results["generation_during_destination_init"] = generation.summary()
+                results["memory_during_destination_init"] = memory.summary()
             results["destination_init_s"] = round(
                 time.perf_counter() - destination_init_started,
                 6,
@@ -557,7 +657,6 @@ def run_delta_weight_update(
                 results["destination_init_s"],
             )
             results["destination_init_rank_stats"] = initialized.get("rank_stats")
-            results["generation_during_destination_init"] = generation.summary()
             results["memory_after_destination_init"] = _memory_snapshot()
             if generation.errors or not generation.samples:
                 raise RuntimeError(

@@ -59,7 +59,7 @@ modal = ModalConfig(
 
 
 class _Miles(MilesConfig):
-    miles_model_script = "scripts/models/kimi-k25_2layer.sh"
+    megatron_model_type = "kimi-k25_2layer"
 
     hf_checkpoint = str(ROLLOUT_CHECKPOINT_PATH)
     ref_load = str(TORCH_DIST_CHECKPOINT_PATH)
@@ -83,7 +83,6 @@ class _Miles(MilesConfig):
         "rollout_request_weight_version_lag": 1,
         "rollout_request_retry_attempts": 240,
         "rollout_request_retry_sleep": 1.0,
-        "rollout_session_affinity_header": "Modal-Session-ID",
     }
 
     async_mode = True

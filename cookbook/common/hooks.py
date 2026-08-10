@@ -19,6 +19,7 @@ from stitch.stores.modal_volume import ModalVolumeStore
 from stitch.types import PointerRewind, VersionRef
 
 from . import process
+from .constants import MODAL_SESSION_ID_HEADER
 
 logger = logging.getLogger(__name__)
 
@@ -126,9 +127,6 @@ async def gated_rollout_request_hook(
     weights beyond its lag bound."""
     payload, headers = request["payload"], dict(request.get("headers") or {})
     mode = str(getattr(args, "rollout_request_weight_version_mode", "min"))
-    affinity = str(
-        getattr(args, "rollout_session_affinity_header", "x-session-affinity")
-    )
 
     latest = exact = None
     lag = 0
@@ -146,7 +144,7 @@ async def gated_rollout_request_hook(
         lag=lag,
         exact=exact,
         session_id=sample_affinity_key(sample),
-        affinity_header=affinity,
+        affinity_header=MODAL_SESSION_ID_HEADER,
     )
     request["headers"] = headers
     request["max_retries"] = int(
