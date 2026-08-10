@@ -7,6 +7,9 @@ from __future__ import annotations
 import asyncio
 import queue
 import threading
+from functools import partial
+
+import pytest
 
 from stitch.engines.base import Engine
 from stitch.stores.base import Store
@@ -18,6 +21,8 @@ from stitch.types import (
     VersionManifest,
     VersionRef,
 )
+
+_make_reconciler = partial(Reconciler, run_id="r1")
 
 
 class FakeStore(Store):
@@ -112,7 +117,7 @@ def _run(coro) -> None:
 def test_fresh_reconcile() -> None:
     async def go() -> None:
         engine = FakeEngine()
-        r = Reconciler(
+        r = _make_reconciler(
             store=FakeStore(VersionRef("r1", 3), _full("r1", 3)),
             engine=engine,
             commit_mode="quiesce",
@@ -132,7 +137,7 @@ def test_fresh_reconcile() -> None:
 
 def test_reconcile_latches_ready() -> None:
     async def go() -> None:
-        r = Reconciler(
+        r = _make_reconciler(
             store=FakeStore(VersionRef("r1", 2), _full("r1", 2)), engine=FakeEngine()
         )
         assert (
@@ -147,7 +152,7 @@ def test_reconcile_latches_ready() -> None:
 def test_startup_initializes_update_destination() -> None:
     async def go() -> None:
         engine = FakeEngine()
-        r = Reconciler(
+        r = _make_reconciler(
             store=FakeStore(), engine=engine
         )  # unclaimed pool: reconcile is a no-op
         await r.startup()
@@ -160,7 +165,7 @@ def test_startup_initializes_update_destination() -> None:
 def test_catch_up() -> None:
     async def go() -> None:
         engine = FakeEngine()
-        r = Reconciler(
+        r = _make_reconciler(
             store=FakeStore(VersionRef("r1", 5), _full("r1", 5)), engine=engine
         )
         r.applied = VersionRef("r1", 3)
@@ -191,7 +196,7 @@ def test_latest_advance_during_stage_coalesces_before_commit() -> None:
                 await finish_stage.wait()
 
         engine.stage = slow_stage  # type: ignore[method-assign]
-        r = Reconciler(store=store, engine=engine)
+        r = _make_reconciler(store=store, engine=engine)
         r.applied = VersionRef("r1", 6)
 
         syncing = asyncio.create_task(r.reconcile())
@@ -228,7 +233,7 @@ def test_continuous_publishing_cannot_starve_commit() -> None:
                 store.advance_pointer(VersionRef("r1", manifest.ref.version + 1))
 
         engine.stage = advancing_stage  # type: ignore[method-assign]
-        r = Reconciler(store=store, engine=engine)
+        r = _make_reconciler(store=store, engine=engine)
         r.applied = VersionRef("r1", 0)
 
         caught_up = await r._reconcile_once()
@@ -260,7 +265,7 @@ def test_coalesce_does_not_cross_run_lineage() -> None:
             store.advance_pointer(VersionRef("r2", 1))
 
         engine.stage = switching_stage  # type: ignore[method-assign]
-        r = Reconciler(store=store, engine=engine)
+        r = _make_reconciler(store=store, engine=engine)
         r.applied = VersionRef("r1", 0)
 
         assert not await r._reconcile_once()
@@ -284,7 +289,7 @@ def test_coalesce_observation_failure_commits_staged_target() -> None:
             _delta("r1", 1, files=["v1"]),
         )
         engine = FakeEngine()
-        r = Reconciler(store=store, engine=engine)
+        r = _make_reconciler(store=store, engine=engine)
         r.applied = VersionRef("r1", 0)
 
         assert await r._reconcile_once()
@@ -299,7 +304,7 @@ def test_coalesce_observation_failure_commits_staged_target() -> None:
 def test_run_switch_resets_in_place() -> None:
     async def go() -> None:
         engine = FakeEngine()
-        r = Reconciler(
+        r = _make_reconciler(
             store=FakeStore(VersionRef("r2", 2), _full("r2", 2)),
             engine=engine,
             commit_mode="in_place",
@@ -324,7 +329,7 @@ def test_run_switch_drains_rolling_requests() -> None:
     # Base reset is incompatible: even in in_place, no rolling request crosses the wipe (drain_all; stitch#32).
     async def go() -> None:
         engine = FakeEngine()
-        r = Reconciler(
+        r = _make_reconciler(
             store=FakeStore(VersionRef("r2", 1), _full("r2", 1)),
             engine=engine,
             commit_mode="in_place",
@@ -368,7 +373,7 @@ def test_rolling_requests_cross_in_place_commit() -> None:
     # Counterpart: a compatible in_place commit applies while rolling traffic keeps decoding; only a base reset drains.
     async def go() -> None:
         engine = FakeEngine()
-        r = Reconciler(
+        r = _make_reconciler(
             store=FakeStore(VersionRef("r1", 4), _full("r1", 4)),
             engine=engine,
             commit_mode="in_place",
@@ -407,7 +412,7 @@ def test_new_request_waits_for_in_place_commit() -> None:
             await original_commit(manifest, flush_cache=flush_cache)
 
         engine.commit = slow_commit  # type: ignore[method-assign]
-        r = Reconciler(
+        r = _make_reconciler(
             store=FakeStore(VersionRef("r1", 4), _full("r1", 4)),
             engine=engine,
             commit_mode="in_place",
@@ -445,7 +450,7 @@ def test_new_request_waits_for_in_place_commit() -> None:
 def test_empty_delta_skips_commit() -> None:
     async def go() -> None:
         engine = FakeEngine()
-        r = Reconciler(
+        r = _make_reconciler(
             store=FakeStore(VersionRef("r1", 4), _delta("r1", 4, files=[])),
             engine=engine,
         )
@@ -467,7 +472,7 @@ def test_nonempty_delta_in_catch_up_range_commits() -> None:
             _delta("r1", 4, files=["f1"]),
             _delta("r1", 5, files=[]),
         )
-        r = Reconciler(store=store, engine=engine)
+        r = _make_reconciler(store=store, engine=engine)
         r.applied = VersionRef("r1", 3)
         await r.reconcile()
         assert r.applied == VersionRef("r1", 5)
@@ -480,7 +485,7 @@ def test_nonempty_delta_commits() -> None:
     async def go() -> None:
         engine = FakeEngine()
         store = FakeStore(VersionRef("r1", 5), _delta("r1", 5, files=["f1"]))
-        r = Reconciler(store=store, engine=engine)
+        r = _make_reconciler(store=store, engine=engine)
         r.applied = VersionRef("r1", 4)
         await r.reconcile()
         assert r.applied == VersionRef("r1", 5)
@@ -494,7 +499,7 @@ def test_periodic_reconcile_recovers_missed_wake() -> None:
     async def go() -> None:
         engine = FakeEngine()
         store = FakeStore(VersionRef("r1", 3), _full("r1", 3), _full("r1", 5))
-        r = Reconciler(store=store, engine=engine, reconcile_interval=0.02)
+        r = _make_reconciler(store=store, engine=engine, reconcile_interval=0.02)
         await r.startup()
         assert r.applied == VersionRef("r1", 3)
         # Publish advances latest but its wake never lands; only the background loop catches up.
@@ -509,7 +514,7 @@ def test_periodic_reconcile_recovers_missed_wake() -> None:
 def test_reconcile_interval_zero_disables_backstop() -> None:
     async def go() -> None:
         store = FakeStore(VersionRef("r1", 3), _full("r1", 3), _full("r1", 5))
-        r = Reconciler(store=store, engine=FakeEngine(), reconcile_interval=0.0)
+        r = _make_reconciler(store=store, engine=FakeEngine(), reconcile_interval=0.0)
         await r.startup()
         store.advance_pointer(VersionRef("r1", 5))
         await asyncio.sleep(0.1)
@@ -531,7 +536,7 @@ def test_stage_waits_for_update_destination() -> None:
             await initialize()
 
         engine.initialize_update_destination = slow_initialize  # type: ignore[method-assign]
-        r = Reconciler(
+        r = _make_reconciler(
             store=FakeStore(VersionRef("r1", 2), _full("r1", 2)),
             engine=engine,
             reconcile_interval=0.0,
@@ -561,7 +566,7 @@ def test_boot_weights_serve_before_update_destination_is_ready() -> None:
             engine.calls.append("initialize_update_destination")
 
         engine.initialize_update_destination = slow_initialize  # type: ignore[method-assign]
-        r = Reconciler(
+        r = _make_reconciler(
             store=FakeStore(VersionRef("r1", 0)),
             engine=engine,
             reconcile_interval=0.0,
@@ -587,7 +592,7 @@ def test_update_fails_after_update_destination_initialization_fails() -> None:
             raise RuntimeError("broken destination")
 
         engine.initialize_update_destination = fail_initialize  # type: ignore[method-assign]
-        r = Reconciler(
+        r = _make_reconciler(
             store=FakeStore(VersionRef("r1", 2), _full("r1", 2)),
             engine=engine,
             reconcile_interval=0.0,
@@ -629,7 +634,7 @@ class FlakyStore(FakeStore):
 
 
 async def _heals_transient_error(interval: float) -> bool:
-    r = Reconciler(
+    r = _make_reconciler(
         store=FlakyStore(VersionRef("r1", 1), _full("r1", 1)),
         engine=FakeEngine(),
         reconcile_interval=interval,
@@ -678,7 +683,7 @@ async def _heals_dropped_wake(interval: float) -> bool:
     """A wake IS delivered, but mid-pass: wake() no-ops against the running task, whose
     caught-up recheck already snapshotted pre-publish state — the wake is lost."""
     store = HostViewStore(VersionRef("r1", 1), _full("r1", 1), _full("r1", 2))
-    r = Reconciler(store=store, engine=FakeEngine(), reconcile_interval=interval)
+    r = _make_reconciler(store=store, engine=FakeEngine(), reconcile_interval=interval)
     await r.startup()  # converges to v1, ungated
 
     gate = store.refresh_gate = queue.Queue()
@@ -707,7 +712,7 @@ def test_constrained_409_recovers_without_backstop() -> None:
     """The event-driven channel: a min_version 409 self-wakes a stale ERROR replica."""
 
     async def go() -> None:
-        r = Reconciler(
+        r = _make_reconciler(
             store=FlakyStore(VersionRef("r1", 1), _full("r1", 1)),
             engine=FakeEngine(),
             reconcile_interval=0,
@@ -727,7 +732,7 @@ def test_constrained_409_recovers_without_backstop() -> None:
 # ── admission gate ───────────────────────────────────────────────────────────
 def test_admit_satisfied() -> None:
     async def go() -> None:
-        r = Reconciler(store=FakeStore(), engine=FakeEngine())
+        r = _make_reconciler(store=FakeStore(), engine=FakeEngine())
         r.applied = VersionRef("r1", 5)
         async with r.admit(VersionConstraint(min_version=3)) as served:
             assert served == VersionRef("r1", 5)
@@ -737,7 +742,7 @@ def test_admit_satisfied() -> None:
 
 def test_admit_rejected_triggers_wake() -> None:
     async def go() -> None:
-        r = Reconciler(
+        r = _make_reconciler(
             store=FakeStore(VersionRef("r1", 5), _full("r1", 5)), engine=FakeEngine()
         )
         r.applied = VersionRef("r1", 2)
@@ -752,17 +757,22 @@ def test_admit_rejected_triggers_wake() -> None:
     _run(go())
 
 
-def test_unapplied_replica_rejects() -> None:
-    # Non-blocking startup serves /health before the first sync lands a version; a request in
-    # that window has no served version to stamp, so it must 409 (retryable), not serve unversioned.
+def test_reconciler_requires_nonempty_run_id() -> None:
+    with pytest.raises(ValueError, match="run_id is required"):
+        Reconciler(store=FakeStore(), engine=FakeEngine(), run_id="")
+
+
+def test_run_scoped_replica_serves_boot_checkpoint_as_version_zero() -> None:
     async def go() -> None:
-        r = Reconciler(store=FakeStore(), engine=FakeEngine())
-        assert r.applied is None
+        r = Reconciler(store=FakeStore(), engine=FakeEngine(), run_id="r1")
+        await r.startup()
         try:
-            async with r.admit(None):
-                raise AssertionError("should have rejected")
-        except ConstraintUnmet as e:
-            assert e.error["type"] == "WeightVersionNotReady"
+            assert r.applied == VersionRef("r1", 0)
+            assert r.ready
+            async with r.admit(VersionConstraint(exact_version=0)) as served:
+                assert served == VersionRef("r1", 0)
+        finally:
+            await r.shutdown()
 
     _run(go())
 
@@ -770,7 +780,7 @@ def test_unapplied_replica_rejects() -> None:
 def test_version_flips_before_resume() -> None:
     async def go() -> None:
         engine = FakeEngine()
-        r = Reconciler(
+        r = _make_reconciler(
             store=FakeStore(VersionRef("r1", 4), _full("r1", 4)),
             engine=engine,
             commit_mode="in_place",
