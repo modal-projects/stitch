@@ -14,7 +14,7 @@ DEFAULT_SGLANG_RUNTIME = SGLangRuntime(
     image="lmsysorg/sglang:v0.5.17",
     repository="https://github.com/modal-projects/sglang.git",
     branch="stitch-sglang-v0.5.17",
-    commit="b784b486b28d4fdf483332ba6fe0e19577e96249",
+    commit="4b23a8508a313025fd095888d193b2cf66ec7057",
 )
 ```
 
@@ -158,7 +158,9 @@ retain those reclaimable pages for later reads.
 
 The group bound limits transient loader work; it does not tune correctness or
 assume a model architecture. An indivisible module larger than the requested
-bound remains intact and is reported.
+bound remains intact and is reported. Each staging clone is reclaimed at its
+group boundary, so CUDA-required post-load transforms cannot accumulate a
+second model-sized device copy.
 
 With the default in-memory canonical checkpoint, persistent host RAM is:
 
