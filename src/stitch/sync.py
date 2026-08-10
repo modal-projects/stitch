@@ -172,17 +172,20 @@ class Reconciler(AdmissionGate):
         *,
         store: Store,
         engine: Engine,
-        run_id: str | None = None,
+        run_id: str,
         commit_mode: CommitMode = "in_place",
         flush_cache_on_commit: bool = False,
         debug_requests: bool = False,
         reconcile_interval: float = 5.0,
     ) -> None:
         super().__init__(commit_mode=commit_mode)
+        if not run_id:
+            raise ValueError("run_id is required")
         self.store = store
         self.engine = engine
         self.flush_cache_on_commit = flush_cache_on_commit
-        self.run_id = run_id  # static label for server_info, not the active chain's run
+        self.run_id = run_id
+        self.applied = VersionRef(run_id, 0)
         self.debug_requests = debug_requests
         self.reconcile_interval = reconcile_interval
         self.sync_state = SyncState.IDLE

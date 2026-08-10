@@ -257,7 +257,7 @@ def serve(
     store: Store,
     engine: Engine,
     *,
-    run_id: str | None = None,
+    run_id: str,
     commit_mode: CommitMode = "in_place",
     flush_cache_on_commit: bool = False,
     host: str = "0.0.0.0",
