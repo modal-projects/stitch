@@ -6,7 +6,7 @@ image. [`trainer_image.py`](trainer_image.py) defines the shared default:
 ```python
 MILES_IMAGE_TAG = "radixark/miles:dev-202607290235"
 MILES_REPO_URL = "https://github.com/modal-projects/miles.git"
-MILES_REPO_REF = "66eef02918761b86784d0f6f543f0fc22a45898b"
+MILES_REPO_REF = "6e2db0b80a7252743e37cad7b73fd8a9ee4b1fee"
 ```
 
 The pin is `modal-projects/miles:stitch-miles-fully-async-swe`. It contains a
@@ -29,18 +29,18 @@ These commits are useful independently of Stitch:
 | `679845a10` | Add the Modal Sandbox v2 transport for SWE rollouts. |
 | `d2afa6639` | Add and validate the mini-SWE rollout adapter. |
 | `0788a3cfc` | Add CISPO policy optimization. |
-| `024b63fe6` | Replay exact top-p sampling masks during training. |
-| `3196a9eda` | Compact routing-replay expert IDs for transport. |
-| `e0fac19f5` | Suppress per-request session access logs. |
-| `3f1837e58` | Reject aborted generations at the session protocol boundary. |
+| `56116e18b` | Replay exact top-p sampling masks during training. |
+| `a59b628bd` | Compact routing-replay expert IDs for transport. |
+| `4920cce83` | Suppress per-request session access logs. |
+| `fac618950` | Reject aborted generations at the session protocol boundary. |
 
 ## Stitch integration
 
 | Commit | Responsibility |
 | --- | --- |
-| `193ff71d5` | Route fully-async generation through an external fleet with version constraints and finite timeouts. |
-| `c14606e7b` | Publish disk deltas without Miles-managed rollout-engine handles. |
-| `66eef0291` | Overlap the initial delta snapshot with the first rollout. |
+| `59931a089` | Route fully-async generation through an external fleet with version constraints and finite timeouts. |
+| `5aa513895` | Publish disk deltas without Miles-managed rollout-engine handles. |
+| `6e2db0b80` | Overlap external weight updates with active rollout. |
 
 The dated image supplies Megatron-LM, TransformerEngine, CUDA, and other
 compiled dependencies. Miles is installed over it with `--no-deps`, so the
