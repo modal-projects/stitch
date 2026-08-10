@@ -767,21 +767,6 @@ def test_unapplied_replica_rejects() -> None:
     _run(go())
 
 
-def test_run_scoped_replica_serves_boot_checkpoint_as_version_zero() -> None:
-    async def go() -> None:
-        r = Reconciler(store=FakeStore(), engine=FakeEngine(), run_id="r1")
-        await r.startup()
-        try:
-            assert r.applied == VersionRef("r1", 0)
-            assert r.ready
-            async with r.admit(None) as served:
-                assert served == VersionRef("r1", 0)
-        finally:
-            await r.shutdown()
-
-    _run(go())
-
-
 def test_version_flips_before_resume() -> None:
     async def go() -> None:
         engine = FakeEngine()

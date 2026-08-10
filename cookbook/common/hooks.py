@@ -24,20 +24,14 @@ logger = logging.getLogger(__name__)
 
 
 def sample_affinity_key(sample: Any) -> str | None:
-    """Return one stable routing key for a rollout trajectory."""
+    """Return one stable routing key for a rollout trajectory or GRPO group."""
+    group_index = getattr(sample, "group_index", None)
+    if group_index is not None:
+        return f"group-{group_index}"
     for name in ("routing_key", "session_id"):
         value = getattr(sample, name, None)
         if value is not None:
             return str(value)
-    rollout_id = getattr(sample, "rollout_id", None)
-    if rollout_id is not None:
-        return f"rollout-{rollout_id}"
-    index = getattr(sample, "index", None)
-    if index is not None:
-        return f"sample-{index}"
-    group_index = getattr(sample, "group_index", None)
-    if group_index is not None:
-        return f"group-{group_index}"
     return None
 
 

@@ -67,7 +67,7 @@ modal = ModalConfig(
 
 
 class _Miles(MilesConfig):
-    megatron_model_type = "glm4.5-106B-A12B"
+    miles_model_script = "scripts/models/glm4.5-106B-A12B.sh"
 
     hf_checkpoint = str(ROLLOUT_CHECKPOINT_PATH)
     ref_load = str(TORCH_DIST_CHECKPOINT_PATH)
@@ -91,7 +91,7 @@ class _Miles(MilesConfig):
         "rollout_request_weight_version_lag": 1,
         "rollout_request_retry_attempts": 900,
         "rollout_request_retry_sleep": 1.0,
-        "rollout_session_affinity_header": "X-Session-Affinity",
+        "rollout_session_affinity_header": "Modal-Session-ID",
         "rollout_request_timeout_secs": 300,
     }
 
