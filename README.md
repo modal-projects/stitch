@@ -44,37 +44,40 @@ recover without becoming part of the trainer's process lifecycle.
 ## Measured delta updates
 
 These are verified single-update measurements from the pinned v0.5.17 cookbook
-stack. The synthetic XOR deltas are element-wise over rollout-visible values
-and change nearly every trained tensor. Quantized-value densities are 0.6% for
-FP8, 0.3% for Kimi K2.6 NVFP4 and Kimi K3 MXFP4, and 0.375% for mixed
-GLM-5.2; high-precision values change at 1%. Remote transfer, delta generation,
-and one-time CPU destination initialization are excluded. Preparation runs
-while inference remains available; only activation pauses the engine.
+stack. Every row completed checksum verification, generated successfully before,
+during, and after the update, changed from the base, and reproduced the exact
+post-update text, tokens, and logprobs. The synthetic XOR deltas are element-wise
+over rollout-visible values and change nearly every trained tensor.
+Quantized-value densities are 0.6% for FP8, 0.3% for Kimi K2.6 NVFP4 and Kimi
+K3 MXFP4, and 0.375% for mixed GLM-5.2; high-precision values change at 1%.
+Remote transfer, delta generation, and one-time CPU destination initialization
+are excluded. Preparation runs while inference remains available; only
+activation pauses the engine.
 
-| Model | TP | Destination / canonical storage | Preparation | Engine pause | Total update |
+| Model | TP | Update path | Preparation | Engine pause | Total update |
 | --- | ---: | --- | ---: | ---: | ---: |
-| GLM-4.5-Air FP8 | 4 | CPU / RAM | 24.1 s | 1.00 s | 25.1 s |
-| GLM-4.5-Air FP8 | 4 | CPU / NVMe | 84.4 s | 0.99 s | 85.4 s |
-| GLM-4.5-Air FP8 | 4 | Disk target | 36.6 s | 21.1 s | 57.7 s |
-| Kimi K2.6 NVFP4 | 4 | CPU / RAM | 64.9 s | 2.77 s | 67.7 s |
-| Kimi K2.6 NVFP4 | 4 | CPU / NVMe | 374.7 s | 2.76 s | 377.4 s |
-| Kimi K2.6 NVFP4 | 4 | Disk target | 124.7 s | 118.3 s | 243.1 s |
-| GLM-5.2 mixed NVFP4/BF16 | 4 | CPU / RAM | 90.1 s | 3.42 s | 93.6 s |
-| GLM-5.2 mixed NVFP4/BF16 | 4 | CPU / NVMe | 167.7 s | 3.50 s | 171.2 s |
-| GLM-5.2 mixed NVFP4/BF16 | 4 | Disk target | 119.0 s | 283.5 s | 402.5 s |
-| Kimi K3 MXFP4 | 8 | CPU / RAM | Did not complete | — | — |
-| Kimi K3 MXFP4 | 8 | CPU / NVMe | 1,963.6 s | 3.98 s | 1,967.6 s |
-| Kimi K3 MXFP4 | 8 | Disk target | 516.4 s | 243.3 s | 759.7 s |
+| GLM-4.5-Air FP8 | 4 | CPU cache; canonical in RAM | 26.6 s | 0.99 s | 27.5 s |
+| GLM-4.5-Air FP8 | 4 | CPU cache; canonical on NVMe | 85.5 s | 0.98 s | 86.5 s |
+| GLM-4.5-Air FP8 | 4 | Disk checkpoint | 18.5 s | 27.15 s | 45.7 s |
+| Kimi K2.6 NVFP4 | 4 | CPU cache; canonical in RAM | 72.5 s | 2.82 s | 75.3 s |
+| Kimi K2.6 NVFP4 | 4 | CPU cache; canonical on NVMe | 279.0 s | 3.23 s | 282.2 s |
+| Kimi K2.6 NVFP4 | 4 | Disk checkpoint | 149.0 s | 165.09 s | 314.1 s |
+| GLM-5.2 mixed NVFP4/BF16 | 4 | CPU cache; canonical in RAM | 116.4 s | 3.30 s | 119.7 s |
+| GLM-5.2 mixed NVFP4/BF16 | 4 | CPU cache; canonical on NVMe | 164.5 s | 3.26 s | 167.7 s |
+| GLM-5.2 mixed NVFP4/BF16 | 4 | Disk checkpoint | 128.0 s | 299.38 s | 427.4 s |
+| Kimi K3 MXFP4 | 8 | CPU cache; canonical in RAM | 120.5 s | 3.84 s | 124.3 s |
+| Kimi K3 MXFP4 | 8 | CPU cache; canonical on NVMe | 1,089.7 s | 3.83 s | 1,093.6 s |
+| Kimi K3 MXFP4 | 8 | Disk checkpoint | 704.0 s | 300.37 s | 1,004.4 s |
 
 These are wall-clock samples, not a hardware distribution. NVMe preparation
 reads and writes a complete canonical checkpoint and therefore tracks the
 assigned host's local-storage bandwidth; the Kimi K2.6 and Kimi K3 NVMe samples
 are therefore host-specific rather than model-only transformation costs. K3's
 canonical checkpoint and eight rank images occupy 3.22 TB before engine and
-staging overhead, so its supplied recipe keeps the canonical checkpoint on
-NVMe. K3's all-RAM attempt did not complete within a 4 TiB host limit during
-cache construction. The mixed GLM-5.2 and K3 deltas are 10.04 GB and 24.13 GB
-compressed, respectively.
+staging overhead; the all-RAM sample reached 3.29 TB after staging. Its supplied
+recipe therefore keeps the canonical checkpoint on NVMe to preserve operating
+headroom. The mixed GLM-5.2 and K3 deltas are 10.04 GB and 24.13 GB compressed,
+respectively.
 
 Each profiler reconstructs and checksums the complete target and validates
 generation before, during, and after activation. See

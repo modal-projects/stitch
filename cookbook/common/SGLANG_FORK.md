@@ -14,7 +14,7 @@ DEFAULT_SGLANG_RUNTIME = SGLangRuntime(
     image="lmsysorg/sglang:v0.5.17",
     repository="https://github.com/modal-projects/sglang.git",
     branch="stitch-sglang-v0.5.17",
-    commit="4b23a8508a313025fd095888d193b2cf66ec7057",
+    commit="0c79627e857eec795298a372adadf649209cdf2f",
 )
 ```
 
@@ -168,6 +168,11 @@ With the default in-memory canonical checkpoint, persistent host RAM is:
 one canonical checkpoint per host
 + one rank-local runtime image per local TP rank
 ```
+
+The canonical checkpoint is interleaved across the host's allowed NUMA nodes so
+it cannot exhaust one GPU-local node while capacity remains elsewhere. Rank
+images remain GPU-local because they are the source of the latency-sensitive
+CPU-to-GPU commit.
 
 With a storage-backed canonical checkpoint, persistent host RAM is the rank
 images; local storage holds one canonical checkpoint. File-cache pages used

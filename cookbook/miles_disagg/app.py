@@ -254,6 +254,7 @@ class Router:
             registry_url=RouterRegistry.get_url(),
             upstream_url=Server.get_url(),
             session_routes=session_routes,
+            overload_threshold=ROLLOUT_CONCURRENCY,
         )
 
     @modal.exit()

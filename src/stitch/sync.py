@@ -182,7 +182,12 @@ class Reconciler(AdmissionGate):
         self.store = store
         self.engine = engine
         self.flush_cache_on_commit = flush_cache_on_commit
-        self.run_id = run_id  # static label for server_info, not the active chain's run
+        self.run_id = run_id
+        # A run-scoped replica boots from that run's immutable base checkpoint, so
+        # its served version is known before the trainer creates the durable v0
+        # pointer. Unscoped reconcilers still wait for their first pointer.
+        if run_id is not None:
+            self.applied = VersionRef(run_id, 0)
         self.debug_requests = debug_requests
         self.reconcile_interval = reconcile_interval
         self.sync_state = SyncState.IDLE

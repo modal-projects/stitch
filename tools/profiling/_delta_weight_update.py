@@ -354,6 +354,51 @@ class _GenerationProbe:
         }
 
 
+class _MemoryProbe:
+    def __init__(self, interval_s: float = 1.0) -> None:
+        self.interval_s = interval_s
+        self.stop = threading.Event()
+        self.samples: list[dict[str, int | str]] = []
+        self.thread = threading.Thread(
+            target=self._run,
+            name="memory-during-weight-stage",
+            daemon=True,
+        )
+
+    def _run(self) -> None:
+        while not self.stop.is_set():
+            self.samples.append(_memory_snapshot())
+            self.stop.wait(self.interval_s)
+
+    def __enter__(self) -> _MemoryProbe:
+        self.thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        self.stop.set()
+        self.thread.join(timeout=max(5.0, 2 * self.interval_s))
+
+    def summary(self) -> dict[str, int | str | None]:
+        numeric_keys = {
+            key
+            for sample in self.samples
+            for key, value in sample.items()
+            if isinstance(value, int)
+        }
+        result: dict[str, int | str | None] = {"samples": len(self.samples)}
+        for key in sorted(numeric_keys):
+            values = [
+                value
+                for sample in self.samples
+                if isinstance(value := sample.get(key), int)
+            ]
+            if key == "MemAvailable_bytes":
+                result[f"{key}_min"] = min(values)
+            else:
+                result[f"{key}_max"] = max(values)
+        return result
+
+
 def _memory_snapshot() -> dict[str, int | str]:
     result: dict[str, int | str] = {}
     cgroup_files = {
@@ -455,6 +500,7 @@ def _print_profile_summary(results: dict[str, Any]) -> None:
             "destination_init_s",
             "destination_init_cpu",
             "generation_during_destination_init",
+            "memory_during_destination_init",
             "stage_s",
             "stage_cpu",
             "commit_rpc_s",
@@ -579,22 +625,28 @@ def run_delta_weight_update(
         with httpx.Client(timeout=None, trust_env=False) as client:
             destination_init_started = time.perf_counter()
             destination_init_cpu_started = _cgroup_cpu_usage_s()
-            with _GenerationProbe(url) as generation:
-                init_payload = {
-                    "base_checkpoint_dir": spec.base_checkpoint_dir,
-                    "target_version": 0,
-                    "destination": update_mode,
-                }
-                if update_mode == "disk":
-                    init_payload["local_checkpoint_dir"] = (
-                        spec.local_target_checkpoint_dir
+            generation = _GenerationProbe(url)
+            memory = _MemoryProbe()
+            try:
+                with generation, memory:
+                    init_payload = {
+                        "base_checkpoint_dir": spec.base_checkpoint_dir,
+                        "target_version": 0,
+                        "destination": update_mode,
+                    }
+                    if update_mode == "disk":
+                        init_payload["local_checkpoint_dir"] = (
+                            spec.local_target_checkpoint_dir
+                        )
+                    initialized = _post(
+                        client,
+                        url,
+                        "/stage_weight_update",
+                        init_payload,
                     )
-                initialized = _post(
-                    client,
-                    url,
-                    "/stage_weight_update",
-                    init_payload,
-                )
+            finally:
+                results["generation_during_destination_init"] = generation.summary()
+                results["memory_during_destination_init"] = memory.summary()
             results["destination_init_s"] = round(
                 time.perf_counter() - destination_init_started,
                 6,
@@ -605,7 +657,6 @@ def run_delta_weight_update(
                 results["destination_init_s"],
             )
             results["destination_init_rank_stats"] = initialized.get("rank_stats")
-            results["generation_during_destination_init"] = generation.summary()
             results["memory_after_destination_init"] = _memory_snapshot()
             if generation.errors or not generation.samples:
                 raise RuntimeError(

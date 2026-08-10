@@ -10,7 +10,7 @@ Why it exists: with a per-container queue bound (sglang ``--max-queued-requests`
 own sticky routing turns the first saturated replicas into 503 attractors — sessions stuck
 on a full replica keep retrying it while the rest of the pool starves. Here, the registry
 polls every replica's live queue depth (``/v1/loads`` + a ``/health`` zombie check); the
-router pins each ``modal-session-id`` to a healthy replica with spare capacity via the
+router pins each ``x-session-affinity`` key to a healthy replica with spare capacity via the
 ``modal-flash-upstream`` header, and a 503 from a pinned replica evicts it from rotation and
 retries on a healthier one, so load spreads instead of sticking.
 
@@ -26,7 +26,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import math
 import random
 import threading
 import time
@@ -45,9 +44,9 @@ from stitch.pools.modal_flash import list_flash_containers_async
 logger = logging.getLogger(__name__)
 
 SESSION_ROUTE_TTL_SECONDS = 4 * 60 * 60
-SESSION_ROUTE_IMBALANCE_THRESHOLD = 0.5
-SESSION_ROUTE_OVERLOAD_FLOOR = 3
 SESSION_ROUTE_MAX_UPSTREAMS = 10
+# Flash consumes its reserved Modal-Session-ID before the ASGI app sees the request.
+SESSION_AFFINITY_HEADER = "x-session-affinity"
 
 CONTAINER_POLL_INTERVAL_SECONDS = 1.0
 CONTAINER_POLL_TIMEOUT_SECONDS = 3.0
@@ -121,6 +120,7 @@ def filter_headers(headers: dict[str, str]) -> dict[str, str]:
         "modal-key",
         "modal-secret",
         "modal-session-id",
+        SESSION_AFFINITY_HEADER,
         "x-forwarded-for",
         "x-forwarded-host",
         "x-forwarded-port",
@@ -150,12 +150,14 @@ def select_underloaded_container(
 
 
 async def route_session(
-    session_routes: modal.Dict, session_id: str, containers: dict[str, ContainerInfo]
+    session_routes: modal.Dict,
+    session_id: str,
+    containers: dict[str, ContainerInfo],
+    overload_threshold: int,
 ) -> ContainerInfo:
     """Pick the replica for one session: the most-recently-used of its known replicas
-    that isn't overloaded, else a random replica with headroom. A replica is overloaded when its
-    load is ≥50% above the pool's mean (floored), so a hot replica sheds new session
-    traffic without a hard capacity number. Mutates and persists the session's routes."""
+    that has room below the pool's configured soft capacity, else a random replica with
+    headroom. Mutates and persists the session's routes."""
     current_time = time.time()
 
     routes: list[RouteEntry] = RouteEntryList.validate_python(
@@ -170,15 +172,6 @@ async def route_session(
         and entry.task_id in containers
     ]
     routes.sort(key=lambda entry: entry.last_sent, reverse=True)
-
-    overload_threshold = max(
-        math.ceil(
-            sum(c.load for c in containers.values())
-            / len(containers)
-            * (1 + SESSION_ROUTE_IMBALANCE_THRESHOLD)
-        ),
-        SESSION_ROUTE_OVERLOAD_FLOOR,
-    )
 
     async def save_routes() -> None:
         await session_routes.put.aio(
@@ -282,12 +275,14 @@ def serve_router(
     registry_url: str,
     upstream_url: str,
     session_routes: modal.Dict,
+    overload_threshold: int,
 ) -> None:
     """Start the session-routing proxy on a ``Router`` container (@modal.enter)."""
     router = _ProxyApp(
         registry_url=registry_url,
         upstream_url=upstream_url,
         session_routes=session_routes,
+        overload_threshold=overload_threshold,
     )
     router.start()
     replica._router_server = router
@@ -401,11 +396,17 @@ class _ProxyApp(_UvicornApp):
     """Proxies requests to rollout replicas with session-affinity routing."""
 
     def __init__(
-        self, *, registry_url: str, upstream_url: str, session_routes: modal.Dict
+        self,
+        *,
+        registry_url: str,
+        upstream_url: str,
+        session_routes: modal.Dict,
+        overload_threshold: int,
     ) -> None:
         self.registry_url = registry_url.rstrip("/")
         self.upstream_url = upstream_url.rstrip("/")
         self.session_routes = session_routes
+        self.overload_threshold = overload_threshold
         self.containers: dict[str, ContainerInfo] = {}
 
     @contextlib.contextmanager
@@ -521,7 +522,7 @@ class _ProxyApp(_UvicornApp):
                 return Response(content=b"", status_code=200, media_type="text/plain")
 
             body = await request.body()
-            session_id = request.headers.get("modal-session-id")
+            session_id = request.headers.get(SESSION_AFFINITY_HEADER)
             log_prefix = f"[request {uuid.uuid4()}, session {session_id}]"
 
             try:
@@ -531,7 +532,10 @@ class _ProxyApp(_UvicornApp):
                     container = None
                     if session_id and self.containers:
                         container = await route_session(
-                            self.session_routes, session_id, self.containers
+                            self.session_routes,
+                            session_id,
+                            self.containers,
+                            self.overload_threshold,
                         )
                         headers["modal-flash-upstream"] = container.upstream
 

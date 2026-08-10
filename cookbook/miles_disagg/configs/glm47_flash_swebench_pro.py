@@ -37,8 +37,8 @@ TRAINER_NODES = 4
 GPUS_PER_TRAINER_NODE = 8
 ROLLOUT_GPUS_PER_ENGINE = 1
 ROLLOUT_INPUTS_PER_ENGINE = 20
-ROLLOUT_CONCURRENT_SAMPLES = 544
-ROLLOUT_MIN_CONTAINERS = 28
+ROLLOUT_CONCURRENT_SAMPLES = 640  # saturates the 40-worker rollout harness
+ROLLOUT_MIN_CONTAINERS = 48  # 48 rollout GPUs at one GPU per engine
 ROLLOUT_MAX_RUNNING_REQUESTS = 28
 ROLLOUT_MAX_QUEUED_REQUESTS = 4  # backpressure
 MAX_SEQ_LEN = 65_536
@@ -69,16 +69,17 @@ SGLANG_SERVER_ARGS = {
     "--decode-log-interval": "1000",
     "--log-level-http": "warning",
     "--enable-return-routed-experts": "",
+    "--sampling-mask-max-tokens": "8192",
 }
 
 modal = ModalConfig(
     gpu="H200",
     rollout_gpu="H200",
     cloud="aws",
-    trainer_memory_mib=(1024 * 1024, 2 * 1024 * 1024),
+    trainer_memory_mib=(1024 * 1024, 3 * 1024 * 1024),
     rollout_memory_mib=(512 * 1024, 1024 * 1024),
     rollout_min_containers=ROLLOUT_MIN_CONTAINERS,
-    rollout_max_containers=None,
+    rollout_max_containers=ROLLOUT_MIN_CONTAINERS,
     rollout_target_inputs=ROLLOUT_INPUTS_PER_ENGINE,
     rollout_ephemeral_disk_mib=524_288,
     trainer_ephemeral_disk_mib=1_048_576,
@@ -122,7 +123,7 @@ class _Miles(MilesConfig):
         "rollout_request_weight_version_lag": 1,
         "rollout_request_retry_attempts": 1200,
         "rollout_request_retry_sleep": 1.0,
-        "rollout_session_affinity_header": "Modal-Session-ID",
+        "rollout_session_affinity_header": "X-Session-Affinity",
         "rollout_request_timeout_secs": 300,
     }
 
@@ -141,8 +142,7 @@ class _Miles(MilesConfig):
     balance_data = True
 
     fully_async = True
-    # Free submission capacity as individual trajectories finish instead of
-    # waiting for every sibling in their prompt group.
+    pause_generation_mode = "in_place"
     rollout_submission_granularity = "sample"
     custom_rollout_log_function_path = "modal_swe_metrics.log_rollout_data"
     custom_generate_function_path = (
@@ -165,11 +165,14 @@ class _Miles(MilesConfig):
     global_batch_size = 256
     rollout_temperature = 1.0
     rollout_top_p = 0.95
+    rollout_top_k = 8192
     rollout_max_response_len = 8192
     max_seq_len = MAX_SEQ_LEN
     max_weight_staleness = 6
     async_max_concurrent_samples = ROLLOUT_CONCURRENT_SAMPLES
-    async_data_buffer_capacity_factor = 3.0
+    async_data_buffer_capacity_factor = (
+        0.5  # at most half a batch of completed R3 state
+    )
     async_unused_samples_handler = "drop"
     eval_interval = None
 
