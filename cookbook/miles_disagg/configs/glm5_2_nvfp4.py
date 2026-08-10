@@ -190,7 +190,7 @@ modal = ModalConfig(
 
 
 class _Miles(MilesConfig):
-    miles_model_script = "scripts/models/glm5.2-744B-A40B.sh"
+    megatron_model_type = "glm5.2-744B-A40B"
     async_mode = True
 
     hf_checkpoint = str(ROLLOUT_CHECKPOINT_PATH)

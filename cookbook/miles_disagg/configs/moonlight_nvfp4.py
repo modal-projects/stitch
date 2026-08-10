@@ -58,7 +58,7 @@ modal = ModalConfig(
 
 class _Miles(MilesConfig):
     # Arch comes from the model script; do NOT inline arch attrs here.
-    miles_model_script = "scripts/models/moonlight.sh"
+    megatron_model_type = "moonlight"
 
     hf_checkpoint = str(ROLLOUT_CHECKPOINT_PATH)
     ref_load = str(BF16_CHECKPOINT_PATH)

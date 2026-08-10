@@ -74,7 +74,7 @@ modal = ModalConfig(
 
 class _Miles(MilesConfig):
     # Arch comes from the model script (shared with Kimi-K2-Thinking; K2.6 matches).
-    miles_model_script = "scripts/models/kimi-k2-thinking.sh"
+    megatron_model_type = "kimi-k2-thinking"
 
     hf_checkpoint = str(ROLLOUT_CHECKPOINT_PATH)
     ref_load = str(TORCH_DIST_CHECKPOINT_PATH)

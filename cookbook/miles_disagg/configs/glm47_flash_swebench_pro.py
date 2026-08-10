@@ -98,7 +98,7 @@ modal = ModalConfig(
 
 
 class _Miles(MilesConfig):
-    miles_model_script = "scripts/models/glm4.7-flash.sh"
+    megatron_model_type = "glm4.7-flash"
     async_mode = True
 
     hf_checkpoint = str(ROLLOUT_CHECKPOINT_PATH)

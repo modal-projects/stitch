@@ -393,14 +393,15 @@ class Trainer:
 
 def _build_train_cmd(cfg: MilesConfig) -> str:
     train_script = f"{MILES_ROOT}/{'train_async.py' if cfg.async_mode else 'train.py'}"
-    model_script = cfg.miles_model_script
-    if model_script:
-        inner = (
-            f"source {MILES_ROOT}/{model_script} && "
-            f"python3 {train_script} ${{MODEL_ARGS[@]}} {shlex.join(cfg.cli_args())}"
-        )
-        return f"bash -c {shlex.quote(inner)}"
-    return f"python3 {train_script} {shlex.join(cfg.cli_args())}"
+    args = cfg.cli_args()
+    if cfg.megatron_model_type:
+        from miles.utils.external_utils.model_args_utils import load_model_args
+
+        args = [
+            *shlex.split(load_model_args(cfg.megatron_model_type)),
+            *args,
+        ]
+    return shlex.join(["python3", train_script, *args])
 
 
 # ── Entrypoints (preparation lives in a separate app: cookbook.miles_disagg.prep_app) ──

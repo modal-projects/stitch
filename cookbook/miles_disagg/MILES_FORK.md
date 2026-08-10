@@ -6,11 +6,11 @@ image. [`trainer_image.py`](trainer_image.py) defines the shared default:
 ```python
 MILES_IMAGE_TAG = "radixark/miles:dev-202607290235"
 MILES_REPO_URL = "https://github.com/modal-projects/miles.git"
-MILES_REPO_REF = "6e2db0b80a7252743e37cad7b73fd8a9ee4b1fee"
+MILES_REPO_REF = "f83a68b296ca6f42d04e77e2b42c070c1ab02c70"
 ```
 
 The pin is `modal-projects/miles:stitch-miles-fully-async-swe`. It contains a
-Miles fully-async stack based on upstream main at `0113aa5ab`, followed by the
+Miles fully-async stack based on upstream main at `6bc45ad39`, followed by the
 Stitch external-fleet integration.
 
 ## Miles fully-async stack
@@ -19,28 +19,31 @@ These commits are useful independently of Stitch:
 
 | Commit | Responsibility |
 | --- | --- |
-| `b6627fbcf` | Assemble additional routing-replay rows during in-place updates. |
-| `3ca48bb28` | Make distributed service startup and teardown deterministic. |
-| `6b792d8a0` | Report generation and queue staleness separately. |
-| `8f812030e` | Distinguish explicit checkpoint resume from a fresh run. |
-| `15ab881ca` | Load optional P2P weight-sync dependencies lazily. |
-| `84a09f66b` | Validate canonical disk-delta tensor layouts. |
-| `deaf1af70` | Report trainer-rollout policy drift accurately. |
-| `679845a10` | Add the Modal Sandbox v2 transport for SWE rollouts. |
-| `d2afa6639` | Add and validate the mini-SWE rollout adapter. |
-| `0788a3cfc` | Add CISPO policy optimization. |
-| `56116e18b` | Replay exact top-p sampling masks during training. |
-| `a59b628bd` | Compact routing-replay expert IDs for transport. |
-| `4920cce83` | Suppress per-request session access logs. |
-| `fac618950` | Reject aborted generations at the session protocol boundary. |
+| `ad0411c85` | Assemble additional routing-replay rows during in-place updates. |
+| `35c78a78b` | Preserve in-flight requests while changing their weight version. |
+| `6d638ba8a` | Make distributed service startup and teardown deterministic. |
+| `9be219f58` | Report generation and queue staleness separately. |
+| `63da214e1` | Distinguish explicit checkpoint resume from a fresh run. |
+| `bd0216740` | Load optional P2P weight-sync dependencies lazily. |
+| `717802e21` | Validate canonical disk-delta tensor layouts. |
+| `13dd38252` | Report trainer-rollout policy drift accurately. |
+| `a658a505c` | Make session endpoint affinity and lifecycle explicit. |
+| `6dbc5ab45` | Add the Modal Sandbox v2 transport for SWE rollouts. |
+| `080e58555` | Honor rollout-only LoRA configuration. |
+| `4e98074fa` | Add and validate the mini-SWE rollout adapter. |
+| `113271f5e` | Add CISPO policy optimization. |
+| `d688df471` | Replay exact truncated-sampling support during training. |
+| `53c402487` | Compact routing-replay expert IDs for transport. |
+| `719e2844d` | Suppress per-request session access logs. |
+| `45a2c5b25` | Reject aborted generations at the session protocol boundary. |
 
 ## Stitch integration
 
 | Commit | Responsibility |
 | --- | --- |
-| `59931a089` | Route fully-async generation through an external fleet with version constraints and finite timeouts. |
-| `5aa513895` | Publish disk deltas without Miles-managed rollout-engine handles. |
-| `6e2db0b80` | Overlap external weight updates with active rollout. |
+| `69244e487` | Route fully-async generation through an external fleet with version constraints and finite timeouts. |
+| `b54a23588` | Publish disk deltas without Miles-managed rollout-engine handles. |
+| `f83a68b29` | Overlap external weight updates with active rollout. |
 
 The dated image supplies Megatron-LM, TransformerEngine, CUDA, and other
 compiled dependencies. Miles is installed over it with `--no-deps`, so the
