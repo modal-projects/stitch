@@ -1,5 +1,5 @@
 """Router harness: the pure routing helpers — ``route_session`` stickiness / overload
-fallback / TTL eviction, ``select_least_loaded_container``, ``filter_headers``, and
+fallback / TTL eviction, ``select_underloaded_container``, ``filter_headers``, and
 ``_container_addr`` — against a fake session-routes dict (no Modal involved)."""
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from cookbook.common.router import (
     _ProxyApp,
     filter_headers,
     route_session,
-    select_least_loaded_container,
+    select_underloaded_container,
 )
 
 
@@ -56,31 +56,31 @@ def _seeded(routes: FakeRoutes, session: str, entries: list[dict]) -> None:
     )
 
 
-def test_route_session_pins_least_loaded_on_first_request() -> None:
+def test_route_session_pins_only_available_underloaded_replica() -> None:
     routes, containers = FakeRoutes(), _containers(0, 5, 5)
-    picked = asyncio.run(route_session(routes, "s1", containers))
+    picked = asyncio.run(route_session(routes, "s1", containers, 4))
     assert picked.task_id == "ta-0"
     assert routes.store["s1"][0]["task_id"] == "ta-0"
 
 
 def test_route_session_is_sticky_for_known_healthy_replica() -> None:
     routes, containers = FakeRoutes(), _containers(0, 5, 5)
-    first = asyncio.run(route_session(routes, "s1", containers))
+    first = asyncio.run(route_session(routes, "s1", containers, 4))
     # ta-1 becomes strictly less loaded, but stickiness holds while the pinned
-    # replica stays below the overload threshold (3 < ceil(avg × 1.5) = 4).
+    # replica stays below the configured overload threshold.
     containers["ta-0"] = containers["ta-0"].model_copy(update={"load": 3})
     containers["ta-1"] = containers["ta-1"].model_copy(update={"load": 0})
-    second = asyncio.run(route_session(routes, "s1", containers))
+    second = asyncio.run(route_session(routes, "s1", containers, 4))
     assert second.task_id == first.task_id == "ta-0"
 
 
-def test_route_session_sheds_overloaded_replica_to_least_loaded() -> None:
+def test_route_session_sheds_overloaded_replica_to_replica_with_headroom() -> None:
     routes, containers = FakeRoutes(), _containers(0, 0, 20)
-    first = asyncio.run(route_session(routes, "s1", containers))
+    first = asyncio.run(route_session(routes, "s1", containers, 10))
     containers[first.task_id] = containers[first.task_id].model_copy(
         update={"load": 20}
     )
-    second = asyncio.run(route_session(routes, "s1", containers))
+    second = asyncio.run(route_session(routes, "s1", containers, 10))
     assert second.task_id != first.task_id
     assert second.load == 0
 
@@ -98,15 +98,23 @@ def test_route_session_drops_expired_and_undiscovered_routes() -> None:
             {"task_id": "ta-gone", "last_sent": time.time()},
         ],
     )
-    picked = asyncio.run(route_session(routes, "s1", containers))
+    picked = asyncio.run(route_session(routes, "s1", containers, 4))
     assert picked.task_id == "ta-0"
     assert [entry["task_id"] for entry in routes.store["s1"]] == ["ta-0"]
 
 
-def test_select_least_loaded_container_picks_minimum() -> None:
+def test_select_underloaded_container_spreads_across_headroom(monkeypatch) -> None:
     containers = _containers(7, 2, 3, 2)
-    picked = select_least_loaded_container(containers)
-    assert picked.load == 2
+    candidates = []
+
+    def choose(options):
+        candidates.extend(options)
+        return options[0]
+
+    monkeypatch.setattr("cookbook.common.router.random.choice", choose)
+    picked = select_underloaded_container(containers, overload_threshold=4)
+    assert picked.load < 4
+    assert {container.task_id for container in candidates} == {"ta-1", "ta-2", "ta-3"}
 
 
 def test_filter_headers_drops_routing_and_hop_by_hop() -> None:
@@ -164,6 +172,7 @@ def test_upstream_stream_reserves_capacity_before_connecting() -> None:
             registry_url="https://registry",
             upstream_url="https://upstream",
             session_routes=FakeRoutes(),
+            overload_threshold=4,
         )
         client = FakeClient()
         app.client = client

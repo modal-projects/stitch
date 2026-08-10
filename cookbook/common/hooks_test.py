@@ -211,7 +211,6 @@ def test_request_hook_min_lag() -> None:
             str(root),
             rollout_request_weight_version_lag=2,
             rollout_request_retry_attempts=900,
-            rollout_session_affinity_header="Modal-Session-ID",
         )
         request = {"payload": {}}
         asyncio.run(

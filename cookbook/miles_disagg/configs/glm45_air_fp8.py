@@ -88,7 +88,6 @@ class _Miles(MilesConfig):
         "rollout_request_weight_version_lag": 1,
         "rollout_request_retry_attempts": 900,
         "rollout_request_retry_sleep": 1.0,
-        "rollout_session_affinity_header": "Modal-Session-ID",
         "rollout_request_timeout_secs": 300,
     }
 
