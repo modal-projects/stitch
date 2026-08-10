@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 import os
-import shlex
 import shutil
 import subprocess
 import threading
@@ -172,11 +171,8 @@ def prepare_torch_dist(exp, checkpoint_volume, *, rank: int, master_addr: str) -
     ):
         print(f"reusing existing torch_dist {torch_dist_dir}")
         return
-    if not exp.miles.megatron_model_type:
-        raise SystemExit("prepare_torch_dist requires megatron_model_type")
-    from miles.utils.external_utils.model_args_utils import load_model_args
-
-    model_args = shlex.split(load_model_args(exp.miles.megatron_model_type))
+    if not exp.miles.miles_model_script:
+        raise SystemExit("prepare_torch_dist requires miles_model_script (MODEL_ARGS)")
     nodes = exp.modal.torch_dist_prep_nodes
     use_wrapper = nodes > 1 and getattr(exp, "USE_MODAL_TORCH_DIST_WRAPPER", False)
     convert = (
@@ -184,28 +180,15 @@ def prepare_torch_dist(exp, checkpoint_volume, *, rank: int, master_addr: str) -
         if use_wrapper
         else f"{MILES_ROOT}/tools/convert_hf_to_torch_dist.py"
     )
-    command = [
-        "torchrun",
-        "--nnodes",
-        str(nodes),
-        "--node-rank",
-        str(rank),
-        "--master-addr",
-        master_addr,
-        "--master-port",
-        "29500",
-        "--nproc-per-node",
-        str(exp.modal.torch_dist_prep_gpus_per_node),
-        convert,
-        *model_args,
-        "--hf-checkpoint",
-        bf16_dir,
-        "--save",
-        torch_dist_dir,
-        "--megatron-to-hf-mode",
-        "raw",
-        *shlex.split(exp.modal.torch_dist_convert_extra_args),
-    ]
+    inner = (
+        f"source {MILES_ROOT}/{exp.miles.miles_model_script} && "
+        f"PYTHONPATH={MEGATRON_PATH} torchrun"
+        f" --nnodes {nodes} --node-rank {rank} --master-addr {master_addr} --master-port 29500"
+        f" --nproc-per-node {exp.modal.torch_dist_prep_gpus_per_node}"
+        f" {convert} ${{MODEL_ARGS[@]}}"
+        f" --hf-checkpoint {bf16_dir} --save {torch_dist_dir} --megatron-to-hf-mode raw"
+        f" {exp.modal.torch_dist_convert_extra_args}"
+    )
     env = {**os.environ}
     if use_wrapper:
         env["SKIP_RELEASE_RENAME"] = "1"
@@ -213,8 +196,7 @@ def prepare_torch_dist(exp, checkpoint_volume, *, rank: int, master_addr: str) -
         f"converting bf16 masters -> torch_dist ref_load ({nodes}-node torchrun, rank {rank})...",
         flush=True,
     )
-    env["PYTHONPATH"] = f"{MEGATRON_PATH}:{env.get('PYTHONPATH', '')}"
-    subprocess.run(command, check=True, env=env)
+    subprocess.run(["bash", "-c", inner], check=True, env=env)
     # Every node commits its own distcp shards (disjoint files merge on the Volume);
     # a rank-0-only commit would drop the other nodes' shards.
     checkpoint_volume.commit()

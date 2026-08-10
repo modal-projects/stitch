@@ -2,7 +2,7 @@
 
 Every public, non-callable attribute becomes a miles CLI arg via ``cli_args`` (miles
 wraps Megatron's parser, so Megatron args pass straight through); ``environment`` /
-``async_mode`` / ``megatron_model_type`` are launcher instructions, not CLI args. The
+``async_mode`` / ``miles_model_script`` are launcher instructions, not CLI args. The
 Modal-infra half of an experiment is ``common.config.ModalConfig``.
 """
 
@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
-_MILES_SKIP = {"environment", "async_mode", "megatron_model_type"}
+_MILES_SKIP = {"environment", "async_mode", "miles_model_script"}
 # Fields miles reads as YAML files; inline dicts are materialized before launch.
 # (te_precision_config_file is handled separately in app.py — it needs an identical
 # node-local path on every Ray actor, not a per-launch tmpdir.)
@@ -23,7 +23,9 @@ class MilesConfig:
 
     environment: dict = {}
     async_mode: bool = False  # True -> train_async.py
-    megatron_model_type: str = ""
+    miles_model_script: str = (
+        ""  # shell script (relative to the miles root) defining MODEL_ARGS
+    )
 
     def __init__(self, **kwargs: Any) -> None:
         self.environment = dict(
@@ -87,7 +89,7 @@ class MilesConfig:
             "fields": self._fields(),
             "environment": dict(self.environment),
             "async_mode": self.async_mode,
-            "megatron_model_type": self.megatron_model_type,
+            "miles_model_script": self.miles_model_script,
         }
 
     @classmethod
@@ -95,5 +97,5 @@ class MilesConfig:
         cfg = cls(**payload["fields"])
         cfg.environment = dict(payload["environment"])
         cfg.async_mode = payload["async_mode"]
-        cfg.megatron_model_type = payload["megatron_model_type"]
+        cfg.miles_model_script = payload["miles_model_script"]
         return cfg

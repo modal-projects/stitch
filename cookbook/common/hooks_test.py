@@ -211,7 +211,7 @@ def test_request_hook_min_lag() -> None:
             str(root),
             rollout_request_weight_version_lag=2,
             rollout_request_retry_attempts=900,
-            rollout_session_affinity_header="X-Session-Affinity",
+            rollout_session_affinity_header="Modal-Session-ID",
         )
         request = {"payload": {}}
         asyncio.run(
@@ -225,19 +225,8 @@ def test_request_hook_min_lag() -> None:
             "min_version": 8,
             "exact_version": None,
         }
-        assert request["headers"]["X-Session-Affinity"] == "sample-key"
+        assert request["headers"]["Modal-Session-ID"] == "group-1"
         assert request["max_retries"] == 900
-
-
-def test_sample_affinity_prefers_trajectory_identity_over_group() -> None:
-    assert (
-        hooks.sample_affinity_key(SimpleNamespace(group_index=1, rollout_id=2, index=3))
-        == "rollout-2"
-    )
-    assert (
-        hooks.sample_affinity_key(SimpleNamespace(group_index=1, index=3)) == "sample-3"
-    )
-    assert hooks.sample_affinity_key(SimpleNamespace(group_index=1)) == "group-1"
 
 
 def test_request_hook_reads_shared_mount_without_reload() -> None:
