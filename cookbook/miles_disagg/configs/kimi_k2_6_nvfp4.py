@@ -74,7 +74,7 @@ modal = ModalConfig(
 
 class _Miles(MilesConfig):
     # Arch comes from the model script (shared with Kimi-K2-Thinking; K2.6 matches).
-    miles_model_script = "scripts/models/kimi-k2-thinking.sh"
+    megatron_model_type = "kimi-k2-thinking"
 
     hf_checkpoint = str(ROLLOUT_CHECKPOINT_PATH)
     ref_load = str(TORCH_DIST_CHECKPOINT_PATH)
@@ -103,7 +103,7 @@ class _Miles(MilesConfig):
         # 1200x1s = 20 min, outlasts a ~16 min cold-load.
         "rollout_request_retry_attempts": 1200,
         "rollout_request_retry_sleep": 1.0,
-        "rollout_session_affinity_header": "Modal-Session-ID",
+        "rollout_session_affinity_header": "X-Session-Affinity",
         # finite read timeout, else a request to a scaled-down container hangs forever.
         "rollout_request_timeout_secs": 300,
     }

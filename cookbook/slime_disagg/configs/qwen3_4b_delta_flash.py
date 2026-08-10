@@ -57,8 +57,8 @@ class _Slime(SlimeConfig):
     rollout_request_weight_version_lag = 0
     rollout_request_retry_attempts = 240
     rollout_request_retry_sleep = 1.0
-    # session affinity so GRPO siblings co-locate on one Flash replica.
-    rollout_session_affinity_header = "Modal-Session-ID"
+    # Keep each trajectory on one Flash replica across its requests.
+    rollout_session_affinity_header = "X-Session-Affinity"
 
     # disk-delta publish-only: slime writes weight_v{N}/ + `latest`; the hook commits and wakes the pool.
     update_weight_mode = "delta"

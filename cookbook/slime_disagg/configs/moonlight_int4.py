@@ -65,7 +65,7 @@ class _Slime(SlimeConfig):
     rollout_request_weight_version_lag = 1
     rollout_request_retry_attempts = 240
     rollout_request_retry_sleep = 1.0
-    rollout_session_affinity_header = "Modal-Session-ID"
+    rollout_session_affinity_header = "X-Session-Affinity"
 
     async_mode = True
     update_weights_interval = 1

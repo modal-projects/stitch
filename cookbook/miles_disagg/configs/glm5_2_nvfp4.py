@@ -9,9 +9,6 @@ from cookbook.miles_disagg.swebench_pro import prepare_swebench_pro
 
 APP_NAME = "stitch-glm5-2-nvfp4"
 EXPERIMENT_VOLUME_NAME = "stitch-miles-glm5-2-nvfp4"
-# This experiment layers Stitch integration onto Miles' fully-async SWE runtime.
-# Other cookbook experiments keep the standard Miles pin in trainer_image.py.
-MILES_REPO_REF = "b1020b5961657ef1bb8c9f56bda49bc12899fa57"
 LOCAL_CHECKPOINT_PATH = None
 TRAINER_EXTRA_PIP_PACKAGES = (
     "harbor[modal,huggingface]==0.20.0",
@@ -193,7 +190,7 @@ modal = ModalConfig(
 
 
 class _Miles(MilesConfig):
-    miles_model_script = "scripts/models/glm5.2-744B-A40B.sh"
+    megatron_model_type = "glm5.2-744B-A40B"
     async_mode = True
 
     hf_checkpoint = str(ROLLOUT_CHECKPOINT_PATH)
@@ -225,7 +222,7 @@ class _Miles(MilesConfig):
         "rollout_request_weight_version_lag": 1,
         "rollout_request_retry_attempts": 1200,
         "rollout_request_retry_sleep": 1.0,
-        "rollout_session_affinity_header": "Modal-Session-ID",
+        "rollout_session_affinity_header": "X-Session-Affinity",
         "rollout_request_timeout_secs": 300,
     }
 
@@ -284,7 +281,7 @@ class _Miles(MilesConfig):
     balance_data = True
 
     fully_async = True
-    rollout_sample_completion_backfill = True
+    rollout_submission_granularity = "sample"
     custom_rollout_log_function_path = "modal_swe_metrics.log_rollout_data"
     custom_generate_function_path = (
         "miles.rollout.generate_hub.agentic_tool_call.generate"
@@ -292,10 +289,11 @@ class _Miles(MilesConfig):
     custom_agent_function_path = "modal_swe_agent_function.run"
     custom_rm_path = "modal_swe_agent_function.reward_func"
     tito_model = "glm47"
-    use_session_server = True
+    use_session_server = "v2"
+    session_sample_picker_path = "modal_swe_agent_function.pick_latest_leaf"
+    session_sample_postprocessor_path = "modal_swe_agent_function.postprocess_samples"
     session_server_port = [30000, 30064]
     session_server_startup_timeout_seconds = 180
-    tito_session_mismatch_sample_rate = 0.0625
 
     num_rollout = 500
     save_interval = 10
@@ -309,6 +307,8 @@ class _Miles(MilesConfig):
     use_dynamic_global_batch_size = True
     max_weight_staleness = 6
     async_max_concurrent_samples = ROLLOUT_CONCURRENT_SAMPLES
+    async_data_buffer_capacity_factor = 3.0
+    async_unused_samples_handler = "drop"
     eval_interval = None
 
     use_rollout_routing_replay = True

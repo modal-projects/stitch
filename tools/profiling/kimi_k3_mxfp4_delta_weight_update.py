@@ -1,13 +1,14 @@
 """Download Kimi K3 and validate one complete MXFP4 delta update on Modal.
 
-Disk destination (the Kimi K3 config's declared update mode):
+Disk destination:
 
-    MODAL_FUNCTION_RUNTIME=runc uv run --extra modal modal run -d \
+    uv run --extra modal modal run -d \
       tools/profiling/kimi_k3_mxfp4_delta_weight_update.py
 
-CPU destination with the canonical checkpoint on local storage:
+CPU destination with the canonical checkpoint on local storage (the recipe's
+declared update mode):
 
-    MODAL_FUNCTION_RUNTIME=runc uv run --extra modal modal run -d \
+    uv run --extra modal modal run -d \
       tools/profiling/kimi_k3_mxfp4_delta_weight_update.py \
       --update-mode cpu --canonical-storage disk
 
@@ -19,8 +20,6 @@ disk destination instead of rank-ready CPU staging.
 
 from __future__ import annotations
 
-import json
-import shutil
 from pathlib import Path
 
 import modal
@@ -30,10 +29,20 @@ from cookbook.miles_disagg.configs import kimi_k3_mxfp4 as model
 from tools.profiling._delta_weight_update import (
     WeightUpdateSpec,
     modal_runtime_label,
+    parse_canonical_storage,
+    parse_update_destination,
     parse_update_mode,
     run_delta_weight_update,
 )
-from tools.profiling._synthetic_delta import write_full_coverage_delta
+from tools.profiling._hf_checkpoint import (
+    download_snapshot,
+    materialize_checkpoint_view,
+)
+from tools.profiling._synthetic_delta import (
+    SyntheticDeltaSpec,
+    prepare_standard_delta,
+    synthetic_delta_profile_id,
+)
 
 APP_NAME = "profile-kimi-k3-mxfp4-delta-weight-update"
 EXPERIMENT = "kimi_k3_mxfp4"
@@ -43,12 +52,19 @@ HF_SNAPSHOT_DIR = (
     f"{model.ROLLOUT_SOURCE_REVISION}"
 )
 DELTA_MOUNT = "/synthetic-delta"
-DELTA_ID = f"kimi-k3/{model.ROLLOUT_SOURCE_REVISION}/full-coverage-v3"
+DELTA_SPEC = SyntheticDeltaSpec(
+    checkpoint_format="mxfp4",
+    quantized_value_density=0.003,
+    high_precision_value_density=0.01,
+    # Text-only RL leaves the vision encoder and projector fixed.
+    immutable_prefixes=("vision_tower.", "mm_projector."),
+)
+DELTA_ID = (
+    f"kimi-k3/{model.ROLLOUT_SOURCE_REVISION}/{synthetic_delta_profile_id(DELTA_SPEC)}"
+)
 DELTA_SOURCE_DIR = f"{DELTA_MOUNT}/{DELTA_ID}"
 BASE_CHECKPOINT_DIR = "/local-checkpoint/kimi-k3-mxfp4/base"
 LOCAL_TARGET_CHECKPOINT_DIR = "/local-checkpoint/kimi-k3-mxfp4/target"
-# CPU-mode-only overlay: the config is a clean disk config, so the profiler
-# injects the cpu-weight-cache args when profiling the cpu destination.
 CPU_CACHE_GROUP_GB = "16"
 CANONICAL_CHECKPOINT_DIR = "/local-checkpoint/kimi-k3-mxfp4/canonical"
 SGLANG_CACHE_PATH = "/root/.cache/sglang"
@@ -95,7 +111,6 @@ serving_image = build_serving_image(
     hf_cache_path=HF_CACHE_PATH,
     experiment=EXPERIMENT,
     extra_env=getattr(model, "SGLANG_SERVER_ENV", None),
-    runtime=model.SGLANG_RUNTIME,
 ).add_local_dir(
     str(Path(__file__).resolve().parents[1]),
     remote_path="/root/tools",
@@ -112,38 +127,12 @@ serving_image = build_serving_image(
     timeout=6 * 60 * 60,
 )
 def download_model() -> str:
-    from huggingface_hub import HfApi, snapshot_download
-
-    files = HfApi().list_repo_files(
-        repo_id=model.ROLLOUT_SOURCE_MODEL,
-        revision=model.ROLLOUT_SOURCE_REVISION,
+    return download_snapshot(
+        model.ROLLOUT_SOURCE_MODEL,
+        model.ROLLOUT_SOURCE_REVISION,
+        HF_CACHE_PATH,
+        commit=hf_cache_volume.commit,
     )
-    weights = sorted(path for path in files if path.endswith(".safetensors"))
-    metadata = sorted(set(files) - set(weights))
-    batches = [metadata]
-    batches.extend(weights[offset : offset + 4] for offset in range(0, len(weights), 4))
-    for index, batch in enumerate(batches, start=1):
-        snapshot_download(
-            repo_id=model.ROLLOUT_SOURCE_MODEL,
-            revision=model.ROLLOUT_SOURCE_REVISION,
-            cache_dir=HF_CACHE_PATH,
-            allow_patterns=batch,
-            max_workers=4,
-        )
-        hf_cache_volume.commit()
-        print(f"Committed checkpoint download batch {index}/{len(batches)}")
-
-    path = snapshot_download(
-        repo_id=model.ROLLOUT_SOURCE_MODEL,
-        revision=model.ROLLOUT_SOURCE_REVISION,
-        cache_dir=HF_CACHE_PATH,
-        local_files_only=True,
-    )
-    print(
-        f"Downloaded {model.ROLLOUT_SOURCE_MODEL}"
-        f"@{model.ROLLOUT_SOURCE_REVISION} to {path}"
-    )
-    return path
 
 
 @app.function(
@@ -157,43 +146,12 @@ def download_model() -> str:
     timeout=6 * 60 * 60,
 )
 def prepare_delta() -> dict:
-    metadata_path = Path(DELTA_SOURCE_DIR) / "controlled_delta.json"
-    index_path = (
-        Path(DELTA_SOURCE_DIR) / "weight_v000001" / "model.safetensors.index.json"
-    )
-    if metadata_path.is_file() and index_path.is_file():
-        result = json.loads(metadata_path.read_text())
-        print(f"Reusing synthetic delta at {DELTA_SOURCE_DIR}")
-        return result
-
-    shutil.rmtree(DELTA_SOURCE_DIR, ignore_errors=True)
-    Path(DELTA_SOURCE_DIR).mkdir(parents=True)
-    result = write_full_coverage_delta(
+    return prepare_standard_delta(
         HF_SNAPSHOT_DIR,
         DELTA_SOURCE_DIR,
+        spec=DELTA_SPEC,
+        commit=delta_volume.commit,
     )
-    metadata_path.write_text(json.dumps(result, sort_keys=True))
-    delta_volume.commit()
-    print(f"Committed synthetic delta at {DELTA_SOURCE_DIR}")
-    return result
-
-
-def _materialize_checkpoint_view() -> None:
-    """Give trusted remote code real sibling files without copying model weights."""
-
-    source = Path(HF_SNAPSHOT_DIR)
-    target = Path(BASE_CHECKPOINT_DIR)
-    shutil.rmtree(target, ignore_errors=True)
-    target.mkdir(parents=True)
-    for path in source.rglob("*"):
-        destination = target / path.relative_to(source)
-        if path.is_dir():
-            destination.mkdir(parents=True, exist_ok=True)
-        elif path.suffix == ".safetensors":
-            destination.symlink_to(path.resolve())
-        else:
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(path, destination, follow_symlinks=True)
 
 
 @app.function(
@@ -215,31 +173,22 @@ def benchmark(
     runtime: str,
     sample_id: str,
 ) -> dict:
-    _materialize_checkpoint_view()
+    materialize_checkpoint_view(HF_SNAPSHOT_DIR, BASE_CHECKPOINT_DIR)
     server_args = dict(model.SGLANG_SERVER_ARGS)
-    if update_mode == "cpu":
-        server_args["--enable-cpu-weight-cache"] = ""
-        server_args["--cpu-weight-cache-max-compile-group-gb"] = CPU_CACHE_GROUP_GB
-        storage = canonical_storage if canonical_storage is not None else "disk"
-        if storage == "disk":
-            server_args["--cpu-weight-cache-canonical-checkpoint-dir"] = (
-                CANONICAL_CHECKPOINT_DIR
-            )
-        elif storage != "memory":
-            raise ValueError("canonical_storage must be 'memory' or 'disk'")
-    elif canonical_storage is not None:
-        raise ValueError("--canonical-storage applies only with --update-mode cpu")
+    server_args["--cpu-weight-cache-max-compile-group-gb"] = CPU_CACHE_GROUP_GB
     return run_delta_weight_update(
         WeightUpdateSpec(
             model_name="Kimi K3 MXFP4",
             base_checkpoint_dir=BASE_CHECKPOINT_DIR,
             local_target_checkpoint_dir=LOCAL_TARGET_CHECKPOINT_DIR,
+            local_canonical_checkpoint_dir=CANONICAL_CHECKPOINT_DIR,
             server_args=server_args,
             tp_size=model.ROLLOUT_NUM_GPUS_PER_ENGINE,
         ),
         source_dir=DELTA_SOURCE_DIR,
         target_version=1,
         update_mode=parse_update_mode(update_mode),
+        canonical_storage=parse_canonical_storage(canonical_storage),
         runtime=runtime,
         sample_id=sample_id,
     )
@@ -250,15 +199,18 @@ def main(
     update_mode: str = "disk",
     canonical_storage: str | None = None,
     sample_id: str = "1",
+    skip_preparation: bool = False,
 ) -> None:
-    parsed_mode = parse_update_mode(update_mode)
-    if parsed_mode == "disk" and canonical_storage is not None:
-        raise ValueError("--canonical-storage applies only with --update-mode cpu")
-    download_model.remote()
-    prepare_delta.remote()
+    parsed_mode, parsed_storage = parse_update_destination(
+        update_mode,
+        canonical_storage,
+    )
+    if not skip_preparation:
+        download_model.remote()
+        prepare_delta.remote()
     benchmark.remote(
         parsed_mode,
-        canonical_storage,
+        parsed_storage,
         modal_runtime_label(),
         sample_id,
     )
