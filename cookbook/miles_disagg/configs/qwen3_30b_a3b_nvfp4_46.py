@@ -130,7 +130,7 @@ modal = ModalConfig(
 
 
 class _Miles(MilesConfig):
-    miles_model_script = "scripts/models/qwen3-30B-A3B.sh"
+    megatron_model_type = "qwen3-30B-A3B"
 
     # Bridge mode: ref_load is the bf16 HF masters directly (no torch_dist prep).
     hf_checkpoint = str(ROLLOUT_CHECKPOINT_PATH)

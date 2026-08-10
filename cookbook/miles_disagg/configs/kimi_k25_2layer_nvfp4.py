@@ -59,7 +59,7 @@ modal = ModalConfig(
 
 
 class _Miles(MilesConfig):
-    miles_model_script = "scripts/models/kimi-k25_2layer.sh"
+    megatron_model_type = "kimi-k25_2layer"
 
     hf_checkpoint = str(ROLLOUT_CHECKPOINT_PATH)
     ref_load = str(TORCH_DIST_CHECKPOINT_PATH)

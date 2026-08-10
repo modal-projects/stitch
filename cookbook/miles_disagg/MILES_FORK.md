@@ -1,60 +1,49 @@
-# Miles forks
+# Miles fork
 
-Stitch’s Miles recipes use a dated trainer image and an immutable Miles commit.
-[`trainer_image.py`](trainer_image.py) defines the default:
+Stitch’s Miles recipes install an immutable Miles revision over a dated trainer
+image. [`trainer_image.py`](trainer_image.py) defines the shared default:
 
 ```python
 MILES_IMAGE_TAG = "radixark/miles:dev-202607290235"
 MILES_REPO_URL = "https://github.com/modal-projects/miles.git"
-MILES_REPO_REF = "1eb7520018446cb94b7406715f66dff1a271b53b"
+MILES_REPO_REF = "f83a68b296ca6f42d04e77e2b42c070c1ab02c70"
 ```
 
-An experiment config may override `MILES_REPO_REF` without changing other
-recipes. GLM-5.2 does this because it runs on Miles’ fully-async SWE branch.
+The pin is `modal-projects/miles:stitch-miles-fully-async-swe`. It contains a
+Miles fully-async stack based on upstream main at `6bc45ad39`, followed by the
+Stitch external-fleet integration.
 
-## Standard weight-sync branch
+## Miles fully-async stack
 
-The branch `stitch-weight-sync-v0516` is upstream `radixark/miles` main at
-`52403d0e3` plus six commits:
-
-| Commit | Responsibility |
-| --- | --- |
-| `7995ec27c` | Route generation through one opaque fleet endpoint, publish versions without per-engine handles, gate individual requests through a generic hook, and use a finite rollout read timeout. |
-| `4572f97a6` | Emit canonical quantized checkpoint layouts for disk deltas, support GLM-Air channel FP8 and plain-language-model Kimi names, and preserve SGLang runtime layouts for P2P/broadcast. |
-| `cf56d32b0` | Encode zero-dimensional quantization scalars by flattening before their byte view. |
-| `748f1724a` | Use SGLang’s staged checkpoint API for Miles-managed disk-delta engines. |
-| `d814b87c3` | Replace the unused delta progress bar with an explicit baseline-snapshot log. |
-| `1eb752001` | Honor ModelOpt glob exclusions when exporting NVFP4 weights. |
-
-## GLM-5.2 fully-async SWE branch
-
-The GLM-5.2 and GLM-4.7 fully-async SWE recipes pin
-`stitch-miles-fully-async-swe` at `b1020b596`. The Stitch branch is stacked on
-`modal/feat/modal-swe-fully-async` at `d0c11a412`.
-
-The fully-async branch owns behavior that is useful without Stitch:
+These commits are useful independently of Stitch:
 
 | Commit | Responsibility |
 | --- | --- |
-| `de10d68d1` | Format the fully-async rollout files. |
-| `ffcad9557` | Match GLM router tensors to the canonical checkpoint dtypes. |
-| `c0661aa6a` | Validate canonical disk-delta layouts and encode scalar tensors safely. |
-| `8857d8114` | Shard routing replay by trainer topology with a lossless compact wire dtype. |
-| `8e140dbd9` | Apply the configured log-prob token budget when routing replay is enabled. |
-| `791ef9593` | Bound Modal agent submissions before they enter Ray actor mailboxes. |
-| `d0c11a412` | Format the added fully-async code. |
+| `ad0411c85` | Assemble additional routing-replay rows during in-place updates. |
+| `35c78a78b` | Preserve in-flight requests while changing their weight version. |
+| `6d638ba8a` | Make distributed service startup and teardown deterministic. |
+| `9be219f58` | Report generation and queue staleness separately. |
+| `63da214e1` | Distinguish explicit checkpoint resume from a fresh run. |
+| `bd0216740` | Load optional P2P weight-sync dependencies lazily. |
+| `717802e21` | Validate canonical disk-delta tensor layouts. |
+| `13dd38252` | Report trainer-rollout policy drift accurately. |
+| `a658a505c` | Make session endpoint affinity and lifecycle explicit. |
+| `6dbc5ab45` | Add the Modal Sandbox v2 transport for SWE rollouts. |
+| `080e58555` | Honor rollout-only LoRA configuration. |
+| `4e98074fa` | Add and validate the mini-SWE rollout adapter. |
+| `113271f5e` | Add CISPO policy optimization. |
+| `d688df471` | Replay exact truncated-sampling support during training. |
+| `53c402487` | Compact routing-replay expert IDs for transport. |
+| `719e2844d` | Suppress per-request session access logs. |
+| `45a2c5b25` | Reject aborted generations at the session protocol boundary. |
 
-The Stitch branch adds only the external-fleet integration:
+## Stitch integration
 
 | Commit | Responsibility |
 | --- | --- |
-| `2fa28cde4` | Route session rollouts through an external fleet with request gating, version constraints, and finite timeouts. |
-| `7bfb4a69a` | Publish disk deltas without Miles-managed rollout-engine handles. |
-| `23b262bca` | Overlap the external fleet's initial delta snapshot with the first rollout. |
-| `b1020b596` | Sort imports in the external-fleet adapter. |
-
-This branch is additive and only backs fully-async SWE experiments. It does not
-replace the standard recipe pin.
+| `69244e487` | Route fully-async generation through an external fleet with version constraints and finite timeouts. |
+| `b54a23588` | Publish disk deltas without Miles-managed rollout-engine handles. |
+| `f83a68b29` | Overlap external weight updates with active rollout. |
 
 The dated image supplies Megatron-LM, TransformerEngine, CUDA, and other
 compiled dependencies. Miles is installed over it with `--no-deps`, so the
@@ -80,16 +69,15 @@ encoding is dtype- and quantization-agnostic; model-specific converters are
 responsible only for producing the same tensor names, dtypes, shapes, and byte
 layouts as the base checkpoint.
 
-## Re-porting
+## Updating the pin
 
-When updating a Miles pin:
-
-1. start from the intended upstream branch;
-2. reapply only the responsibilities still missing upstream;
-3. keep canonical checkpoint layout changes scoped to `disk-delta`;
-4. use a dated Miles image whose Megatron and TransformerEngine match that
-   upstream revision;
-5. run Miles pre-commit plus the focused GPU tests for export, endpoint routing,
-   and staged engine requests;
-6. run a multi-step rollout test with a replica joining mid-run; and
-7. update the immutable repository SHA and this file.
+1. Start from the intended upstream Miles revision.
+2. Reapply only behavior still missing upstream, keeping general Miles changes
+   below the Stitch-specific integration commits.
+3. Keep canonical checkpoint layout changes scoped to `disk-delta`.
+4. Use a dated image whose Megatron-LM and TransformerEngine match the target
+   Miles revision.
+5. Run Miles pre-commit and the focused tests for export, endpoint routing, and
+   staged engine requests.
+6. Run a multi-step rollout test with a replica joining mid-run.
+7. Update the immutable SHA and this file.
