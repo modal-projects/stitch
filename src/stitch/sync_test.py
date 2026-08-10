@@ -571,14 +571,50 @@ def test_boot_weights_serve_before_update_destination_is_ready() -> None:
             engine=engine,
             reconcile_interval=0.0,
         )
-        await r.startup()
+        startup = asyncio.create_task(r.startup())
+        while not r.ready:
+            await asyncio.sleep(0)
         assert r.ready
         assert r.applied == VersionRef("r1", 0)
         assert "pause" not in engine.calls
         assert not r._destination_ready
         release.set()
-        await r._destination_init_task
+        await startup
         assert r._destination_ready
+        await r.shutdown()
+
+    _run(go())
+
+
+def test_store_refresh_waits_for_update_destination() -> None:
+    async def go() -> None:
+        engine = FakeEngine()
+        release = asyncio.Event()
+
+        async def slow_initialize() -> None:
+            await release.wait()
+            engine.calls.append("initialize_update_destination")
+
+        engine.initialize_update_destination = slow_initialize  # type: ignore[method-assign]
+
+        class GuardedStore(FakeStore):
+            def refresh(self) -> None:
+                assert release.is_set(), (
+                    "store refreshed while checkpoint files were open"
+                )
+                super().refresh()
+
+        store = GuardedStore(VersionRef("r1", 0))
+        r = _make_reconciler(store=store, engine=engine, reconcile_interval=0.0)
+        startup = asyncio.create_task(r.startup())
+        while not r.ready:
+            await asyncio.sleep(0)
+        assert r.ready
+        assert store.refreshed == 0
+
+        release.set()
+        await startup
+        assert store.refreshed > 0
         await r.shutdown()
 
     _run(go())

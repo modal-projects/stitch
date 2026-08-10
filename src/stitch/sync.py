@@ -207,6 +207,13 @@ class Reconciler(AdmissionGate):
         self._destination_init_task = asyncio.create_task(
             self._initialize_update_destination()
         )
+        # Inspect the store's initially visible pointer without refreshing it:
+        # destination setup may still have boot-checkpoint files open. A replica
+        # already at that view can serve immediately while setup continues; a
+        # mid-run joiner stays out of rotation until catch-up.
+        pointer = await asyncio.to_thread(self.store.read_pointer)
+        if not self._behind(pointer):
+            self.ready = True
         await self.reconcile()
         if self.reconcile_interval > 0:
             self._periodic_task = asyncio.create_task(self._periodic_reconcile())
@@ -359,6 +366,20 @@ class Reconciler(AdmissionGate):
                         )
 
     async def _reconcile_once_measured(self, m: dict[str, Any]) -> bool:
+        # Destination initialization reads the immutable boot checkpoint. Let it
+        # release those files before refreshing a shared backing store.
+        if self._destination_init_task is not None:
+            if self._destination_init_task.done():
+                await self._destination_init_task
+            else:
+                with _timed(m, "destination_init_wait_s"):
+                    await self._destination_init_task
+        if self._destination_init_error is not None:
+            raise RuntimeError(
+                "weight update destination initialization failed: "
+                f"{self._destination_init_error}"
+            )
+
         await asyncio.to_thread(self.store.refresh)
         pointer = await asyncio.to_thread(self.store.read_pointer)
         if pointer is None:
@@ -383,18 +404,6 @@ class Reconciler(AdmissionGate):
         has_weight_changes = await asyncio.to_thread(
             self._range_has_weight_changes, target
         )
-
-        if self._destination_init_task is not None:
-            if self._destination_init_task.done():
-                await self._destination_init_task
-            else:
-                with _timed(m, "destination_init_wait_s"):
-                    await self._destination_init_task
-        if self._destination_init_error is not None:
-            raise RuntimeError(
-                "weight update destination initialization failed: "
-                f"{self._destination_init_error}"
-            )
 
         def on_applied() -> None:
             self.applied = pointer
