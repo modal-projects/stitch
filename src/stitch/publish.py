@@ -60,24 +60,32 @@ def publish_version(
     return manifest.ref
 
 
-def claim_run(store: Store, pool: Pool | None, run_id: str) -> None:
-    """Start a run at base before its first publish: write the base pointer and wake the
-    pool, so every replica (cold or warm on a finished run) resets to base up front. A
-    reused ``run_id`` above base is a rewind, while retrying an interrupted base claim is
+def claim_run(
+    store: Store,
+    pool: Pool | None,
+    run_id: str,
+    *,
+    boot_version: int = 0,
+) -> None:
+    """Start a run at its boot checkpoint before its first publish: write the pointer and
+    wake the pool, so replicas and the trainer agree on the first served version. A reused
+    ``run_id`` above the boot checkpoint is a rewind, while retrying the same claim is
     idempotent."""
-    base = VersionRef(run_id, 0)
+    if boot_version < 0:
+        raise ValueError("boot_version must be non-negative")
+    boot = VersionRef(run_id, boot_version)
     current = store.read_pointer()
-    if current == base:
+    if current == boot:
         # Re-write the same pointer so a retry also retries its durability
         # boundary after an interrupted/ambiguous backend write.
-        store.claim(run_id)
-        _wake(pool, base)
-        logger.info("run %s already claimed at base", run_id)
+        store.claim(boot)
+        _wake(pool, boot)
+        logger.info("run %s already claimed at v%d", run_id, boot_version)
         return
-    decide_pointer_move(current, base)  # rewind guard (a reused run_id above base)
-    store.claim(run_id)
-    _wake(pool, base)
-    logger.info("claimed run %s at base", run_id)
+    decide_pointer_move(current, boot)  # rewind guard (a reused run_id above boot)
+    store.claim(boot)
+    _wake(pool, boot)
+    logger.info("claimed run %s at v%d", run_id, boot_version)
 
 
 def _wake(pool: Pool | None, ref: VersionRef) -> None:

@@ -21,6 +21,7 @@ def serve_startup(
     replica: Any,
     *,
     model_name: str,
+    boot_version: int = 0,
     sglang_args: dict,
     tp: int,
     concurrency: int,
@@ -34,7 +35,7 @@ def serve_startup(
     startup_timeout: int,
 ) -> None:
     """Start sglang + the versioned-proxy sidecar on a Server replica (from ``@modal.enter``).
-    SGLang starts directly from the immutable base. The sidecar initializes the
+    SGLang starts directly from the immutable boot checkpoint. The sidecar initializes the
     selected update destination in the background after serving is available."""
     from autoinference_utils.endpoint import (
         SGLangEndpoint,
@@ -85,6 +86,7 @@ def serve_startup(
         disk_load_format=str(sglang_args.get("--load-format", "auto")),
         volume_name=volume_name,
         run_id=run_id,
+        boot_version=boot_version,
         commit_mode=commit_mode,
         flush_cache_on_commit=flush_cache_on_commit,
     )
