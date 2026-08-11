@@ -65,8 +65,9 @@ def serve_startup(
         log_requests_level=-1,
     )
     replica.endpoint.start()
+    served_model_name = str(sglang_args.get("--served-model-name", model_name))
     warmup = {
-        "model": model_name,
+        "model": served_model_name,
         "messages": [{"role": "user", "content": "Reply with exactly OK."}],
         "max_tokens": 8,
         "temperature": 0,
@@ -123,7 +124,10 @@ def serve_startup(
         on_failure=lambda: modal.experimental.stop_fetching_inputs(),
         max_consecutive_failures=12,  # ~1 min of sustained idle-state failures
     )
-    print(f"Rollout server ready: model={model_name}, target_inputs={concurrency}")
+    print(
+        f"Rollout server ready: model={served_model_name}, "
+        f"boot_version={boot_version}, target_inputs={concurrency}"
+    )
 
 
 def serve_stop(replica: Any) -> None:

@@ -40,6 +40,16 @@ class ResumePoint:
         )
 
 
+def saved_checkpoint_version(rollout_id: int, *, resumed: bool) -> int:
+    """Return the Stitch version stored by a Miles ``save_hf`` checkpoint.
+
+    A fresh trainer starts rollout 0 from Stitch v0, so save N precedes the
+    publication of vN+1. A resumed trainer starts rollout N+1 from Stitch vN,
+    so subsequent save IDs and Stitch versions are equal.
+    """
+    return rollout_id if resumed else rollout_id + 1
+
+
 def validate_auto_resume_config(cfg: Any) -> None:
     """Require an explicit, resumable checkpoint policy before automatic resume."""
     validate_resume_config(cfg)

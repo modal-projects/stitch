@@ -25,6 +25,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -49,9 +50,11 @@ from cookbook.miles_disagg.config import YAML_CONFIG_FIELDS, MilesConfig
 from cookbook.miles_disagg.resume import (
     RESUME_POINT_ENV,
     ResumePoint,
+    saved_checkpoint_version,
 )
 from cookbook.miles_disagg.trainer_image import MEGATRON_PATH, MILES_ROOT
 from stitch.pools.modal_flash_lb_temp import ModalFlashLBPool
+from stitch.types import VersionRef
 
 EXPERIMENT = os.environ[
     "EXPERIMENT_CONFIG"
@@ -74,11 +77,6 @@ def _resume_point() -> ResumePoint | None:
 def _rollout_boot_checkpoint() -> str:
     point = _resume_point()
     return point.rollout_checkpoint if point is not None else miles_cfg.hf_checkpoint
-
-
-def _rollout_boot_version() -> int:
-    point = _resume_point()
-    return point.version if point is not None else 0
 
 
 # Per-run id, minted fresh by cookbook.miles_disagg.launch. The same identity
@@ -220,10 +218,66 @@ class Server:
     def startup(self) -> None:
         STORE_DEPLOYMENT.bootstrap_credentials()
         store_config = STORE_DEPLOYMENT.hook_config(APP_NAME)
+        resume_point = _resume_point()
+        model_name = (
+            resume_point.rollout_checkpoint
+            if resume_point is not None
+            else miles_cfg.hf_checkpoint
+        )
+        boot_version = resume_point.version if resume_point is not None else 0
+        save_hf = getattr(miles_cfg, "save_hf", None)
+        # TODO: support larger update intervals once saved checkpoints expose the
+        # exact published weight version instead of only Miles' rollout ID.
+        update_every_step = getattr(miles_cfg, "update_weights_interval", 1) == 1
+        if (
+            STORE_DEPLOYMENT.backend == storage.MODAL_VOLUME
+            and save_hf
+            and getattr(miles_cfg, "save_interval", None) is not None
+            and update_every_step
+        ):
+            relative_path = Path(save_hf.format(rollout_id=0))
+            if relative_path.is_absolute() or ".." in relative_path.parts:
+                raise ValueError("save_hf must be a run-relative path")
+
+            # Read complete HF exports and the published pointer from one Volume
+            # snapshot. A save ahead of latest is not eligible yet.
+            run_volume.reload()
+            store = storage.create_store(
+                store_config["stitch_store_backend"],
+                local_root=RUN_DIR,
+                run_id=RUN_ID,
+                volume_name=exp.EXPERIMENT_VOLUME_NAME,
+            )
+            latest = store.read_pointer()
+            if latest is not None:
+                if latest.run_id != RUN_ID:
+                    raise ValueError(
+                        f"latest belongs to run {latest.run_id!r}, not {RUN_ID!r}"
+                    )
+                checkpoints = []
+                for marker in (RUN_DIR / relative_path.parent).glob("*/.complete"):
+                    try:
+                        saved_rollout_id = VersionRef.parse(marker.parent.name).version
+                    except ValueError:
+                        continue
+                    if marker.parent != RUN_DIR / save_hf.format(
+                        rollout_id=saved_rollout_id
+                    ):
+                        continue
+                    saved_version = saved_checkpoint_version(
+                        saved_rollout_id,
+                        resumed=resume_point is not None,
+                    )
+                    if boot_version <= saved_version <= latest.version:
+                        checkpoints.append((saved_version, marker.parent))
+                if checkpoints:
+                    saved_version, checkpoint = max(checkpoints)
+                    model_name = str(checkpoint)
+                    boot_version = saved_version
         server.serve_startup(
             self,
-            model_name=_rollout_boot_checkpoint(),
-            boot_version=_rollout_boot_version(),
+            model_name=model_name,
+            boot_version=boot_version,
             sglang_args=SGLANG_SERVER_ARGS,
             tp=miles_cfg.rollout_num_gpus_per_engine,
             concurrency=ROLLOUT_CONCURRENCY,
