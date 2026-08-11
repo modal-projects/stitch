@@ -9,7 +9,7 @@ from pathlib import Path
 from stitch.pools.base import Pool
 from stitch.publish import claim_run, constrain_request, publish_version
 from stitch.stores.base import Store
-from stitch.types import PointerRewind, VersionRef
+from stitch.types import PointerConflict, PointerRewind, VersionRef
 
 
 class FakeStore(Store):
@@ -109,6 +109,25 @@ def test_publish_rejects_missing_payload_before_pointer_moves() -> None:
             assert "missing model-00001.safetensors" in str(exc)
 
         assert store._pointer is None
+
+
+def test_publish_rejects_a_pointer_changed_during_upload() -> None:
+    class ConcurrentStore(FakeStore):
+        def publish(self, manifest, files_dir):
+            super().publish(manifest, files_dir)
+            self._pointer = VersionRef("r1", 8)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        store, pool = ConcurrentStore(VersionRef("r1", 0)), FakePool()
+
+        try:
+            publish_version(store, pool, _version_dir(tmp, version=1), run_id="r1")
+            raise AssertionError("expected PointerConflict")
+        except PointerConflict:
+            pass
+
+        assert store._pointer == VersionRef("r1", 8)
+        assert pool.woke == []
 
 
 def test_claim_run() -> None:

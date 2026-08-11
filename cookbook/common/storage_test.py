@@ -106,3 +106,12 @@ def test_create_store_selects_the_backend(tmp_path: Path) -> None:
     assert isinstance(s3, S3Store)
     assert s3.cache_dir == tmp_path / "cache"
     assert s3.run_id == "run-a"
+
+
+def test_s3_trainer_updates_are_node_local() -> None:
+    run_dir = Path("/stitch/run-a")
+
+    assert StoreDeployment(MODAL_VOLUME).updates_dir(run_dir) == run_dir / "updates"
+    assert StoreDeployment(S3, "stitch-s3").updates_dir(run_dir) == Path(
+        "/tmp/stitch-publications/run-a/updates"
+    )

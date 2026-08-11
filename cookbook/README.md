@@ -40,30 +40,11 @@ Preparation jobs use `huggingface-secret`. Recipes that enable W&B logging use
 
 ### 3. Choose a checkpoint store
 
-By default, runs publish updates through their experiment's Modal Volume. To
-make S3 the source of truth instead, create a Secret containing a run-root base
-and either standard AWS credentials or an assumable role:
-
-```bash
-uv run --extra modal modal secret create -e "$MODAL_ENVIRONMENT" stitch-s3 \
-  S3_ROOT=s3://your-bucket/stitch \
-  AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
-  AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
-  AWS_REGION="$AWS_REGION"
-```
-
-Then include these variables when launching or redeploying a run:
-
-```bash
-export STITCH_STORE_BACKEND=s3
-export STITCH_S3_SECRET_NAME=stitch-s3
-```
-
-Each run receives an isolated prefix below `S3_ROOT`. Trainers retain their
-Modal Volume as a multi-host staging area for checkpoint shards and logs, but
-`latest` and the version chain are published to S3; rollout replicas download
-from S3 into their ephemeral local cache. A Secret with `AWS_ROLE_ARN` can be
-used instead of static keys when the role trusts Modal's OIDC identity.
+Modal Volumes are the default checkpoint store. Select S3 when policy
+publications should live in object storage instead; the trainer and rollout
+protocol otherwise stays the same. See the [S3 store appendix](#s3-store-appendix)
+for cookbook setup, both authentication options, and integration with other
+trainers.
 
 ### 4. Prepare immutable inputs
 
@@ -246,14 +227,16 @@ in [`SGLANG_FORK.md`](common/SGLANG_FORK.md).
 
 ## Persistent storage
 
-All persistent storage uses Modal Volume v2:
+Prepared inputs, caches, logs, and trainer checkpoints use Modal Volume v2.
+Run publications use either the experiment Volume or S3, according to
+`STITCH_STORE_BACKEND`:
 
 | Volume | Mount | Contents |
 | --- | --- | --- |
 | `huggingface-cache` | `/root/.cache/huggingface` | Pinned source-model downloads |
 | `miles-checkpoints` or `slime-checkpoints` | `/checkpoints` | Immutable prepared model layouts |
 | `miles-data` or `slime-data` | `/data` | Pinned datasets |
-| `stitch-<framework>-<model>` | `/stitch` | Run-scoped publications, checkpoints, and logs |
+| `stitch-<framework>-<model>` | `/stitch` | Run-scoped checkpoints and logs; publications when using the Volume backend |
 | `sglang-cache` | `/root/.cache/sglang` | Compiled SGLang kernels |
 | Configured draft Volume | `/draft` | Optional external speculative draft |
 
@@ -330,3 +313,197 @@ uv run --extra modal modal run -d \
   --update-mode cpu \
   --canonical-storage disk
 ```
+
+## S3 store appendix
+
+### Use S3 with the cookbook
+
+The cookbook gives each run an isolated prefix below `S3_ROOT`. The AWS
+identity used by the trainer and rollout functions needs these permissions,
+scoped to that root:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::your-bucket",
+      "Condition": {
+        "StringLike": {"s3:prefix": ["stitch", "stitch/*"]}
+      }
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:PutObject"],
+      "Resource": "arn:aws:s3:::your-bucket/stitch/*"
+    }
+  ]
+}
+```
+
+Choose one of the following authentication methods. Both use a Modal Secret
+named `stitch-s3`; only its credential fields differ.
+
+#### Static AWS access keys
+
+Store the access key and S3 root together. Add `AWS_SESSION_TOKEN` when using
+temporary credentials.
+
+```bash
+uv run --extra modal modal secret create -e "$MODAL_ENVIRONMENT" stitch-s3 \
+  S3_ROOT=s3://your-bucket/stitch \
+  AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
+  AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
+  AWS_REGION="$AWS_REGION"
+```
+
+#### Modal OIDC
+
+OIDC exchanges each Function's short-lived Modal identity token for AWS
+credentials, so no AWS access key is stored in Modal. Register Modal's provider
+once in the AWS account:
+
+```bash
+aws iam create-open-id-connect-provider \
+  --url https://oidc.modal.com \
+  --client-id-list oidc.modal.com
+```
+
+Create an IAM role with the S3 policy above and a trust policy scoped to the
+Modal workspace and environment that run the cookbook:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Federated": "arn:aws:iam::<aws-account-id>:oidc-provider/oidc.modal.com"
+      },
+      "Action": "sts:AssumeRoleWithWebIdentity",
+      "Condition": {
+        "StringEquals": {"oidc.modal.com:aud": "oidc.modal.com"},
+        "StringLike": {
+          "oidc.modal.com:sub": "modal:workspace_id:<workspace-id>:environment_name:<environment-name>:*"
+        }
+      }
+    }
+  ]
+}
+```
+
+The workspace ID is available from `modal token info` or the Modal workspace
+settings. The subject can be narrowed further by app or function name. See
+Modal's [OIDC integration guide](https://modal.com/docs/guide/oidc-integration)
+for the identity claims and trust-policy options.
+
+Put the role and root in the Secret:
+
+```bash
+uv run --extra modal modal secret create -e "$MODAL_ENVIRONMENT" stitch-s3 \
+  S3_ROOT=s3://your-bucket/stitch \
+  AWS_ROLE_ARN=arn:aws:iam::<aws-account-id>:role/<role-name> \
+  AWS_REGION="$AWS_REGION"
+```
+
+The cookbook exposes Modal's injected identity token through boto3's standard
+web-identity credential chain. Do not copy `MODAL_IDENTITY_TOKEN` into the
+Secret.
+
+For either authentication method, select the backend before launching or
+redeploying a run:
+
+```bash
+export STITCH_STORE_BACKEND=s3
+export STITCH_S3_SECRET_NAME=stitch-s3
+```
+
+Trainers then write publications to node-local disk. One process per trainer
+host uploads its files directly to the final immutable
+`weight_vNNNNNN/` prefix, and rank 0 verifies the gathered receipts, index,
+sizes, and checksums before conditionally advancing `latest`. Partially
+uploaded versions remain invisible because replicas only follow `latest`.
+S3's [strong consistency](https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html#ConsistencyModel)
+and [conditional writes](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes.html)
+make the pointer the publication boundary; there is no shared publication
+staging Volume or S3 copy step.
+
+Rollout replicas download versions into their ephemeral local caches. The
+experiment Volume remains available for logs and trainer checkpoints.
+
+### Publish from a non-cookbook trainer
+
+`S3Store` does not depend on Modal, Miles, or Slime. Install the optional boto3
+dependency and let boto3 resolve credentials from environment variables, an
+AWS profile, web identity, or the compute environment's IAM role:
+
+```bash
+pip install 'stitch[s3]'
+```
+
+Each version directory must be named `weight_vNNNNNN` and contain
+`model.safetensors.index.json`. Its `metadata.version` must be `NNNNNN`, and
+its `weight_map` must name every checkpoint or delta shard. A single-host
+trainer can claim a new run and use the high-level publisher:
+
+```python
+from stitch.publish import claim_run, publish_version
+from stitch.stores.s3 import S3Store
+
+run_id = "run-2026-08-11"
+store = S3Store(
+    f"s3://my-bucket/stitch-runs/{run_id}",
+    cache_dir=f"/tmp/stitch/{run_id}",
+    run_id=run_id,
+)
+
+# Call once when establishing the run's base checkpoint.
+claim_run(store, None, run_id, boot_version=0)
+
+publish_version(
+    store,
+    None,
+    "/local/updates/weight_v000001",
+    run_id=run_id,
+)
+```
+
+`publish_version` uploads and verifies the complete directory, advances
+`latest` with an ETag precondition, and returns the published `VersionRef`.
+Passing `None` for the pool is sufficient when replicas poll the store; a
+custom `Pool` can be passed to provide an immediate wake-up hint.
+
+For a distributed trainer, snapshot `latest` before upload, have one leader per
+host upload only that host's local files, gather the receipts through the
+trainer's communicator, and let rank 0 commit the pointer last:
+
+```python
+from stitch.types import VersionRef, decide_pointer_move
+
+target = VersionRef(run_id, 1)
+
+if global_rank == 0:
+    expected = store.read_pointer()
+    decide_pointer_move(expected, target)
+else:
+    expected = None
+expected = broadcast_object(expected, src=0)  # your trainer's communicator
+
+receipt = None
+if is_host_leader:
+    receipt = store.upload_version_files(target, local_version_dir)
+receipts = gather_objects(receipt, dst=0)  # your trainer's communicator
+
+if global_rank == 0:
+    receipts = [receipt for receipt in receipts if receipt is not None]
+    store.verify_version(target, receipts)
+    store.compare_and_advance_pointer(expected, target)
+```
+
+All ranks should treat an upload, verification, or pointer conflict as a
+failed publication and synchronize before continuing. The version prefix is
+immutable: do not repair a failed publication by silently overwriting a
+version that consumers may already have observed.

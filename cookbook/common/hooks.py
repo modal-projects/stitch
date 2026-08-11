@@ -14,10 +14,10 @@ from pathlib import Path
 from typing import Any
 
 from stitch.pools.modal_flash import ModalFlashPool
-from stitch.publish import claim_run, constrain_request, publish_version
+from stitch.publish import claim_run, constrain_request, publish_version, wake_pool
 from stitch.stores.base import Store
-from stitch.stores.modal_volume import ModalVolumeStore
-from stitch.types import PointerRewind, VersionRef
+from stitch.stores.s3 import S3Store, UploadReceipt
+from stitch.types import VersionRef, decide_pointer_move
 
 from . import process, storage
 from .constants import MODAL_SESSION_ID_HEADER
@@ -39,49 +39,84 @@ def sample_affinity_key(sample: Any) -> str | None:
 
 # ── publish ────────────────────────────────────────────────────────────────────
 def commit_and_wake(args: Any, published_dir: str, rollout_engines: Any = None) -> None:
-    """Bridge the framework's disk-delta publish to the stitch store. The framework fires this
-    at each durability boundary: a version dir (``weight_vNNNNNN``, holding the HF index) and —
-    at baseline/pointer commit — the run dir. Every container commits its shared mount once;
-    after all commits succeed, rank 0 refreshes and validates the complete checkpoint before
-    advancing the pointer. Keying on the dir name (not on reading an index) keeps run-dir calls
-    a clean no-op, not a missing-file crash."""
+    """Publish one framework-written disk update and wake rollout replicas.
+
+    Volume trainers commit each host's shared mount before rank 0 publishes.
+    S3 trainers instead upload from node-local disk once per host, gather small
+    receipts, and let rank 0 verify the complete S3 version before advancing
+    ``latest``. The framework also invokes this hook for its run directory;
+    that is a Volume durability boundary and an S3 no-op.
+    """
     del rollout_engines
     store = _store(args)
-    staging_store = _staging_store(args)
     if not Path(published_dir).name.startswith("weight_v"):
-        # Baseline cleanup is performed by rank 0 only, so a normal mounted
-        # Volume commit is authoritative here even when S3 is the publication
-        # store: the Volume remains the framework's multi-host staging area.
-        staging_store.commit()
+        if not isinstance(store, S3Store):
+            store.commit()
         return
 
-    publication_state: tuple[bool, str | None] = (False, None)
+    target = VersionRef.parse(f"{_run_id(args)}/{Path(published_dir).name}")
+    checked = process.dist_rank() in (None, 0)
+    publication_state: tuple[bool, bool, VersionRef | None, str | None] = (
+        checked,
+        False,
+        None,
+        None,
+    )
     if process.dist_rank() in (None, 0):
         try:
-            target = VersionRef.parse(f"{_run_id(args)}/{Path(published_dir).name}")
             current = store.read_pointer()
             publication_state = (
+                True,
                 current is not None
                 and current.run_id == target.run_id
                 and current.version >= target.version,
+                current,
                 None,
             )
         except Exception:  # noqa: BLE001
-            publication_state = (False, f"rank 0:\n{traceback.format_exc()}")
+            publication_state = (
+                True,
+                False,
+                None,
+                f"rank 0:\n{traceback.format_exc()}",
+            )
     publication_states = process.dist_all_gather_object(publication_state)
-    errors = [error for _, error in publication_states if error is not None]
+    errors = [error for _, _, _, error in publication_states if error is not None]
     if errors:
         raise RuntimeError(
             "checkpoint publication state check failed:\n" + "\n".join(errors)
         )
-    if any(already_published for already_published, _ in publication_states):
+    rank_zero_states = [state for state in publication_states if state[0]]
+    if len(rank_zero_states) != 1:
+        raise RuntimeError(
+            "checkpoint publication state check did not identify exactly one rank 0"
+        )
+    _, already_published, expected_pointer, _ = rank_zero_states[0]
+    if already_published:
         logger.warning("%s is already published; leaving it immutable", published_dir)
         return
+    decide_pointer_move(expected_pointer, target)
+
+    if isinstance(store, S3Store):
+        _publish_s3_version(
+            store,
+            args,
+            target,
+            published_dir,
+            expected_pointer=expected_pointer,
+        )
+        return
+
+    _publish_mounted_version(store, args, published_dir)
+
+
+def _publish_mounted_version(store: Store, args: Any, published_dir: str) -> None:
+    """Commit every trainer host, then publish from rank 0's refreshed mount."""
 
     commit_error = None
     if process.dist_is_container_leader():
         try:
-            staging_store.commit()
+            store.commit()
         except Exception:  # noqa: BLE001
             commit_error = f"rank {process.dist_rank()}:\n{traceback.format_exc()}"
     _raise_distributed_failures("checkpoint commit", commit_error)
@@ -89,14 +124,50 @@ def commit_and_wake(args: Any, published_dir: str, rollout_engines: Any = None) 
     publish_error = None
     if process.dist_rank() in (None, 0):
         try:
-            staging_store.refresh()
+            store.refresh()
             publish_version(store, _pool(args), published_dir, run_id=_run_id(args))
-        except PointerRewind:
-            # A same-run republish (e.g. a retried step) — drop it rather than serve stale.
-            logger.warning(
-                "publish of %s would rewind latest; dropping",
-                published_dir,
-                exc_info=True,
+        except Exception:  # noqa: BLE001
+            publish_error = f"rank 0:\n{traceback.format_exc()}"
+    _raise_distributed_failures("checkpoint publication", publish_error)
+
+
+def _publish_s3_version(
+    store: S3Store,
+    args: Any,
+    target: VersionRef,
+    published_dir: str,
+    *,
+    expected_pointer: VersionRef | None,
+) -> None:
+    """Upload once per host, verify gathered receipts, and commit ``latest`` last."""
+    receipt: UploadReceipt | None = None
+    upload_error = None
+    if process.dist_is_container_leader():
+        try:
+            receipt = store.upload_version_files(target, published_dir)
+        except Exception:  # noqa: BLE001
+            upload_error = f"rank {process.dist_rank()}:\n{traceback.format_exc()}"
+
+    upload_results = process.dist_all_gather_object((receipt, upload_error))
+    upload_errors = [error for _, error in upload_results if error is not None]
+    if upload_errors:
+        raise RuntimeError("checkpoint upload failed:\n" + "\n".join(upload_errors))
+    receipts = [receipt for receipt, _ in upload_results if receipt is not None]
+    if not receipts:
+        raise RuntimeError("checkpoint upload produced no host receipts")
+
+    publish_error = None
+    if process.dist_rank() in (None, 0):
+        try:
+            manifest = store.verify_version(target, receipts)
+            store.compare_and_advance_pointer(expected_pointer, target)
+            wake_pool(_pool(args), target)
+            logger.info(
+                "published %s: kind=%s files=%d hosts=%d",
+                target.identity,
+                manifest.kind.value,
+                len(manifest.files),
+                len(receipts),
             )
         except Exception:  # noqa: BLE001
             publish_error = f"rank 0:\n{traceback.format_exc()}"
@@ -212,15 +283,6 @@ def _store(args: Any) -> Store:
         volume_name=getattr(args, "experiment_volume_name", None) or None,
         s3_root=getattr(args, "stitch_s3_root", None) or None,
         s3_endpoint_url=getattr(args, "stitch_s3_endpoint_url", None) or None,
-    )
-
-
-def _staging_store(args: Any) -> ModalVolumeStore:
-    volume = getattr(args, "experiment_volume_name", None)
-    return ModalVolumeStore(
-        _transport_root(args),
-        volume_name=volume or None,
-        run_id=_run_id(args),
     )
 
 

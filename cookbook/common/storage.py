@@ -22,6 +22,7 @@ _S3_SECRET_ENV = "STITCH_S3_SECRET_NAME"
 _S3_ROOT_ENV = "S3_ROOT"
 _S3_ENDPOINT_ENV = "S3_ENDPOINT_URL"
 _AWS_TOKEN_PATH = Path("/tmp/stitch-aws-web-identity-token")
+_LOCAL_PUBLICATION_ROOT = Path("/tmp/stitch-publications")
 
 
 @dataclass(frozen=True)
@@ -62,6 +63,17 @@ class StoreDeployment:
     @property
     def extra_packages(self) -> tuple[str, ...]:
         return ("boto3",) if self.backend == S3 else ()
+
+    def updates_dir(self, run_dir: str | Path) -> Path:
+        """Return the trainer-visible update directory for this backend.
+
+        Volume publications are written on the shared mount. S3 publications
+        stay on each trainer host until that host uploads its files.
+        """
+        run_dir = Path(run_dir)
+        if self.backend == S3:
+            return _LOCAL_PUBLICATION_ROOT / run_dir.name / "updates"
+        return run_dir / "updates"
 
     def modal_secrets(self) -> list[Any]:
         if self.s3_secret_name is None:

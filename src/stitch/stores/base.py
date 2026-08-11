@@ -7,7 +7,7 @@ pointer methods; ``commit`` has a no-op default.
 
 from __future__ import annotations
 
-from stitch.types import VersionManifest, VersionRef
+from stitch.types import PointerConflict, VersionManifest, VersionRef
 
 
 class Store:
@@ -27,6 +27,20 @@ class Store:
     def advance_pointer(self, ref: VersionRef) -> None:
         """Move ``latest`` to ``ref`` — the caller has already run ``decide_pointer_move``."""
         raise NotImplementedError
+
+    def compare_and_advance_pointer(
+        self, expected: VersionRef | None, ref: VersionRef
+    ) -> None:
+        """Move ``latest`` only when it still equals ``expected``.
+
+        Mounted stores get a best-effort compare before their normal pointer
+        write. Stores with conditional writes override this with an atomic
+        compare-and-swap.
+        """
+        actual = self.read_pointer()
+        if actual != expected:
+            raise PointerConflict(expected, actual, ref)
+        self.advance_pointer(ref)
 
     def claim(self, boot: VersionRef) -> None:
         """Start a new run epoch at its boot checkpoint, forking the version space."""

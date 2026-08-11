@@ -86,8 +86,8 @@ def _rollout_boot_version() -> int:
 RUN_ID = os.environ["RUN_ID"]
 APP_NAME = f"{exp.APP_NAME}-{RUN_ID}"
 RUN_DIR = STITCH_PATH / RUN_ID
-UPDATES_DIR = RUN_DIR / "updates"
 STORE_DEPLOYMENT = storage.StoreDeployment.from_environment()
+UPDATES_DIR = STORE_DEPLOYMENT.updates_dir(RUN_DIR)
 STORE_SECRETS = STORE_DEPLOYMENT.modal_secrets()
 
 # Flash autoscaler target / sglang concurrency cap: explicit target_inputs, else engine concurrency.

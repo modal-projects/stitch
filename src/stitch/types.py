@@ -184,6 +184,27 @@ class PointerRewind(Exception):
         self.current, self.proposed = current, proposed
 
 
+class PointerConflict(Exception):
+    """``latest`` changed after a publisher chose its expected predecessor."""
+
+    def __init__(
+        self,
+        expected: VersionRef | None,
+        actual: VersionRef | None,
+        proposed: VersionRef,
+    ) -> None:
+        def identity(ref: VersionRef | None) -> str:
+            return ref.identity if ref is not None else "<unset>"
+
+        super().__init__(
+            f"latest changed while publishing {proposed.identity!r}: "
+            f"expected {identity(expected)!r}, found {identity(actual)!r}"
+        )
+        self.expected = expected
+        self.actual = actual
+        self.proposed = proposed
+
+
 @dataclass(frozen=True)
 class PointerMove:
     ref: VersionRef
