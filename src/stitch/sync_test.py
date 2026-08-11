@@ -12,6 +12,7 @@ from functools import partial
 import pytest
 
 from stitch.engines.base import Engine
+from stitch.errors import UnrecoverableEngineError
 from stitch.stores.base import Store
 from stitch.sync import ConstraintUnmet, Reconciler
 from stitch.types import (
@@ -162,6 +163,25 @@ def test_startup_initializes_update_destination() -> None:
         assert "initialize_update_destination" in engine.calls
 
     _run(go())
+
+
+@pytest.mark.parametrize(
+    "sync_state,expected",
+    [
+        (SyncState.IDLE, False),
+        (SyncState.FETCHING, False),
+        (SyncState.STAGING, False),
+        (SyncState.COMMITTING, True),
+        (SyncState.ERROR, False),
+    ],
+)
+def test_engine_health_may_be_stale_only_during_commit(
+    sync_state: SyncState, expected: bool
+) -> None:
+    reconciler = _make_reconciler(store=FakeStore(), engine=FakeEngine())
+    reconciler.sync_state = sync_state
+
+    assert reconciler.engine_health_may_be_stale() is expected
 
 
 def test_catch_up() -> None:
@@ -638,11 +658,38 @@ def test_update_fails_after_update_destination_initialization_fails() -> None:
             reconcile_interval=0.0,
         )
         r.applied = VersionRef("r1", 0)
+        terminal = asyncio.create_task(r.wait_for_terminal_error())
         await r.startup()
         assert r.sync_state is SyncState.ERROR
         assert r.last_error is not None
         assert "broken destination" in r.last_error
         assert "stage:2" not in engine.calls
+        assert not terminal.done()
+        terminal.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await terminal
+        await r.shutdown()
+
+    _run(go())
+
+
+def test_unrecoverable_reconcile_error_reaches_terminal_monitor() -> None:
+    async def go() -> None:
+        engine = FakeEngine()
+
+        async def fail_stage(_manifest, _source_dir) -> None:
+            raise UnrecoverableEngineError("engine process is gone")
+
+        engine.stage = fail_stage  # type: ignore[method-assign]
+        r = _make_reconciler(
+            store=FakeStore(VersionRef("r1", 2), _full("r1", 2)),
+            engine=engine,
+            reconcile_interval=0,
+        )
+        await r.startup()
+        with pytest.raises(UnrecoverableEngineError, match="process is gone"):
+            await r.wait_for_terminal_error()
+        assert r.server_info()["terminal_error"] == "engine process is gone"
         await r.shutdown()
 
     _run(go())

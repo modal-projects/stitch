@@ -7,9 +7,33 @@ shape. Subclasses override the methods they use —
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from enum import Enum
 from typing import Any
 
 from stitch.types import VersionManifest, VersionRef
+
+
+class EngineHealthStatus(str, Enum):
+    """How conclusively the sidecar can account for an engine health failure."""
+
+    HEALTHY = "healthy"
+    UNRESPONSIVE = "unresponsive"
+    UNREACHABLE = "unreachable"
+
+
+@dataclass(frozen=True)
+class EngineHealth:
+    """One engine-liveness probe result.
+
+    ``UNRESPONSIVE`` includes timeouts and non-200 health responses. Whether a
+    transition explains one is engine-specific; the rollout sidecar exempts only
+    its explicit paused-apply window. ``UNREACHABLE`` means the sidecar could not
+    establish a connection to its colocated engine at all.
+    """
+
+    status: EngineHealthStatus
+    detail: str = ""
 
 
 class Engine:
@@ -77,3 +101,7 @@ class Engine:
         """Engine control routes the versioned proxy must never forward: a stray external
         call would mutate engine state behind the reconciler's back. Default: none."""
         return frozenset()
+
+    async def check_health(self) -> EngineHealth:
+        """Probe whether the colocated engine can still serve requests."""
+        raise NotImplementedError

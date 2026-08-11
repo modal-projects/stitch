@@ -17,6 +17,7 @@ from contextlib import asynccontextmanager, contextmanager, suppress
 from typing import Any, Literal
 
 from stitch.engines.base import Engine
+from stitch.errors import UnrecoverableSidecarError
 from stitch.stores.base import Store
 from stitch.types import (
     SyncState,
@@ -203,6 +204,8 @@ class Reconciler(AdmissionGate):
         self._destination_ready = False
         self._destination_init_error: str | None = None
         self._periodic_task: asyncio.Task[None] | None = None
+        self._terminal_error: UnrecoverableSidecarError | None = None
+        self._terminal_error_event = asyncio.Event()
         self._lock = asyncio.Lock()
 
     async def startup(self) -> None:
@@ -219,7 +222,7 @@ class Reconciler(AdmissionGate):
         if not self._behind(pointer):
             self.ready = True
         await self.reconcile()
-        if self.reconcile_interval > 0:
+        if self.reconcile_interval > 0 and self._terminal_error is None:
             self._periodic_task = asyncio.create_task(self._periodic_reconcile())
 
     async def shutdown(self) -> None:
@@ -240,6 +243,12 @@ class Reconciler(AdmissionGate):
         try:
             await self.engine.initialize_update_destination(self.boot_version)
             self._destination_ready = True
+        except UnrecoverableSidecarError as exc:
+            self._destination_init_error = str(exc)
+            self._record_terminal_error(exc)
+            logger.exception(
+                "weight update destination initialization failed terminally"
+            )
         except Exception as exc:  # noqa: BLE001
             self._destination_init_error = str(exc)
             logger.exception("weight update destination initialization failed")
@@ -257,6 +266,9 @@ class Reconciler(AdmissionGate):
             "active_requests": self._active,
             "update_destination_ready": self._destination_ready,
             "update_destination_error": self._destination_init_error,
+            "terminal_error": str(self._terminal_error)
+            if self._terminal_error
+            else None,
             "metrics": self.metrics,
         }
 
@@ -274,13 +286,28 @@ class Reconciler(AdmissionGate):
         applied = self.applied.identity if self.applied else "boot"
         return f"catching up to live version (applied={applied}, state={self.sync_state.value})"
 
+    def engine_health_may_be_stale(self) -> bool:
+        """Whether the engine is paused while staged weights are applied."""
+        return self.sync_state is SyncState.COMMITTING
+
+    async def wait_for_terminal_error(self) -> None:
+        """Raise once reconciliation proves this replica must be replaced."""
+        await self._terminal_error_event.wait()
+        assert self._terminal_error is not None
+        raise self._terminal_error
+
+    def _record_terminal_error(self, error: UnrecoverableSidecarError) -> None:
+        if self._terminal_error is None:
+            self._terminal_error = error
+            self._terminal_error_event.set()
+
     def _on_reject(self, error: dict[str, Any]) -> None:
         self.wake()  # a 409 is our cue to catch up
 
     def wake(self) -> None:
         """Nudge a reconcile now (a publish wake or a 409). Non-cancelling: starts a
         task only if none is running; the running loop re-reads the authoritative pointer."""
-        if self._task is None or self._task.done():
+        if self._terminal_error is None and (self._task is None or self._task.done()):
             self._task = asyncio.get_running_loop().create_task(self.reconcile())
 
     async def reconcile(self) -> None:
@@ -295,6 +322,12 @@ class Reconciler(AdmissionGate):
                     pointer = await asyncio.to_thread(self.store.read_pointer)
                     if self._behind(pointer):
                         caught_up = False
+            except UnrecoverableSidecarError as exc:
+                self.last_error = str(exc)
+                self.sync_state = SyncState.ERROR
+                self._record_terminal_error(exc)
+                logger.exception("reconcile failed terminally")
+                return
             except Exception as exc:  # noqa: BLE001
                 self.last_error = str(exc)
                 self.sync_state = SyncState.ERROR
