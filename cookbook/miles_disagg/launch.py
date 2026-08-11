@@ -196,7 +196,7 @@ def _run_attempt(*, supervise: bool) -> None:
         trainer_call.get()
     finally:
         subprocess.run(
-            [sys.executable, "-m", "modal", "app", "stop", run.APP_NAME],
+            [sys.executable, "-m", "modal", "app", "stop", "--yes", run.APP_NAME],
             check=False,
         )
 

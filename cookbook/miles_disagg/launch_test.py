@@ -150,7 +150,7 @@ def test_supervised_attempt_stops_pool_when_launch_fails(monkeypatch) -> None:
     with pytest.raises(RuntimeError, match="not ready"):
         launch._run_attempt(supervise=True)
 
-    assert stopped["command"][-3:] == ["app", "stop", "app"]
+    assert stopped["command"][-4:] == ["app", "stop", "--yes", "app"]
     assert stopped["check"] is False
 
 
