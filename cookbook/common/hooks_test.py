@@ -179,7 +179,7 @@ def test_commit_and_wake_does_not_mutate_an_already_published_version() -> None:
         assert store.read_pointer() == VersionRef("run-abc", 1)
 
 
-def test_claim_pool_resets_to_base() -> None:
+def test_claim_pool_claims_version_zero_for_fresh_run() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         pool = _FakePool()
         hooks._pool = lambda args: pool
@@ -188,6 +188,17 @@ def test_claim_pool_resets_to_base() -> None:
             Path(tmp), run_id="run-abc"
         ).read_pointer() == VersionRef("run-abc", 0)
         assert pool.woke == [VersionRef("run-abc", 0)]
+
+
+def test_claim_pool_preserves_resumed_boot_version() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        pool = _FakePool()
+        hooks._pool = lambda args: pool
+        hooks.claim_pool(_args(tmp), boot_version=119)
+        assert ModalVolumeStore(
+            Path(tmp), run_id="run-abc"
+        ).read_pointer() == VersionRef("run-abc", 119)
+        assert pool.woke == [VersionRef("run-abc", 119)]
 
 
 def test_store_rejects_a_non_updates_directory() -> None:

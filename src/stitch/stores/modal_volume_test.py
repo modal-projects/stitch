@@ -57,7 +57,7 @@ def test_claim_then_delta_chain() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         store = ModalVolumeStore(root, run_id="r1")
-        store.claim("r1")
+        store.claim(VersionRef("r1", 0))
         assert store.read_pointer() == VersionRef("r1", 0)  # base before any publish
         publish_version(
             store, None, _write_version(root, VersionRef("r1", 1)), run_id="r1"
@@ -106,8 +106,8 @@ def test_runs_sharing_a_volume_have_independent_state() -> None:
         first = ModalVolumeStore(first_root, run_id="run-a")
         second = ModalVolumeStore(second_root, run_id="run-b")
 
-        first.claim("run-a")
-        second.claim("run-b")
+        first.claim(VersionRef("run-a", 0))
+        second.claim(VersionRef("run-b", 0))
         publish_version(
             first,
             None,

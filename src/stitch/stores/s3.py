@@ -49,12 +49,12 @@ class S3Store(Store):
             Body=ref.identity.encode("utf-8"),
         )
 
-    def claim(self, run_id: str) -> None:
-        if not run_id:
+    def claim(self, boot: VersionRef) -> None:
+        if not boot.run_id:
             raise ValueError(
                 "claim requires a run_id (the run's per-launch epoch token)"
             )
-        self.advance_pointer(VersionRef(run_id, 0))
+        self.advance_pointer(boot)
 
     def read_manifest(self, ref: VersionRef) -> VersionManifest:
         # from_hf_index reads a local dir — land just the small index here; shards download in materialize.

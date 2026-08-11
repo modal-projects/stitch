@@ -28,8 +28,8 @@ class Store:
         """Move ``latest`` to ``ref`` — the caller has already run ``decide_pointer_move``."""
         raise NotImplementedError
 
-    def claim(self, run_id: str) -> None:
-        """Start a new run epoch at base, forking the version space."""
+    def claim(self, boot: VersionRef) -> None:
+        """Start a new run epoch at its boot checkpoint, forking the version space."""
         raise NotImplementedError
 
     def read_manifest(self, ref: VersionRef) -> VersionManifest:

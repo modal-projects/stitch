@@ -14,7 +14,7 @@ DEFAULT_SGLANG_RUNTIME = SGLangRuntime(
     image="lmsysorg/sglang:v0.5.17",
     repository="https://github.com/modal-projects/sglang.git",
     branch="stitch-sglang-v0.5.17",
-    commit="0c79627e857eec795298a372adadf649209cdf2f",
+    commit="974035001038645296f584583b46f245513928a6",
 )
 ```
 
@@ -43,6 +43,7 @@ images.
 ```json
 {
   "base_checkpoint_dir": "/checkpoints/<artifact-id>",
+  "base_version": 0,
   "checkpoint_source_dir": "/stitch/<run-id>/updates",
   "local_checkpoint_dir": "/local-checkpoint",
   "target_version": 7,
@@ -50,14 +51,14 @@ images.
 }
 ```
 
-- `base_checkpoint_dir` is the immutable v0 checkpoint. It defaults to the
-  engine’s boot model path.
+- `base_checkpoint_dir` is the immutable checkpoint already loaded by the
+  engine. `base_version` records its logical version and defaults to 0.
 - `checkpoint_source_dir` contains `weight_vNNNNNN` publications. It is omitted
-  when initializing version 0.
+  when initializing the base version.
 - `destination="disk"` requires `local_checkpoint_dir` and accepts FULL or
   DELTA targets.
-- `destination="cpu"` does not use `local_checkpoint_dir`. Version 0 initializes
-  the cache; later targets must be DELTAs.
+- `destination="cpu"` does not use `local_checkpoint_dir`. The base version
+  initializes the cache; later targets must be DELTAs.
 
 Commit remains a separate operation:
 
@@ -84,11 +85,13 @@ reading and writing each changed target tensor once. The folded representation
 is ephemeral: no aggregate delta or additional checkpoint is persisted. The
 final published target checksum remains the commit boundary.
 
-The rollout engine initially loads v0 directly from `base_checkpoint_dir`.
-Stitch initializes the mutable local checkpoint in the background after v0 is
-serving, so initial rollout readiness is not delayed by a second model-sized
-copy. Local storage must hold the mutable checkpoint plus filesystem headroom;
-the immutable base remains in its configured source.
+The rollout engine initially loads its boot checkpoint directly from
+`base_checkpoint_dir`. Its logical version is normally v0 and may be a saved
+version for a resumed run. Stitch initializes the mutable local checkpoint in
+the background after the boot checkpoint is serving, so initial rollout
+readiness is not delayed by a second model-sized copy. Local storage must hold
+the mutable checkpoint plus filesystem headroom; the immutable boot checkpoint
+remains in its configured source.
 
 The commit RPC still reads and transforms the complete target checkpoint. On
 each commit, Stitch forwards the load format selected for the initial server
@@ -105,9 +108,9 @@ mode:
 
 CPU mode keeps rank-ready images in RAM for the shortest commit:
 
-1. After v0 begins serving, SGLang allocates one complete rank-ready image per
-   local TP rank and either caches one canonical checkpoint per host in RAM or
-   materializes it on host-local storage.
+1. After the boot checkpoint begins serving, SGLang allocates one complete
+   rank-ready image per local TP rank and either caches one canonical checkpoint
+   per host in RAM or materializes it on host-local storage.
 2. When the base is the boot checkpoint, it captures the already-realized active
    runtime storages into the rank images instead of repeating a model-sized
    load. A different base goes through the model's ordinary loader and
@@ -129,9 +132,9 @@ destination before routing latency-sensitive traffic when warmup latency
 matters.
 
 CPU mode is delta-only. It rejects FULL publications and cannot reset a patched
-live replica to another run’s v0; the controller must use disk mode or replace
-that replica. This keeps a single canonical snapshot rather than retaining a
-second rollback-sized CPU checkpoint. Compressed deltas are not retained in a
+live replica to another run; the controller must use disk mode or replace that
+replica. This keeps a single canonical snapshot rather than retaining a second
+rollback-sized CPU checkpoint. Compressed deltas are not retained in a
 lineage-sized CPU arena after reconstruction.
 
 Enable it explicitly:

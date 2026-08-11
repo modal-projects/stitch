@@ -54,12 +54,12 @@ class ModalVolumeStore(Store):
         if self.volume_name:
             _volume(self.volume_name).commit()
 
-    def claim(self, run_id: str) -> None:
-        if not run_id:
+    def claim(self, boot: VersionRef) -> None:
+        if not boot.run_id:
             raise ValueError(
                 "claim requires a run_id (the run's per-launch epoch token)"
             )
-        self.advance_pointer(VersionRef(run_id, 0))
+        self.advance_pointer(boot)
 
     def read_manifest(self, ref: VersionRef) -> VersionManifest:
         return VersionManifest.from_hf_index(self._version_dir(ref), run_id=ref.run_id)

@@ -42,6 +42,7 @@ def main() -> None:
     p.add_argument("--commit-mode", choices=["in_place", "quiesce"], default="in_place")
     p.add_argument("--flush-cache-on-commit", action="store_true")
     p.add_argument("--run-id", required=True)
+    p.add_argument("--boot-version", type=int, default=0)
     p.add_argument("--debug-requests", action="store_true")
     p.add_argument(
         "--reconcile-interval", type=float, default=5.0
@@ -66,6 +67,7 @@ def main() -> None:
         store,
         engine,
         run_id=args.run_id,
+        boot_version=args.boot_version,
         commit_mode=args.commit_mode,
         flush_cache_on_commit=args.flush_cache_on_commit,
         host=args.host,

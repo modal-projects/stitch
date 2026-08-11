@@ -27,9 +27,9 @@ class FakeStore(Store):
     def advance_pointer(self, ref):
         self._pointer = ref
 
-    def claim(self, run_id):
+    def claim(self, boot):
         self.claim_calls += 1
-        self._pointer = VersionRef(run_id, 0)
+        self._pointer = boot
 
 
 class FakePool(Pool):
@@ -119,7 +119,7 @@ def test_claim_run() -> None:
     assert pool.woke == [VersionRef("r2", 0)]
 
 
-def test_claim_run_at_base_is_idempotent() -> None:
+def test_claim_run_at_boot_is_idempotent() -> None:
     store, pool = FakeStore(VersionRef("r2", 0)), FakePool()
     claim_run(store, pool, "r2")
     assert store._pointer == VersionRef("r2", 0)
@@ -127,10 +127,18 @@ def test_claim_run_at_base_is_idempotent() -> None:
     assert pool.woke == [VersionRef("r2", 0)]
 
 
+def test_claim_run_preserves_resumed_boot_version() -> None:
+    store, pool = FakeStore(), FakePool()
+    claim_run(store, pool, "resumed", boot_version=119)
+    assert store._pointer == VersionRef("resumed", 119)
+    assert store.claim_calls == 1
+    assert pool.woke == [VersionRef("resumed", 119)]
+
+
 def test_claim_rewind_rejected() -> None:
     store = FakeStore(VersionRef("r2", 3))
     try:
-        claim_run(store, None, "r2")  # reused run_id already at v3 -> rewind to base
+        claim_run(store, None, "r2")  # reused run_id already at v3 -> rewind to boot
         raise AssertionError("expected PointerRewind")
     except PointerRewind:
         pass

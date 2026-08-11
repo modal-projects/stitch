@@ -25,6 +25,10 @@ def main() -> None:
     from cookbook.slime_disagg import app as run
 
     launch.deploy_pool_and_spawn(run)
+    print(
+        f"run {os.environ['RUN_ID']} up on {run.APP_NAME}; "
+        f"stop it with: modal app stop {run.APP_NAME}"
+    )
 
 
 if __name__ == "__main__":

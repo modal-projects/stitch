@@ -110,12 +110,17 @@ def _raise_distributed_failures(phase: str, local_error: str | None) -> None:
         raise RuntimeError(f"{phase} failed:\n" + "\n".join(errors))
 
 
-def claim_pool(args: Any) -> None:
-    """Launch hook (rank 0): reset every replica to base before the first publish, so a
-    cold or finished-run-warm pool starts this run clean."""
+def claim_pool(args: Any, *, boot_version: int = 0) -> None:
+    """Launch hook (rank 0): identify the checkpoint already served by every replica
+    before the first publish."""
     if process.dist_rank() not in (None, 0):
         return
-    claim_run(_store(args), _pool(args), _run_id(args))
+    claim_run(
+        _store(args),
+        _pool(args),
+        _run_id(args),
+        boot_version=boot_version,
+    )
 
 
 # ── staleness-gated rollout requests ────────────────────────────────────────────

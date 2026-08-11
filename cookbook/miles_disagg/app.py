@@ -46,6 +46,10 @@ from cookbook.common.constants import (
 )
 from cookbook.miles_disagg import trainer_image
 from cookbook.miles_disagg.config import YAML_CONFIG_FIELDS, MilesConfig
+from cookbook.miles_disagg.resume import (
+    RESUME_POINT_ENV,
+    ResumePoint,
+)
 from cookbook.miles_disagg.trainer_image import MEGATRON_PATH, MILES_ROOT
 from stitch.pools.modal_flash_lb_temp import ModalFlashLBPool
 
@@ -59,6 +63,23 @@ MILES_LOCAL_DIR = os.environ.get(
 exp = importlib.import_module(f"cookbook.miles_disagg.configs.{EXPERIMENT}")
 modal_cfg = exp.modal
 miles_cfg = exp.miles
+
+
+def _resume_point() -> ResumePoint | None:
+    if payload := os.environ.get(RESUME_POINT_ENV):
+        return ResumePoint.from_json(payload)
+    return None
+
+
+def _rollout_boot_checkpoint() -> str:
+    point = _resume_point()
+    return point.rollout_checkpoint if point is not None else miles_cfg.hf_checkpoint
+
+
+def _rollout_boot_version() -> int:
+    point = _resume_point()
+    return point.version if point is not None else 0
+
 
 # Per-run id, minted fresh by cookbook.miles_disagg.launch. The same identity
 # scopes the pool, Stitch pointer, publications, checkpoints, and logs.
@@ -83,11 +104,15 @@ image = trainer_image.build_trainer_image(
     extra_pip_packages=getattr(exp, "TRAINER_EXTRA_PIP_PACKAGES", ()),
     image_run_commands=getattr(exp, "TRAINER_IMAGE_RUN_COMMANDS", ()),
 )
+# Server containers re-import this module, so persist this attempt's resume point.
 server_image = serving_image.build_serving_image(
     hf_cache_path=str(HF_CACHE_PATH),
     experiment=EXPERIMENT,
     run_id=RUN_ID,
-    extra_env=getattr(exp, "SGLANG_SERVER_ENV", None),
+    extra_env={
+        **(getattr(exp, "SGLANG_SERVER_ENV", None) or {}),
+        RESUME_POINT_ENV: os.environ.get(RESUME_POINT_ENV, ""),
+    },
     runtime=getattr(exp, "SGLANG_RUNTIME", serving_image.DEFAULT_SGLANG_RUNTIME),
 )
 if MILES_LOCAL_DIR:
@@ -134,7 +159,7 @@ train_volumes = {
 app = modal.App(APP_NAME)
 
 SGLANG_SERVER_ARGS = {
-    "--served-model-name": miles_cfg.hf_checkpoint,
+    "--served-model-name": _rollout_boot_checkpoint(),
     **(
         {}
         if "--cuda-graph-config" in exp.SGLANG_SERVER_ARGS
@@ -182,7 +207,8 @@ class Server:
     def startup(self) -> None:
         server.serve_startup(
             self,
-            model_name=miles_cfg.hf_checkpoint,
+            model_name=_rollout_boot_checkpoint(),
+            boot_version=_rollout_boot_version(),
             sglang_args=SGLANG_SERVER_ARGS,
             tp=miles_cfg.rollout_num_gpus_per_engine,
             concurrency=ROLLOUT_CONCURRENCY,
@@ -324,17 +350,26 @@ class Trainer:
         )
 
     @modal.method()
-    def train(self, payload: dict) -> None:
+    def train(self, payload: dict, resume_payload: str | None = None) -> None:
         """Run one training job from a MilesConfig payload (see MilesConfig.to_payload)."""
         for volume in train_volumes.values():
             volume.reload()
 
+        resume_point = (
+            ResumePoint.from_json(resume_payload)
+            if resume_payload is not None
+            else None
+        )
         cfg = MilesConfig.from_payload(payload)
         launch.materialize_node_local_yaml(cfg, "te_precision_config_file")
         if self.rank != 0:
             return
 
         cfg.rollout_endpoint_url = ModalFlashLBPool(APP_NAME, "Server").gateway_url()
+        if resume_point is not None:
+            cfg.load = resume_point.trainer_checkpoint
+            cfg.hf_checkpoint = resume_point.rollout_checkpoint
+            cfg.exit_on_missing_checkpoint = True
         # Miles requires this CLI argument; the deployment owns its run-scoped value.
         cfg.update_weight_disk_dir = str(UPDATES_DIR)
         if getattr(cfg, "save_interval", None) is None:
@@ -360,18 +395,27 @@ class Trainer:
         )
         cmd = _build_train_cmd(cfg)
 
-        # Claim the pool before miles publishes: reset every replica to base for this run.
+        # Claim the version already served by the pool before Miles publishes.
         from cookbook.common import hooks
 
         hooks.claim_pool(
             SimpleNamespace(
                 update_weight_disk_dir=cfg.update_weight_disk_dir, **custom_config
-            )
+            ),
+            boot_version=resume_point.version if resume_point is not None else 0,
         )
 
+        resume_log = (
+            f", checkpoint_version={resume_point.version}, "
+            f"next_version={resume_point.version + 1}, "
+            f"source_run_id={resume_point.source_run_id}, "
+            f"stitch_boot={RUN_ID}/weight_v{resume_point.version:06d}"
+            if resume_point is not None
+            else ""
+        )
         print(
-            f"Training {EXPERIMENT}: run={RUN_ID}, nodes={miles_cfg.n_train_nodes}, "
-            f"rollout_endpoint={cfg.rollout_endpoint_url}"
+            f"Training {EXPERIMENT}: run={RUN_ID}{resume_log}, "
+            f"nodes={miles_cfg.n_train_nodes}, rollout_endpoint={cfg.rollout_endpoint_url}"
         )
         print(f"Command: {cmd}")
         log_path = str(RUN_DIR / "train.log")
@@ -410,7 +454,10 @@ def spawn_train() -> Any:
     """Spawn the trainer on this run's already-deployed pool (config ships as data, so config
     edits run without a redeploy; infra changes still require one)."""
     trainer = modal.Cls.from_name(APP_NAME, "Trainer")()
-    call = trainer.train.spawn(miles_cfg.to_payload())
+    call = trainer.train.spawn(
+        miles_cfg.to_payload(),
+        os.environ.get(RESUME_POINT_ENV),
+    )
     print(f"Spawned train on {APP_NAME}: {call.object_id}")
     return call
 

@@ -37,6 +37,7 @@ class SGLangEngine(Engine):
         self._control_timeout = control_timeout
         self._weight_staging_timeout = weight_staging_timeout
         self._weight_update_timeout = weight_update_timeout
+        self._boot_version = 0
 
     def base_url(self) -> str:
         return self._base_url
@@ -60,15 +61,18 @@ class SGLangEngine(Engine):
         await self._stage_weight_update(
             checkpoint_source_dir=str(Path(source_dir).parent),
             target_version=manifest.ref.version,
+            base_version=self._boot_version,
             destination=self._destination_for(manifest),
         )
 
-    async def initialize_update_destination(self) -> None:
+    async def initialize_update_destination(self, boot_version: int = 0) -> None:
         await self._stage_weight_update(
             checkpoint_source_dir=None,
-            target_version=0,
+            target_version=boot_version,
+            base_version=boot_version,
             destination=self.delta_update_mode,
         )
+        self._boot_version = boot_version
 
     async def commit(
         self,
@@ -112,13 +116,14 @@ class SGLangEngine(Engine):
     async def reset(self) -> None:
         if self.delta_update_mode == "cpu":
             raise RuntimeError(
-                "CPU delta update mode cannot reset a live engine to version 0; "
+                "CPU delta update mode cannot restore a live engine to its boot checkpoint; "
                 "start a fresh rollout replica for a new run"
             )
         assert self.local_checkpoint_dir is not None
         await self._stage_weight_update(
             checkpoint_source_dir=None,
-            target_version=0,
+            target_version=self._boot_version,
+            base_version=self._boot_version,
             destination="disk",
         )
         await self._post(
@@ -126,11 +131,11 @@ class SGLangEngine(Engine):
             {
                 "model_path": self.local_checkpoint_dir,
                 "load_format": self.disk_load_format,
-                "weight_version": "0",
+                "weight_version": str(self._boot_version),
                 "flush_cache": False,
             },
             timeout=self._weight_update_timeout,
-            action="reset weights to base",
+            action="restore boot weights",
         )
 
     def _destination_for(
@@ -151,10 +156,12 @@ class SGLangEngine(Engine):
         *,
         checkpoint_source_dir: str | None,
         target_version: int,
+        base_version: int,
         destination: Literal["disk", "cpu"],
     ) -> None:
         payload: dict[str, Any] = {
             "base_checkpoint_dir": self.base_checkpoint_dir,
+            "base_version": base_version,
             "target_version": target_version,
             "destination": destination,
         }

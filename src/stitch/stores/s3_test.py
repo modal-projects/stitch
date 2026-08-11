@@ -88,7 +88,7 @@ def test_s3_pointer_roundtrip() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         store = _store(tmp)
         assert store.read_pointer() is None
-        store.claim("run-x")
+        store.claim(VersionRef("run-x", 0))
         assert store.read_pointer() == VersionRef("run-x", 0)
         store.advance_pointer(VersionRef("run-x", 3))
         assert store.read_pointer() == VersionRef("run-x", 3)

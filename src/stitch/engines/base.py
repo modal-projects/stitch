@@ -46,11 +46,12 @@ class Engine:
         """Restore the engine to its boot weights."""
         raise NotImplementedError
 
-    async def initialize_update_destination(self) -> None:
+    async def initialize_update_destination(self, boot_version: int = 0) -> None:
         """Initialize engine state required before staging updates.
 
         This may run while the engine serves its boot weights. A reconciler waits
-        for it before staging the first published update.
+        for it before staging the first published update. ``boot_version`` is the
+        logical version of the immutable checkpoint already loaded by the engine.
         """
         return
 

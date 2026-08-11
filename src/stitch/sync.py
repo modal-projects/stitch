@@ -56,7 +56,7 @@ class AdmissionGate:
     pauses the engine and lets non-exact requests already in flight continue on the new
     weights (only exact pins are drained). Admission closes during either commit, so a
     newly arriving request is attributed to the version it will actually run on. An
-    incompatible transition (a run switch's base reset) commits with ``drain_all=True``,
+    incompatible transition (a run switch's boot reset) commits with ``drain_all=True``,
     which also drains all in-flight requests. The version flips before admission reopens.
     """
 
@@ -133,10 +133,10 @@ class AdmissionGate:
         """Wait for the commit point, close the gate, apply, flip the served version
         (``on_applied``) while the gate is held, then reopen. ``on_applied`` runs only
         after a successful apply; in ``in_place`` the flip happens before ``resume``.
-        ``drain_all`` marks an incompatible transition (a base reset): drain and gate
+        ``drain_all`` marks an incompatible transition (a boot reset): drain and gate
         every request regardless of mode — rolling requests may cross a compatible
         weight update, never a change of lineage (stitch#32)."""
-        # Close admission before draining (stitch#32), else a new in_place request can straddle a base reset.
+        # Close admission before draining (stitch#32), else a new in_place request can straddle a boot reset.
         async with self._cond:
             self._committing = True
             self._drain_all = drain_all
@@ -164,8 +164,8 @@ class AdmissionGate:
 
 class Reconciler(AdmissionGate):
     """Converges one replica to the store's ``latest`` pointer: stage the chain,
-    commit once, flip the served version. A run change resets to base (the engine
-    reseeds), so a run's chain is never mistaken for another's."""
+    commit once, flip the served version. A run change restores the immutable boot
+    checkpoint, so one run's chain is never mistaken for another's."""
 
     def __init__(
         self,
@@ -173,6 +173,7 @@ class Reconciler(AdmissionGate):
         store: Store,
         engine: Engine,
         run_id: str,
+        boot_version: int = 0,
         commit_mode: CommitMode = "in_place",
         flush_cache_on_commit: bool = False,
         debug_requests: bool = False,
@@ -181,11 +182,14 @@ class Reconciler(AdmissionGate):
         super().__init__(commit_mode=commit_mode)
         if not run_id:
             raise ValueError("run_id is required")
+        if boot_version < 0:
+            raise ValueError("boot_version must be non-negative")
         self.store = store
         self.engine = engine
         self.flush_cache_on_commit = flush_cache_on_commit
         self.run_id = run_id
-        self.applied = VersionRef(run_id, 0)
+        self.boot_version = boot_version
+        self.applied = VersionRef(run_id, boot_version)
         self.debug_requests = debug_requests
         self.reconcile_interval = reconcile_interval
         self.sync_state = SyncState.IDLE
@@ -207,6 +211,13 @@ class Reconciler(AdmissionGate):
         self._destination_init_task = asyncio.create_task(
             self._initialize_update_destination()
         )
+        # Inspect the store's initially visible pointer without refreshing it:
+        # destination setup may still have boot-checkpoint files open. A replica
+        # already at that view can serve immediately while setup continues; a
+        # mid-run joiner stays out of rotation until catch-up.
+        pointer = await asyncio.to_thread(self.store.read_pointer)
+        if not self._behind(pointer):
+            self.ready = True
         await self.reconcile()
         if self.reconcile_interval > 0:
             self._periodic_task = asyncio.create_task(self._periodic_reconcile())
@@ -227,7 +238,7 @@ class Reconciler(AdmissionGate):
 
     async def _initialize_update_destination(self) -> None:
         try:
-            await self.engine.initialize_update_destination()
+            await self.engine.initialize_update_destination(self.boot_version)
             self._destination_ready = True
         except Exception as exc:  # noqa: BLE001
             self._destination_init_error = str(exc)
@@ -260,7 +271,7 @@ class Reconciler(AdmissionGate):
             return "initializing weight update destination"
         if self.last_error:
             return f"sync error: {self.last_error}"
-        applied = self.applied.identity if self.applied else "base"
+        applied = self.applied.identity if self.applied else "boot"
         return f"catching up to live version (applied={applied}, state={self.sync_state.value})"
 
     def _on_reject(self, error: dict[str, Any]) -> None:
@@ -359,6 +370,20 @@ class Reconciler(AdmissionGate):
                         )
 
     async def _reconcile_once_measured(self, m: dict[str, Any]) -> bool:
+        # Destination initialization reads the immutable boot checkpoint. Let it
+        # release those files before refreshing a shared backing store.
+        if self._destination_init_task is not None:
+            if self._destination_init_task.done():
+                await self._destination_init_task
+            else:
+                with _timed(m, "destination_init_wait_s"):
+                    await self._destination_init_task
+        if self._destination_init_error is not None:
+            raise RuntimeError(
+                "weight update destination initialization failed: "
+                f"{self._destination_init_error}"
+            )
+
         await asyncio.to_thread(self.store.refresh)
         pointer = await asyncio.to_thread(self.store.read_pointer)
         if pointer is None:
@@ -376,25 +401,13 @@ class Reconciler(AdmissionGate):
         source_dir = await asyncio.to_thread(self.store.materialize, pointer)
         logger.info(
             "catch-up: %s -> v%d, preparing weight update",
-            "base" if self.applied is None else f"v{self.applied.version}",
+            "boot" if self.applied is None else f"v{self.applied.version}",
             pointer.version,
         )
 
         has_weight_changes = await asyncio.to_thread(
             self._range_has_weight_changes, target
         )
-
-        if self._destination_init_task is not None:
-            if self._destination_init_task.done():
-                await self._destination_init_task
-            else:
-                with _timed(m, "destination_init_wait_s"):
-                    await self._destination_init_task
-        if self._destination_init_error is not None:
-            raise RuntimeError(
-                "weight update destination initialization failed: "
-                f"{self._destination_init_error}"
-            )
 
         def on_applied() -> None:
             self.applied = pointer
@@ -476,17 +489,19 @@ class Reconciler(AdmissionGate):
         self.sync_state = SyncState.COMMITTING
 
     async def _switch_run(self, new_run: str | None) -> None:
-        """Select a new run at version 0, resetting patched weights to the boot base.
+        """Select a new run at its boot version, resetting patched weights to the
+        boot checkpoint.
 
         A reset commits with ``drain_all`` because it is incompatible with
         in-flight requests. Selecting the boot run on an unpatched engine only
         updates attribution and does not pause generation.
         """
         old_run = self.applied.run_id if self.applied else None
-        logger.info("run change %r -> %r: resetting to base", old_run, new_run)
-        # Reset if weights are patched (v>0), or a prior error may have left the checkpoint dirty (stitch#32).
+        logger.info("run change %r -> %r: restoring boot checkpoint", old_run, new_run)
+        # Reset if weights differ from the boot checkpoint, or a prior error may
+        # have left them dirty (stitch#32).
         was_patched = self.applied is not None and (
-            self.applied.version > 0 or self.last_error is not None
+            self.applied.version != self.boot_version or self.last_error is not None
         )
 
         async def apply() -> None:
@@ -494,7 +509,7 @@ class Reconciler(AdmissionGate):
                 await self.engine.reset()
 
         def on_applied() -> None:
-            self.applied = VersionRef(new_run, 0)
+            self.applied = VersionRef(new_run, self.boot_version)
             self.last_error = None
 
         await self.commit(

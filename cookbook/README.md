@@ -81,6 +81,38 @@ pool, waits for its gateway, and starts the trainer. It prints the app name and
 stop command. Repeating the command creates a separate run and checkpoint
 lineage.
 
+#### Resume a Miles run
+
+Use the same recipe and Modal environment as the source run. A resumable point
+is the latest saved Megatron checkpoint with a matching complete Hugging Face
+export. Resume it once with:
+
+```bash
+export EXPERIMENT_CONFIG=your_config_name
+export MODAL_ENVIRONMENT=your_environment
+
+uv run --extra modal python -m cookbook.miles_disagg.launch \
+  --resume-from source_run_id
+```
+
+The launcher creates a new run ID; do not reuse or pass the source run ID as
+`RUN_ID`. If the source checkpoint is v120, the new run boots at v120 and
+publishes v121 next.
+
+Add automatic resume to a fresh or resumed launch with:
+
+```bash
+uv run --extra modal python -m cookbook.miles_disagg.launch \
+  --resume-from source_run_id \
+  --auto-resume
+```
+
+`--auto-resume` stays attached to the trainer. An unexpected exit starts a new
+run from the newest complete checkpoint and retries until the trainer returns
+normally. Stop it with Ctrl-C. It is off by default and requires
+`save_interval`, `save_hf`, and optimizer/RNG checkpointing. A fresh run becomes
+resumable after its first complete Megatron/Hugging Face checkpoint pair.
+
 ### 5. Inspect or change a live run
 
 Follow logs using the app name printed by the launcher:
@@ -214,6 +246,7 @@ Each experiment Volume contains only run-scoped state:
     ├── latest
     ├── updates/weight_vNNNNNN/
     ├── checkpoints/
+    ├── hf_checkpoints/weight_vNNNNNN/
     └── train.log
 ```
 

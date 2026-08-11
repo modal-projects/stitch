@@ -48,8 +48,8 @@ class FakeStore(Store):
     def advance_pointer(self, ref: VersionRef) -> None:
         self._pointer = ref
 
-    def claim(self, run_id: str) -> None:
-        self._pointer = VersionRef(run_id, 0)
+    def claim(self, boot: VersionRef) -> None:
+        self._pointer = boot
 
     def publish(self, manifest: VersionManifest, files_dir: str) -> None:
         self._manifests[(manifest.ref.run_id, manifest.ref.version)] = manifest
@@ -60,6 +60,7 @@ class FakeEngine(Engine):
         self.calls: list[str] = []
         self.staged: list[VersionRef] = []
         self.committed: list[VersionRef] = []
+        self.initialized_versions: list[int] = []
 
     async def stage(self, manifest: VersionManifest, source_dir: str) -> None:
         self.staged.append(manifest.ref)
@@ -86,7 +87,8 @@ class FakeEngine(Engine):
     async def reset(self) -> None:
         self.calls.append("reset")
 
-    async def initialize_update_destination(self) -> None:
+    async def initialize_update_destination(self, boot_version: int = 0) -> None:
+        self.initialized_versions.append(boot_version)
         self.calls.append("initialize_update_destination")
 
     def stamp_request(self, request, served) -> None:
@@ -312,7 +314,7 @@ def test_run_switch_resets_in_place() -> None:
         r.applied = VersionRef("r1", 5)
         await r.reconcile()
         assert r.applied == VersionRef("r2", 2)
-        assert "reset" in engine.calls  # was patched -> reseed base for the new run
+        assert "reset" in engine.calls  # was patched -> restore boot checkpoint
         assert (
             engine.calls.index("pause")
             < engine.calls.index("reset")
@@ -370,7 +372,7 @@ def test_run_switch_drains_rolling_requests() -> None:
 
 
 def test_rolling_requests_cross_in_place_commit() -> None:
-    # Counterpart: a compatible in_place commit applies while rolling traffic keeps decoding; only a base reset drains.
+    # Counterpart: a compatible in_place commit applies while rolling traffic keeps decoding; only a boot reset drains.
     async def go() -> None:
         engine = FakeEngine()
         r = _make_reconciler(
@@ -531,9 +533,9 @@ def test_stage_waits_for_update_destination() -> None:
         release = asyncio.Event()
         initialize = engine.initialize_update_destination
 
-        async def slow_initialize() -> None:
+        async def slow_initialize(boot_version: int = 0) -> None:
             await release.wait()
-            await initialize()
+            await initialize(boot_version)
 
         engine.initialize_update_destination = slow_initialize  # type: ignore[method-assign]
         r = _make_reconciler(
@@ -561,8 +563,9 @@ def test_boot_weights_serve_before_update_destination_is_ready() -> None:
         engine = FakeEngine()
         release = asyncio.Event()
 
-        async def slow_initialize() -> None:
+        async def slow_initialize(boot_version: int = 0) -> None:
             await release.wait()
+            engine.initialized_versions.append(boot_version)
             engine.calls.append("initialize_update_destination")
 
         engine.initialize_update_destination = slow_initialize  # type: ignore[method-assign]
@@ -571,14 +574,51 @@ def test_boot_weights_serve_before_update_destination_is_ready() -> None:
             engine=engine,
             reconcile_interval=0.0,
         )
-        await r.startup()
+        startup = asyncio.create_task(r.startup())
+        while not r.ready:
+            await asyncio.sleep(0)
         assert r.ready
         assert r.applied == VersionRef("r1", 0)
         assert "pause" not in engine.calls
         assert not r._destination_ready
         release.set()
-        await r._destination_init_task
+        await startup
         assert r._destination_ready
+        await r.shutdown()
+
+    _run(go())
+
+
+def test_store_refresh_waits_for_update_destination() -> None:
+    async def go() -> None:
+        engine = FakeEngine()
+        release = asyncio.Event()
+
+        async def slow_initialize(boot_version: int = 0) -> None:
+            await release.wait()
+            engine.initialized_versions.append(boot_version)
+            engine.calls.append("initialize_update_destination")
+
+        engine.initialize_update_destination = slow_initialize  # type: ignore[method-assign]
+
+        class GuardedStore(FakeStore):
+            def refresh(self) -> None:
+                assert release.is_set(), (
+                    "store refreshed while checkpoint files were open"
+                )
+                super().refresh()
+
+        store = GuardedStore(VersionRef("r1", 0))
+        r = _make_reconciler(store=store, engine=engine, reconcile_interval=0.0)
+        startup = asyncio.create_task(r.startup())
+        while not r.ready:
+            await asyncio.sleep(0)
+        assert r.ready
+        assert store.refreshed == 0
+
+        release.set()
+        await startup
+        assert store.refreshed > 0
         await r.shutdown()
 
     _run(go())
@@ -588,7 +628,7 @@ def test_update_fails_after_update_destination_initialization_fails() -> None:
     async def go() -> None:
         engine = FakeEngine()
 
-        async def fail_initialize() -> None:
+        async def fail_initialize(boot_version: int = 0) -> None:
             raise RuntimeError("broken destination")
 
         engine.initialize_update_destination = fail_initialize  # type: ignore[method-assign]
@@ -773,6 +813,47 @@ def test_run_scoped_replica_serves_boot_checkpoint_as_version_zero() -> None:
                 assert served == VersionRef("r1", 0)
         finally:
             await r.shutdown()
+
+    _run(go())
+
+
+def test_resumed_replica_serves_boot_checkpoint_at_saved_version() -> None:
+    async def go() -> None:
+        engine = FakeEngine()
+        r = Reconciler(
+            store=FakeStore(VersionRef("resumed", 119)),
+            engine=engine,
+            run_id="resumed",
+            boot_version=119,
+        )
+        await r.startup()
+        try:
+            assert r.applied == VersionRef("resumed", 119)
+            assert r.ready
+            assert not engine.staged
+            assert engine.initialized_versions == [119]
+            async with r.admit(VersionConstraint(exact_version=119)) as served:
+                assert served == VersionRef("resumed", 119)
+        finally:
+            await r.shutdown()
+
+    _run(go())
+
+
+def test_resumed_replica_applies_only_versions_after_saved_checkpoint() -> None:
+    async def go() -> None:
+        engine = FakeEngine()
+        target = _delta("resumed", 120, files=["delta"])
+        r = Reconciler(
+            store=FakeStore(VersionRef("resumed", 120), target),
+            engine=engine,
+            run_id="resumed",
+            boot_version=119,
+        )
+        await r.reconcile()
+        assert engine.staged == [VersionRef("resumed", 120)]
+        assert engine.committed == [VersionRef("resumed", 120)]
+        assert r.applied == VersionRef("resumed", 120)
 
     _run(go())
 

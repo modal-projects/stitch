@@ -174,8 +174,8 @@ class PoolState:
 
 class PointerRewind(Exception):
     """A move that would rewind ``latest`` within the same run. The single writer
-    advances monotonically per run; crossing to a *different* run forks at base
-    and is not a rewind."""
+    advances monotonically per run; crossing to a *different* run forks at that
+    run's boot checkpoint and is not a rewind."""
 
     def __init__(self, current: VersionRef, proposed: VersionRef) -> None:
         super().__init__(
@@ -187,14 +187,14 @@ class PointerRewind(Exception):
 @dataclass(frozen=True)
 class PointerMove:
     ref: VersionRef
-    reset: bool  # crossed to a new run -> reset to base
+    reset: bool  # crossed to a new run -> restore its boot checkpoint
 
 
 def decide_pointer_move(
     current: VersionRef | None, proposed: VersionRef
 ) -> PointerMove:
-    """A different run forks at base (a reset, even at a lower number); within the
-    same run the move must be strictly newer, else :class:`PointerRewind`."""
+    """A different run forks at its boot checkpoint, even at a lower version;
+    within one run the move must be strictly newer, else :class:`PointerRewind`."""
     current_run = current.run_id if current is not None else None
     if proposed.run_id != current_run:
         return PointerMove(proposed, reset=True)

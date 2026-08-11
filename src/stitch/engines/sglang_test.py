@@ -58,6 +58,7 @@ def test_cpu_mode_does_not_require_local_checkpoint() -> None:
             "/stage_weight_update",
             {
                 "base_checkpoint_dir": "/base",
+                "base_version": 0,
                 "target_version": 0,
                 "destination": "cpu",
             },
@@ -90,6 +91,7 @@ def test_disk_mode_reset_stages_and_loads_base() -> None:
             "/stage_weight_update",
             {
                 "base_checkpoint_dir": "/base",
+                "base_version": 0,
                 "target_version": 0,
                 "destination": "disk",
                 "local_checkpoint_dir": "/ckpt",
@@ -195,6 +197,7 @@ def test_cpu_mode_stages_deltas_in_cpu() -> None:
             "/stage_weight_update",
             {
                 "base_checkpoint_dir": "/base",
+                "base_version": 0,
                 "checkpoint_source_dir": "/source",
                 "target_version": 5,
                 "destination": "cpu",
@@ -236,12 +239,55 @@ def test_initialize_update_destination(mode: str) -> None:
     asyncio.run(engine.initialize_update_destination())
     expected = {
         "base_checkpoint_dir": "/base",
+        "base_version": 0,
         "target_version": 0,
         "destination": mode,
     }
     if mode == "disk":
         expected["local_checkpoint_dir"] = "/ckpt"
     assert requests == [("/stage_weight_update", expected)]
+
+
+@pytest.mark.parametrize("mode", ["disk", "cpu"])
+def test_resumed_destination_preserves_boot_version(mode: str) -> None:
+    engine = SGLangEngine(
+        "http://engine",
+        "/base-v119",
+        "/ckpt",
+        delta_update_mode=mode,
+    )
+    requests = []
+
+    async def fake_post(path, payload, *, timeout=None, action=None):
+        requests.append((path, payload))
+
+    engine._post = fake_post  # type: ignore[method-assign]
+    asyncio.run(engine.initialize_update_destination(119))
+    expected = {
+        "base_checkpoint_dir": "/base-v119",
+        "base_version": 119,
+        "target_version": 119,
+        "destination": mode,
+    }
+    if mode == "disk":
+        expected["local_checkpoint_dir"] = "/ckpt"
+    assert requests == [("/stage_weight_update", expected)]
+
+    requests.clear()
+    resumed_delta = VersionManifest(
+        VersionRef("r1", 120), VersionKind.DELTA, ["weights"]
+    )
+    asyncio.run(engine.stage(resumed_delta, "/source/weight_v000120"))
+    staged = {
+        "base_checkpoint_dir": "/base-v119",
+        "base_version": 119,
+        "checkpoint_source_dir": "/source",
+        "target_version": 120,
+        "destination": mode,
+    }
+    if mode == "disk":
+        staged["local_checkpoint_dir"] = "/ckpt"
+    assert requests == [("/stage_weight_update", staged)]
 
 
 def test_staging_and_commit_have_independent_timeouts() -> None:
