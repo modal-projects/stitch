@@ -121,6 +121,12 @@ normally. Stop it with Ctrl-C. It is off by default and requires
 `save_interval`, `save_hf`, and optimizer/RNG checkpointing. A fresh run becomes
 resumable after its first complete Megatron/Hugging Face checkpoint pair.
 
+With the Modal Volume store, complete Hugging Face checkpoints also accelerate
+elastic rollout startup. When a Miles recipe saves checkpoints and updates
+weights every step, a new replica loads the current run's newest complete
+checkpoint no newer than `latest`, then applies only the remaining deltas.
+Before the first save, it catches up from the run's configured boot checkpoint.
+
 ### 6. Inspect or change a live run
 
 Follow logs using the app name printed by the launcher:
@@ -257,11 +263,12 @@ Each experiment Volume contains only run-scoped state:
     ├── updates/weight_vNNNNNN/
     ├── checkpoints/
     ├── hf_checkpoints/weight_vNNNNNN/
+    │   └── .complete
     └── train.log
 ```
 
-The training framework owns `updates/`; Stitch owns the `latest` commit
-pointer. A resumed checkpoint starts a new run and reads the previous run's
+The training framework owns `updates/` and the saved checkpoints; Stitch owns
+`latest`. A resumed checkpoint starts a new run and reads the previous run's
 `checkpoints/` rather than appending to its update chain.
 
 Datasets are independent of models and runs:

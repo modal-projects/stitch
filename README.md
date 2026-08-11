@@ -28,8 +28,9 @@ Pool gateway ──────────────────────�
 - **Continuous policy updates.** Replicas stage and verify the next full
   checkpoint or delta while serving. Weight activation briefly pauses the
   engine and gates new requests.
-- **Elastic rollout capacity.** New replicas load the base policy, catch up to
-  the current version, and enter rotation only when ready.
+- **Elastic rollout capacity.** New replicas load an eligible policy
+  checkpoint, catch up to the current version, and enter rotation only when
+  ready.
 - **Failure-safe convergence.** Version bytes become durable before the shared
   pointer advances. A replica reports a version only after its engine activates
   it successfully.

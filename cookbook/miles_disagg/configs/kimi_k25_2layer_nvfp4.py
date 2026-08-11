@@ -146,6 +146,7 @@ class _Miles(MilesConfig):
     # Tiny smoke: a couple of rollout/train steps to close the loop fast.
     num_rollout = 2
     save_interval = 10
+    save_hf = "hf_checkpoints/weight_v{rollout_id:06d}"
     rollout_batch_size = 16
     rollout_max_response_len = 2048
     rollout_temperature = 0.8

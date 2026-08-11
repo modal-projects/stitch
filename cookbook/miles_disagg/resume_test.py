@@ -5,6 +5,7 @@ import pytest
 from cookbook.miles_disagg.resume import (
     ResumePoint,
     resolve_resume_point,
+    saved_checkpoint_version,
     validate_auto_resume_config,
     validate_resume_config,
 )
@@ -25,6 +26,17 @@ class _Config:
     save_interval = 20
     save_hf = "hf_checkpoints/weight_v{rollout_id:06d}"
     no_save_optim = False
+
+
+@pytest.mark.parametrize(
+    ("rollout_id", "resumed", "version"),
+    [
+        (19, False, 20),
+        (120, True, 120),
+    ],
+)
+def test_saved_checkpoint_version(rollout_id: int, resumed: bool, version: int) -> None:
+    assert saved_checkpoint_version(rollout_id, resumed=resumed) == version
 
 
 def test_resolve_resume_point_pairs_megatron_and_hf_checkpoints() -> None:

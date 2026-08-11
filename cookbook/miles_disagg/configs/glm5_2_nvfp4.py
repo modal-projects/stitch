@@ -296,6 +296,7 @@ class _Miles(MilesConfig):
 
     num_rollout = 500
     save_interval = 10
+    save_hf = "hf_checkpoints/weight_v{rollout_id:06d}"
     rollout_batch_size = ROLLOUT_BATCH_SIZE
     n_samples_per_prompt = N_SAMPLES_PER_PROMPT
     global_batch_size = 256

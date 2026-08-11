@@ -111,9 +111,8 @@ class _Miles(MilesConfig):
     eval_interval = None
 
     num_rollout = 20
-    save_interval = (
-        1000  # megatron requires it; > num_rollout so the smoke skips megatron saves
-    )
+    save_interval = 1000  # The short smoke saves only its final checkpoint.
+    save_hf = "hf_checkpoints/weight_v{rollout_id:06d}"
     rollout_batch_size = 32
     rollout_max_response_len = 4096  # fits within the 8192 context (prompt + response)
     rollout_temperature = 0.8
