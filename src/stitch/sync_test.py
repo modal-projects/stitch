@@ -347,6 +347,37 @@ def test_run_switch_resets_in_place() -> None:
     _run(go())
 
 
+def test_run_switch_exposes_paused_reset_to_engine_watchdog() -> None:
+    async def go() -> None:
+        engine = FakeEngine()
+        reset_started = asyncio.Event()
+        finish_reset = asyncio.Event()
+
+        async def slow_reset() -> None:
+            engine.calls.append("reset")
+            reset_started.set()
+            await finish_reset.wait()
+
+        engine.reset = slow_reset  # type: ignore[method-assign]
+        r = _make_reconciler(
+            store=FakeStore(),
+            engine=engine,
+            commit_mode="in_place",
+        )
+        r.applied = VersionRef("r0", 5)
+
+        switch = asyncio.create_task(r._switch_run("r1"))
+        await reset_started.wait()
+        assert engine.calls == ["pause", "reset"]
+        assert r.sync_state is SyncState.COMMITTING
+        assert r.engine_health_may_be_stale()
+
+        finish_reset.set()
+        await switch
+
+    _run(go())
+
+
 def test_run_switch_drains_rolling_requests() -> None:
     # Base reset is incompatible: even in in_place, no rolling request crosses the wipe (drain_all; stitch#32).
     async def go() -> None:

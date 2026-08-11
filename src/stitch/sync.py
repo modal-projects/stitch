@@ -539,6 +539,7 @@ class Reconciler(AdmissionGate):
 
         async def apply() -> None:
             if was_patched:
+                self.sync_state = SyncState.COMMITTING
                 await self.engine.reset()
 
         def on_applied() -> None:
