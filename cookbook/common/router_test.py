@@ -8,6 +8,7 @@ import asyncio
 import time
 from types import SimpleNamespace
 
+from cookbook.common import router
 from cookbook.common.router import (
     SESSION_ROUTE_TTL_SECONDS,
     ContainerInfo,
@@ -19,6 +20,24 @@ from cookbook.common.router import (
     route_session,
     select_underloaded_container,
 )
+
+
+class _Image:
+    def __init__(self) -> None:
+        self.environment: dict[str, str] = {}
+
+    def pip_install(self, *_packages: str) -> _Image:
+        return self
+
+    def env(self, values: dict[str, str]) -> _Image:
+        self.environment.update(values)
+        return self
+
+    def add_local_python_source(self, _module: str) -> _Image:
+        return self
+
+    def add_local_dir(self, *_args, **_kwargs) -> _Image:
+        return self
 
 
 class _SyncAsync:
@@ -54,6 +73,23 @@ def _seeded(routes: FakeRoutes, session: str, entries: list[dict]) -> None:
     routes.store[session] = RouteEntryList.dump_python(
         [RouteEntry(**entry) for entry in entries], mode="json"
     )
+
+
+def test_router_image_preserves_store_environment(monkeypatch) -> None:
+    image = _Image()
+    monkeypatch.setattr(router.modal.Image, "debian_slim", lambda: image)
+
+    router.build_router_image(
+        "experiment",
+        "run-a",
+        extra_env={"STITCH_STORE_BACKEND": "s3"},
+    )
+
+    assert image.environment == {
+        "STITCH_STORE_BACKEND": "s3",
+        "EXPERIMENT_CONFIG": "experiment",
+        "RUN_ID": "run-a",
+    }
 
 
 def test_route_session_pins_only_available_underloaded_replica() -> None:

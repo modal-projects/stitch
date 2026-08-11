@@ -30,6 +30,7 @@ import random
 import threading
 import time
 import uuid
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, AsyncGenerator, Generator
 
@@ -56,14 +57,25 @@ MAX_SESSION_RETRIES = 3
 _COOKBOOK_DIR = Path(__file__).resolve().parent.parent
 
 
-def build_router_image(experiment: str, run_id: str) -> modal.Image:
+def build_router_image(
+    experiment: str,
+    run_id: str,
+    *,
+    extra_env: Mapping[str, str] | None = None,
+) -> modal.Image:
     """CPU image for the router classes. Like the serving image, it bakes the run
     coordinates and carries the cookbook + stitch sources, so a container's re-import of
     the recipe app module rebuilds the same app name and class wiring."""
     return (
         modal.Image.debian_slim()
         .pip_install("fastapi", "httpx", "pydantic", "uvicorn")
-        .env({"EXPERIMENT_CONFIG": experiment, "RUN_ID": run_id})
+        .env(
+            {
+                **(extra_env or {}),
+                "EXPERIMENT_CONFIG": experiment,
+                "RUN_ID": run_id,
+            }
+        )
         .add_local_python_source("stitch")
         .add_local_dir(
             str(_COOKBOOK_DIR), remote_path="/root/cookbook", ignore=["**/__pycache__"]

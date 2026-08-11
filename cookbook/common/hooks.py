@@ -2,7 +2,7 @@
 
 Trainer integrations point their lifecycle callbacks at this module. Each hook reads the
 run coordinates from the trainer's argument namespace and composes the Stitch core with a
-``ModalVolumeStore`` and ``ModalFlashPool``.
+configured Store and ``ModalFlashPool``.
 """
 
 from __future__ import annotations
@@ -14,11 +14,12 @@ from pathlib import Path
 from typing import Any
 
 from stitch.pools.modal_flash import ModalFlashPool
-from stitch.publish import claim_run, constrain_request, publish_version
-from stitch.stores.modal_volume import ModalVolumeStore
-from stitch.types import PointerRewind, VersionRef
+from stitch.publish import claim_run, constrain_request, publish_version, wake_pool
+from stitch.stores.base import Store
+from stitch.stores.s3 import S3Store, UploadReceipt
+from stitch.types import VersionRef, decide_pointer_move
 
-from . import process
+from . import process, storage
 from .constants import MODAL_SESSION_ID_HEADER
 
 logger = logging.getLogger(__name__)
@@ -38,42 +39,79 @@ def sample_affinity_key(sample: Any) -> str | None:
 
 # ── publish ────────────────────────────────────────────────────────────────────
 def commit_and_wake(args: Any, published_dir: str, rollout_engines: Any = None) -> None:
-    """Bridge the framework's disk-delta publish to the stitch store. The framework fires this
-    at each durability boundary: a version dir (``weight_vNNNNNN``, holding the HF index) and —
-    at baseline/pointer commit — the run dir. Every container commits its shared mount once;
-    after all commits succeed, rank 0 refreshes and validates the complete checkpoint before
-    advancing the pointer. Keying on the dir name (not on reading an index) keeps run-dir calls
-    a clean no-op, not a missing-file crash."""
+    """Publish one framework-written disk update and wake rollout replicas.
+
+    Volume trainers commit each host's shared mount before rank 0 publishes.
+    S3 trainers instead upload from node-local disk once per host, gather small
+    receipts, and let rank 0 verify the complete S3 version before advancing
+    ``latest``. The framework also invokes this hook for its run directory;
+    that is a Volume durability boundary and an S3 no-op.
+    """
     del rollout_engines
     store = _store(args)
     if not Path(published_dir).name.startswith("weight_v"):
-        # Baseline cleanup is performed by rank 0 only, so a normal mounted
-        # Volume commit is authoritative here.
-        store.commit()
+        if not isinstance(store, S3Store):
+            store.commit()
         return
 
-    publication_state: tuple[bool, str | None] = (False, None)
+    target = VersionRef.parse(f"{_run_id(args)}/{Path(published_dir).name}")
+    checked = process.dist_rank() in (None, 0)
+    publication_state: tuple[bool, bool, VersionRef | None, str | None] = (
+        checked,
+        False,
+        None,
+        None,
+    )
     if process.dist_rank() in (None, 0):
         try:
-            target = VersionRef.parse(f"{_run_id(args)}/{Path(published_dir).name}")
             current = store.read_pointer()
             publication_state = (
+                True,
                 current is not None
                 and current.run_id == target.run_id
                 and current.version >= target.version,
+                current,
                 None,
             )
         except Exception:  # noqa: BLE001
-            publication_state = (False, f"rank 0:\n{traceback.format_exc()}")
+            publication_state = (
+                True,
+                False,
+                None,
+                f"rank 0:\n{traceback.format_exc()}",
+            )
     publication_states = process.dist_all_gather_object(publication_state)
-    errors = [error for _, error in publication_states if error is not None]
+    errors = [error for _, _, _, error in publication_states if error is not None]
     if errors:
         raise RuntimeError(
             "checkpoint publication state check failed:\n" + "\n".join(errors)
         )
-    if any(already_published for already_published, _ in publication_states):
+    rank_zero_states = [state for state in publication_states if state[0]]
+    if len(rank_zero_states) != 1:
+        raise RuntimeError(
+            "checkpoint publication state check did not identify exactly one rank 0"
+        )
+    _, already_published, expected_pointer, _ = rank_zero_states[0]
+    if already_published:
         logger.warning("%s is already published; leaving it immutable", published_dir)
         return
+    decide_pointer_move(expected_pointer, target)
+
+    if isinstance(store, S3Store):
+        _publish_s3_version(
+            store,
+            args,
+            target,
+            published_dir,
+            expected_pointer=expected_pointer,
+        )
+        return
+
+    _publish_mounted_version(store, args, published_dir)
+
+
+def _publish_mounted_version(store: Store, args: Any, published_dir: str) -> None:
+    """Commit every trainer host, then publish from rank 0's refreshed mount."""
 
     commit_error = None
     if process.dist_is_container_leader():
@@ -88,12 +126,48 @@ def commit_and_wake(args: Any, published_dir: str, rollout_engines: Any = None) 
         try:
             store.refresh()
             publish_version(store, _pool(args), published_dir, run_id=_run_id(args))
-        except PointerRewind:
-            # A same-run republish (e.g. a retried step) — drop it rather than serve stale.
-            logger.warning(
-                "publish of %s would rewind latest; dropping",
-                published_dir,
-                exc_info=True,
+        except Exception:  # noqa: BLE001
+            publish_error = f"rank 0:\n{traceback.format_exc()}"
+    _raise_distributed_failures("checkpoint publication", publish_error)
+
+
+def _publish_s3_version(
+    store: S3Store,
+    args: Any,
+    target: VersionRef,
+    published_dir: str,
+    *,
+    expected_pointer: VersionRef | None,
+) -> None:
+    """Upload once per host, verify gathered receipts, and commit ``latest`` last."""
+    receipt: UploadReceipt | None = None
+    upload_error = None
+    if process.dist_is_container_leader():
+        try:
+            receipt = store.upload_version_files(target, published_dir)
+        except Exception:  # noqa: BLE001
+            upload_error = f"rank {process.dist_rank()}:\n{traceback.format_exc()}"
+
+    upload_results = process.dist_all_gather_object((receipt, upload_error))
+    upload_errors = [error for _, error in upload_results if error is not None]
+    if upload_errors:
+        raise RuntimeError("checkpoint upload failed:\n" + "\n".join(upload_errors))
+    receipts = [receipt for receipt, _ in upload_results if receipt is not None]
+    if not receipts:
+        raise RuntimeError("checkpoint upload produced no host receipts")
+
+    publish_error = None
+    if process.dist_rank() in (None, 0):
+        try:
+            manifest = store.verify_version(target, receipts)
+            store.compare_and_advance_pointer(expected_pointer, target)
+            wake_pool(_pool(args), target)
+            logger.info(
+                "published %s: kind=%s files=%d hosts=%d",
+                target.identity,
+                manifest.kind.value,
+                len(manifest.files),
+                len(receipts),
             )
         except Exception:  # noqa: BLE001
             publish_error = f"rank 0:\n{traceback.format_exc()}"
@@ -161,30 +235,25 @@ async def gated_rollout_request_hook(
 
 
 class _CachedPointer:
-    """TTL-cached ``latest`` version from the trainer's local Volume mount.
+    """TTL-cached ``latest`` version from the trainer's configured store.
 
-    The publisher and session-server request hooks share the trainer-head mount. Reloading
-    it here can discard a version that the publisher is still writing; cross-host refresh
-    belongs to rollout-replica reconciliation.
+    The publisher and request hooks share one store client. Refreshing here can
+    disrupt a Volume publisher that is still writing, while S3 needs no refresh;
+    cross-host refresh belongs to rollout-replica reconciliation.
     """
 
     def __init__(self) -> None:
         self._version = 0
         self._at = -1e9
-        self._store: ModalVolumeStore | None = None
+        self._store: Store | None = None
+        self._store_key: tuple[str | None, ...] | None = None
 
     async def get(self, args: Any, ttl: float = 2.0) -> int:
         store = self._store
-        root = Path(_transport_root(args))
-        run_id = _run_id(args)
-        volume = getattr(args, "experiment_volume_name", None)
-        if (
-            store is None
-            or store.root != root
-            or store.run_id != run_id
-            or store.volume_name != (volume or None)
-        ):
+        store_key = _store_key(args)
+        if store is None or self._store_key != store_key:
             store = self._store = _store(args)
+            self._store_key = store_key
             self._version = 0
             self._at = -1e9
         now = time.monotonic()
@@ -206,12 +275,25 @@ _latest = _CachedPointer()
 
 
 # ── args → run coordinates ───────────────────────────────────────────────────────
-def _store(args: Any) -> ModalVolumeStore:
-    volume = getattr(args, "experiment_volume_name", None)
-    return ModalVolumeStore(
-        _transport_root(args),
-        volume_name=volume or None,
+def _store(args: Any) -> Store:
+    return storage.create_store(
+        str(getattr(args, "stitch_store_backend", storage.MODAL_VOLUME)),
+        local_root=_transport_root(args),
         run_id=_run_id(args),
+        volume_name=getattr(args, "experiment_volume_name", None) or None,
+        s3_root=getattr(args, "stitch_s3_root", None) or None,
+        s3_endpoint_url=getattr(args, "stitch_s3_endpoint_url", None) or None,
+    )
+
+
+def _store_key(args: Any) -> tuple[str | None, ...]:
+    return (
+        str(getattr(args, "stitch_store_backend", storage.MODAL_VOLUME)),
+        _transport_root(args),
+        _run_id(args),
+        getattr(args, "experiment_volume_name", None) or None,
+        getattr(args, "stitch_s3_root", None) or None,
+        getattr(args, "stitch_s3_endpoint_url", None) or None,
     )
 
 

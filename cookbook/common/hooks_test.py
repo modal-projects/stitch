@@ -8,8 +8,11 @@ the temp root) and only ``_pool`` is faked. Run directly:
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import io
 import json
 import tempfile
+from base64 import b64encode
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,6 +20,7 @@ import pytest
 
 from cookbook.common import hooks
 from stitch.stores.modal_volume import ModalVolumeStore
+from stitch.stores.s3 import S3Store, UploadReceipt
 from stitch.types import VersionRef
 
 
@@ -29,6 +33,92 @@ class _FakePool:
 
     def wake(self, replicas, ref):
         self.woke.append(ref)
+
+
+class _FakeS3:
+    class exceptions:  # noqa: N801 - mirrors boto3's client.exceptions namespace
+        class NoSuchKey(Exception):
+            pass
+
+    class ConditionalWriteFailed(Exception):
+        def __init__(self) -> None:
+            self.response = {
+                "Error": {"Code": "PreconditionFailed"},
+                "ResponseMetadata": {"HTTPStatusCode": 412},
+            }
+
+    def __init__(self) -> None:
+        self.objects: dict[tuple[str, str], bytes] = {}
+        self.metadata: dict[tuple[str, str], dict[str, str]] = {}
+        self.checksums: dict[tuple[str, str], str] = {}
+        self.etags: dict[tuple[str, str], str] = {}
+
+    def put_object(
+        self,
+        *,
+        Bucket: str,
+        Key: str,
+        Body: bytes,
+        IfMatch: str | None = None,
+        IfNoneMatch: str | None = None,
+    ) -> None:
+        object_id = (Bucket, Key)
+        if IfNoneMatch == "*" and object_id in self.objects:
+            raise self.ConditionalWriteFailed
+        if IfMatch is not None and self.etags.get(object_id) != IfMatch:
+            raise self.ConditionalWriteFailed
+        self._write_object(object_id, Body)
+
+    def get_object(self, *, Bucket: str, Key: str) -> dict[str, io.BytesIO]:
+        try:
+            value = self.objects[(Bucket, Key)]
+        except KeyError:
+            raise self.exceptions.NoSuchKey from None
+        return {"Body": io.BytesIO(value), "ETag": self.etags[(Bucket, Key)]}
+
+    def upload_file(
+        self,
+        filename: str,
+        bucket: str,
+        key: str,
+        ExtraArgs: dict[str, object] | None = None,
+    ) -> None:
+        object_id = (bucket, key)
+        body = Path(filename).read_bytes()
+        self._write_object(object_id, body)
+        self.metadata[object_id] = dict((ExtraArgs or {}).get("Metadata", {}))
+        if (ExtraArgs or {}).get("ChecksumAlgorithm") == "SHA256":
+            self.checksums[object_id] = b64encode(
+                hashlib.sha256(body).digest()
+            ).decode()
+
+    def head_object(
+        self, *, Bucket: str, Key: str, ChecksumMode: str | None = None
+    ) -> dict[str, object]:
+        object_id = (Bucket, Key)
+        if object_id not in self.objects:
+            raise self.exceptions.NoSuchKey
+        return {
+            "ContentLength": len(self.objects[object_id]),
+            "ETag": self.etags[object_id],
+            "Metadata": self.metadata.get(object_id, {}),
+            **(
+                {"ChecksumSHA256": self.checksums[object_id]}
+                if ChecksumMode == "ENABLED" and object_id in self.checksums
+                else {}
+            ),
+        }
+
+    def download_file(self, bucket: str, key: str, filename: str) -> None:
+        destination = Path(filename)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(self.objects[(bucket, key)])
+
+    def _write_object(self, object_id: tuple[str, str], body: bytes) -> None:
+        self.objects[object_id] = body
+        self.metadata.pop(object_id, None)
+        self.checksums.pop(object_id, None)
+        self.etags[object_id] = f'"{hashlib.sha256(body).hexdigest()[:32]}"'
 
 
 def _args(root: str, run_id: str = "run-abc", **extra):
@@ -120,7 +210,13 @@ def test_commit_and_wake_commits_once_per_container() -> None:
         original_commit = ModalVolumeStore.commit
 
         hooks.process.dist_rank = lambda: 1
-        hooks.process.dist_all_gather_object = lambda value: [value]
+
+        def gather_with_rank_zero(value):
+            if isinstance(value, tuple) and len(value) == 4:
+                return [(True, False, None, None), value]
+            return [value]
+
+        hooks.process.dist_all_gather_object = gather_with_rank_zero
         hooks.process.dist_is_container_leader = lambda: False
 
         def unexpected_commit(_store) -> None:
@@ -135,6 +231,139 @@ def test_commit_and_wake_commits_once_per_container() -> None:
             hooks.process.dist_all_gather_object = original_gather
             hooks.process.dist_is_container_leader = original_container_leader
             ModalVolumeStore.commit = original_commit
+
+
+def test_commit_and_wake_publishes_directly_to_s3(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = _FakeS3()
+    pool = _FakePool()
+    create_store = hooks.storage.create_store
+
+    def create_store_with_client(*args, **kwargs):
+        store = create_store(*args, **kwargs)
+        if isinstance(store, S3Store):
+            store._client = client
+        return store
+
+    monkeypatch.setattr(hooks.storage, "create_store", create_store_with_client)
+    monkeypatch.setattr(hooks, "_pool", lambda _args: pool)
+    monkeypatch.setattr(
+        ModalVolumeStore,
+        "commit",
+        lambda _store: (_ for _ in ()).throw(
+            AssertionError("S3 publication must not commit a Modal Volume")
+        ),
+    )
+    args = _args(
+        str(tmp_path),
+        stitch_store_backend="s3",
+        stitch_s3_root="s3://bucket/experiments/run-abc",
+    )
+    version_dir = _write_version(tmp_path, VersionRef("run-abc", 1))
+
+    hooks.commit_and_wake(args, version_dir)
+
+    assert hooks._store(args).read_pointer() == VersionRef("run-abc", 1)
+    assert pool.woke == [VersionRef("run-abc", 1)]
+    assert (
+        "bucket",
+        "experiments/run-abc/updates/weight_v000001/model-00001.safetensors",
+    ) in client.objects
+
+
+def test_commit_and_wake_verifies_receipts_from_multiple_hosts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = _FakeS3()
+    ref = VersionRef("run-abc", 1)
+    local_dir = tmp_path / "updates" / "weight_v000001"
+    remote_dir = tmp_path / "remote" / "weight_v000001"
+    local_dir.mkdir(parents=True)
+    remote_dir.mkdir(parents=True)
+    (local_dir / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {
+                "metadata": {"version": 1},
+                "weight_map": {
+                    "a": "model-00001-of-00002.safetensors",
+                    "b": "model-00002-of-00002.safetensors",
+                },
+            }
+        )
+    )
+    (local_dir / "model-00001-of-00002.safetensors").write_bytes(b"local")
+    (remote_dir / "model-00002-of-00002.safetensors").write_bytes(b"remote")
+    remote_store = S3Store(
+        "s3://bucket/experiments/run-abc",
+        cache_dir=tmp_path,
+        run_id="run-abc",
+    )
+    remote_store._client = client
+    remote_receipt = remote_store.upload_version_files(ref, remote_dir)
+    create_store = hooks.storage.create_store
+
+    def create_store_with_client(*args, **kwargs):
+        store = create_store(*args, **kwargs)
+        if isinstance(store, S3Store):
+            store._client = client
+        return store
+
+    def gather_with_remote_receipt(value):
+        if (
+            isinstance(value, tuple)
+            and len(value) == 2
+            and isinstance(value[0], UploadReceipt)
+        ):
+            return [value, (remote_receipt, None)]
+        return [value]
+
+    monkeypatch.setattr(hooks.storage, "create_store", create_store_with_client)
+    monkeypatch.setattr(
+        hooks.process, "dist_all_gather_object", gather_with_remote_receipt
+    )
+    monkeypatch.setattr(hooks.process, "dist_is_container_leader", lambda: True)
+    monkeypatch.setattr(hooks, "_pool", lambda _args: _FakePool())
+    args = _args(
+        str(tmp_path),
+        stitch_store_backend="s3",
+        stitch_s3_root="s3://bucket/experiments/run-abc",
+    )
+
+    hooks.commit_and_wake(args, str(local_dir))
+
+    assert hooks._store(args).read_pointer() == ref
+
+
+def test_commit_and_wake_s3_baseline_does_not_touch_a_volume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = _FakeS3()
+    create_store = hooks.storage.create_store
+
+    def create_store_with_client(*args, **kwargs):
+        store = create_store(*args, **kwargs)
+        if isinstance(store, S3Store):
+            store._client = client
+        return store
+
+    monkeypatch.setattr(hooks.storage, "create_store", create_store_with_client)
+    monkeypatch.setattr(
+        ModalVolumeStore,
+        "commit",
+        lambda _store: (_ for _ in ()).throw(
+            AssertionError("S3 baseline must not commit a Modal Volume")
+        ),
+    )
+    updates = tmp_path / "updates"
+    updates.mkdir()
+    args = _args(
+        str(tmp_path),
+        stitch_store_backend="s3",
+        stitch_s3_root="s3://bucket/experiments/run-abc",
+    )
+
+    hooks.commit_and_wake(args, str(updates))
 
 
 def test_commit_and_wake_baseline_is_noop() -> None:

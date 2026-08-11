@@ -6,6 +6,8 @@ trainer package, so slime and miles serve on the identical weight-sync sglang im
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import modal
 
 from cookbook.common import trainer_image as common_trainer_image
@@ -23,6 +25,8 @@ def build_trainer_image(
     experiment: str,
     run_id: str | None = None,
     slime_local: str | None = None,
+    extra_pip_packages: tuple[str, ...] = (),
+    extra_env: Mapping[str, str] | None = None,
     copy_source: bool = False,
 ) -> modal.Image:
     """The slime trainer image: the pinned slime fork over the slime base, Megatron-LM
@@ -45,10 +49,13 @@ def build_trainer_image(
             "cd /root/Megatron-LM && python3 -m pip install --no-deps -e . --config-settings editable_mode=compat"
         )
     )
+    if extra_pip_packages:
+        image = image.pip_install(*extra_pip_packages)
     image = common_trainer_image.add_common_layers(
         image,
         experiment=experiment,
         run_id=run_id,
+        extra_env=extra_env,
         copy_source=copy_source,
     )
     # Dev overlay: replace the cloned fork with a local checkout.

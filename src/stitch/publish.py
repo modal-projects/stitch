@@ -47,10 +47,11 @@ def publish_version(
         raise FileNotFoundError(
             f"incomplete source version {version_dir}: missing " + ", ".join(missing)
         )
-    decide_pointer_move(store.read_pointer(), manifest.ref)  # rewind guard
+    expected = store.read_pointer()
+    decide_pointer_move(expected, manifest.ref)  # rewind guard
     store.publish(manifest, version_dir)
-    store.advance_pointer(manifest.ref)
-    _wake(pool, manifest.ref)
+    store.compare_and_advance_pointer(expected, manifest.ref)
+    wake_pool(pool, manifest.ref)
     logger.info(
         "published %s: kind=%s files=%d",
         manifest.ref.identity,
@@ -79,16 +80,16 @@ def claim_run(
         # Re-write the same pointer so a retry also retries its durability
         # boundary after an interrupted/ambiguous backend write.
         store.claim(boot)
-        _wake(pool, boot)
+        wake_pool(pool, boot)
         logger.info("run %s already claimed at v%d", run_id, boot_version)
         return
     decide_pointer_move(current, boot)  # rewind guard (a reused run_id above boot)
     store.claim(boot)
-    _wake(pool, boot)
+    wake_pool(pool, boot)
     logger.info("claimed run %s at v%d", run_id, boot_version)
 
 
-def _wake(pool: Pool | None, ref: VersionRef) -> None:
+def wake_pool(pool: Pool | None, ref: VersionRef) -> None:
     """Best-effort pool wake: the pointer is already durable, so a transient control-plane
     error just costs latency (replicas self-sync on their next poll/startup)."""
     if pool is None:

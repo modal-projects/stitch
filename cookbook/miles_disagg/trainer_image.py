@@ -10,6 +10,7 @@ MILES_FORK.md next to this file.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 
 import modal
@@ -41,6 +42,7 @@ def build_trainer_image(
     miles_local: str | None = None,
     extra_pip_packages: tuple[str, ...] = (),
     image_run_commands: tuple[str, ...] = (),
+    extra_env: Mapping[str, str] | None = None,
     copy_source: bool = False,
 ) -> modal.Image:
     """The miles trainer image: RDMA/EFA userspace + the pinned miles fork + the
@@ -76,6 +78,7 @@ def build_trainer_image(
         image,
         experiment=experiment,
         run_id=run_id,
+        extra_env=extra_env,
         copy_source=copy_source,
     )
     # Dev overlay: replace the cloned fork with a local checkout.
