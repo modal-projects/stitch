@@ -21,6 +21,10 @@ dev = [
     "httpx",
 ]
 
+[[tool.uv.index]]
+name = "pypi"
+url = "https://pypi.org/simple"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
