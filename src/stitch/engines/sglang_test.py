@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 
+import httpx
 import pytest
 
+from stitch.engines.base import EngineHealthStatus
 from stitch.engines.sglang import SGLangEngine
 from stitch.types import VersionKind, VersionManifest, VersionRef
 
@@ -310,6 +312,52 @@ def test_staging_and_commit_have_independent_timeouts() -> None:
         ("/stage_weight_update", 3600.0),
         ("/update_weights_from_disk", 600.0),
     ]
+
+
+class _HealthClient:
+    def __init__(self, outcome) -> None:
+        self.outcome = outcome
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args) -> None:
+        pass
+
+    async def get(self, url: str) -> httpx.Response:
+        if isinstance(self.outcome, Exception):
+            raise self.outcome
+        return httpx.Response(self.outcome, request=httpx.Request("GET", url))
+
+
+@pytest.mark.parametrize(
+    "outcome,expected",
+    [
+        (200, EngineHealthStatus.HEALTHY),
+        (503, EngineHealthStatus.UNRESPONSIVE),
+        (
+            httpx.ReadTimeout("busy", request=httpx.Request("GET", "http://engine")),
+            EngineHealthStatus.UNRESPONSIVE,
+        ),
+        (
+            httpx.ConnectError(
+                "connection refused",
+                request=httpx.Request("GET", "http://engine"),
+            ),
+            EngineHealthStatus.UNREACHABLE,
+        ),
+    ],
+)
+def test_health_check_classifies_engine_failures(
+    monkeypatch, outcome, expected
+) -> None:
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda **_kwargs: _HealthClient(outcome),
+    )
+    engine = SGLangEngine("http://engine", "/base", "/ckpt")
+    assert asyncio.run(engine.check_health()).status is expected
 
 
 if __name__ == "__main__":

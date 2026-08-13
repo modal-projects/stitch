@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from stitch.service import sync_in_progress
+from stitch.service import engine_health_may_be_stale
 
 from . import process
 from .constants import SGLANG_PORT, SIDECAR_PORT
@@ -106,14 +106,16 @@ def serve_startup(
     )
 
     def engine_health() -> str | None:
-        # Weight staging can make the engine health endpoint briefly stale.
-        # Suppress that expected blip only while the reconciler reports work.
+        # Applying staged weights pauses inference. Staging does not, so a health
+        # failure during staging must remain visible as a stalled-engine signal.
         error = replica.endpoint.health_check()
         if error is None:
             return None
         return (
             None
-            if sync_in_progress(f"http://127.0.0.1:{SIDECAR_PORT}/server_info")
+            if engine_health_may_be_stale(
+                f"http://127.0.0.1:{SIDECAR_PORT}/server_info"
+            )
             else error
         )
 

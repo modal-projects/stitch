@@ -1,5 +1,4 @@
-"""``sync_in_progress`` — the shared /server_info interpretation a deployment's engine-health
-probe uses to suppress health blips while the reconciler commits staged weights."""
+"""Engine-health suppression derived from the sidecar's ``/server_info`` state."""
 
 from __future__ import annotations
 
@@ -15,7 +14,7 @@ import httpx
 import pytest
 
 from stitch.engines.base import Engine
-from stitch.service import create_app, sync_in_progress
+from stitch.service import create_app, engine_health_may_be_stale
 from stitch.sync import AdmissionGate
 from stitch.types import VersionRef
 
@@ -268,14 +267,14 @@ def _server_info(payload):
     "info,expected",
     [
         ({"update_destination_ready": True, "sync_state": "COMMITTING"}, True),
-        ({"update_destination_ready": True, "sync_state": "STAGING"}, True),
+        ({"update_destination_ready": True, "sync_state": "STAGING"}, False),
         ({"update_destination_ready": True, "sync_state": "FETCHING"}, False),
         (
             {
                 "update_destination_ready": False,
                 "update_destination_error": None,
             },
-            True,
+            False,
         ),
         ({"update_destination_ready": True, "sync_state": "IDLE"}, False),
         (
@@ -287,11 +286,14 @@ def _server_info(payload):
         ),
     ],
 )
-def test_sync_in_progress(info, expected):
+def test_engine_health_may_be_stale(info, expected):
     with _server_info(info) as url:
-        assert sync_in_progress(url) is expected
+        assert engine_health_may_be_stale(url) is expected
 
 
 def test_unreachable_sidecar_reports_error():
     # Nothing listening: best-effort False so the caller surfaces the engine error.
-    assert sync_in_progress("http://127.0.0.1:1/server_info", timeout=0.2) is False
+    assert (
+        engine_health_may_be_stale("http://127.0.0.1:1/server_info", timeout=0.2)
+        is False
+    )

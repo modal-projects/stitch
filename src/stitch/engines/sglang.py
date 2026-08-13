@@ -5,7 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Literal
 
-from stitch.engines.base import Engine
+from stitch.engines.base import Engine, EngineHealth, EngineHealthStatus
+from stitch.errors import UnrecoverableEngineError
 from stitch.types import VersionKind, VersionManifest, VersionRef
 
 
@@ -19,6 +20,7 @@ class SGLangEngine(Engine):
         delta_update_mode: Literal["disk", "cpu"] = "disk",
         disk_load_format: str = "auto",
         control_timeout: float = 120.0,
+        health_timeout: float = 5.0,
         weight_staging_timeout: float = 3600.0,
         weight_update_timeout: float = 600.0,
     ) -> None:
@@ -35,6 +37,7 @@ class SGLangEngine(Engine):
         self.delta_update_mode = delta_update_mode
         self.disk_load_format = disk_load_format
         self._control_timeout = control_timeout
+        self._health_timeout = health_timeout
         self._weight_staging_timeout = weight_staging_timeout
         self._weight_update_timeout = weight_update_timeout
         self._boot_version = 0
@@ -55,6 +58,29 @@ class SGLangEngine(Engine):
                 "continue_generation",
                 "abort_request",
             }
+        )
+
+    async def check_health(self) -> EngineHealth:
+        """Distinguish an absent process from an engine busy doing weight work."""
+        import httpx
+
+        try:
+            async with httpx.AsyncClient(
+                timeout=self._health_timeout, trust_env=False
+            ) as client:
+                response = await client.get(f"{self._base_url}/health")
+        except httpx.ConnectError as exc:
+            return EngineHealth(EngineHealthStatus.UNREACHABLE, str(exc))
+        except httpx.RequestError as exc:
+            return EngineHealth(
+                EngineHealthStatus.UNRESPONSIVE,
+                f"{type(exc).__name__}: {exc}",
+            )
+        if response.status_code == 200:
+            return EngineHealth(EngineHealthStatus.HEALTHY)
+        return EngineHealth(
+            EngineHealthStatus.UNRESPONSIVE,
+            f"health endpoint returned HTTP {response.status_code}",
         )
 
     async def stage(self, manifest: VersionManifest, source_dir: str) -> None:
@@ -115,7 +141,7 @@ class SGLangEngine(Engine):
 
     async def reset(self) -> None:
         if self.delta_update_mode == "cpu":
-            raise RuntimeError(
+            raise UnrecoverableEngineError(
                 "CPU delta update mode cannot restore a live engine to its boot checkpoint; "
                 "start a fresh rollout replica for a new run"
             )

@@ -26,6 +26,12 @@ from stitch.pools.base import Pool
 from stitch.stores.base import Store
 from stitch.sync import CommitMode, ConstraintUnmet, Reconciler
 from stitch.types import PoolState, ReplicaState, SyncState, VersionConstraint
+from stitch.watchdog import (
+    EngineWatchdog,
+    SidecarWatchdog,
+    TerminalFailureMonitor,
+    run_server_with_watchdog,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -265,6 +271,8 @@ def serve(
     port: int = 8000,
     debug_requests: bool = False,
     reconcile_interval: float = 5.0,
+    watchdog_interval: float = 5.0,
+    watchdog_failure_threshold: int = 3,
 ) -> None:
     """Run one replica's sidecar: build the Reconciler over the given store+engine
     and serve the versioned proxy. The deployment supplies the concrete instances."""
@@ -280,7 +288,19 @@ def serve(
         debug_requests=debug_requests,
         reconcile_interval=reconcile_interval,
     )
-    uvicorn.run(create_app(reconciler, engine), host=host, port=port, log_level="info")
+    watchdog = SidecarWatchdog(
+        EngineWatchdog(
+            engine,
+            engine_health_may_be_stale=reconciler.engine_health_may_be_stale,
+            interval=watchdog_interval,
+            failure_threshold=watchdog_failure_threshold,
+        ),
+        TerminalFailureMonitor(reconciler.wait_for_terminal_error),
+    )
+    config = uvicorn.Config(
+        create_app(reconciler, engine), host=host, port=port, log_level="info"
+    )
+    asyncio.run(run_server_with_watchdog(uvicorn.Server(config), watchdog))
 
 
 async def readiness(pool: Pool, *, timeout: float = 15.0) -> PoolState:
@@ -304,19 +324,12 @@ async def readiness(pool: Pool, *, timeout: float = 15.0) -> PoolState:
     return PoolState(list(states))
 
 
-# The reconciler states in which the engine is legitimately unresponsive: it is
-# staging or loading weights, so a stale health heartbeat is expected.
-_SYNCING_STATES = {
-    SyncState.STAGING.value,
-    SyncState.COMMITTING.value,
-}
+def engine_health_may_be_stale(server_info_url: str, *, timeout: float = 5.0) -> bool:
+    """Whether the engine is paused while staged weights are applied.
 
-
-def sync_in_progress(server_info_url: str, *, timeout: float = 5.0) -> bool:
-    """Whether the replica is initializing, staging, or committing weights.
-
-    A deployment's engine-health probe uses this to suppress expected health
-    blips during weight work. An unreachable sidecar returns ``False`` so the
+    Staging and destination initialization run alongside inference. Suppressing
+    their health failures would mask a stalled scheduler, so only the short
+    commit window is exempt. An unreachable sidecar returns ``False`` so the
     caller still reports an actual failure.
     """
     try:
@@ -324,10 +337,7 @@ def sync_in_progress(server_info_url: str, *, timeout: float = 5.0) -> bool:
             info = json.loads(resp.read())
     except Exception:  # noqa: BLE001
         return False
-    initializing = not info.get("update_destination_ready", True) and not info.get(
-        "update_destination_error"
-    )
-    return bool(initializing or info.get("sync_state") in _SYNCING_STATES)
+    return info.get("sync_state") == SyncState.COMMITTING.value
 
 
 def await_pool_ready(
