@@ -1,9 +1,12 @@
-"""The per-replica sync brain: an ``AdmissionGate`` (gate rollout requests on the
-served version) and a ``Reconciler`` (converge the replica to the store's pointer).
+"""The per-replica sync brain: a ``Reconciler`` that converges the replica to the
+store's pointer, with rollout requests admitted through a composed ``AdmissionGate``.
 
-They share one lock and one ``applied`` version so that reporting stays correct:
-a request's constraint is checked and its serving version captured under the same
-lock the committer holds across the weight apply *and* the version flip.
+Like the watchdogs, the gate is a standalone component wired by injection: the
+reconciler supplies a ``served_version`` reader and an ``on_reject`` hook, and drives
+weight commits through ``gate.commit``. The reader runs under the gate's condition
+lock, so a request's constraint is checked and its serving version captured with the
+same coherence the committer holds across the weight apply *and* the version flip —
+with no inheritance between the two policies.
 """
 
 from __future__ import annotations
@@ -59,11 +62,24 @@ class AdmissionGate:
     newly arriving request is attributed to the version it will actually run on. An
     incompatible transition (a run switch's boot reset) commits with ``drain_all=True``,
     which also drains all in-flight requests. The version flips before admission reopens.
+
+    The gate does not own the served version: it reads it through the injected
+    ``served_version`` reader, always under its condition lock, and reports every
+    rejection to the ``on_reject`` hook (so the owner can treat a 409 as a catch-up
+    trigger). A gate constructed without a reader has no served version: every
+    constrained request is rejected as retryable until a source is attached.
     """
 
-    def __init__(self, *, commit_mode: CommitMode = "in_place") -> None:
+    def __init__(
+        self,
+        *,
+        commit_mode: CommitMode = "in_place",
+        served_version: Callable[[], VersionRef | None] | None = None,
+        on_reject: Callable[[dict[str, Any]], None] | None = None,
+    ) -> None:
         self.commit_mode = commit_mode
-        self.applied: VersionRef | None = None
+        self._served_version = served_version or (lambda: None)
+        self._on_reject = on_reject or (lambda error: None)
         self._cond = asyncio.Condition()
         self._active = 0
         self._committing = False
@@ -75,7 +91,8 @@ class AdmissionGate:
         return self._active
 
     def _rejection(self, c: VersionConstraint) -> dict[str, Any] | None:
-        applied = self.applied.version if self.applied else None
+        served = self._served_version()
+        applied = served.version if served else None
         # Until the first sync lands (applied is None) there is no served version to stamp, so
         # reject as retryable rather than serve unversioned; the background reconcile sets it shortly.
         if applied is None or not c.satisfied_by(applied):
@@ -87,9 +104,6 @@ class AdmissionGate:
                 "message": f"served version {applied} does not satisfy {c}",
             }
         return None
-
-    def _on_reject(self, error: dict[str, Any]) -> None:
-        """Hook, run under the lock, when a request is rejected."""
 
     def _commit_ready(self) -> bool:
         if self.commit_mode == "in_place" and not self._drain_all:
@@ -107,7 +121,7 @@ class AdmissionGate:
             if error is not None:
                 self._on_reject(error)
                 raise ConstraintUnmet(error)
-            served = self.applied
+            served = self._served_version()
             self._active += 1
             if c.exact_version is not None:
                 self._exact_inflight[c.exact_version] += 1
@@ -163,10 +177,13 @@ class AdmissionGate:
                 self._cond.notify_all()
 
 
-class Reconciler(AdmissionGate):
+class Reconciler:
     """Converges one replica to the store's ``latest`` pointer: stage the chain,
-    commit once, flip the served version. A run change restores the immutable boot
-    checkpoint, so one run's chain is never mistaken for another's."""
+    commit once, flip the served version. Admission is delegated to the composed
+    :class:`AdmissionGate` (``self.gate``), which reads ``self.applied`` under its
+    own lock while commits flip that same attribute through ``gate.commit``. A run
+    change restores the immutable boot checkpoint, so one run's chain is never
+    mistaken for another's."""
 
     def __init__(
         self,
@@ -180,7 +197,6 @@ class Reconciler(AdmissionGate):
         debug_requests: bool = False,
         reconcile_interval: float = 5.0,
     ) -> None:
-        super().__init__(commit_mode=commit_mode)
         if not run_id:
             raise ValueError("run_id is required")
         if boot_version < 0:
@@ -191,6 +207,12 @@ class Reconciler(AdmissionGate):
         self.run_id = run_id
         self.boot_version = boot_version
         self.applied = VersionRef(run_id, boot_version)
+        # The gate consults the served version only as a reader; a 409 wakes us.
+        self.gate = AdmissionGate(
+            commit_mode=commit_mode,
+            served_version=lambda: self.applied,
+            on_reject=self._on_reject,
+        )
         self.debug_requests = debug_requests
         self.reconcile_interval = reconcile_interval
         self.sync_state = SyncState.IDLE
@@ -262,8 +284,8 @@ class Reconciler(AdmissionGate):
             "sync_state": self.sync_state.value,
             "reason": self.last_error,
             "run_id": self.run_id,
-            "commit_mode": self.commit_mode,
-            "active_requests": self._active,
+            "commit_mode": self.gate.commit_mode,
+            "active_requests": self.gate.active_requests,
             "update_destination_ready": self._destination_ready,
             "update_destination_error": self._destination_init_error,
             "terminal_error": str(self._terminal_error)
@@ -448,7 +470,7 @@ class Reconciler(AdmissionGate):
         if not has_weight_changes:
             # Nothing changed across the applied→target range: advance the
             # version without preparing or loading byte-identical weights.
-            await self.commit(apply=self._commit_noop, on_applied=on_applied)
+            await self.gate.commit(apply=self._commit_noop, on_applied=on_applied)
             m["skipped_weight_update"] = True
         else:
             # Preparation runs while serving. Re-read the head once before the
@@ -508,7 +530,7 @@ class Reconciler(AdmissionGate):
                         flush_cache=self.flush_cache_on_commit,
                     )
 
-            await self.commit(
+            await self.gate.commit(
                 apply=apply,
                 on_applied=on_applied,
                 pause=self.engine.pause,
@@ -546,7 +568,7 @@ class Reconciler(AdmissionGate):
             self.applied = VersionRef(new_run, self.boot_version)
             self.last_error = None
 
-        await self.commit(
+        await self.gate.commit(
             apply=apply,
             on_applied=on_applied,
             pause=self.engine.pause if was_patched else None,

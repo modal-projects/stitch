@@ -35,6 +35,15 @@ class _ProxyEngine(Engine):
         response["served_version"] = served.version
 
 
+class _GateSidecar:
+    """create_app admits through ``reconciler.gate``; these tests exercise only
+    the gate slice, so stand in just that (no store, engine, or reconcile loop)."""
+
+    def __init__(self, applied: VersionRef | None = None) -> None:
+        self.applied = applied
+        self.gate = AdmissionGate(served_version=lambda: self.applied)
+
+
 class _FailingUpstream:
     """Let a test observe admission, then fail the engine request at a controlled point."""
 
@@ -145,18 +154,17 @@ def test_upstream_transport_failure_is_retryable_and_releases_admission(
 ):
     async def go():
         upstream = _FailingUpstream()
-        gate = AdmissionGate()
-        gate.applied = VersionRef("run", 3)
+        gate_sidecar = _GateSidecar(VersionRef("run", 3))
         monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: upstream)
-        app = create_app(gate, _ProxyEngine())  # type: ignore[arg-type]
+        app = create_app(gate_sidecar, _ProxyEngine())  # type: ignore[arg-type]
 
         request = asyncio.create_task(_asgi_post(app, {"rid": "rollout-1"}))
         await upstream.started.wait()
-        assert gate.active_requests == 1
+        assert gate_sidecar.gate.active_requests == 1
         upstream.fail.set()
         status, headers, body = await request
 
-        assert gate.active_requests == 0
+        assert gate_sidecar.gate.active_requests == 0
         assert upstream.abort_rids == ["rollout-1"]
         return status, headers, json.loads(body)
 
@@ -183,22 +191,21 @@ def test_client_disconnect_cancels_aborts_and_releases_admission(monkeypatch):
     async def go():
         upstream = _HangingUpstream()
         allow_disconnect = asyncio.Event()
-        gate = AdmissionGate()
-        gate.applied = VersionRef("run", 3)
+        gate_sidecar = _GateSidecar(VersionRef("run", 3))
         monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: upstream)
-        app = create_app(gate, _ProxyEngine())  # type: ignore[arg-type]
+        app = create_app(gate_sidecar, _ProxyEngine())  # type: ignore[arg-type]
 
         request = asyncio.create_task(
             _asgi_post(app, {"rid": "rollout-2"}, disconnect_on=allow_disconnect)
         )
         await upstream.started.wait()
-        assert gate.active_requests == 1
+        assert gate_sidecar.gate.active_requests == 1
         allow_disconnect.set()
         status, _headers, _body = await request
 
         assert upstream.cancelled.is_set()
         assert upstream.abort_rids == ["rollout-2"]
-        assert gate.active_requests == 0
+        assert gate_sidecar.gate.active_requests == 0
         assert status == 499
 
     asyncio.run(go())
@@ -207,8 +214,8 @@ def test_client_disconnect_cancels_aborts_and_releases_admission(monkeypatch):
 def test_metrics_bypasses_weight_admission_before_first_pointer(monkeypatch):
     async def go():
         upstream = _MetricsUpstream()
-        gate = AdmissionGate()
-        app = create_app(gate, _ProxyEngine())  # type: ignore[arg-type]
+        gate_sidecar = _GateSidecar()
+        app = create_app(gate_sidecar, _ProxyEngine())  # type: ignore[arg-type]
         sidecar = httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://sidecar"
         )
@@ -222,9 +229,11 @@ def test_metrics_bypasses_weight_admission_before_first_pointer(monkeypatch):
             async def apply() -> None:
                 pass
 
-            assert gate.active_requests == 0
+            assert gate_sidecar.gate.active_requests == 0
             await asyncio.wait_for(
-                gate.commit(apply=apply, on_applied=lambda: None, drain_all=True),
+                gate_sidecar.gate.commit(
+                    apply=apply, on_applied=lambda: None, drain_all=True
+                ),
                 timeout=1.0,
             )
             assert not request.done()
@@ -237,7 +246,7 @@ def test_metrics_bypasses_weight_admission_before_first_pointer(monkeypatch):
         assert response.headers["content-type"].startswith("text/plain; version=0.0.4")
         assert response.content.startswith(b"# TYPE sglang:num_running_reqs gauge")
         assert upstream.requests == [("GET", "http://local-engine:8001/metrics")]
-        assert gate.active_requests == 0
+        assert gate_sidecar.gate.active_requests == 0
 
     asyncio.run(go())
 

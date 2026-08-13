@@ -392,11 +392,11 @@ def test_run_switch_drains_rolling_requests() -> None:
         late_served: list[VersionRef | None] = []
 
         async def rolling() -> None:
-            async with r.admit(None):
+            async with r.gate.admit(None):
                 await release.wait()
 
         async def late() -> None:
-            async with r.admit(None) as served:
+            async with r.gate.admit(None) as served:
                 late_served.append(served)
 
         req = asyncio.create_task(rolling())
@@ -405,7 +405,7 @@ def test_run_switch_drains_rolling_requests() -> None:
         for _ in range(
             1000
         ):  # bounded: without drain_all the switch completes without draining
-            if r._committing:
+            if r.gate._committing:
                 break
             await asyncio.sleep(0.001)
         late_task = asyncio.create_task(late())
@@ -435,7 +435,7 @@ def test_rolling_requests_cross_in_place_commit() -> None:
         release = asyncio.Event()
 
         async def rolling() -> None:
-            async with r.admit(None):
+            async with r.gate.admit(None):
                 await release.wait()
 
         req = asyncio.create_task(rolling())
@@ -475,11 +475,11 @@ def test_new_request_waits_for_in_place_commit() -> None:
         late_served: list[VersionRef | None] = []
 
         async def rolling() -> None:
-            async with r.admit():
+            async with r.gate.admit():
                 await rolling_release.wait()
 
         async def late() -> None:
-            async with r.admit() as served:
+            async with r.gate.admit() as served:
                 late_served.append(served)
 
         rolling_task = asyncio.create_task(rolling())
@@ -760,7 +760,7 @@ async def _heals_transient_error(interval: float) -> bool:
     await (
         r.startup()
     )  # the pass hits the error -> ERROR; the store is healed from here on
-    async with r.admit(None):
+    async with r.gate.admit(None):
         pass  # unconstrained traffic never 409s, so it nudges nothing
     ok = await _converged(r, VersionRef("r1", 1))
     await r.shutdown()
@@ -838,7 +838,7 @@ def test_constrained_409_recovers_without_backstop() -> None:
         await r.startup()
         assert r.sync_state is SyncState.ERROR
         try:
-            async with r.admit(VersionConstraint(min_version=1)):
+            async with r.gate.admit(VersionConstraint(min_version=1)):
                 raise AssertionError("should have rejected")
         except ConstraintUnmet:
             pass
@@ -852,7 +852,7 @@ def test_admit_satisfied() -> None:
     async def go() -> None:
         r = _make_reconciler(store=FakeStore(), engine=FakeEngine())
         r.applied = VersionRef("r1", 5)
-        async with r.admit(VersionConstraint(min_version=3)) as served:
+        async with r.gate.admit(VersionConstraint(min_version=3)) as served:
             assert served == VersionRef("r1", 5)
 
     _run(go())
@@ -865,7 +865,7 @@ def test_admit_rejected_triggers_wake() -> None:
         )
         r.applied = VersionRef("r1", 2)
         try:
-            async with r.admit(VersionConstraint(min_version=5)):
+            async with r.gate.admit(VersionConstraint(min_version=5)):
                 raise AssertionError("should have rejected")
         except ConstraintUnmet as e:
             assert e.error["type"] == "WeightVersionNotReady"
@@ -887,7 +887,7 @@ def test_run_scoped_replica_serves_boot_checkpoint_as_version_zero() -> None:
         try:
             assert r.applied == VersionRef("r1", 0)
             assert r.ready
-            async with r.admit(VersionConstraint(exact_version=0)) as served:
+            async with r.gate.admit(VersionConstraint(exact_version=0)) as served:
                 assert served == VersionRef("r1", 0)
         finally:
             await r.shutdown()
@@ -910,7 +910,7 @@ def test_resumed_replica_serves_boot_checkpoint_at_saved_version() -> None:
             assert r.ready
             assert not engine.staged
             assert engine.initialized_versions == [119]
-            async with r.admit(VersionConstraint(exact_version=119)) as served:
+            async with r.gate.admit(VersionConstraint(exact_version=119)) as served:
                 assert served == VersionRef("resumed", 119)
         finally:
             await r.shutdown()

@@ -159,7 +159,7 @@ def create_app(
             async with (
                 contextlib.nullcontext()
                 if request.method == "GET" and route == "metrics"
-                else reconciler.admit(constraint if is_versioned else None)
+                else reconciler.gate.admit(constraint if is_versioned else None)
             ) as served:
                 if is_versioned and payload is not None and served is not None:
                     engine.stamp_request(payload, served)
