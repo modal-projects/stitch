@@ -6,8 +6,9 @@ and publishes XOR deltas through the configured checkpoint store.
 
 Prepare the checkpoints once first (a separate app, so prep never spins up the rollout Server
 floor — see ``cookbook.miles_disagg.prep_app``), then launch a run with one command — it mints a
-unique run id, stands up that run's pool, and starts training. Each launch is its own run,
-isolated even from an identical-config relaunch (see ``cookbook.miles_disagg.launch``):
+unique run id, stands up that run's pool, and starts training. A fresh launch is isolated even
+from an identical-config launch; resume retains the existing run id (see
+``cookbook.miles_disagg.launch``):
 
     EXPERIMENT_CONFIG=glm45_air_fp8 uv run --extra modal python -m cookbook.miles_disagg.launch
 
@@ -25,9 +26,11 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from uuid import uuid4
 
 import modal
 import modal.experimental
@@ -51,6 +54,7 @@ from cookbook.miles_disagg.resume import (
     RESUME_POINT_ENV,
     ResumePoint,
     saved_checkpoint_version,
+    wait_for_restored_pointer,
 )
 from cookbook.miles_disagg.trainer_image import MEGATRON_PATH, MILES_ROOT
 from stitch.pools.modal_flash_lb_temp import ModalFlashLBPool
@@ -79,8 +83,8 @@ def _rollout_boot_checkpoint() -> str:
     return point.rollout_checkpoint if point is not None else miles_cfg.hf_checkpoint
 
 
-# Per-run id, minted fresh by cookbook.miles_disagg.launch. The same identity
-# scopes the pool, Stitch pointer, publications, checkpoints, and logs.
+# Minted once for a run and retained across resume. The same identity scopes the
+# pool, Stitch pointer, publications, checkpoints, and logs.
 RUN_ID = os.environ["RUN_ID"]
 APP_NAME = f"{exp.APP_NAME}-{RUN_ID}"
 RUN_DIR = STITCH_PATH / RUN_ID
@@ -219,6 +223,12 @@ class Server:
         STORE_DEPLOYMENT.bootstrap_credentials()
         store_config = STORE_DEPLOYMENT.hook_config(APP_NAME)
         resume_point = _resume_point()
+        if resume_point is not None:
+            wait_for_restored_pointer(
+                run_volume,
+                resume_point,
+                timeout=SERVER_STARTUP_TIMEOUT,
+            )
         model_name = (
             resume_point.rollout_checkpoint
             if resume_point is not None
@@ -479,17 +489,17 @@ class Trainer:
         # Claim the version already served by the pool before Miles publishes.
         from cookbook.common import hooks
 
+        boot_version = resume_point.version if resume_point is not None else 0
         hooks.claim_pool(
             SimpleNamespace(
                 update_weight_disk_dir=cfg.update_weight_disk_dir, **custom_config
             ),
-            boot_version=resume_point.version if resume_point is not None else 0,
+            boot_version=boot_version,
         )
 
         resume_log = (
             f", checkpoint_version={resume_point.version}, "
             f"next_version={resume_point.version + 1}, "
-            f"source_run_id={resume_point.source_run_id}, "
             f"stitch_boot={RUN_ID}/weight_v{resume_point.version:06d}"
             if resume_point is not None
             else ""
@@ -499,7 +509,12 @@ class Trainer:
             f"nodes={miles_cfg.n_train_nodes}, rollout_endpoint={cfg.rollout_endpoint_url}"
         )
         print(f"Command: {cmd}")
-        log_path = str(RUN_DIR / "train.log")
+        started_at = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        log_path = (
+            RUN_DIR
+            / "logs"
+            / f"train-from-v{boot_version:06d}-{started_at}-{uuid4().hex[:8]}.log"
+        )
         with tempfile.TemporaryDirectory() as local_log_dir:
             local_log_path = os.path.join(local_log_dir, "train.log")
             teed = f"set -o pipefail; ({cmd}) 2>&1 | tee {local_log_path}"
@@ -507,7 +522,7 @@ class Trainer:
                 subprocess.run(["bash", "-lc", teed], check=True)
             finally:
                 try:
-                    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+                    log_path.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copyfile(local_log_path, log_path)
                     run_volume.commit()
                     print(
