@@ -40,3 +40,14 @@ uv run --extra modal modal run -e stitch-dev \
 - Version-floor polling samples an arbitrary replica through `/server_info`;
   use per-replica logs for exact attribution.
 - Recorded baselines are reviewed by humans and are not CI thresholds.
+
+## Sidecar config check (CPU-only)
+
+Validates the ``python -m stitch.sidecar`` entrypoint in a bare image —
+arg-parse and flag coverage without sglang/Modal deps:
+
+```bash
+uv run --extra modal modal run -e stitch-dev -m tools.probes.sidecar_config
+```
+
+Prints one machine-readable ``PROBE_RESULT ok=... detail=...`` line.

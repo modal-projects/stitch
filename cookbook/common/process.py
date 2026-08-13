@@ -14,7 +14,11 @@ import urllib.error
 import urllib.request
 from typing import Any
 
-SIDECAR_MODULE = "cookbook.common.sidecar"
+from stitch.sidecar import SidecarConfig
+
+# The Modal-agnostic sidecar entrypoint lives in stitch core; the recipe
+# launches it beside the recipe-specific sglang server.
+SIDECAR_MODULE = "stitch.sidecar"
 
 
 def start_sidecar(
@@ -37,45 +41,31 @@ def start_sidecar(
     debug_requests: bool = False,
 ) -> subprocess.Popen:
     """Launch the versioned rollout proxy (the shared sidecar) beside sglang."""
+    config = SidecarConfig(
+        host="0.0.0.0",
+        port=sidecar_port,
+        upstream=f"http://127.0.0.1:{sglang_port}",
+        bulletin_root=bulletin_root,
+        base_checkpoint_dir=base_checkpoint_dir,
+        local_checkpoint_dir=local_checkpoint_dir,
+        delta_update_mode=delta_update_mode,
+        disk_load_format=disk_load_format,
+        store_backend=store_backend,
+        volume_name=volume_name,
+        s3_root=s3_root,
+        s3_endpoint_url=s3_endpoint_url,
+        commit_mode=commit_mode,
+        flush_cache_on_commit=flush_cache_on_commit,
+        run_id=run_id,
+        boot_version=boot_version,
+        debug_requests=debug_requests,
+    )
     cmd = [
         "python3",
         "-m",
         SIDECAR_MODULE,
-        "--host",
-        "0.0.0.0",
-        "--port",
-        str(sidecar_port),
-        "--upstream",
-        f"http://127.0.0.1:{sglang_port}",
-        "--bulletin-root",
-        bulletin_root,
-        "--base-checkpoint-dir",
-        base_checkpoint_dir,
-        "--delta-update-mode",
-        delta_update_mode,
-        "--disk-load-format",
-        disk_load_format,
-        "--store-backend",
-        store_backend,
-        "--volume-name",
-        volume_name,
-        "--run-id",
-        run_id,
-        "--boot-version",
-        str(boot_version),
-        "--commit-mode",
-        commit_mode,
+        *config.to_argv(),
     ]
-    if s3_root is not None:
-        cmd.extend(["--s3-root", s3_root])
-    if s3_endpoint_url is not None:
-        cmd.extend(["--s3-endpoint-url", s3_endpoint_url])
-    if local_checkpoint_dir is not None:
-        cmd.extend(["--local-checkpoint-dir", local_checkpoint_dir])
-    if flush_cache_on_commit:
-        cmd.append("--flush-cache-on-commit")
-    if debug_requests:
-        cmd.append("--debug-requests")
     print("Starting sidecar:", " ".join(cmd))
     return subprocess.Popen(cmd, start_new_session=True)
 
