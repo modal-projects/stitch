@@ -1,14 +1,17 @@
-"""Resolve a saved Miles checkpoint into a fresh Stitch run."""
+"""Resolve and restore a saved Miles checkpoint for one Stitch run."""
 
 from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import asdict, dataclass
+from io import BytesIO
 from pathlib import PurePosixPath
 from typing import Any
 
 from cookbook.common.constants import STITCH_PATH
+from stitch.types import VersionRef
 
 RESUME_POINT_ENV = "STITCH_RESUME_POINT"
 
@@ -19,7 +22,7 @@ class ResumePointNotFound(ValueError):
 
 @dataclass(frozen=True)
 class ResumePoint:
-    """One paired trainer/rollout checkpoint produced by a previous run."""
+    """One paired trainer/rollout checkpoint produced by a run."""
 
     version: int
     source_run_id: str
@@ -64,6 +67,9 @@ def validate_auto_resume_config(cfg: Any) -> None:
 def validate_resume_config(cfg: Any) -> None:
     """Require a complete saved trainer state and matching rollout checkpoint."""
     _validate_save_hf_template(getattr(cfg, "save_hf", None))
+    # TODO: define the checkpoint-to-weight-version mapping for larger intervals.
+    if int(getattr(cfg, "update_weights_interval", 1)) != 1:
+        raise ValueError("resume currently requires update_weights_interval == 1")
     if getattr(cfg, "no_load_optim", False):
         raise ValueError("resume requires loading optimizer state")
     if getattr(cfg, "no_load_rng", False):
@@ -76,7 +82,7 @@ def resolve_resume_point(
     source_run_id: str,
     save_hf: str | None,
 ) -> ResumePoint:
-    """Resolve Miles' latest Megatron tracker and matching complete HF export."""
+    """Resolve the newest complete Megatron/HF checkpoint pair for a run."""
     if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", source_run_id) is None:
         raise ValueError(f"invalid resume run id: {source_run_id!r}")
 
@@ -90,29 +96,105 @@ def resolve_resume_point(
             f"run {source_run_id!r} has no saved Megatron checkpoint"
         ) from exc
     try:
-        version = int(tracker_value)
+        tracked_version = int(tracker_value)
     except ValueError as exc:
         raise ValueError(
             f"invalid checkpoint tracker {tracker}: {tracker_value!r}"
         ) from exc
-    if version < 0:
-        raise ValueError(f"invalid checkpoint version {version} in {tracker}")
+    if tracked_version < 0:
+        raise ValueError(f"invalid checkpoint version {tracked_version} in {tracker}")
 
-    relative_hf = _validate_save_hf_template(save_hf).format(rollout_id=version)
-    hf_root = run_root / relative_hf
-    complete_marker = hf_root / ".complete"
-    try:
-        _read_volume_file(volume, str(complete_marker))
-    except FileNotFoundError as exc:
+    checkpoint_versions = []
+    for entry in volume.iterdir(str(checkpoint_root), recursive=False):
+        if match := re.fullmatch(r"iter_(\d+)", PurePosixPath(entry.path).name):
+            version = int(match.group(1))
+            if version <= tracked_version:
+                checkpoint_versions.append(version)
+
+    save_hf = _validate_save_hf_template(save_hf)
+    for version in sorted(checkpoint_versions, reverse=True):
+        relative_hf = save_hf.format(rollout_id=version)
+        hf_root = run_root / relative_hf
+        try:
+            _read_volume_file(volume, str(hf_root / ".complete"))
+        except FileNotFoundError:
+            continue
+        break
+    else:
         raise ResumePointNotFound(
-            f"run {source_run_id!r} checkpoint v{version} has no complete HF export"
-        ) from exc
+            f"run {source_run_id!r} has no complete Megatron/HF checkpoint pair at or "
+            f"before v{tracked_version}"
+        )
 
     return ResumePoint(
         version=version,
         source_run_id=source_run_id,
         trainer_checkpoint=str(STITCH_PATH / checkpoint_root),
         rollout_checkpoint=str(STITCH_PATH / hf_root),
+    )
+
+
+def restore_resume_point(volume: Any, point: ResumePoint) -> VersionRef:
+    """Restore the trainer tracker and Stitch pointer to one checkpoint pair."""
+    target = VersionRef(point.source_run_id, point.version)
+    pointer_path = f"{point.source_run_id}/latest"
+    try:
+        current = VersionRef.parse(
+            _read_volume_file(volume, pointer_path).decode().strip()
+        )
+    except FileNotFoundError as exc:
+        raise ResumePointNotFound(
+            f"run {point.source_run_id!r} has no Stitch latest pointer"
+        ) from exc
+    if current.run_id != target.run_id:
+        raise ValueError(
+            f"cannot restore {target.identity!r} from {current.identity!r}"
+        )
+    if target.version > current.version:
+        raise ValueError(
+            f"resume checkpoint v{target.version} is newer than latest v{current.version}"
+        )
+
+    with volume.batch_upload(force=True) as upload:
+        upload.put_file(BytesIO(target.identity.encode()), pointer_path)
+        upload.put_file(
+            BytesIO(str(point.version).encode()),
+            f"{point.source_run_id}/checkpoints/latest_checkpointed_iteration.txt",
+        )
+    return target
+
+
+def wait_for_restored_pointer(
+    volume: Any,
+    point: ResumePoint,
+    *,
+    timeout: float,
+) -> VersionRef:
+    """Block engine startup until the launcher has restored this run's pointer."""
+    target = VersionRef(point.source_run_id, point.version)
+    pointer_path = f"{point.source_run_id}/latest"
+    deadline = time.monotonic() + timeout
+    current = None
+    while time.monotonic() < deadline:
+        volume.reload()
+        try:
+            current = VersionRef.parse(
+                _read_volume_file(volume, pointer_path).decode().strip()
+            )
+        except FileNotFoundError:
+            current = None
+        if current == target:
+            return target
+        if current is not None and (
+            current.run_id != target.run_id or current.version < target.version
+        ):
+            raise ValueError(
+                f"cannot boot {target.identity!r} from {current.identity!r}"
+            )
+        time.sleep(1)
+    actual = current.identity if current is not None else "<unset>"
+    raise TimeoutError(
+        f"latest was not restored to {target.identity}; observed {actual}"
     )
 
 

@@ -100,24 +100,26 @@ export EXPERIMENT_CONFIG=your_config_name
 export MODAL_ENVIRONMENT=your_environment
 
 uv run --extra modal python -m cookbook.miles_disagg.launch \
-  --resume-from source_run_id
+  --resume-from existing_run_id
 ```
 
-The launcher creates a new run ID; do not reuse or pass the source run ID as
-`RUN_ID`. If the source checkpoint is v120, the new run boots at v120 and
-publishes v121 next.
+The launcher keeps the existing run ID, recreates its rollout deployment, and
+resets `latest` before replacement engines load the saved checkpoint. If the
+checkpoint is v120, the run resumes at v120 and publishes a replacement v121
+next. Resume currently requires the Modal Volume store and
+`update_weights_interval = 1`.
 
 Add automatic resume to a fresh or resumed launch with:
 
 ```bash
 uv run --extra modal python -m cookbook.miles_disagg.launch \
-  --resume-from source_run_id \
+  --resume-from existing_run_id \
   --auto-resume
 ```
 
-`--auto-resume` stays attached to the trainer. An unexpected exit starts a new
-run from the newest complete checkpoint and retries until the trainer returns
-normally. Stop it with Ctrl-C. It is off by default and requires
+`--auto-resume` stays attached to the trainer. An unexpected exit recreates the
+same run from its newest complete checkpoint and retries until the trainer
+returns normally. Stop it with Ctrl-C. It is off by default and requires
 `save_interval`, `save_hf`, and optimizer/RNG checkpointing. A fresh run becomes
 resumable after its first complete Megatron/Hugging Face checkpoint pair.
 
@@ -268,8 +270,8 @@ Each experiment Volume contains only run-scoped state:
 ```
 
 The training framework owns `updates/` and the saved checkpoints; Stitch owns
-`latest`. A resumed checkpoint starts a new run and reads the previous run's
-`checkpoints/` rather than appending to its update chain.
+`latest`. Resume keeps the same run ID, restores `latest` to the checkpoint,
+and replaces the abandoned update suffix as training continues.
 
 Datasets are independent of models and runs:
 

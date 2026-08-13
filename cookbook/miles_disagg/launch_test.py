@@ -14,7 +14,7 @@ from cookbook.miles_disagg.resume import (
 )
 
 
-def test_supervised_attempt_passes_resume_point_to_fresh_process(monkeypatch) -> None:
+def test_supervised_attempt_preserves_run_id(monkeypatch) -> None:
     captured = {}
 
     def run(command, *, env, check):
@@ -24,19 +24,18 @@ def test_supervised_attempt_passes_resume_point_to_fresh_process(monkeypatch) ->
     monkeypatch.setattr(launch.subprocess, "run", run)
     point = ResumePoint(9, "old", "/trainer", "/rollout")
 
-    launch._run_supervised_attempt(run_id="new", resume_point=point)
+    launch._run_supervised_attempt(run_id="old", resume_point=point)
 
-    assert captured["env"]["RUN_ID"] == "new"
+    assert captured["env"]["RUN_ID"] == "old"
     assert ResumePoint.from_json(captured["env"][RESUME_POINT_ENV]) == point
     assert captured["command"][-1] == "--run-attempt"
     assert captured["check"] is False
 
 
 def test_auto_resume_uses_checkpoint_from_failed_attempt(monkeypatch) -> None:
-    run_ids = iter((SimpleNamespace(hex="first"), SimpleNamespace(hex="second")))
     launches = []
-    point = ResumePoint(19, "first", "/trainer", "/rollout")
-    monkeypatch.setattr(launch.uuid, "uuid4", lambda: next(run_ids))
+    point = ResumePoint(19, "first-re", "/trainer", "/rollout")
+    monkeypatch.setattr(launch.uuid, "uuid4", lambda: SimpleNamespace(hex="first-rest"))
     monkeypatch.setattr(launch, "validate_auto_resume_config", lambda _cfg: None)
     monkeypatch.setattr(launch, "_resume_point_for_run", lambda _exp, run_id: point)
 
@@ -49,8 +48,8 @@ def test_auto_resume_uses_checkpoint_from_failed_attempt(monkeypatch) -> None:
     launch._run_auto_resume(SimpleNamespace(miles=object()), None)
 
     assert launches == [
-        {"run_id": "first", "resume_point": None},
-        {"run_id": "second", "resume_point": point},
+        {"run_id": "first-re", "resume_point": None},
+        {"run_id": "first-re", "resume_point": point},
     ]
 
 
@@ -69,18 +68,18 @@ def test_auto_resume_starts_from_requested_checkpoint(monkeypatch) -> None:
 
     launch._run_auto_resume(SimpleNamespace(miles=object()), "old")
 
-    assert launches == [{"run_id": "new", "resume_point": point}]
+    assert launches == [{"run_id": "old", "resume_point": point}]
 
 
 def test_set_attempt_env_uses_one_resume_payload() -> None:
     env = {"STITCH_UNUSED": "value"}
     point = ResumePoint(9, "old", "/trainer", "/rollout")
 
-    launch._set_attempt_env(env, run_id="new", resume_point=point)
+    launch._set_attempt_env(env, run_id="old", resume_point=point)
 
     assert env == {
         "STITCH_UNUSED": "value",
-        "RUN_ID": "new",
+        "RUN_ID": "old",
         RESUME_POINT_ENV: point.to_json(),
     }
 
@@ -91,6 +90,13 @@ def test_set_attempt_env_clears_a_stale_resume_point() -> None:
     launch._set_attempt_env(env, run_id="fresh", resume_point=None)
 
     assert env == {"RUN_ID": "fresh"}
+
+
+def test_set_attempt_env_rejects_cross_run_resume() -> None:
+    point = ResumePoint(9, "old", "/trainer", "/rollout")
+
+    with pytest.raises(ValueError, match="belongs to run"):
+        launch._set_attempt_env({}, run_id="new", resume_point=point)
 
 
 def test_manual_launch_runs_directly_without_attempt_subprocess(monkeypatch) -> None:
@@ -127,34 +133,72 @@ def test_manual_launch_runs_directly_without_attempt_subprocess(monkeypatch) -> 
 
     launch.main()
 
-    assert configured == {"run_id": "newrunid", "resume_point": point}
+    assert configured == {"run_id": "old", "resume_point": point}
     assert ran == [False]
 
 
-def test_supervised_attempt_stops_pool_when_launch_fails(monkeypatch) -> None:
+def test_supervised_attempt_leaves_pool_deployed_when_trainer_fails(
+    monkeypatch,
+) -> None:
     run = SimpleNamespace(APP_NAME="app")
-    stopped = {}
     monkeypatch.setattr(launch.importlib, "import_module", lambda _name: run)
+    monkeypatch.delenv(RESUME_POINT_ENV, raising=False)
 
     def fail(_run):
         raise RuntimeError("not ready")
 
     monkeypatch.setattr(common_launch, "deploy_pool_and_spawn", fail)
 
-    def stop(command, *, check):
-        stopped.update(command=command, check=check)
-        return subprocess.CompletedProcess(command, 0)
-
-    monkeypatch.setattr(launch.subprocess, "run", stop)
-
     with pytest.raises(RuntimeError, match="not ready"):
         launch._run_attempt(supervise=True)
 
-    assert stopped["command"][-4:] == ["app", "stop", "--yes", "app"]
-    assert stopped["check"] is False
+
+def test_resume_restores_pointer_before_pool_readiness(monkeypatch) -> None:
+    events = []
+    point = ResumePoint(9, "run", "/trainer", "/rollout")
+    volume = object()
+    run = SimpleNamespace(
+        APP_NAME="app-run",
+        exp=SimpleNamespace(EXPERIMENT_VOLUME_NAME="runs"),
+        app=SimpleNamespace(
+            deploy=lambda *, strategy: events.append(("deploy", strategy))
+        ),
+        spawn_train=lambda: events.append(("spawn",)) or object(),
+    )
+    monkeypatch.setenv("RUN_ID", "run")
+    monkeypatch.setenv(RESUME_POINT_ENV, point.to_json())
+    monkeypatch.setattr(launch.importlib, "import_module", lambda _name: run)
+    monkeypatch.setattr(
+        launch.modal.Volume, "from_name", lambda *_args, **_kwargs: volume
+    )
+    monkeypatch.setattr(
+        launch,
+        "restore_resume_point",
+        lambda actual_volume, actual_point: (
+            events.append(("restore", actual_volume, actual_point))
+            or SimpleNamespace(identity="run/weight_v000009")
+        ),
+    )
+
+    import stitch.service
+
+    monkeypatch.setattr(
+        stitch.service,
+        "await_pool_ready",
+        lambda _pool: events.append(("ready",)),
+    )
+
+    launch._run_attempt(supervise=False)
+
+    assert events == [
+        ("deploy", "recreate"),
+        ("restore", volume, point),
+        ("ready",),
+        ("spawn",),
+    ]
 
 
-def test_auto_resume_reuses_source_when_attempt_has_no_new_checkpoint(
+def test_auto_resume_reuses_previous_checkpoint_when_attempt_has_no_new_checkpoint(
     monkeypatch,
 ) -> None:
     previous = ResumePoint(9, "old", "/trainer", "/rollout")
