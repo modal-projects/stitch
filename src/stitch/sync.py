@@ -93,8 +93,9 @@ class AdmissionGate:
     def _rejection(self, c: VersionConstraint) -> dict[str, Any] | None:
         served = self._served_version()
         applied = served.version if served else None
-        # Until the first sync lands (applied is None) there is no served version to stamp, so
-        # reject as retryable rather than serve unversioned; the background reconcile sets it shortly.
+        # A gate without a reader serves nothing versioned, so reject as retryable rather
+        # than serve unversioned. A reconciler always attaches one whose version starts at
+        # the boot ref, so None here only occurs in standalone gate use.
         if applied is None or not c.satisfied_by(applied):
             target = c.exact_version if c.exact_version is not None else c.min_version
             return {

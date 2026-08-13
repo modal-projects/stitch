@@ -36,12 +36,29 @@ class _ProxyEngine(Engine):
 
 
 class _GateSidecar:
-    """create_app admits through ``reconciler.gate``; these tests exercise only
-    the gate slice, so stand in just that (no store, engine, or reconcile loop)."""
+    """The status surface create_app consumes beside the gate; these tests exercise
+    only the admission slice, so stand in the rest (no store, engine, or reconcile
+    loop). The stubs are type-level only — lifespan never runs under ASGITransport."""
 
     def __init__(self, applied: VersionRef | None = None) -> None:
         self.applied = applied
+        self.ready = True
         self.gate = AdmissionGate(served_version=lambda: self.applied)
+
+    def readiness_reason(self) -> str:
+        return ""
+
+    def server_info(self) -> dict[str, Any]:
+        return {"ready": self.ready}
+
+    def wake(self) -> None:
+        pass
+
+    async def startup(self) -> None:
+        pass
+
+    async def shutdown(self) -> None:
+        pass
 
 
 class _FailingUpstream:
@@ -156,7 +173,7 @@ def test_upstream_transport_failure_is_retryable_and_releases_admission(
         upstream = _FailingUpstream()
         gate_sidecar = _GateSidecar(VersionRef("run", 3))
         monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: upstream)
-        app = create_app(gate_sidecar, _ProxyEngine())  # type: ignore[arg-type]
+        app = create_app(gate_sidecar.gate, gate_sidecar, _ProxyEngine())
 
         request = asyncio.create_task(_asgi_post(app, {"rid": "rollout-1"}))
         await upstream.started.wait()
@@ -193,7 +210,7 @@ def test_client_disconnect_cancels_aborts_and_releases_admission(monkeypatch):
         allow_disconnect = asyncio.Event()
         gate_sidecar = _GateSidecar(VersionRef("run", 3))
         monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: upstream)
-        app = create_app(gate_sidecar, _ProxyEngine())  # type: ignore[arg-type]
+        app = create_app(gate_sidecar.gate, gate_sidecar, _ProxyEngine())
 
         request = asyncio.create_task(
             _asgi_post(app, {"rid": "rollout-2"}, disconnect_on=allow_disconnect)
@@ -215,7 +232,7 @@ def test_metrics_bypasses_weight_admission_before_first_pointer(monkeypatch):
     async def go():
         upstream = _MetricsUpstream()
         gate_sidecar = _GateSidecar()
-        app = create_app(gate_sidecar, _ProxyEngine())  # type: ignore[arg-type]
+        app = create_app(gate_sidecar.gate, gate_sidecar, _ProxyEngine())
         sidecar = httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://sidecar"
         )
