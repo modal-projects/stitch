@@ -25,18 +25,16 @@ class _Volume:
 class _Config:
     save_interval = 20
     save_hf = "hf_checkpoints/weight_v{rollout_id:06d}"
+    update_weights_interval = 1
     no_save_optim = False
 
 
 @pytest.mark.parametrize(
-    ("rollout_id", "resumed", "version"),
-    [
-        (19, False, 20),
-        (120, True, 120),
-    ],
+    ("rollout_id", "version"),
+    [(19, 20), (120, 121)],
 )
-def test_saved_checkpoint_version(rollout_id: int, resumed: bool, version: int) -> None:
-    assert saved_checkpoint_version(rollout_id, resumed=resumed) == version
+def test_saved_checkpoint_version(rollout_id: int, version: int) -> None:
+    assert saved_checkpoint_version(rollout_id) == version
 
 
 def test_resolve_resume_point_pairs_megatron_and_hf_checkpoints() -> None:
@@ -50,7 +48,8 @@ def test_resolve_resume_point_pairs_megatron_and_hf_checkpoints() -> None:
     assert resolve_resume_point(
         volume, source_run_id="old", save_hf=_Config.save_hf
     ) == ResumePoint(
-        version=119,
+        rollout_id=119,
+        weight_version=120,
         source_run_id="old",
         trainer_checkpoint="/stitch/old/checkpoints",
         rollout_checkpoint="/stitch/old/hf_checkpoints/weight_v000119",
@@ -74,6 +73,7 @@ def test_resolve_resume_point_rejects_path_like_run_id() -> None:
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
+        ("update_weights_interval", 2, "update_weights_interval == 1"),
         ("save_interval", None, "positive save_interval"),
         ("save_hf", None, "requires save_hf"),
         ("save_hf", "hf_checkpoints/latest", "rollout_id"),
@@ -105,6 +105,6 @@ def test_validate_resume_config(field: str, message: str) -> None:
 
 
 def test_resume_point_json_round_trip() -> None:
-    point = ResumePoint(7, "run", "/trainer", "/rollout")
+    point = ResumePoint(7, 8, "run", "/trainer", "/rollout")
 
     assert ResumePoint.from_json(point.to_json()) == point

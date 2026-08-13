@@ -59,11 +59,13 @@ class FakeEngine(Engine):
     def __init__(self) -> None:
         self.calls: list[str] = []
         self.staged: list[VersionRef] = []
+        self.staged_sources: list[str] = []
         self.committed: list[VersionRef] = []
         self.initialized_versions: list[int] = []
 
     async def stage(self, manifest: VersionManifest, source_dir: str) -> None:
         self.staged.append(manifest.ref)
+        self.staged_sources.append(source_dir)
         self.calls.append(f"stage:{manifest.ref.version}")
 
     async def commit(
@@ -854,6 +856,82 @@ def test_resumed_replica_applies_only_versions_after_saved_checkpoint() -> None:
         assert engine.staged == [VersionRef("resumed", 120)]
         assert engine.committed == [VersionRef("resumed", 120)]
         assert r.applied == VersionRef("resumed", 120)
+
+    _run(go())
+
+
+def test_restore_complete_checkpoint_then_reconcile_next_delta() -> None:
+    async def go() -> None:
+        engine = FakeEngine()
+        store = FakeStore(VersionRef("r1", 5), _delta("r1", 6, files=["delta"]))
+        r = _make_reconciler(store=store, engine=engine, boot_version=0)
+        r.applied = VersionRef("r1", 10)
+        r._destination_init_task = asyncio.create_task(
+            r._initialize_update_destination()
+        )
+
+        await r.restore(VersionRef("r1", 5), "/saved/weight_v000004")
+
+        assert r.applied == VersionRef("r1", 5)
+        assert r.boot_version == 5
+        assert engine.staged == [VersionRef("r1", 5)]
+        assert engine.staged_sources == ["/saved/weight_v000004"]
+        assert engine.committed == [VersionRef("r1", 5)]
+        assert engine.calls[-3:] == ["pause", "commit:5", "resume"]
+
+        store.advance_pointer(VersionRef("r1", 6))
+        await r.reconcile()
+        assert r.applied == VersionRef("r1", 6)
+        assert engine.staged[-1] == VersionRef("r1", 6)
+        assert engine.committed[-1] == VersionRef("r1", 6)
+
+    _run(go())
+
+
+def test_restore_rejects_a_stale_control_request_before_staging() -> None:
+    async def go() -> None:
+        engine = FakeEngine()
+        r = _make_reconciler(
+            store=FakeStore(VersionRef("r1", 6)),
+            engine=engine,
+        )
+
+        with pytest.raises(RuntimeError, match="latest is 'r1/weight_v000006'"):
+            await r.restore(VersionRef("r1", 5), "/saved")
+        assert not engine.staged
+        assert not engine.committed
+
+    _run(go())
+
+
+def test_restore_drains_in_flight_requests_even_in_place() -> None:
+    async def go() -> None:
+        engine = FakeEngine()
+        r = _make_reconciler(
+            store=FakeStore(VersionRef("r1", 5)),
+            engine=engine,
+            commit_mode="in_place",
+        )
+        r.applied = VersionRef("r1", 10)
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def request() -> None:
+            async with r.admit():
+                entered.set()
+                await release.wait()
+
+        inflight = asyncio.create_task(request())
+        await entered.wait()
+        restore = asyncio.create_task(
+            r.restore(VersionRef("r1", 5), "/saved/weight_v000004")
+        )
+        await asyncio.sleep(0)
+        assert "commit:5" not in engine.calls
+        release.set()
+        await inflight
+        await restore
+        assert r.applied == VersionRef("r1", 5)
 
     _run(go())
 

@@ -6,7 +6,7 @@ image. [`trainer_image.py`](trainer_image.py) defines the shared default:
 ```python
 MILES_IMAGE_TAG = "radixark/miles:dev-202607290235"
 MILES_REPO_URL = "https://github.com/modal-projects/miles.git"
-MILES_REPO_REF = "60f7be88af1956111d18351d20413cfd53e0a607"
+MILES_REPO_REF = "4b412fb46b76cdee0d6ed908bab9ec74279b5b9e"
 ```
 
 The pin is `modal-projects/miles:stitch-miles-fully-async-swe`. It contains a
@@ -36,16 +36,18 @@ These commits are useful independently of Stitch:
 | `53c402487` | Compact routing-replay expert IDs for transport. |
 | `719e2844d` | Suppress per-request session access logs. |
 | `45a2c5b25` | Reject aborted generations at the session protocol boundary. |
-| `55b69d37a` | Continue disk-delta versions from a loaded checkpoint. |
-| `a5e2999fa` | Keep transient session-transport failures local to their trajectories. |
+| `954340bca` | Resume disk-delta publication at an explicit external weight version. |
+| `1aa325b7c` | Keep transient session-transport failures local to their trajectories. |
+| `136fe5c95` | Export full-model checkpoints independently of their load path. |
 
 ## Stitch integration
 
 | Commit | Responsibility |
 | --- | --- |
-| `dfbed689a` | Route fully-async generation through an external fleet with version constraints and finite timeouts. |
-| `57b27a8f6` | Publish disk deltas without Miles-managed rollout-engine handles. |
-| `60f7be88a` | Overlap external weight updates with active rollout. |
+| `2c2012edb` | Route fully-async generation through an external fleet with version constraints and finite timeouts. |
+| `fe8074636` | Publish disk deltas without Miles-managed rollout-engine handles. |
+| `576030e74` | Overlap external weight updates with active rollout. |
+| `4b412fb46` | Route legacy generation through the same external-fleet request contract. |
 
 The dated image supplies Megatron-LM, TransformerEngine, CUDA, and other
 compiled dependencies. Miles is installed over it with `--no-deps`, so the

@@ -6,8 +6,10 @@ import json
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from stitch.pools.base import Pool
-from stitch.publish import claim_run, constrain_request, publish_version
+from stitch.publish import claim_run, constrain_request, publish_version, restore_run
 from stitch.stores.base import Store
 from stitch.types import PointerConflict, PointerRewind, VersionRef
 
@@ -161,6 +163,67 @@ def test_claim_rewind_rejected() -> None:
         raise AssertionError("expected PointerRewind")
     except PointerRewind:
         pass
+
+
+def test_restore_run_rewinds_pointer_and_restores_every_visible_replica(
+    monkeypatch,
+) -> None:
+    class Response:
+        def __init__(self, applied: str) -> None:
+            self.applied = applied
+
+        def raise_for_status(self) -> None:
+            return
+
+        def json(self) -> dict[str, str]:
+            return {"applied": self.applied}
+
+    class ElasticPool(FakePool):
+        def __init__(self) -> None:
+            super().__init__()
+            self.discoveries = 0
+
+        def discover_replicas(self):
+            self.discoveries += 1
+            if self.discoveries == 1:
+                return ["http://r1"]
+            return ["http://r1", "http://r2"]
+
+    posts: list[tuple[str, dict]] = []
+
+    def post(url, *, json, timeout):
+        del timeout
+        posts.append((url, json))
+        return Response(json["target"])
+
+    monkeypatch.setattr("httpx.post", post)
+    monkeypatch.setattr("stitch.publish.time.sleep", lambda _seconds: None)
+    store = FakeStore(VersionRef("r1", 10))
+    target = VersionRef("r1", 5)
+
+    restore_run(store, ElasticPool(), target, "/saved/weight_v000004")
+
+    assert store.read_pointer() == target
+    assert {url for url, _ in posts} == {
+        "http://r1/restore",
+        "http://r2/restore",
+    }
+    assert all(
+        payload
+        == {
+            "target": "r1/weight_v000005",
+            "checkpoint_dir": "/saved/weight_v000004",
+        }
+        for _, payload in posts
+    )
+
+
+def test_restore_run_rejects_a_different_run_or_future_version() -> None:
+    store = FakeStore(VersionRef("r1", 10))
+    with pytest.raises(ValueError, match="cannot restore"):
+        restore_run(store, FakePool(), VersionRef("r2", 5), "/saved")
+    with pytest.raises(ValueError, match="newer than latest"):
+        restore_run(store, FakePool(), VersionRef("r1", 11), "/saved")
 
 
 def test_constrain_lag() -> None:

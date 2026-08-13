@@ -313,6 +313,79 @@ class Reconciler(AdmissionGate):
                 return
             await asyncio.sleep(1.0)
 
+    async def restore(self, target: VersionRef, checkpoint_dir: str) -> None:
+        """Restore one run to a complete checkpoint selected by its writer.
+
+        This is an explicit rollback operation, separate from monotonic pointer
+        reconciliation. The caller first moves the durable pointer to ``target``;
+        checking it here fences stale restore requests before any weights change.
+        """
+        if target.run_id != self.run_id:
+            raise ValueError(
+                f"restore target belongs to run {target.run_id!r}, not {self.run_id!r}"
+            )
+        async with self._lock:
+            if self._destination_init_task is not None:
+                await self._destination_init_task
+            if self._destination_init_error is not None:
+                raise RuntimeError(
+                    "weight update destination initialization failed: "
+                    f"{self._destination_init_error}"
+                )
+
+            await asyncio.to_thread(self.store.refresh)
+            pointer = await asyncio.to_thread(self.store.read_pointer)
+            if pointer != target:
+                actual = pointer.identity if pointer is not None else "<unset>"
+                raise RuntimeError(
+                    f"restore target is {target.identity!r}, but latest is {actual!r}"
+                )
+            if self.applied == target:
+                return
+
+            manifest = VersionManifest(target, VersionKind.FULL, [])
+            metrics: dict[str, Any] = {
+                "applied_version": self.applied.version if self.applied else -1,
+                "target_version": target.version,
+                "restore": True,
+            }
+            self.sync_state = SyncState.STAGING
+            self.last_error = None
+            try:
+                with _timed(metrics, "stage_s"):
+                    await self.engine.stage(manifest, checkpoint_dir)
+
+                async def apply() -> None:
+                    self.sync_state = SyncState.COMMITTING
+                    with _timed(metrics, "commit_s"):
+                        await self.engine.commit(
+                            manifest,
+                            flush_cache=self.flush_cache_on_commit,
+                        )
+
+                def on_applied() -> None:
+                    self.applied = target
+                    self.boot_version = target.version
+
+                await self.commit(
+                    apply=apply,
+                    on_applied=on_applied,
+                    pause=self.engine.pause,
+                    resume=self.engine.resume,
+                    drain_all=True,
+                )
+            except Exception as exc:
+                metrics["error"] = str(exc)
+                self.last_error = str(exc)
+                self.sync_state = SyncState.ERROR
+                raise
+            else:
+                self.sync_state = SyncState.IDLE
+                self.ready = True
+            finally:
+                metrics["at"] = time.time()
+                self.metrics = metrics
+
     def _behind(self, pointer: VersionRef | None) -> bool:
         if pointer is None:
             return False

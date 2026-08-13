@@ -37,7 +37,7 @@ class SGLangEngine(Engine):
         self._control_timeout = control_timeout
         self._weight_staging_timeout = weight_staging_timeout
         self._weight_update_timeout = weight_update_timeout
-        self._boot_version = 0
+        self._base_version = 0
 
     def base_url(self) -> str:
         return self._base_url
@@ -58,11 +58,22 @@ class SGLangEngine(Engine):
         )
 
     async def stage(self, manifest: VersionManifest, source_dir: str) -> None:
+        if manifest.kind is VersionKind.FULL:
+            await self._stage_weight_update(
+                base_checkpoint_dir=source_dir,
+                checkpoint_source_dir=None,
+                target_version=manifest.ref.version,
+                base_version=manifest.ref.version,
+                destination=self.delta_update_mode,
+            )
+            self.base_checkpoint_dir = source_dir
+            self._base_version = manifest.ref.version
+            return
         await self._stage_weight_update(
             checkpoint_source_dir=str(Path(source_dir).parent),
             target_version=manifest.ref.version,
-            base_version=self._boot_version,
-            destination=self._destination_for(manifest),
+            base_version=self._base_version,
+            destination=self.delta_update_mode,
         )
 
     async def initialize_update_destination(self, boot_version: int = 0) -> None:
@@ -72,7 +83,7 @@ class SGLangEngine(Engine):
             base_version=boot_version,
             destination=self.delta_update_mode,
         )
-        self._boot_version = boot_version
+        self._base_version = boot_version
 
     async def commit(
         self,
@@ -80,7 +91,7 @@ class SGLangEngine(Engine):
         *,
         flush_cache: bool = False,
     ) -> None:
-        if self._destination_for(manifest) == "cpu":
+        if self.delta_update_mode == "cpu":
             path = "/update_weights_from_cpu"
             payload: dict[str, Any] = {
                 "target_version": manifest.ref.version,
@@ -114,53 +125,31 @@ class SGLangEngine(Engine):
         await self._post("/continue_generation", {}, timeout=self._control_timeout)
 
     async def reset(self) -> None:
-        if self.delta_update_mode == "cpu":
-            raise RuntimeError(
-                "CPU delta update mode cannot restore a live engine to its boot checkpoint; "
-                "start a fresh rollout replica for a new run"
-            )
-        assert self.local_checkpoint_dir is not None
         await self._stage_weight_update(
             checkpoint_source_dir=None,
-            target_version=self._boot_version,
-            base_version=self._boot_version,
-            destination="disk",
+            target_version=self._base_version,
+            base_version=self._base_version,
+            destination=self.delta_update_mode,
         )
-        await self._post(
-            "/update_weights_from_disk",
-            {
-                "model_path": self.local_checkpoint_dir,
-                "load_format": self.disk_load_format,
-                "weight_version": str(self._boot_version),
-                "flush_cache": False,
-            },
-            timeout=self._weight_update_timeout,
-            action="restore boot weights",
+        await self.commit(
+            VersionManifest(
+                ref=VersionRef(None, self._base_version),
+                kind=VersionKind.FULL,
+                files=[],
+            )
         )
-
-    def _destination_for(
-        self,
-        manifest: VersionManifest,
-    ) -> Literal["disk", "cpu"]:
-        if manifest.kind is VersionKind.FULL:
-            if self.delta_update_mode == "cpu":
-                raise ValueError(
-                    "CPU delta update mode accepts delta manifests only; "
-                    "use disk mode to publish full checkpoints"
-                )
-            return "disk"
-        return self.delta_update_mode
 
     async def _stage_weight_update(
         self,
         *,
+        base_checkpoint_dir: str | None = None,
         checkpoint_source_dir: str | None,
         target_version: int,
         base_version: int,
         destination: Literal["disk", "cpu"],
     ) -> None:
         payload: dict[str, Any] = {
-            "base_checkpoint_dir": self.base_checkpoint_dir,
+            "base_checkpoint_dir": base_checkpoint_dir or self.base_checkpoint_dir,
             "base_version": base_version,
             "target_version": target_version,
             "destination": destination,

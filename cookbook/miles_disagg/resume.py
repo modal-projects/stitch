@@ -1,4 +1,4 @@
-"""Resolve a saved Miles checkpoint into a fresh Stitch run."""
+"""Resolve a saved Miles checkpoint for resuming its Stitch run."""
 
 from __future__ import annotations
 
@@ -19,9 +19,10 @@ class ResumePointNotFound(ValueError):
 
 @dataclass(frozen=True)
 class ResumePoint:
-    """One paired trainer/rollout checkpoint produced by a previous run."""
+    """One paired trainer/rollout checkpoint produced by a run."""
 
-    version: int
+    rollout_id: int
+    weight_version: int
     source_run_id: str
     trainer_checkpoint: str
     rollout_checkpoint: str
@@ -33,21 +34,21 @@ class ResumePoint:
     def from_json(cls, value: str) -> ResumePoint:
         data = json.loads(value)
         return cls(
-            version=int(data["version"]),
+            rollout_id=int(data["rollout_id"]),
+            weight_version=int(data["weight_version"]),
             source_run_id=str(data["source_run_id"]),
             trainer_checkpoint=str(data["trainer_checkpoint"]),
             rollout_checkpoint=str(data["rollout_checkpoint"]),
         )
 
 
-def saved_checkpoint_version(rollout_id: int, *, resumed: bool) -> int:
+def saved_checkpoint_version(rollout_id: int) -> int:
     """Return the Stitch version stored by a Miles ``save_hf`` checkpoint.
 
-    A fresh trainer starts rollout 0 from Stitch v0, so save N precedes the
-    publication of vN+1. A resumed trainer starts rollout N+1 from Stitch vN,
-    so subsequent save IDs and Stitch versions are equal.
+    Save N captures the trained weights immediately before Miles publishes
+    them as vN+1. This mapping remains unchanged after a same-run resume.
     """
-    return rollout_id if resumed else rollout_id + 1
+    return rollout_id + 1
 
 
 def validate_auto_resume_config(cfg: Any) -> None:
@@ -64,6 +65,9 @@ def validate_auto_resume_config(cfg: Any) -> None:
 def validate_resume_config(cfg: Any) -> None:
     """Require a complete saved trainer state and matching rollout checkpoint."""
     _validate_save_hf_template(getattr(cfg, "save_hf", None))
+    # TODO: map checkpoint rollout IDs to published versions for update intervals > 1.
+    if int(getattr(cfg, "update_weights_interval", 1)) != 1:
+        raise ValueError("resume currently requires update_weights_interval == 1")
     if getattr(cfg, "no_load_optim", False):
         raise ValueError("resume requires loading optimizer state")
     if getattr(cfg, "no_load_rng", False):
@@ -109,7 +113,8 @@ def resolve_resume_point(
         ) from exc
 
     return ResumePoint(
-        version=version,
+        rollout_id=version,
+        weight_version=saved_checkpoint_version(version),
         source_run_id=source_run_id,
         trainer_checkpoint=str(STITCH_PATH / checkpoint_root),
         rollout_checkpoint=str(STITCH_PATH / hf_root),

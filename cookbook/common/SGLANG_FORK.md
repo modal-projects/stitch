@@ -14,7 +14,7 @@ DEFAULT_SGLANG_RUNTIME = SGLangRuntime(
     image="lmsysorg/sglang:v0.5.17",
     repository="https://github.com/modal-projects/sglang.git",
     branch="stitch-sglang-v0.5.17",
-    commit="bc992874b335d0b6e314f9e883d9f55df185740d",
+    commit="80ba2a61baa436054c6e5f5b1119994fa2f6da7d",
 )
 ```
 
@@ -57,8 +57,9 @@ images.
   when initializing the base version.
 - `destination="disk"` requires `local_checkpoint_dir` and accepts FULL or
   DELTA targets.
-- `destination="cpu"` does not use `local_checkpoint_dir`. The base version
-  initializes the cache; later targets must be DELTAs.
+- `destination="cpu"` does not use `local_checkpoint_dir`. A complete
+  checkpoint initializes or replaces the cached base; later targets may apply
+  DELTAs from that base.
 
 Commit remains a separate operation:
 
@@ -131,11 +132,11 @@ but can delay active inference on very large models. Initialize the CPU
 destination before routing latency-sensitive traffic when warmup latency
 matters.
 
-CPU mode is delta-only. It rejects FULL publications and cannot reset a patched
-live replica to another run; the controller must use disk mode or replace that
-replica. This keeps a single canonical snapshot rather than retaining a second
-rollback-sized CPU checkpoint. Compressed deltas are not retained in a
-lineage-sized CPU arena after reconstruction.
+CPU mode can stage a complete saved checkpoint as a new base without retaining
+the previous canonical snapshot. This supports restoring a live replica before
+continuing its delta lineage while keeping peak canonical storage to one
+checkpoint. Compressed deltas are not retained in a lineage-sized CPU arena
+after reconstruction.
 
 Enable it explicitly:
 

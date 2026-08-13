@@ -7,6 +7,8 @@ compose the Store and Pool ports, so they work with any backend — no Modal her
 from __future__ import annotations
 
 import logging
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -87,6 +89,85 @@ def claim_run(
     store.claim(boot)
     wake_pool(pool, boot)
     logger.info("claimed run %s at v%d", run_id, boot_version)
+
+
+def restore_run(
+    store: Store,
+    pool: Pool,
+    target: VersionRef,
+    checkpoint_dir: str,
+    *,
+    timeout: float = 2 * 60 * 60,
+) -> None:
+    """Restore every live replica to a complete checkpoint within the same run.
+
+    The trainer is stopped while this runs. Move the durable pointer first so a
+    replacement replica boots at the restored version, then repeatedly discover
+    the elastic pool until every visible replica has committed ``target``.
+    """
+    current = store.read_pointer()
+    if current is None or current.run_id != target.run_id:
+        actual = current.identity if current is not None else "<unset>"
+        raise ValueError(f"cannot restore {target.identity!r} from latest {actual!r}")
+    if target.version > current.version:
+        raise ValueError(
+            f"restore target v{target.version} is newer than latest v{current.version}"
+        )
+    if current != target:
+        store.compare_and_advance_pointer(current, target)
+
+    import httpx
+
+    deadline = time.monotonic() + timeout
+    stable = 0
+    stable_replicas: frozenset[str] | None = None
+    while time.monotonic() < deadline:
+        replicas = pool.discover_replicas()
+        if not replicas:
+            stable = 0
+            stable_replicas = None
+            time.sleep(2.0)
+            continue
+
+        def restore_replica(url: str) -> bool:
+            try:
+                response = httpx.post(
+                    f"{url.rstrip('/')}/restore",
+                    json={
+                        "target": target.identity,
+                        "checkpoint_dir": checkpoint_dir,
+                    },
+                    timeout=max(0.1, deadline - time.monotonic()),
+                )
+                response.raise_for_status()
+                return response.json().get("applied") == target.identity
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "failed to restore replica %s to %s",
+                    url,
+                    target.identity,
+                    exc_info=True,
+                )
+                return False
+
+        with ThreadPoolExecutor(max_workers=min(16, len(replicas))) as executor:
+            restored = list(executor.map(restore_replica, replicas))
+        if all(restored):
+            visible = frozenset(replicas)
+            stable = stable + 1 if visible == stable_replicas else 1
+            stable_replicas = visible
+            if stable == 2:
+                logger.info(
+                    "restored %d rollout replicas to %s",
+                    len(replicas),
+                    target.identity,
+                )
+                return
+        else:
+            stable = 0
+            stable_replicas = None
+        time.sleep(2.0)
+    raise TimeoutError(f"rollout pool did not restore to {target.identity}")
 
 
 def wake_pool(pool: Pool | None, ref: VersionRef) -> None:

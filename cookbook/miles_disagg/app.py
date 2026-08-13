@@ -74,11 +74,6 @@ def _resume_point() -> ResumePoint | None:
     return None
 
 
-def _rollout_boot_checkpoint() -> str:
-    point = _resume_point()
-    return point.rollout_checkpoint if point is not None else miles_cfg.hf_checkpoint
-
-
 # Per-run id, minted fresh by cookbook.miles_disagg.launch. The same identity
 # scopes the pool, Stitch pointer, publications, checkpoints, and logs.
 RUN_ID = os.environ["RUN_ID"]
@@ -116,7 +111,6 @@ server_image = serving_image.build_serving_image(
     extra_packages=STORE_DEPLOYMENT.extra_packages,
     extra_env={
         **(getattr(exp, "SGLANG_SERVER_ENV", None) or {}),
-        RESUME_POINT_ENV: os.environ.get(RESUME_POINT_ENV, ""),
         **STORE_DEPLOYMENT.image_environment,
     },
     runtime=getattr(exp, "SGLANG_RUNTIME", serving_image.DEFAULT_SGLANG_RUNTIME),
@@ -165,7 +159,7 @@ train_volumes = {
 app = modal.App(APP_NAME)
 
 SGLANG_SERVER_ARGS = {
-    "--served-model-name": _rollout_boot_checkpoint(),
+    "--served-model-name": miles_cfg.hf_checkpoint,
     **(
         {}
         if "--cuda-graph-config" in exp.SGLANG_SERVER_ARGS
@@ -218,13 +212,8 @@ class Server:
     def startup(self) -> None:
         STORE_DEPLOYMENT.bootstrap_credentials()
         store_config = STORE_DEPLOYMENT.hook_config(APP_NAME)
-        resume_point = _resume_point()
-        model_name = (
-            resume_point.rollout_checkpoint
-            if resume_point is not None
-            else miles_cfg.hf_checkpoint
-        )
-        boot_version = resume_point.version if resume_point is not None else 0
+        model_name = miles_cfg.hf_checkpoint
+        boot_version = 0
         save_hf = getattr(miles_cfg, "save_hf", None)
         # TODO: support larger update intervals once saved checkpoints expose the
         # exact published weight version instead of only Miles' rollout ID.
@@ -264,10 +253,7 @@ class Server:
                         rollout_id=saved_rollout_id
                     ):
                         continue
-                    saved_version = saved_checkpoint_version(
-                        saved_rollout_id,
-                        resumed=resume_point is not None,
-                    )
+                    saved_version = saved_checkpoint_version(saved_rollout_id)
                     if boot_version <= saved_version <= latest.version:
                         checkpoints.append((saved_version, marker.parent))
                 if checkpoints:
@@ -450,6 +436,7 @@ class Trainer:
             cfg.load = resume_point.trainer_checkpoint
             cfg.hf_checkpoint = resume_point.rollout_checkpoint
             cfg.exit_on_missing_checkpoint = True
+            cfg.update_weight_initial_version = resume_point.weight_version
         # Miles requires this CLI argument; the deployment owns its run-scoped value.
         cfg.update_weight_disk_dir = str(UPDATES_DIR)
         if getattr(cfg, "save_interval", None) is None:
@@ -476,21 +463,27 @@ class Trainer:
         )
         cmd = _build_train_cmd(cfg)
 
-        # Claim the version already served by the pool before Miles publishes.
+        # Align the existing pool with the trainer checkpoint before Miles publishes.
         from cookbook.common import hooks
 
-        hooks.claim_pool(
-            SimpleNamespace(
-                update_weight_disk_dir=cfg.update_weight_disk_dir, **custom_config
-            ),
-            boot_version=resume_point.version if resume_point is not None else 0,
+        hook_args = SimpleNamespace(
+            update_weight_disk_dir=cfg.update_weight_disk_dir, **custom_config
         )
+        if resume_point is None:
+            hooks.claim_pool(hook_args)
+        else:
+            hooks.restore_pool(
+                hook_args,
+                version=resume_point.weight_version,
+                checkpoint_dir=resume_point.rollout_checkpoint,
+            )
 
         resume_log = (
-            f", checkpoint_version={resume_point.version}, "
-            f"next_version={resume_point.version + 1}, "
+            f", checkpoint_rollout={resume_point.rollout_id}, "
+            f"weight_version={resume_point.weight_version}, "
+            f"next_version={resume_point.weight_version + 1}, "
             f"source_run_id={resume_point.source_run_id}, "
-            f"stitch_boot={RUN_ID}/weight_v{resume_point.version:06d}"
+            f"stitch_boot={RUN_ID}/weight_v{resume_point.weight_version:06d}"
             if resume_point is not None
             else ""
         )

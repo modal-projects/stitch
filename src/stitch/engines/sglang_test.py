@@ -66,15 +66,35 @@ def test_cpu_mode_does_not_require_local_checkpoint() -> None:
     ]
 
 
-def test_cpu_mode_reset_requires_a_fresh_replica() -> None:
+def test_cpu_mode_reset_stages_and_commits_current_base() -> None:
     engine = SGLangEngine(
         "http://engine",
         "/base",
         None,
         delta_update_mode="cpu",
     )
-    with pytest.raises(RuntimeError, match="fresh rollout replica"):
-        asyncio.run(engine.reset())
+    requests = []
+
+    async def fake_post(path, payload, *, timeout=None, action=None):
+        requests.append((path, payload))
+
+    engine._post = fake_post  # type: ignore[method-assign]
+    asyncio.run(engine.reset())
+    assert requests == [
+        (
+            "/stage_weight_update",
+            {
+                "base_checkpoint_dir": "/base",
+                "base_version": 0,
+                "target_version": 0,
+                "destination": "cpu",
+            },
+        ),
+        (
+            "/update_weights_from_cpu",
+            {"target_version": 0, "flush_cache": False},
+        ),
+    ]
 
 
 def test_disk_mode_reset_stages_and_loads_base() -> None:
@@ -170,12 +190,13 @@ def test_cpu_delta_commit_uses_host_image() -> None:
     assert payload == {"target_version": 5, "flush_cache": False}
 
 
-def test_full_checkpoint_is_never_loaded_from_cpu() -> None:
-    with pytest.raises(ValueError, match="delta manifests only"):
-        _commit_request(
-            kind=VersionKind.FULL,
-            delta_update_mode="cpu",
-        )
+def test_full_checkpoint_commit_uses_host_image_in_cpu_mode() -> None:
+    path, payload = _commit_request(
+        kind=VersionKind.FULL,
+        delta_update_mode="cpu",
+    )
+    assert path == "/update_weights_from_cpu"
+    assert payload == {"target_version": 5, "flush_cache": False}
 
 
 def test_cpu_mode_stages_deltas_in_cpu() -> None:
@@ -206,20 +227,89 @@ def test_cpu_mode_stages_deltas_in_cpu() -> None:
     ]
 
 
-def test_cpu_mode_rejects_full_checkpoint_staging() -> None:
+def test_cpu_mode_stages_full_checkpoint_as_new_base() -> None:
     engine = SGLangEngine(
         "http://engine",
         "/base",
         "/ckpt",
         delta_update_mode="cpu",
     )
-    with pytest.raises(ValueError, match="delta manifests only"):
-        asyncio.run(
-            engine.stage(
-                _manifest(VersionKind.FULL),
-                "/source/weight_v000005",
-            )
+    requests = []
+
+    async def fake_post(path, payload, *, timeout=None, action=None):
+        requests.append((path, payload))
+
+    engine._post = fake_post  # type: ignore[method-assign]
+    asyncio.run(
+        engine.stage(
+            _manifest(VersionKind.FULL),
+            "/source/weight_v000005",
         )
+    )
+    assert requests == [
+        (
+            "/stage_weight_update",
+            {
+                "base_checkpoint_dir": "/source/weight_v000005",
+                "base_version": 5,
+                "target_version": 5,
+                "destination": "cpu",
+            },
+        )
+    ]
+
+    requests.clear()
+    asyncio.run(
+        engine.stage(
+            VersionManifest(VersionRef("r1", 6), VersionKind.DELTA, ["weights"]),
+            "/source/weight_v000006",
+        )
+    )
+    assert requests[0][1]["base_checkpoint_dir"] == "/source/weight_v000005"
+    assert requests[0][1]["base_version"] == 5
+
+
+def test_disk_mode_stages_full_checkpoint_as_new_base() -> None:
+    engine = SGLangEngine(
+        "http://engine",
+        "/base",
+        "/ckpt",
+        delta_update_mode="disk",
+    )
+    requests = []
+
+    async def fake_post(path, payload, *, timeout=None, action=None):
+        requests.append((path, payload))
+
+    engine._post = fake_post  # type: ignore[method-assign]
+    asyncio.run(
+        engine.stage(
+            _manifest(VersionKind.FULL),
+            "/source/weight_v000005",
+        )
+    )
+    assert requests == [
+        (
+            "/stage_weight_update",
+            {
+                "base_checkpoint_dir": "/source/weight_v000005",
+                "base_version": 5,
+                "target_version": 5,
+                "destination": "disk",
+                "local_checkpoint_dir": "/ckpt",
+            },
+        )
+    ]
+
+    requests.clear()
+    asyncio.run(
+        engine.stage(
+            VersionManifest(VersionRef("r1", 6), VersionKind.DELTA, ["weights"]),
+            "/source/weight_v000006",
+        )
+    )
+    assert requests[0][1]["base_checkpoint_dir"] == "/source/weight_v000005"
+    assert requests[0][1]["base_version"] == 5
 
 
 @pytest.mark.parametrize("mode", ["disk", "cpu"])

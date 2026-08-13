@@ -25,7 +25,13 @@ from stitch.engines.base import Engine
 from stitch.pools.base import Pool
 from stitch.stores.base import Store
 from stitch.sync import CommitMode, ConstraintUnmet, Reconciler
-from stitch.types import PoolState, ReplicaState, SyncState, VersionConstraint
+from stitch.types import (
+    PoolState,
+    ReplicaState,
+    SyncState,
+    VersionConstraint,
+    VersionRef,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +107,18 @@ def create_app(
     @app.post("/wake")
     async def wake() -> dict[str, Any]:
         reconciler.wake()
+        return reconciler.server_info()
+
+    @app.post("/restore")
+    async def restore(request: Request) -> dict[str, Any]:
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise ValueError("restore payload must be an object")
+        target = VersionRef.parse(str(payload.get("target", "")))
+        checkpoint_dir = str(payload.get("checkpoint_dir", ""))
+        if not checkpoint_dir:
+            raise ValueError("checkpoint_dir is required")
+        await reconciler.restore(target, checkpoint_dir)
         return reconciler.server_info()
 
     async def _watch_disconnect(request: Request) -> None:

@@ -14,7 +14,13 @@ from pathlib import Path
 from typing import Any
 
 from stitch.pools.modal_flash import ModalFlashPool
-from stitch.publish import claim_run, constrain_request, publish_version, wake_pool
+from stitch.publish import (
+    claim_run,
+    constrain_request,
+    publish_version,
+    restore_run,
+    wake_pool,
+)
 from stitch.stores.base import Store
 from stitch.stores.s3 import S3Store, UploadReceipt
 from stitch.types import VersionRef, decide_pointer_move
@@ -194,6 +200,19 @@ def claim_pool(args: Any, *, boot_version: int = 0) -> None:
         _pool(args),
         _run_id(args),
         boot_version=boot_version,
+    )
+
+
+def restore_pool(args: Any, *, version: int, checkpoint_dir: str) -> None:
+    """Restore a stopped trainer's existing rollout pool before it resumes."""
+    if process.dist_rank() not in (None, 0):
+        return
+    run_id = _run_id(args)
+    restore_run(
+        _store(args),
+        _pool(args),
+        VersionRef(run_id, version),
+        checkpoint_dir,
     )
 
 

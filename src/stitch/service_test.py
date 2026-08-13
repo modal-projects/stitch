@@ -94,6 +94,20 @@ class _MetricsUpstream:
         )
 
 
+class _RestoreGate(AdmissionGate):
+    def __init__(self) -> None:
+        super().__init__()
+        self.applied = VersionRef("run", 10)
+        self.restores: list[tuple[VersionRef, str]] = []
+
+    async def restore(self, target: VersionRef, checkpoint_dir: str) -> None:
+        self.restores.append((target, checkpoint_dir))
+        self.applied = target
+
+    def server_info(self) -> dict[str, Any]:
+        return {"applied": self.applied.identity}
+
+
 async def _asgi_post(
     app: Any, payload: dict[str, Any], *, disconnect_on: asyncio.Event | None = None
 ):
@@ -178,6 +192,29 @@ def test_upstream_transport_failure_is_retryable_and_releases_admission(
     assert (
         records[0].exc_info is None
     )  # concise per-request signal, not a traceback storm
+
+
+def test_restore_endpoint_forwards_checkpoint_and_target() -> None:
+    async def go():
+        gate = _RestoreGate()
+        app = create_app(gate, _ProxyEngine())  # type: ignore[arg-type]
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://sidecar",
+        ) as client:
+            response = await client.post(
+                "/restore",
+                json={
+                    "target": "run/weight_v000005",
+                    "checkpoint_dir": "/saved/weight_v000004",
+                },
+            )
+        return gate, response
+
+    gate, response = asyncio.run(go())
+    assert response.status_code == 200
+    assert response.json()["applied"] == "run/weight_v000005"
+    assert gate.restores == [(VersionRef("run", 5), "/saved/weight_v000004")]
 
 
 def test_client_disconnect_cancels_aborts_and_releases_admission(monkeypatch):

@@ -30,7 +30,7 @@ DEFAULT_SGLANG_RUNTIME = SGLangRuntime(
     image="lmsysorg/sglang:v0.5.17",
     repository="https://github.com/modal-projects/sglang.git",
     branch="stitch-sglang-v0.5.17",
-    commit="bc992874b335d0b6e314f9e883d9f55df185740d",
+    commit="80ba2a61baa436054c6e5f5b1119994fa2f6da7d",
 )
 
 _COOKBOOK_DIR = Path(__file__).resolve().parent.parent

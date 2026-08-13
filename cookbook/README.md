@@ -93,7 +93,8 @@ lineage.
 
 Use the same recipe and Modal environment as the source run. A resumable point
 is the latest saved Megatron checkpoint with a matching complete Hugging Face
-export. Resume it once with:
+export. The current resume path uses the default Modal Volume store. Resume it
+once with:
 
 ```bash
 export EXPERIMENT_CONFIG=your_config_name
@@ -103,9 +104,11 @@ uv run --extra modal python -m cookbook.miles_disagg.launch \
   --resume-from source_run_id
 ```
 
-The launcher creates a new run ID; do not reuse or pass the source run ID as
-`RUN_ID`. If the source checkpoint is v120, the new run boots at v120 and
-publishes v121 next.
+The launcher reuses the source run ID and its rollout pool. It restores every
+live replica to the saved Hugging Face checkpoint before restarting the trainer,
+then continues the same version chain. To fork a checkpoint under different
+settings, configure that checkpoint as a new experiment input and launch without
+`--resume-from`.
 
 Add automatic resume to a fresh or resumed launch with:
 
@@ -115,9 +118,9 @@ uv run --extra modal python -m cookbook.miles_disagg.launch \
   --auto-resume
 ```
 
-`--auto-resume` stays attached to the trainer. An unexpected exit starts a new
-run from the newest complete checkpoint and retries until the trainer returns
-normally. Stop it with Ctrl-C. It is off by default and requires
+`--auto-resume` stays attached to the trainer. An unexpected exit restores the
+same run and rollout pool from the newest complete checkpoint, then retries until
+the trainer returns normally. Stop it with Ctrl-C. It is off by default and requires
 `save_interval`, `save_hf`, and optimizer/RNG checkpointing. A fresh run becomes
 resumable after its first complete Megatron/Hugging Face checkpoint pair.
 
