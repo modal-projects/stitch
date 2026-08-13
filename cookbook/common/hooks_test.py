@@ -1,7 +1,9 @@
 """Harness for the shared hook shims.
 
 Runs without Modal/torch: the real ``_store`` builds a local dir (volume_name=None from
-the temp root) and only ``_pool`` is faked. Run directly:
+the temp root) and only ``_pool`` is faked. The distributed publish protocol itself
+is covered by ``src/stitch/publisher_test.py``; here is the cookbook's wiring of
+trainer args to the core Store/Pool/comms, plus the request-hook gate. Run directly:
   PYTHONPATH=src:. python cookbook/common/hooks_test.py
 """
 
@@ -20,7 +22,7 @@ import pytest
 
 from cookbook.common import hooks
 from stitch.stores.modal_volume import ModalVolumeStore
-from stitch.stores.s3 import S3Store, UploadReceipt
+from stitch.stores.s3 import S3Store
 from stitch.types import VersionRef
 
 
@@ -148,53 +150,23 @@ def test_commit_and_wake_publishes() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         pool = _FakePool()
-        events = []
-        original_gather = hooks.process.dist_all_gather_object
-        original_container_leader = hooks.process.dist_is_container_leader
-        original_publish = hooks.publish_version
         original_commit = ModalVolumeStore.commit
-        original_refresh = ModalVolumeStore.refresh
-
-        def publish_after_refresh(*args, **kwargs):
-            events.append("publish")
-            return original_publish(*args, **kwargs)
-
-        def commit_before_refresh(store):
-            events.append("commit")
-            return original_commit(store)
-
-        def refresh_after_commit(store):
-            events.append("refresh")
-            return original_refresh(store)
 
         hooks._pool = lambda args: pool  # rank is None in tests -> treated as writer
+        commits = 0
 
-        def gather(value):
-            events.append("gather")
-            return [value]
+        def count_commit(store):
+            nonlocal commits
+            commits += 1
+            return original_commit(store)
 
-        hooks.process.dist_all_gather_object = gather
-        hooks.process.dist_is_container_leader = lambda: True
-        hooks.publish_version = publish_after_refresh
-        ModalVolumeStore.commit = commit_before_refresh
-        ModalVolumeStore.refresh = refresh_after_commit
+        ModalVolumeStore.commit = count_commit
         try:
             vdir = _write_version(root, VersionRef("run-abc", 1))
             hooks.commit_and_wake(_args(str(root)), vdir)
         finally:
-            hooks.process.dist_all_gather_object = original_gather
-            hooks.process.dist_is_container_leader = original_container_leader
-            hooks.publish_version = original_publish
             ModalVolumeStore.commit = original_commit
-            ModalVolumeStore.refresh = original_refresh
-        assert events == [
-            "gather",
-            "commit",
-            "gather",
-            "refresh",
-            "publish",
-            "gather",
-        ]
+        assert commits == 1  # this host's mount was committed before rank 0 published
         assert ModalVolumeStore(root, run_id="run-abc").read_pointer() == VersionRef(
             "run-abc", 1
         )
@@ -270,69 +242,6 @@ def test_commit_and_wake_publishes_directly_to_s3(
         "bucket",
         "experiments/run-abc/updates/weight_v000001/model-00001.safetensors",
     ) in client.objects
-
-
-def test_commit_and_wake_verifies_receipts_from_multiple_hosts(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    client = _FakeS3()
-    ref = VersionRef("run-abc", 1)
-    local_dir = tmp_path / "updates" / "weight_v000001"
-    remote_dir = tmp_path / "remote" / "weight_v000001"
-    local_dir.mkdir(parents=True)
-    remote_dir.mkdir(parents=True)
-    (local_dir / "model.safetensors.index.json").write_text(
-        json.dumps(
-            {
-                "metadata": {"version": 1},
-                "weight_map": {
-                    "a": "model-00001-of-00002.safetensors",
-                    "b": "model-00002-of-00002.safetensors",
-                },
-            }
-        )
-    )
-    (local_dir / "model-00001-of-00002.safetensors").write_bytes(b"local")
-    (remote_dir / "model-00002-of-00002.safetensors").write_bytes(b"remote")
-    remote_store = S3Store(
-        "s3://bucket/experiments/run-abc",
-        cache_dir=tmp_path,
-        run_id="run-abc",
-    )
-    remote_store._client = client
-    remote_receipt = remote_store.upload_version_files(ref, remote_dir)
-    create_store = hooks.storage.create_store
-
-    def create_store_with_client(*args, **kwargs):
-        store = create_store(*args, **kwargs)
-        if isinstance(store, S3Store):
-            store._client = client
-        return store
-
-    def gather_with_remote_receipt(value):
-        if (
-            isinstance(value, tuple)
-            and len(value) == 2
-            and isinstance(value[0], UploadReceipt)
-        ):
-            return [value, (remote_receipt, None)]
-        return [value]
-
-    monkeypatch.setattr(hooks.storage, "create_store", create_store_with_client)
-    monkeypatch.setattr(
-        hooks.process, "dist_all_gather_object", gather_with_remote_receipt
-    )
-    monkeypatch.setattr(hooks.process, "dist_is_container_leader", lambda: True)
-    monkeypatch.setattr(hooks, "_pool", lambda _args: _FakePool())
-    args = _args(
-        str(tmp_path),
-        stitch_store_backend="s3",
-        stitch_s3_root="s3://bucket/experiments/run-abc",
-    )
-
-    hooks.commit_and_wake(args, str(local_dir))
-
-    assert hooks._store(args).read_pointer() == ref
 
 
 def test_commit_and_wake_s3_baseline_does_not_touch_a_volume(

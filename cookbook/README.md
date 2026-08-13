@@ -486,32 +486,42 @@ publish_version(
 Passing `None` for the pool is sufficient when replicas poll the store; a
 custom `Pool` can be passed to provide an immediate wake-up hint.
 
-For a distributed trainer, snapshot `latest` before upload, have one leader per
-host upload only that host's local files, gather the receipts through the
-trainer's communicator, and let rank 0 commit the pointer last:
+For a distributed trainer, `stitch.publisher.Publisher` runs the same protocol
+the cookbook's trainers use — rank 0 snapshots `latest`, one leader per host
+uploads only that host's local files, rank 0 verifies the gathered receipts and
+commits the pointer last. Provide your trainer's communicator as a
+`TrainerComms` (rank identity, an object gather, and one host leader election);
+the defaults are the single-process case:
 
 ```python
-from stitch.types import VersionRef, decide_pointer_move
+from stitch.publisher import Publisher, TrainerComms
 
-target = VersionRef(run_id, 1)
 
-if global_rank == 0:
-    expected = store.read_pointer()
-    decide_pointer_move(expected, target)
-else:
-    expected = None
-expected = broadcast_object(expected, src=0)  # your trainer's communicator
+class TorchComms(TrainerComms):
+    def rank(self):
+        import torch.distributed as dist
 
-receipt = None
-if is_host_leader:
-    receipt = store.upload_version_files(target, local_version_dir)
-receipts = gather_objects(receipt, dst=0)  # your trainer's communicator
+        return dist.get_rank() if dist.is_initialized() else None
 
-if global_rank == 0:
-    receipts = [receipt for receipt in receipts if receipt is not None]
-    store.verify_version(target, receipts)
-    store.compare_and_advance_pointer(expected, target)
+    def all_gather_object(self, value):
+        import torch.distributed as dist
+
+        values = [None] * dist.get_world_size()
+        dist.all_gather_object(values, value)
+        return values
+
+    def is_host_leader(self):
+        return torch.distributed.get_rank() % ranks_per_host == 0
+
+
+publisher = Publisher(store, None, run_id=run_id, comms=TorchComms())
+publisher.claim(boot_version=0)  # once, when establishing the run's base
+publisher.publish("/local/updates/weight_v000001")
 ```
+
+`Publisher.publish` also dispatches on the backend: a shared mounted store is
+committed by each host leader before rank 0 publishes from the refreshed view,
+which is the flow the cookbook's Miles/Slime hooks use with Modal Volumes.
 
 All ranks should treat an upload, verification, or pointer conflict as a
 failed publication and synchronize before continuing. The version prefix is
