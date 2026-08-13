@@ -266,12 +266,13 @@ Each experiment Volume contains only run-scoped state:
     ├── checkpoints/
     ├── hf_checkpoints/weight_vNNNNNN/
     │   └── .complete
-    └── train.log
+    └── logs/train-from-vNNNNNN-<UTC>-<id>.log
 ```
 
 The training framework owns `updates/` and the saved checkpoints; Stitch owns
 `latest`. Resume keeps the same run ID, restores `latest` to the checkpoint,
-and replaces the abandoned update suffix as training continues.
+and replaces the abandoned update suffix as training continues. Each finished
+trainer attempt writes a separate log; use Modal app logs while it is running.
 
 Datasets are independent of models and runs:
 

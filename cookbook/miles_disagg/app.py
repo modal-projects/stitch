@@ -26,9 +26,11 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from uuid import uuid4
 
 import modal
 import modal.experimental
@@ -487,11 +489,12 @@ class Trainer:
         # Claim the version already served by the pool before Miles publishes.
         from cookbook.common import hooks
 
+        boot_version = resume_point.version if resume_point is not None else 0
         hooks.claim_pool(
             SimpleNamespace(
                 update_weight_disk_dir=cfg.update_weight_disk_dir, **custom_config
             ),
-            boot_version=resume_point.version if resume_point is not None else 0,
+            boot_version=boot_version,
         )
 
         resume_log = (
@@ -506,7 +509,12 @@ class Trainer:
             f"nodes={miles_cfg.n_train_nodes}, rollout_endpoint={cfg.rollout_endpoint_url}"
         )
         print(f"Command: {cmd}")
-        log_path = str(RUN_DIR / "train.log")
+        started_at = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        log_path = (
+            RUN_DIR
+            / "logs"
+            / f"train-from-v{boot_version:06d}-{started_at}-{uuid4().hex[:8]}.log"
+        )
         with tempfile.TemporaryDirectory() as local_log_dir:
             local_log_path = os.path.join(local_log_dir, "train.log")
             teed = f"set -o pipefail; ({cmd}) 2>&1 | tee {local_log_path}"
@@ -514,7 +522,7 @@ class Trainer:
                 subprocess.run(["bash", "-lc", teed], check=True)
             finally:
                 try:
-                    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+                    log_path.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copyfile(local_log_path, log_path)
                     run_volume.commit()
                     print(
