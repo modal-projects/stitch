@@ -669,7 +669,7 @@ def test_store_refresh_waits_for_update_destination() -> None:
 
         release.set()
         await startup
-        assert store.refreshed > 0
+        assert store.refreshed == 1
         await r.shutdown()
 
     _run(go())
@@ -727,7 +727,7 @@ def test_unrecoverable_reconcile_error_reaches_terminal_monitor() -> None:
 
 
 # ── convergence liveness ─────────────────────────────────────────────────────
-# Backstop self-heals what wake-only cannot (stitch#45): each converges with it, never with interval=0.
+# The periodic backstop heals a wake that never arrives. A delivered wake is sufficient.
 
 
 async def _converged(r: Reconciler, target: VersionRef, timeout: float = 1.0) -> bool:
@@ -797,33 +797,26 @@ class HostViewStore(FakeStore):
         self.remote_pointer = ref
 
 
-async def _heals_dropped_wake(interval: float) -> bool:
-    """A wake IS delivered, but mid-pass: wake() no-ops against the running task, whose
-    caught-up recheck already snapshotted pre-publish state — the wake is lost."""
+async def _preserves_concurrent_wake(interval: float) -> bool:
+    """A publish wake delivered during a pass schedules another authoritative read."""
     store = HostViewStore(VersionRef("r1", 1), _full("r1", 1), _full("r1", 2))
     r = _make_reconciler(store=store, engine=FakeEngine(), reconcile_interval=interval)
     await r.startup()  # converges to v1, ungated
 
     gate = store.refresh_gate = queue.Queue()
     r.wake()  # start an idle pass
-    (
-        await asyncio.to_thread(gate.get, True, 10)
-    ).set()  # release its pass-start refresh
-    recheck = await asyncio.to_thread(
-        gate.get, True, 10
-    )  # its recheck: snapshotted v1, held
+    refresh = await asyncio.to_thread(gate.get, True, 10)  # snapshotted v1, held
     store.advance_pointer(VersionRef("r1", 2))
-    r.wake()  # v2's wake: delivered mid-pass -> dropped; the pass idles on its v1 snapshot
-    recheck.set()
+    r.wake()  # delivered mid-pass: request another pass
     store.refresh_gate = None
+    refresh.set()
     ok = await _converged(r, VersionRef("r1", 2))
     await r.shutdown()
     return ok
 
 
-def test_dropped_wake_recovery_needs_backstop() -> None:
-    assert asyncio.run(_heals_dropped_wake(0.05))
-    assert not asyncio.run(_heals_dropped_wake(0))
+def test_wake_during_reconcile_is_preserved_without_backstop() -> None:
+    assert asyncio.run(_preserves_concurrent_wake(0))
 
 
 def test_constrained_409_recovers_without_backstop() -> None:

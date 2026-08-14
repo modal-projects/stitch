@@ -200,6 +200,7 @@ class Reconciler(AdmissionGate):
         self._boot_monotonic = time.monotonic()
         self._catchup_passes = 0
         self._task: asyncio.Task[None] | None = None
+        self._wake_pending = False
         self._destination_init_task: asyncio.Task[None] | None = None
         self._destination_ready = False
         self._destination_init_error: str | None = None
@@ -305,23 +306,25 @@ class Reconciler(AdmissionGate):
         self.wake()  # a 409 is our cue to catch up
 
     def wake(self) -> None:
-        """Nudge a reconcile now (a publish wake or a 409). Non-cancelling: starts a
-        task only if none is running; the running loop re-reads the authoritative pointer."""
-        if self._terminal_error is None and (self._task is None or self._task.done()):
-            self._task = asyncio.get_running_loop().create_task(self.reconcile())
+        """Nudge reconciliation now (a publish wake or a 409).
+
+        Multiple wakes coalesce because each pass reads the authoritative pointer. A
+        wake during an active pass requests one more pass instead of being dropped.
+        """
+        if self._terminal_error is not None:
+            return
+        if self._task is not None and not self._task.done():
+            self._wake_pending = True
+            return
+        self._task = asyncio.get_running_loop().create_task(self.reconcile())
 
     async def reconcile(self) -> None:
         """Loop until caught up to the store's (run, latest); on error, record it and
         stop — a later wake or poll retries."""
         while True:
+            self._wake_pending = False
             try:
                 caught_up = await self._reconcile_once()
-                if caught_up:
-                    # A publish can land mid-commit; re-check before idling.
-                    await asyncio.to_thread(self.store.refresh)
-                    pointer = await asyncio.to_thread(self.store.read_pointer)
-                    if self._behind(pointer):
-                        caught_up = False
             except UnrecoverableSidecarError as exc:
                 self.last_error = str(exc)
                 self.sync_state = SyncState.ERROR
@@ -332,8 +335,12 @@ class Reconciler(AdmissionGate):
                 self.last_error = str(exc)
                 self.sync_state = SyncState.ERROR
                 logger.exception("reconcile failed")
+                if self._wake_pending:
+                    continue
                 return
             if caught_up:
+                if self._wake_pending:
+                    continue
                 self.sync_state = SyncState.IDLE
                 if not self.ready:
                     logger.info(
