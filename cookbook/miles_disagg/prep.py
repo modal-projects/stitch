@@ -174,9 +174,9 @@ def prepare_torch_dist(exp, checkpoint_volume, *, rank: int, master_addr: str) -
         return
     if not exp.miles.megatron_model_type:
         raise SystemExit("prepare_torch_dist requires megatron_model_type")
-    from miles.utils.external_utils.model_args_utils import load_model_args
+    from cookbook.miles_disagg.model_args import load_pinned_model_args
 
-    model_args = shlex.split(load_model_args(exp.miles.megatron_model_type))
+    model_args = load_pinned_model_args(MILES_ROOT, exp.miles.megatron_model_type)
     nodes = exp.modal.torch_dist_prep_nodes
     use_wrapper = nodes > 1 and getattr(exp, "USE_MODAL_TORCH_DIST_WRAPPER", False)
     convert = (

@@ -150,9 +150,10 @@ uv run --extra modal python -m cookbook.common.smoke \
 ```
 
 Rollout capacity is controlled by `rollout_min_containers`,
-`rollout_max_containers`, and `rollout_target_inputs`. Engine concurrency and
-backpressure are controlled by `--max-running-requests` and
-`--max-queued-requests` in the recipe.
+`rollout_max_containers`, `rollout_target_inputs`, and
+`rollout_scaledown_window_seconds`. Engine concurrency and backpressure are
+controlled by `--max-running-requests` and `--max-queued-requests` in the
+recipe.
 
 After changing fleet or SGLang settings, redeploy the active run with the same
 experiment and run ID:

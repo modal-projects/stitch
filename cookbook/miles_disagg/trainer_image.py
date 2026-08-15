@@ -60,15 +60,14 @@ def build_trainer_image(
         )
         # A baked HF cache must not shadow the mounted volume.
         .run_commands(f"rm -rf {hf_cache_path}")
-        .run_commands(
-            f"rm -rf {MILES_ROOT}"
-            f" && git clone {MILES_REPO_URL} {MILES_ROOT}"
-            f" && cd {MILES_ROOT} && git fetch origin {miles_repo_ref} && git checkout FETCH_HEAD"
-            f" && python3 -m pip install --no-deps -e {MILES_ROOT}"
-        )
-        .add_local_file(
-            str(_TORCH_DIST_WRAPPER_SRC), TORCH_DIST_CONVERT_WRAPPER, copy=True
-        )
+    )
+    image = image.run_commands(
+        f"rm -rf {MILES_ROOT}"
+        f" && git clone {MILES_REPO_URL} {MILES_ROOT}"
+        f" && cd {MILES_ROOT} && git fetch origin {miles_repo_ref} && git checkout FETCH_HEAD"
+        f" && python3 -m pip install --no-deps -e {MILES_ROOT}"
+    ).add_local_file(
+        str(_TORCH_DIST_WRAPPER_SRC), TORCH_DIST_CONVERT_WRAPPER, copy=True
     )
     if extra_pip_packages:
         image = image.pip_install(*extra_pip_packages)
