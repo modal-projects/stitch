@@ -147,7 +147,12 @@ def create_store(
     s3_root: str | None = None,
     s3_endpoint_url: str | None = None,
 ) -> Store:
-    """Create a Store with one local layout regardless of its backing service."""
+    """Create a Store with one local layout regardless of its backing service.
+
+    Doubles as the cookbook's sidecar store factory: ``cookbook.common.process``
+    passes it as ``--store-factory``, and ``stitch.sidecar.main`` calls it with
+    ``local_root``/``run_id`` plus the launch's ``--store-opt`` pairs.
+    """
     if backend == MODAL_VOLUME:
         return ModalVolumeStore(local_root, volume_name=volume_name, run_id=run_id)
     if backend == S3:
