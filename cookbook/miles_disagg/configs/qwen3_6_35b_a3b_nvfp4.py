@@ -73,6 +73,7 @@ ROLLOUT_CONCURRENT_SAMPLES = 192
 ROLLOUT_AGENT_PROCESSES = 12
 ROLLOUT_AGENT_THREADS_PER_PROCESS = 16
 MAX_SEQ_LEN = 16_384
+TRAIN_MAX_TOKENS_PER_GPU = 8_192
 SGLANG_CONTEXT_LENGTH = MAX_SEQ_LEN + 8
 SAMPLING_MASK_MAX_TOKENS = 32_768
 
@@ -323,7 +324,9 @@ class _Miles(MilesConfig):
     distributed_timeout_minutes = 60
     moe_token_dispatcher_type = "alltoall"
     use_dynamic_batch_size = True
-    max_tokens_per_gpu = MAX_SEQ_LEN
+    # Backward retains activations, unlike forward-only log-prob scoring. Keep
+    # its dynamic microbatches at the Miles-recommended response-length budget.
+    max_tokens_per_gpu = TRAIN_MAX_TOKENS_PER_GPU
     log_probs_max_tokens_per_gpu = MAX_SEQ_LEN
     data_pad_size_multiplier = 1024
     log_probs_chunk_size = MAX_SEQ_LEN

@@ -69,6 +69,12 @@ def validate_trainer_contract() -> dict:
         "get_qwen3_5_spec",
     ]:
         raise RuntimeError(f"pinned Qwen model arguments are incorrect: {model_args[:3]}")
+    if model.miles.max_tokens_per_gpu != model.miles.rollout_max_response_len:
+        raise RuntimeError(
+            "Qwen training token budget exceeds its response-length memory bound"
+        )
+    if model.miles.log_probs_max_tokens_per_gpu != model.MAX_SEQ_LEN:
+        raise RuntimeError("Qwen forward-only scoring lost its full-sequence budget")
 
     prep_converter = _load_miles_module(
         "qwen36_prep_converter",
@@ -195,6 +201,8 @@ def validate_trainer_contract() -> dict:
         "status": "PASS",
         "model_script_argument_count": len(model_args),
         "model_script_source": "pinned_checkout",
+        "training_token_budget": model.miles.max_tokens_per_gpu,
+        "log_probs_token_budget": model.miles.log_probs_max_tokens_per_gpu,
         "expanded_expert_tensors": len(live_names),
         "bf16_expert_layout": "per_expert",
         "bf16_fused_moe_ignore": "exact_aliases",

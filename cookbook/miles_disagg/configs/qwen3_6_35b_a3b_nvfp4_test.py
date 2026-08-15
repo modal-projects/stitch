@@ -43,6 +43,14 @@ def test_training_keeps_nvfp4_routing_replay_and_top_p_masking() -> None:
     assert config.TORCH_DIST_CHECKPOINT_PATH.name.endswith("global-experts-v2")
 
 
+def test_training_uses_a_smaller_token_budget_than_forward_only_scoring() -> None:
+    miles = config.miles
+
+    assert miles.rollout_max_response_len == config.TRAIN_MAX_TOKENS_PER_GPU
+    assert miles.max_tokens_per_gpu == config.TRAIN_MAX_TOKENS_PER_GPU
+    assert miles.log_probs_max_tokens_per_gpu == config.MAX_SEQ_LEN
+
+
 def test_rollout_capacity_matches_the_elastic_agent_pool() -> None:
     miles = config.miles
     agent_processes = int(miles.environment["MODAL_SWE_AGENT_PROCESSES"])
