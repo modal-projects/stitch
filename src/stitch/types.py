@@ -14,7 +14,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-_WEIGHT_PREFIX = "weight_v"
+WEIGHT_PREFIX = "weight_v"
 
 
 @dataclass(frozen=True)
@@ -31,7 +31,7 @@ class VersionRef:
 
     @property
     def identity(self) -> str:
-        name = f"{_WEIGHT_PREFIX}{self.version:06d}"
+        name = f"{WEIGHT_PREFIX}{self.version:06d}"
         return f"{self.run_id}/{name}" if self.run_id else name
 
     @classmethod
@@ -40,9 +40,7 @@ class VersionRef:
         # raises — never fall back to base and serve the wrong weights (stitch#31).
         text = (text or "").strip()
         run_id, _, tail = text.rpartition("/")
-        digits = (
-            tail[len(_WEIGHT_PREFIX) :] if tail.startswith(_WEIGHT_PREFIX) else tail
-        )
+        digits = tail[len(WEIGHT_PREFIX) :] if tail.startswith(WEIGHT_PREFIX) else tail
         if not digits.isdigit():
             raise ValueError(f"unparseable snapshot pointer: {text!r}")
         return cls(run_id or None, int(digits))

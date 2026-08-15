@@ -1,28 +1,44 @@
 """Shared trainer hooks for publishing HF weight updates and routing rollout requests.
 
 Trainer integrations point their lifecycle callbacks at this module. Each hook reads the
-run coordinates from the trainer's argument namespace and composes the Stitch core with a
-configured Store and ``ModalFlashPool``.
+run coordinates from the trainer's argument namespace and wires the configured Store and
+``ModalFlashPool`` into :class:`stitch.publisher.Publisher`, the modal-agnostic core
+that owns the distributed publish protocol.
 """
 
 from __future__ import annotations
 
 import logging
 import time
-import traceback
 from pathlib import Path
 from typing import Any
 
 from stitch.pools.modal_flash import ModalFlashPool
-from stitch.publish import claim_run, constrain_request, publish_version, wake_pool
+from stitch.publish import constrain_request
+from stitch.publisher import Publisher, TrainerComms
 from stitch.stores.base import Store
-from stitch.stores.s3 import S3Store, UploadReceipt
-from stitch.types import VersionRef, decide_pointer_move
 
 from . import process, storage
 from .constants import MODAL_SESSION_ID_HEADER
 
 logger = logging.getLogger(__name__)
+
+
+class _TorchComms(TrainerComms):
+    """The trainer's torch.distributed comms, via ``common.process`` helpers.
+
+    Off the distributed path (no initialized process group) each helper degrades
+    to the single-process default, so a single-host dev run needs no wiring.
+    """
+
+    def rank(self) -> int | None:
+        return process.dist_rank()
+
+    def all_gather_object(self, value: Any) -> list[Any]:
+        return process.dist_all_gather_object(value)
+
+    def is_host_leader(self) -> bool:
+        return process.dist_is_container_leader()
 
 
 def sample_affinity_key(sample: Any) -> str | None:
@@ -48,152 +64,21 @@ def commit_and_wake(args: Any, published_dir: str, rollout_engines: Any = None) 
     that is a Volume durability boundary and an S3 no-op.
     """
     del rollout_engines
-    store = _store(args)
-    if not Path(published_dir).name.startswith("weight_v"):
-        if not isinstance(store, S3Store):
-            store.commit()
-        return
-
-    target = VersionRef.parse(f"{_run_id(args)}/{Path(published_dir).name}")
-    checked = process.dist_rank() in (None, 0)
-    publication_state: tuple[bool, bool, VersionRef | None, str | None] = (
-        checked,
-        False,
-        None,
-        None,
-    )
-    if process.dist_rank() in (None, 0):
-        try:
-            current = store.read_pointer()
-            publication_state = (
-                True,
-                current is not None
-                and current.run_id == target.run_id
-                and current.version >= target.version,
-                current,
-                None,
-            )
-        except Exception:  # noqa: BLE001
-            publication_state = (
-                True,
-                False,
-                None,
-                f"rank 0:\n{traceback.format_exc()}",
-            )
-    publication_states = process.dist_all_gather_object(publication_state)
-    errors = [error for _, _, _, error in publication_states if error is not None]
-    if errors:
-        raise RuntimeError(
-            "checkpoint publication state check failed:\n" + "\n".join(errors)
-        )
-    rank_zero_states = [state for state in publication_states if state[0]]
-    if len(rank_zero_states) != 1:
-        raise RuntimeError(
-            "checkpoint publication state check did not identify exactly one rank 0"
-        )
-    _, already_published, expected_pointer, _ = rank_zero_states[0]
-    if already_published:
-        logger.warning("%s is already published; leaving it immutable", published_dir)
-        return
-    decide_pointer_move(expected_pointer, target)
-
-    if isinstance(store, S3Store):
-        _publish_s3_version(
-            store,
-            args,
-            target,
-            published_dir,
-            expected_pointer=expected_pointer,
-        )
-        return
-
-    _publish_mounted_version(store, args, published_dir)
-
-
-def _publish_mounted_version(store: Store, args: Any, published_dir: str) -> None:
-    """Commit every trainer host, then publish from rank 0's refreshed mount."""
-
-    commit_error = None
-    if process.dist_is_container_leader():
-        try:
-            store.commit()
-        except Exception:  # noqa: BLE001
-            commit_error = f"rank {process.dist_rank()}:\n{traceback.format_exc()}"
-    _raise_distributed_failures("checkpoint commit", commit_error)
-
-    publish_error = None
-    if process.dist_rank() in (None, 0):
-        try:
-            store.refresh()
-            publish_version(store, _pool(args), published_dir, run_id=_run_id(args))
-        except Exception:  # noqa: BLE001
-            publish_error = f"rank 0:\n{traceback.format_exc()}"
-    _raise_distributed_failures("checkpoint publication", publish_error)
-
-
-def _publish_s3_version(
-    store: S3Store,
-    args: Any,
-    target: VersionRef,
-    published_dir: str,
-    *,
-    expected_pointer: VersionRef | None,
-) -> None:
-    """Upload once per host, verify gathered receipts, and commit ``latest`` last."""
-    receipt: UploadReceipt | None = None
-    upload_error = None
-    if process.dist_is_container_leader():
-        try:
-            receipt = store.upload_version_files(target, published_dir)
-        except Exception:  # noqa: BLE001
-            upload_error = f"rank {process.dist_rank()}:\n{traceback.format_exc()}"
-
-    upload_results = process.dist_all_gather_object((receipt, upload_error))
-    upload_errors = [error for _, error in upload_results if error is not None]
-    if upload_errors:
-        raise RuntimeError("checkpoint upload failed:\n" + "\n".join(upload_errors))
-    receipts = [receipt for receipt, _ in upload_results if receipt is not None]
-    if not receipts:
-        raise RuntimeError("checkpoint upload produced no host receipts")
-
-    publish_error = None
-    if process.dist_rank() in (None, 0):
-        try:
-            manifest = store.verify_version(target, receipts)
-            store.compare_and_advance_pointer(expected_pointer, target)
-            wake_pool(_pool(args), target)
-            logger.info(
-                "published %s: kind=%s files=%d hosts=%d",
-                target.identity,
-                manifest.kind.value,
-                len(manifest.files),
-                len(receipts),
-            )
-        except Exception:  # noqa: BLE001
-            publish_error = f"rank 0:\n{traceback.format_exc()}"
-    _raise_distributed_failures("checkpoint publication", publish_error)
-
-
-def _raise_distributed_failures(phase: str, local_error: str | None) -> None:
-    errors = [
-        error
-        for error in process.dist_all_gather_object(local_error)
-        if error is not None
-    ]
-    if errors:
-        raise RuntimeError(f"{phase} failed:\n" + "\n".join(errors))
+    _publisher(args).publish(published_dir)
 
 
 def claim_pool(args: Any, *, boot_version: int = 0) -> None:
     """Launch hook (rank 0): identify the checkpoint already served by every replica
     before the first publish."""
-    if process.dist_rank() not in (None, 0):
-        return
-    claim_run(
+    _publisher(args).claim(boot_version=boot_version)
+
+
+def _publisher(args: Any) -> Publisher:
+    return Publisher(
         _store(args),
         _pool(args),
-        _run_id(args),
-        boot_version=boot_version,
+        run_id=_run_id(args),
+        comms=_TorchComms(),
     )
 
 
