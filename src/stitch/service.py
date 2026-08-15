@@ -19,12 +19,12 @@ import urllib.request
 import uuid
 from collections.abc import Iterable
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, Protocol
 
 from stitch.engines.base import Engine
 from stitch.pools.base import Pool
 from stitch.stores.base import Store
-from stitch.sync import CommitMode, ConstraintUnmet, Reconciler
+from stitch.sync import AdmissionGate, CommitMode, ConstraintUnmet, Reconciler
 from stitch.types import PoolState, ReplicaState, SyncState, VersionConstraint
 from stitch.watchdog import (
     EngineWatchdog,
@@ -41,8 +41,31 @@ VERSIONED_ROUTES = ("generate", "v1/chat/completions", "v1/completions")
 _DROP_HEADERS = {"host", "content-length", "connection"}
 
 
+class SidecarStatus(Protocol):
+    """The status/control surface the proxy consumes besides admission — the reconciler
+    implements it; tests stand it in with a stub. Admission flows through the
+    ``AdmissionGate`` separately, so the data plane never needs the control loop."""
+
+    @property
+    def ready(self) -> bool: ...
+
+    @property
+    def applied(self) -> Any: ...
+
+    def readiness_reason(self) -> str: ...
+
+    def server_info(self) -> dict[str, Any]: ...
+
+    def wake(self) -> None: ...
+
+    async def startup(self) -> None: ...
+
+    async def shutdown(self) -> None: ...
+
+
 def create_app(
-    reconciler: Reconciler,
+    gate: AdmissionGate,
+    status: SidecarStatus,
     engine: Engine,
     *,
     versioned_routes: Iterable[str] = VERSIONED_ROUTES,
@@ -73,14 +96,14 @@ def create_app(
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         # Background reconcile so uvicorn answers /health (503 until the first catch-up) while it runs.
-        syncing = asyncio.create_task(reconciler.startup())
+        syncing = asyncio.create_task(status.startup())
         try:
             yield
         finally:
             syncing.cancel()
             with contextlib.suppress(BaseException):
                 await syncing
-            await reconciler.shutdown()
+            await status.shutdown()
             c = pooled.pop("client", None)
             if c is not None:
                 await c.aclose()
@@ -93,21 +116,21 @@ def create_app(
         # keeps a not-yet-synced replica out of rotation (else it's routed to and 409s the whole
         # catch-up). A fresh boot clears at once; a mid-run joiner waits until it has applied the
         # live version. Liveness/boot checks use /server_info instead.
-        if not reconciler.ready:
+        if not status.ready:
             return JSONResponse(
-                {"ready": False, "reason": reconciler.readiness_reason()},
+                {"ready": False, "reason": status.readiness_reason()},
                 status_code=503,
             )
         return JSONResponse({"ready": True})
 
     @app.get("/server_info")
     async def server_info() -> dict[str, Any]:
-        return reconciler.server_info()
+        return status.server_info()
 
     @app.post("/wake")
     async def wake() -> dict[str, Any]:
-        reconciler.wake()
-        return reconciler.server_info()
+        status.wake()
+        return status.server_info()
 
     async def _watch_disconnect(request: Request) -> None:
         while True:
@@ -159,7 +182,7 @@ def create_app(
             async with (
                 contextlib.nullcontext()
                 if request.method == "GET" and route == "metrics"
-                else reconciler.admit(constraint if is_versioned else None)
+                else gate.admit(constraint if is_versioned else None)
             ) as served:
                 if is_versioned and payload is not None and served is not None:
                     engine.stamp_request(payload, served)
@@ -228,7 +251,7 @@ def create_app(
                     )
                 data = resp.json()
                 current = (
-                    reconciler.applied
+                    status.applied
                 )  # capture while still pinned, before a commit advances it
         except ConstraintUnmet as exc:
             return JSONResponse(exc.error, status_code=409)
@@ -298,7 +321,7 @@ def serve(
         TerminalFailureMonitor(reconciler.wait_for_terminal_error),
     )
     config = uvicorn.Config(
-        create_app(reconciler, engine), host=host, port=port, log_level="info"
+        create_app(reconciler.gate, reconciler, engine), host=host, port=port, log_level="info"
     )
     asyncio.run(run_server_with_watchdog(uvicorn.Server(config), watchdog))
 
