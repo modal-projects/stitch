@@ -119,25 +119,8 @@ class _MetricsUpstream:
         )
 
 
-class _RecordingUpstream:
-    def __init__(self) -> None:
-        self.requests: list[tuple[str, str, dict[str, Any]]] = []
-
-    async def request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
-        self.requests.append((method, url, kwargs))
-        return httpx.Response(
-            200,
-            json={"ok": True},
-            headers={"content-type": "application/json"},
-        )
-
-
 async def _asgi_post(
-    app: Any,
-    payload: dict[str, Any],
-    *,
-    path: str = "/generate",
-    disconnect_on: asyncio.Event | None = None,
+    app: Any, payload: dict[str, Any], *, disconnect_on: asyncio.Event | None = None
 ):
     """Issue one request directly to the ASGI app, optionally disconnecting after its body."""
     body = json.dumps(payload).encode()
@@ -165,8 +148,8 @@ async def _asgi_post(
             "http_version": "1.1",
             "method": "POST",
             "scheme": "http",
-            "path": path,
-            "raw_path": path.encode(),
+            "path": "/generate",
+            "raw_path": b"/generate",
             "query_string": b"",
             "headers": [(b"content-type", b"application/json")],
             "client": ("127.0.0.1", 1234),
@@ -181,33 +164,6 @@ async def _asgi_post(
     )
     headers = {k.decode().lower(): v.decode() for k, v in start["headers"]}
     return start["status"], headers, response_body
-
-
-def test_chat_proxy_restores_miles_sampling_mask_from_custom_params(monkeypatch):
-    async def go() -> dict[str, Any]:
-        upstream = _RecordingUpstream()
-        gate_sidecar = _GateSidecar(VersionRef("run", 3))
-        monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: upstream)
-        app = create_app(gate_sidecar.gate, gate_sidecar, _ProxyEngine())
-
-        status, _headers, _body = await _asgi_post(
-            app,
-            {
-                "custom_params": {"miles_return_sampling_mask": True},
-                "return_sampling_mask": False,
-                "return_meta_info": True,
-            },
-            path="/v1/chat/completions",
-        )
-
-        assert status == 200
-        assert len(upstream.requests) == 1
-        return upstream.requests[0][2]["json"]
-
-    forwarded = asyncio.run(go())
-
-    assert forwarded["return_sampling_mask"] is True
-    assert forwarded["custom_params"] == {"miles_return_sampling_mask": True}
 
 
 def test_upstream_transport_failure_is_retryable_and_releases_admission(

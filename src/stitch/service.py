@@ -41,17 +41,6 @@ VERSIONED_ROUTES = ("generate", "v1/chat/completions", "v1/completions")
 _DROP_HEADERS = {"host", "content-length", "connection"}
 
 
-def _restore_router_compatibility(route: str, payload: dict[str, Any]) -> None:
-    """Restore fields carried through routers that drop unknown top-level keys."""
-    if route != "v1/chat/completions":
-        return
-    custom_params = payload.get("custom_params")
-    if isinstance(custom_params, dict) and custom_params.get(
-        "miles_return_sampling_mask", False
-    ):
-        payload["return_sampling_mask"] = True
-
-
 class SidecarStatus(Protocol):
     """The status/control surface the proxy consumes besides admission — the reconciler
     implements it; tests stand it in with a stub. Admission flows through the
@@ -169,8 +158,6 @@ def create_app(
         ):
             parsed = await request.json()
             payload = parsed if isinstance(parsed, dict) else None
-        if payload is not None:
-            _restore_router_compatibility(route, payload)
 
         is_versioned = route in versioned
         constraint = (
