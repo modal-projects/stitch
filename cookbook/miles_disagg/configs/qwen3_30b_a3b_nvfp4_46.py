@@ -115,14 +115,13 @@ SGLANG_SERVER_ARGS = {
 modal = ModalConfig(
     gpu="B200",
     region="us",
-    # Warm floor of 1 (the pool must be UP before the trainer sends rollouts); cap at 3
-    # to bound the footprint at trainer 8 + pool 3 = 11 concurrent B200.
+    # Warm floor of 1: the pool must be UP before the trainer sends rollouts.
     rollout_min_containers=1,
-    rollout_max_containers=3,
+    rollout_max_containers=None,
     # Per-container autoscaler target, well below the trainer's client concurrency: a
     # rollout wave (rollout_batch_size x n_samples_per_prompt = 256) must register as
-    # queue pressure so Flash scales OUT to the container cap instead of one engine
-    # absorbing the whole wave at its concurrency ceiling.
+    # queue pressure so Flash scales OUT instead of one engine absorbing the whole
+    # wave at its concurrency ceiling.
     rollout_target_inputs=24,
     # cpu persist ≈ 2x the 23.5 GiB canonical checkpoint; request covers staging + serving baseline.
     rollout_memory_mib=(128 * 1024, 512 * 1024),
