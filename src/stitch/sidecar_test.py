@@ -1,4 +1,4 @@
-"""``SidecarConfig`` flag round-trips and ``main``'s Store/Engine/serve wiring."""
+"""``SidecarConfig`` flag round-trips and ``run``'s Engine/serve wiring."""
 
 from __future__ import annotations
 
@@ -13,6 +13,8 @@ _BASE = dict(
     bulletin_root="/cache/run-a",
     base_checkpoint_dir="/model",
     run_id="run-a",
+    # Opaque to core: round-trips verbatim for the launching package to interpret.
+    store_backend="opaque-backend",
 )
 
 
@@ -43,7 +45,6 @@ _FULL = SidecarConfig(
     local_checkpoint_dir="/cache/weights",
     delta_update_mode="disk",
     disk_load_format="safetensors",
-    store_backend="s3",
     volume_name="weights",
     s3_root="s3://bucket/experiment/run-a",
     s3_endpoint_url="https://s3.example.test",
@@ -71,6 +72,8 @@ def test_from_argv_fills_unflagged_fields_with_defaults() -> None:
             "/model",
             "--delta-update-mode",
             "cpu",
+            "--store-backend",
+            "opaque-backend",
             "--run-id",
             "run-a",
         ]
@@ -85,15 +88,11 @@ def test_disk_mode_requires_local_checkpoint_dir() -> None:
         SidecarConfig.from_argv(argv)
 
 
-def test_main_builds_store_engine_and_serves(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_builds_engine_and_serves(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: dict[str, Any] = {}
 
     store_out = object()
     engine_out = object()
-
-    def _create_store(backend: str, **kwargs: Any) -> object:
-        calls["store"] = (backend, kwargs)
-        return store_out
 
     def _engine(
         base_url: str,
@@ -107,7 +106,6 @@ def test_main_builds_store_engine_and_serves(monkeypatch: pytest.MonkeyPatch) ->
     def _serve(store: Any, engine: Any, **kwargs: Any) -> None:
         calls["serve"] = (store, engine, kwargs)
 
-    monkeypatch.setattr(sidecar, "create_store", _create_store)
     monkeypatch.setattr(sidecar, "SGLangEngine", _engine)
     monkeypatch.setattr(sidecar, "serve", _serve)
 
@@ -115,7 +113,6 @@ def test_main_builds_store_engine_and_serves(monkeypatch: pytest.MonkeyPatch) ->
         **_BASE,
         local_checkpoint_dir="/cache/weights",
         delta_update_mode="disk",
-        store_backend="s3",
         s3_root="s3://bucket/experiment/run-a",
         commit_mode="quiesce",
         flush_cache_on_commit=True,
@@ -125,18 +122,8 @@ def test_main_builds_store_engine_and_serves(monkeypatch: pytest.MonkeyPatch) ->
         watchdog_interval=1.0,
         watchdog_failure_threshold=7,
     )
-    sidecar.main(config.to_argv())
+    sidecar.run(config, store_out)
 
-    assert calls["store"] == (
-        "s3",
-        {
-            "local_root": "/cache/run-a",
-            "volume_name": None,
-            "run_id": "run-a",
-            "s3_root": "s3://bucket/experiment/run-a",
-            "s3_endpoint_url": None,
-        },
-    )
     assert calls["engine"] == (
         "http://127.0.0.1:8001",
         "/model",

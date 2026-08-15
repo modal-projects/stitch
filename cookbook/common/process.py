@@ -16,9 +16,10 @@ from typing import Any
 
 from stitch.sidecar import SidecarConfig
 
-# The Modal-agnostic sidecar entrypoint lives in stitch core; the recipe
-# launches it beside the recipe-specific sglang server.
-SIDECAR_MODULE = "stitch.sidecar"
+# The sidecar's config/CLI plumbing lives in stitch core, but the entrypoint
+# lives here: the recipe launches the cookbook module, which chooses the Store
+# backend, beside the recipe-specific sglang server.
+SIDECAR_MODULE = "cookbook.common.sidecar"
 
 
 def start_sidecar(

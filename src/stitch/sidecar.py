@@ -1,28 +1,26 @@
-"""The Modal-agnostic sidecar entrypoint: a ``SidecarConfig`` (one value for every
+"""The Modal-agnostic sidecar plumbing: a ``SidecarConfig`` (one value for every
 serving knob), a lossless CLI flag round-trip (``to_argv``/``from_argv``), and
-``main``, which builds the Store + Engine from a config and calls
-:func:`stitch.service.serve`.
+:func:`run`, which builds the local Engine from a config and serves the
+versioned rollout proxy in front of it.
 
-A programmatic deployment constructs these instances itself and calls ``serve``
-directly; this module exists so a container can launch the sidecar as its own
-subprocess (``python -m stitch.sidecar``) with one flag vocabulary shared by
-every recipe.
+Core deliberately does not choose Store backends. ``Store`` is a port consumers
+implement, so any name -> class dispatch frozen here would be useless to a
+package that subclasses ``Store`` for its own runs. The launching package owns
+that decision: this repo's recipes go through ``cookbook.common.sidecar``
+(``python -m cookbook.common.sidecar``), which builds the Store via
+``cookbook.common.storage`` and passes it to :func:`run`.
 """
 
 from __future__ import annotations
 
 import argparse
-import logging
-import sys
 from dataclasses import dataclass
 from typing import Literal
 
 from stitch.engines.sglang import SGLangEngine
 from stitch.service import serve
-from stitch.stores.factory import MODAL_VOLUME, S3, StoreBackend, create_store
+from stitch.stores.base import Store
 from stitch.sync import CommitMode
-
-logger = logging.getLogger(__name__)
 
 DeltaUpdateMode = Literal["disk", "cpu"]
 
@@ -30,9 +28,10 @@ DeltaUpdateMode = Literal["disk", "cpu"]
 @dataclass(frozen=True, kw_only=True)
 class SidecarConfig:
     """Everything one replica's sidecar needs: the ``serve`` serving knobs plus
-    the wiring to build its Store and local SGLang Engine. Defaults describe a
-    fresh boot beside a freshly started engine; a container launch overrides
-    only what its recipe sets."""
+    the wiring to build its local SGLang Engine. ``store_backend`` is opaque
+    here: it round-trips for the launching package, which interprets it when
+    constructing the Store. Defaults describe a fresh boot beside a freshly
+    started engine; a container launch overrides only what its recipe sets."""
 
     host: str = "0.0.0.0"
     port: int = 8000
@@ -42,7 +41,7 @@ class SidecarConfig:
     local_checkpoint_dir: str | None = None
     delta_update_mode: DeltaUpdateMode
     disk_load_format: str = "auto"
-    store_backend: StoreBackend = MODAL_VOLUME
+    store_backend: str
     volume_name: str | None = None
     s3_root: str | None = None
     s3_endpoint_url: str | None = None
@@ -151,11 +150,7 @@ def _sidecar_parser() -> argparse.ArgumentParser:
     p.add_argument("--base-checkpoint-dir", required=True)
     p.add_argument("--delta-update-mode", choices=["disk", "cpu"], required=True)
     p.add_argument("--disk-load-format", default="auto")
-    p.add_argument(
-        "--store-backend",
-        choices=[MODAL_VOLUME, S3],
-        default=MODAL_VOLUME,
-    )
+    p.add_argument("--store-backend", required=True)
     p.add_argument("--commit-mode", choices=["in_place", "quiesce"], default="in_place")
     p.add_argument("--run-id", required=True)
     p.add_argument("--boot-version", type=int, default=0)
@@ -173,29 +168,10 @@ def _sidecar_parser() -> argparse.ArgumentParser:
     return p
 
 
-def _configure_logging() -> None:
-    """Emit INFO logs to stdout (uvicorn configures only its own loggers)."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        stream=sys.stdout,
-    )
-
-
-def main(argv: list[str] | None = None) -> None:
-    """The sidecar subprocess entrypoint: parse flags, build the Store + SGLang
-    Engine, and serve the versioned rollout proxy beside the local engine."""
-    _configure_logging()
-    config = SidecarConfig.from_argv(argv)
-    store = create_store(
-        config.store_backend,
-        local_root=config.bulletin_root,
-        # Empty flags normalize to unset, as the stores' own validation treats them.
-        volume_name=config.volume_name or None,
-        run_id=config.run_id,
-        s3_root=config.s3_root or None,
-        s3_endpoint_url=config.s3_endpoint_url or None,
-    )
+def run(config: SidecarConfig, store: Store) -> None:
+    """Build the local SGLang Engine from ``config`` and serve the versioned
+    rollout proxy beside it. The caller owns the Store — choosing its backend
+    (and therefore its concrete class) is the launching package's decision."""
     engine = SGLangEngine(
         config.upstream,
         config.base_checkpoint_dir,
@@ -217,7 +193,3 @@ def main(argv: list[str] | None = None) -> None:
         watchdog_interval=config.watchdog_interval,
         watchdog_failure_threshold=config.watchdog_failure_threshold,
     )
-
-
-if __name__ == "__main__":
-    main()
