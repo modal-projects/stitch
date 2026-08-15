@@ -183,9 +183,7 @@ class Publisher:
         results = self._comms.all_gather_object((receipt, upload_error))
         upload_errors = [error for _, error in results if error is not None]
         if upload_errors:
-            raise RuntimeError(
-                "checkpoint upload failed:\n" + "\n".join(upload_errors)
-            )
+            raise RuntimeError("checkpoint upload failed:\n" + "\n".join(upload_errors))
         receipts = [receipt for receipt, _ in results if receipt is not None]
         if not receipts:
             raise RuntimeError("checkpoint upload produced no host receipts")

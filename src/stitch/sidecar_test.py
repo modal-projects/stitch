@@ -18,15 +18,22 @@ _BASE = dict(
 
 def test_sidecar_config_requires_run_id() -> None:
     with pytest.raises(ValueError, match="run_id is required"):
-        SidecarConfig(**{**_BASE, "run_id": ""})
+        SidecarConfig(**{**_BASE, "run_id": ""}, delta_update_mode="cpu")
 
 
 def test_sidecar_config_requires_nonnegative_boot_version() -> None:
     with pytest.raises(ValueError, match="boot_version must be non-negative"):
-        SidecarConfig(**_BASE, boot_version=-1)
+        SidecarConfig(**_BASE, delta_update_mode="cpu", boot_version=-1)
 
 
-_MINIMAL = SidecarConfig(**_BASE)
+def test_sidecar_config_requires_local_checkpoint_dir_in_disk_mode() -> None:
+    with pytest.raises(
+        ValueError, match="local_checkpoint_dir is required in disk mode"
+    ):
+        SidecarConfig(**_BASE, delta_update_mode="disk")
+
+
+_MINIMAL = SidecarConfig(**_BASE, delta_update_mode="cpu")
 
 _FULL = SidecarConfig(
     **_BASE,

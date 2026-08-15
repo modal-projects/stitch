@@ -321,7 +321,10 @@ def serve(
         TerminalFailureMonitor(reconciler.wait_for_terminal_error),
     )
     config = uvicorn.Config(
-        create_app(reconciler.gate, reconciler, engine), host=host, port=port, log_level="info"
+        create_app(reconciler.gate, reconciler, engine),
+        host=host,
+        port=port,
+        log_level="info",
     )
     asyncio.run(run_server_with_watchdog(uvicorn.Server(config), watchdog))
 

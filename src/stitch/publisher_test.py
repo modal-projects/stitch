@@ -380,8 +380,10 @@ def test_publish_upload_fails_when_any_rank_errors() -> None:
         store = _s3_store(Path(tmp), client)
 
         def gather_with_failure(value):
-            if isinstance(value, tuple) and len(value) == 2 and isinstance(
-                value[0], UploadReceipt
+            if (
+                isinstance(value, tuple)
+                and len(value) == 2
+                and isinstance(value[0], UploadReceipt)
             ):
                 return [value, (None, "rank 3: connection reset")]
             return [value]
