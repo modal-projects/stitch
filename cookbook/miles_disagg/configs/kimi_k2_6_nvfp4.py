@@ -57,9 +57,9 @@ modal = ModalConfig(
     gpu="B200",
     region="us",
     trainer_memory_mib=(1024, 2 * 1024 * 1024),
-    # Four fixed B200:4 engines leave capacity for the trainer gang.
+    # A floor of four B200:4 engines leaves capacity for the trainer gang.
     rollout_min_containers=4,
-    rollout_max_containers=4,
+    rollout_max_containers=None,
     rollout_target_inputs=32,
     # Local disk holds runtime files and spill; CPU delta updates do not
     # materialize a target checkpoint.
