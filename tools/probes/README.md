@@ -54,3 +54,14 @@ uv run --extra modal modal run -e stitch-dev -m tools.probes.sidecar_config
 ```
 
 Prints one machine-readable ``PROBE_RESULT ok=... detail=...`` line.
+
+## GLM-5.2 image preflight (CPU-only)
+
+This builds the exact pinned trainer and serving images, then validates model
+arguments and the DFlash contract without reserving GPUs:
+
+```bash
+modal run -e stitch-dev tools/probes/glm5_2_nvfp4_dflash_preflight.py
+```
+
+The command finishes with one machine-readable ``VERDICT ... PASS`` line.
