@@ -8,8 +8,6 @@ an elastic rollout fleet, and remains bounded to ten steps.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from cookbook.common.config import ModalConfig
 from cookbook.common.constants import CHECKPOINTS_PATH, DATA_PATH
 from cookbook.miles_disagg.config import MilesConfig
@@ -17,11 +15,7 @@ from cookbook.miles_disagg.swebench_pro import prepare_swebench_pro
 
 APP_NAME = "stitch-qwen3-6-35b-a3b-nvfp4"
 EXPERIMENT_VOLUME_NAME = "stitch-miles-qwen3-6-35b-a3b-nvfp4"
-MILES_REPO_REF = "b1020b5961657ef1bb8c9f56bda49bc12899fa57"
-QWEN36_NVFP4_DFLASH_MILES_PATCH = (
-    Path(__file__).resolve().parents[1] / "patches" / "qwen3_6_nvfp4_dflash.patch"
-)
-MILES_SOURCE_PATCHES = (QWEN36_NVFP4_DFLASH_MILES_PATCH,)
+MILES_REPO_REF = "e686b2560b06b314ed4be2b470c3d02b42c22987"
 LOCAL_CHECKPOINT_PATH = None
 TRAINER_EXTRA_PIP_PACKAGES = (
     "harbor[modal,huggingface]==0.20.0",

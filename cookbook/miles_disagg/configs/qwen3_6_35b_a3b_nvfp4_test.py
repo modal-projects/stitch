@@ -70,12 +70,4 @@ def test_quantizer_contract_matches_across_prep_training_and_serving() -> None:
         config.NVFP4_TRAINING_ENV["NVTE_NVFP4_4OVER6_ERR_MODE"]
         == config.NVFP4_SERVING_ENV["FLASHINFER_NVFP4_4OVER6_ERR_MODE"]
     )
-    assert config.MILES_SOURCE_PATCHES == (config.QWEN36_NVFP4_DFLASH_MILES_PATCH,)
-    patch = config.QWEN36_NVFP4_DFLASH_MILES_PATCH.read_text()
-    assert "if processor and isinstance(prompt, list):" in patch
-    assert "return _expand_batched_expert_params(converted_named_params)" in patch
-    assert "q_weights.update(dict(_expand_batched_expert_params(key, tensor)))" in patch
-    assert "modules_to_not_convert.extend(_batched_expert_module_aliases(key))" in patch
-    assert "tensor = _normalize_checkpoint_dtype(key, tensor)" in patch
-    assert 'name.endswith(".linear_attn.A_log")' in patch
-    assert "expert_id = self._global_expert_id(local_expert_id)" in patch
+    assert config.MILES_REPO_REF == "e686b2560b06b314ed4be2b470c3d02b42c22987"

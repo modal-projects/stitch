@@ -31,7 +31,6 @@ trainer_preflight_image = trainer_image.build_trainer_image(
     miles_repo_ref=model.MILES_REPO_REF,
     extra_pip_packages=model.TRAINER_EXTRA_PIP_PACKAGES,
     image_run_commands=model.TRAINER_IMAGE_RUN_COMMANDS,
-    source_patches=model.MILES_SOURCE_PATCHES,
 )
 serving_preflight_image = build_serving_image(
     hf_cache_path=str(HF_CACHE_PATH),
@@ -203,6 +202,8 @@ def validate_server_args() -> dict:
     from sglang.srt.server_args import ServerArgs
     from sglang.srt.speculative.dflash_utils import DFlashSamplingMaskOutput
 
+    from stitch.service import _restore_router_compatibility
+
     argv = ["--model-path", "/tmp/qwen3-6-nvfp4"]
     for flag, value in model.SGLANG_SERVER_ARGS.items():
         argv.append(flag)
@@ -229,7 +230,7 @@ def validate_server_args() -> dict:
     if actual != expected:
         raise RuntimeError(f"parsed SGLang arguments differ: {actual} != {expected}")
 
-    expected_sglang_commit = "be31674effe497f6b3d4449ca2687088865d58c3"
+    expected_sglang_commit = "bc992874b335d0b6e314f9e883d9f55df185740d"
     if DEFAULT_SGLANG_RUNTIME.commit != expected_sglang_commit:
         raise RuntimeError(
             "serving image SGLang pin differs: "
@@ -239,7 +240,8 @@ def validate_server_args() -> dict:
     dflash_source = inspect.getsource(DFlashSamplingMaskOutput)
     required_dflash_fragments = (
         "map_device_tensors",
-        "support_mask",
+        "support_ids",
+        "support_lens",
         "finalize",
     )
     missing_dflash = [
@@ -253,16 +255,23 @@ def validate_server_args() -> dict:
         )
 
     chat_source = inspect.getsource(OpenAIServingChat._convert_to_internal_request)
-    if "miles_return_sampling_mask" not in chat_source:
+    if "return_sampling_mask=request.return_sampling_mask" not in chat_source:
         raise RuntimeError(
-            "SGLang is missing Miles sampling-mask compatibility metadata"
+            "SGLang is missing native chat sampling-mask request forwarding"
         )
+    compatibility_payload = {
+        "custom_params": {"miles_return_sampling_mask": True},
+        "return_sampling_mask": False,
+    }
+    _restore_router_compatibility("v1/chat/completions", compatibility_payload)
+    if compatibility_payload["return_sampling_mask"] is not True:
+        raise RuntimeError("Stitch did not restore Miles sampling-mask metadata")
 
     result = {
         "status": "PASS",
         "sglang_commit": expected_sglang_commit,
         "deferred_dflash_masks": True,
-        "miles_sampling_mask_metadata": True,
+        "sidecar_sampling_mask_compatibility": True,
         **actual,
     }
     print(

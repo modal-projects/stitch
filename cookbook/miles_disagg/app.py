@@ -111,7 +111,6 @@ image = trainer_image.build_trainer_image(
     ),
     image_run_commands=getattr(exp, "TRAINER_IMAGE_RUN_COMMANDS", ()),
     extra_env=STORE_DEPLOYMENT.image_environment,
-    source_patches=getattr(exp, "MILES_SOURCE_PATCHES", ()),
 )
 # Server containers re-import this module, so persist this attempt's resume point.
 server_image = serving_image.build_serving_image(
