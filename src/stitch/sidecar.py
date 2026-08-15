@@ -40,7 +40,7 @@ class SidecarConfig:
     bulletin_root: str
     base_checkpoint_dir: str
     local_checkpoint_dir: str | None = None
-    delta_update_mode: DeltaUpdateMode = "cpu"
+    delta_update_mode: DeltaUpdateMode
     disk_load_format: str = "auto"
     store_backend: StoreBackend = MODAL_VOLUME
     volume_name: str | None = None
@@ -60,6 +60,8 @@ class SidecarConfig:
             raise ValueError("run_id is required")
         if self.boot_version < 0:
             raise ValueError("boot_version must be non-negative")
+        if self.delta_update_mode == "disk" and not self.local_checkpoint_dir:
+            raise ValueError("local_checkpoint_dir is required in disk mode")
 
     def to_argv(self) -> list[str]:
         """Render as CLI flags. ``from_argv(self.to_argv()) == self``, including
