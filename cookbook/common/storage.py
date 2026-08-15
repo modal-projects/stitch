@@ -6,16 +6,16 @@ import os
 from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
-from stitch.stores.base import Store
-from stitch.stores.modal_volume import ModalVolumeStore
-from stitch.stores.s3 import S3Store
+from stitch.stores import factory as _factory
 
-StoreBackend = Literal["modal-volume", "s3"]
-
-MODAL_VOLUME: StoreBackend = "modal-volume"
-S3: StoreBackend = "s3"
+# The store factory + backend names live in stitch core; recipes and trainer
+# hooks keep importing them from here.
+MODAL_VOLUME = _factory.MODAL_VOLUME
+S3 = _factory.S3
+StoreBackend = _factory.StoreBackend
+create_store = _factory.create_store
 
 _BACKEND_ENV = "STITCH_STORE_BACKEND"
 _S3_SECRET_ENV = "STITCH_S3_SECRET_NAME"
@@ -136,27 +136,3 @@ class StoreDeployment:
         if endpoint_url := values.get(_S3_ENDPOINT_ENV):
             config["stitch_s3_endpoint_url"] = endpoint_url
         return config
-
-
-def create_store(
-    backend: str,
-    *,
-    local_root: str | Path,
-    run_id: str,
-    volume_name: str | None = None,
-    s3_root: str | None = None,
-    s3_endpoint_url: str | None = None,
-) -> Store:
-    """Create a Store with one local layout regardless of its backing service."""
-    if backend == MODAL_VOLUME:
-        return ModalVolumeStore(local_root, volume_name=volume_name, run_id=run_id)
-    if backend == S3:
-        if not s3_root:
-            raise ValueError("s3_root is required for the S3 store")
-        return S3Store(
-            s3_root,
-            cache_dir=local_root,
-            endpoint_url=s3_endpoint_url,
-            run_id=run_id,
-        )
-    raise ValueError(f"unsupported store backend: {backend!r}")
