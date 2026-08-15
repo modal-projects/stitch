@@ -27,7 +27,8 @@ def test_rollout_combines_qwen_dflash_with_rl_metadata() -> None:
 def test_training_keeps_nvfp4_routing_replay_and_top_p_masking() -> None:
     miles = config.miles
 
-    assert miles.miles_model_script == "scripts/models/qwen3.6-35B-A3B.sh"
+    assert miles.megatron_model_type == "qwen3.6-35B-A3B"
+    assert "--miles-model-script" not in miles.cli_args()
     assert miles.model_name == "qwen3_6"
     assert miles.fp4_recipe == "nvfp4"
     assert miles.use_rollout_routing_replay is True

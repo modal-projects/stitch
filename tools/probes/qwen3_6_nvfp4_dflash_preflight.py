@@ -20,6 +20,7 @@ from cookbook.common.constants import HF_CACHE_PATH
 from cookbook.common.serving_image import DEFAULT_SGLANG_RUNTIME, build_serving_image
 from cookbook.miles_disagg import trainer_image
 from cookbook.miles_disagg.configs import qwen3_6_35b_a3b_nvfp4 as model
+from cookbook.miles_disagg.model_args import load_pinned_model_args
 
 APP_NAME = "probe-qwen3-6-nvfp4-dflash-preflight"
 EXPERIMENT = "qwen3_6_35b_a3b_nvfp4"
@@ -54,6 +55,20 @@ def validate_trainer_contract() -> dict:
 
     import torch
     from miles.utils.data import Dataset
+
+    model_args = load_pinned_model_args(
+        trainer_image.MILES_ROOT, model.miles.megatron_model_type
+    )
+    if "--miles-model-script" in model_args:
+        raise RuntimeError(
+            "pinned Qwen model arguments include the removed --miles-model-script flag"
+        )
+    if model_args[:3] != [
+        "--spec",
+        "miles_plugins.models.qwen3_5",
+        "get_qwen3_5_spec",
+    ]:
+        raise RuntimeError(f"pinned Qwen model arguments are incorrect: {model_args[:3]}")
 
     prep_converter = _load_miles_module(
         "qwen36_prep_converter",
@@ -178,6 +193,8 @@ def validate_trainer_contract() -> dict:
 
     result = {
         "status": "PASS",
+        "model_script_argument_count": len(model_args),
+        "model_script_source": "pinned_checkout",
         "expanded_expert_tensors": len(live_names),
         "bf16_expert_layout": "per_expert",
         "bf16_fused_moe_ignore": "exact_aliases",
