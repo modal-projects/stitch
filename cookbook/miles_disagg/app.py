@@ -50,6 +50,7 @@ from cookbook.common.constants import (
 )
 from cookbook.miles_disagg import trainer_image
 from cookbook.miles_disagg.config import YAML_CONFIG_FIELDS, MilesConfig
+from cookbook.miles_disagg.model_args import load_pinned_model_args
 from cookbook.miles_disagg.resume import (
     RESUME_POINT_ENV,
     ResumePoint,
@@ -536,10 +537,8 @@ def _build_train_cmd(cfg: MilesConfig) -> str:
     train_script = f"{MILES_ROOT}/{'train_async.py' if cfg.async_mode else 'train.py'}"
     args = cfg.cli_args()
     if cfg.megatron_model_type:
-        from miles.utils.external_utils.model_args_utils import load_model_args
-
         args = [
-            *shlex.split(load_model_args(cfg.megatron_model_type)),
+            *load_pinned_model_args(MILES_ROOT, cfg.megatron_model_type),
             *args,
         ]
     return shlex.join(["python3", train_script, *args])
