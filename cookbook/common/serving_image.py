@@ -36,6 +36,10 @@ DEFAULT_SGLANG_RUNTIME = SGLangRuntime(
 _COOKBOOK_DIR = Path(__file__).resolve().parent.parent
 _FASTSAFETENSORS_CONFIG_SOURCE = Path(__file__).with_name("fastsafetensors.json")
 _FASTSAFETENSORS_CONFIG_PATH = "/etc/fastsafetensors.json"
+_SGLANG_FASTSAFETENSORS_PATCH_SOURCE = Path(__file__).with_name(
+    "sglang_fastsafetensors_config.patch"
+)
+_SGLANG_FASTSAFETENSORS_PATCH_PATH = "/tmp/sglang-fastsafetensors-config.patch"
 
 _SERVING_ENV = {
     "FASTSAFETENSORS_CONFIG": _FASTSAFETENSORS_CONFIG_PATH,
@@ -61,14 +65,22 @@ def build_serving_image(
     """Build the rollout-pool image for one experiment config."""
     return (
         modal.Image.from_registry(runtime.image)
+        .add_local_file(
+            _SGLANG_FASTSAFETENSORS_PATCH_SOURCE,
+            remote_path=_SGLANG_FASTSAFETENSORS_PATCH_PATH,
+            copy=True,
+        )
         .run_commands(
             "rm -rf /tmp/stitch-sglang-overlay"
             f" && git clone --filter=blob:none --single-branch --branch {runtime.branch}"
             f" {runtime.repository} /tmp/stitch-sglang-overlay"
             f" && git -C /tmp/stitch-sglang-overlay checkout --detach {runtime.commit}"
+            " && git -C /tmp/stitch-sglang-overlay apply"
+            f" {_SGLANG_FASTSAFETENSORS_PATCH_PATH}"
             " && rm -rf /sgl-workspace/sglang/python/sglang"
             " && cp -a /tmp/stitch-sglang-overlay/python/. /sgl-workspace/sglang/python/"
             " && rm -rf /tmp/stitch-sglang-overlay"
+            f" && rm {_SGLANG_FASTSAFETENSORS_PATCH_PATH}"
         )
         .run_commands(
             f"rm -rf {hf_cache_path}"

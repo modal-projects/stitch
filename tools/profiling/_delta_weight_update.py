@@ -584,6 +584,8 @@ def run_delta_weight_update(
     import httpx
     from autoinference_utils.endpoint import SGLangEndpoint
 
+    from cookbook.common.sglang_endpoint import configure_fastsafetensors_endpoint
+
     target_dir = Path(source_dir) / f"weight_v{target_version:06d}"
     target_index = target_dir / "model.safetensors.index.json"
     base_index = Path(spec.base_checkpoint_dir) / "model.safetensors.index.json"
@@ -611,21 +613,25 @@ def run_delta_weight_update(
 
     shutil.rmtree(spec.local_target_checkpoint_dir, ignore_errors=True)
 
-    endpoint = SGLangEndpoint(
-        model_path=spec.base_checkpoint_dir,
-        worker_port=spec.port,
-        tp=spec.tp_size,
-        extra_server_args=server_args_for_mode(
-            spec.server_args,
-            update_mode,
-            canonical_storage,
-            spec.local_canonical_checkpoint_dir,
+    endpoint_args = server_args_for_mode(
+        spec.server_args,
+        update_mode,
+        canonical_storage,
+        spec.local_canonical_checkpoint_dir,
+    )
+    endpoint = configure_fastsafetensors_endpoint(
+        SGLangEndpoint(
+            model_path=spec.base_checkpoint_dir,
+            worker_port=spec.port,
+            tp=spec.tp_size,
+            extra_server_args=endpoint_args,
+            # Allow for a cold, model-sized initial load. Destination initialization
+            # is measured separately after the endpoint begins serving.
+            health_timeout=2 * 60 * 60,
+            health_poll_interval=10,
+            log_requests_level=-1,
         ),
-        # Allow for a cold, model-sized initial load. Destination initialization
-        # is measured separately after the endpoint begins serving.
-        health_timeout=2 * 60 * 60,
-        health_poll_interval=10,
-        log_requests_level=-1,
+        endpoint_args,
     )
     url = f"http://127.0.0.1:{spec.port}"
     try:

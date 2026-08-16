@@ -105,7 +105,12 @@ load. Recipes select fastsafetensors as the load format:
 The shared serving image sets `FASTSAFETENSORS_CONFIG` to a baked
 `/etc/fastsafetensors.json`. It selects the base loader with the no-GDS copier,
 a 64 MiB bounce buffer, and four copy threads, so recipes do not duplicate
-loader-specific server arguments.
+loader-specific server arguments. The image applies
+`sglang_fastsafetensors_config.patch` to the pinned fork so SGLang enters
+fastsafetensors through its config-driven `AutoLoader`; the shared endpoint
+policy also removes the historical 64-thread default injected by
+autoinference-utils 0.2.3. Recipe-level model-loader configuration is rejected
+for this load format, leaving the baked file as the single source of truth.
 
 ## CPU destination
 

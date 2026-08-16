@@ -1,0 +1,118 @@
+diff --git a/python/sglang/srt/model_loader/loader.py b/python/sglang/srt/model_loader/loader.py
+index 3e95d71184..14eff21c0a 100644
+--- a/python/sglang/srt/model_loader/loader.py
++++ b/python/sglang/srt/model_loader/loader.py
+@@ -404,15 +404,11 @@ class DefaultModelLoader(BaseModelLoader):
+     def __init__(self, load_config: LoadConfig):
+         super().__init__(load_config)
+         extra_config = load_config.model_loader_extra_config
+-        allowed_keys = {"enable_multithread_load", "num_threads"}
+-        if load_config.load_format == LoadFormat.FASTSAFETENSORS:
+-            allowed_keys.add("enable_gds")
+-            if "enable_gds" in extra_config and not isinstance(
+-                extra_config["enable_gds"], bool
+-            ):
+-                raise ValueError(
+-                    "enable_gds in --model-loader-extra-config must be a boolean"
+-                )
++        allowed_keys = (
++            set()
++            if load_config.load_format == LoadFormat.FASTSAFETENSORS
++            else {"enable_multithread_load", "num_threads"}
++        )
+         unexpected_keys = set(extra_config.keys()) - allowed_keys
+ 
+         if unexpected_keys:
+@@ -623,12 +619,7 @@ class DefaultModelLoader(BaseModelLoader):
+                 use_multithread = False
+ 
+             if self.load_config.load_format == LoadFormat.FASTSAFETENSORS:
+-                enable_gds = extra_config.get("enable_gds", True)
+-                weights_iterator = fastsafetensors_weights_iterator(
+-                    hf_weights_files,
+-                    enable_gds=enable_gds,
+-                    drop_cache_after_load=weight_loader_drop_cache_after_load,
+-                )
++                weights_iterator = fastsafetensors_weights_iterator(hf_weights_files)
+             elif use_multithread:
+                 weights_iterator = buffered_multi_thread_safetensors_weights_iterator(
+                     hf_weights_files,
+diff --git a/python/sglang/srt/model_loader/weight_utils.py b/python/sglang/srt/model_loader/weight_utils.py
+index 506d359a40..4f0946f992 100644
+--- a/python/sglang/srt/model_loader/weight_utils.py
++++ b/python/sglang/srt/model_loader/weight_utils.py
+@@ -66,9 +66,9 @@ from sglang.srt.utils.common import is_cuda_alike
+ from sglang.utils import is_in_ci
+ 
+ try:
+-    from fastsafetensors import SafeTensorsFileLoader, SingleGroup
++    from fastsafetensors import AutoLoader, SingleGroup
+ except ImportError:
+-    SafeTensorsFileLoader = SingleGroup = None
++    AutoLoader = SingleGroup = None
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -999,14 +999,9 @@ def safetensors_weights_iterator(
+ 
+ def fastsafetensors_weights_iterator(
+     hf_weights_files: List[str],
+-    enable_gds: bool = True,
+-    drop_cache_after_load: bool = False,
+ ) -> Generator[Tuple[str, torch.Tensor], None, None]:
+-    """
+-    Iterate over the weights in the model safetensor files
+-    using fastsafetensor library to accelerate loading via GPU Direct Storage (if available).
+-    """
+-    if SafeTensorsFileLoader is None:
++    """Load model weights with fastsafetensors' config-driven loader."""
++    if AutoLoader is None:
+         raise ImportError(
+             "Please install fastsafetensors via `pip install fastsafetensors`"
+         )
+@@ -1021,40 +1016,11 @@ def fastsafetensors_weights_iterator(
+     except Exception:
+         rank = 0
+ 
+-    device = torch.device(f"cuda:{rank}")
+-
+-    weight_files_sub_lists = [
+-        hf_weights_files[i : i + pg.size()]
+-        for i in range(0, len(hf_weights_files), pg.size())
+-    ]
+-
+-    _BAR_FORMAT = (
+-        "{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]"
+-    )
+-
+-    for f_list in tqdm(
+-        weight_files_sub_lists,
+-        desc="Loading safetensors using Fastsafetensor loader",
+-        disable=False,
+-        bar_format=_BAR_FORMAT,
+-    ):
+-        loader = SafeTensorsFileLoader(pg, device, nogds=not enable_gds)
+-        rank_file_map = {i: [f] for i, f in enumerate(f_list)}
+-        loader.add_filenames(rank_file_map)
+-        try:
+-            fb = loader.copy_files_to_device()
+-            try:
+-                keys = list(fb.key_to_rank_lidx.keys())
+-                for k in keys:
+-                    t = fb.get_tensor(k)
+-                    yield k, t
+-            finally:
+-                pass
+-        finally:
+-            loader.close()
+-        if drop_cache_after_load:
+-            for loaded_file in rank_file_map.get(rank, []):
+-                _drop_file_cache_after_load(loaded_file)
++    loader = AutoLoader(pg, hf_weights_files, device=f"cuda:{rank}")
++    try:
++        yield from loader.iterate_weights()
++    finally:
++        loader.close()
+ 
+ 
+ def multi_thread_safetensors_weights_iterator(

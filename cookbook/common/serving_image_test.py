@@ -62,6 +62,7 @@ def test_build_serving_image_uses_selected_runtime(monkeypatch) -> None:
     assert runtime.repository in source_overlay
     assert runtime.branch in source_overlay
     assert runtime.commit in source_overlay
+    assert "sglang-fastsafetensors-config.patch" in source_overlay
 
 
 def test_build_serving_image_bakes_fastsafetensors_config(monkeypatch) -> None:
@@ -78,15 +79,21 @@ def test_build_serving_image_bakes_fastsafetensors_config(monkeypatch) -> None:
     )
 
     config_path = "/etc/fastsafetensors.json"
+    patch_path = "/tmp/sglang-fastsafetensors-config.patch"
+    local_files = {
+        remote_path: (local_path, copy)
+        for local_path, remote_path, copy in image.local_files
+    }
     assert image.environment["FASTSAFETENSORS_CONFIG"] == config_path
-    assert image.local_files == [
-        (
-            Path(serving_image.__file__).with_name("fastsafetensors.json"),
-            config_path,
-            True,
-        )
-    ]
-    assert json.loads(image.local_files[0][0].read_text()) == {
+    assert local_files[config_path] == (
+        Path(serving_image.__file__).with_name("fastsafetensors.json"),
+        True,
+    )
+    assert local_files[patch_path] == (
+        Path(serving_image.__file__).with_name("sglang_fastsafetensors_config.patch"),
+        True,
+    )
+    assert json.loads(local_files[config_path][0].read_text()) == {
         "loader": "base",
         "base": {
             "copier_type": "nogds",
