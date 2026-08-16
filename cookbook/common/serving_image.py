@@ -34,8 +34,11 @@ DEFAULT_SGLANG_RUNTIME = SGLangRuntime(
 )
 
 _COOKBOOK_DIR = Path(__file__).resolve().parent.parent
+_FASTSAFETENSORS_CONFIG_SOURCE = Path(__file__).with_name("fastsafetensors.json")
+_FASTSAFETENSORS_CONFIG_PATH = "/etc/fastsafetensors.json"
 
 _SERVING_ENV = {
+    "FASTSAFETENSORS_CONFIG": _FASTSAFETENSORS_CONFIG_PATH,
     "HF_XET_HIGH_PERFORMANCE": "1",
     "HF_HUB_ENABLE_HF_TRANSFER": "1",
     "HF_MODULES_CACHE": "/tmp/huggingface/modules",
@@ -80,6 +83,13 @@ def build_serving_image(
             "blake3",  # engine-side weight-staging checksum
             "fastsafetensors",
             *extra_packages,
+        )
+        # copy=True bakes the shared loader policy into the image instead of
+        # mounting a host file when each container starts.
+        .add_local_file(
+            _FASTSAFETENSORS_CONFIG_SOURCE,
+            remote_path=_FASTSAFETENSORS_CONFIG_PATH,
+            copy=True,
         )
         .env(
             {

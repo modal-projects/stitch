@@ -58,7 +58,6 @@ SOURCE_MARKER = ".stitch-source.json"
 SGLANG_SERVER_ARGS = {
     "--served-model-name": model.ROLLOUT_SOURCE_MODEL,
     "--load-format": "fastsafetensors",
-    "--model-loader-extra-config": '{"enable_gds":false}',
     "--weight-loader-drop-cache-after-load": "",
     "--dtype": "auto",
     "--reasoning-parser": "glm45",

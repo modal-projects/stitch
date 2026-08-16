@@ -1,0 +1,8 @@
+{
+  "loader": "base",
+  "base": {
+    "copier_type": "nogds",
+    "bbuf_size_kb": 65536,
+    "max_threads": 4
+  }
+}

@@ -29,9 +29,7 @@ MEGATRON_RUNTIME_PATCHES = [
 
 
 SGLANG_SERVER_ARGS = {
-    # Use the no-GDS fastsafetensors path on hosts without nvidia-fs.
     "--load-format": "fastsafetensors",
-    "--model-loader-extra-config": '{"enable_gds":false}',
     "--enable-cpu-weight-cache": "",
     "--weight-loader-drop-cache-after-load": "",
     "--reasoning-parser": "glm45",

@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from cookbook.common import serving_image
 
 
 class _Image:
     def __init__(self) -> None:
         self.commands: list[str] = []
+        self.environment: dict[str, str] = {}
+        self.local_files: list[tuple[Path, str, bool]] = []
 
     def run_commands(self, command: str) -> _Image:
         self.commands.append(command)
@@ -14,7 +19,14 @@ class _Image:
     def pip_install(self, *_packages: str) -> _Image:
         return self
 
-    def env(self, _values: dict[str, str]) -> _Image:
+    def env(self, values: dict[str, str]) -> _Image:
+        self.environment.update(values)
+        return self
+
+    def add_local_file(
+        self, local_path: str | Path, remote_path: str, *, copy: bool = False
+    ) -> _Image:
+        self.local_files.append((Path(local_path), remote_path, copy))
         return self
 
     def add_local_python_source(self, _module: str) -> _Image:
@@ -50,3 +62,35 @@ def test_build_serving_image_uses_selected_runtime(monkeypatch) -> None:
     assert runtime.repository in source_overlay
     assert runtime.branch in source_overlay
     assert runtime.commit in source_overlay
+
+
+def test_build_serving_image_bakes_fastsafetensors_config(monkeypatch) -> None:
+    image = _Image()
+    monkeypatch.setattr(
+        serving_image.modal.Image,
+        "from_registry",
+        lambda _name: image,
+    )
+
+    serving_image.build_serving_image(
+        hf_cache_path="/cache",
+        experiment="test",
+    )
+
+    config_path = "/etc/fastsafetensors.json"
+    assert image.environment["FASTSAFETENSORS_CONFIG"] == config_path
+    assert image.local_files == [
+        (
+            Path(serving_image.__file__).with_name("fastsafetensors.json"),
+            config_path,
+            True,
+        )
+    ]
+    assert json.loads(image.local_files[0][0].read_text()) == {
+        "loader": "base",
+        "base": {
+            "copier_type": "nogds",
+            "bbuf_size_kb": 65536,
+            "max_threads": 4,
+        },
+    }

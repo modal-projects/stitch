@@ -95,14 +95,17 @@ remains in its configured source.
 
 The commit RPC still reads and transforms the complete target checkpoint. On
 each commit, Stitch forwards the load format selected for the initial server
-load. On hosts without GDS, recipes select fastsafetensors’ supported no-GDS
-mode:
+load. Recipes select fastsafetensors as the load format:
 
 ```python
 "--load-format": "fastsafetensors",
-"--model-loader-extra-config": '{"enable_gds":false}',
 "--weight-loader-drop-cache-after-load": "",
 ```
+
+The shared serving image sets `FASTSAFETENSORS_CONFIG` to a baked
+`/etc/fastsafetensors.json`. It selects the base loader with the no-GDS copier,
+a 64 MiB bounce buffer, and four copy threads, so recipes do not duplicate
+loader-specific server arguments.
 
 ## CPU destination
 

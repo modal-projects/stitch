@@ -60,7 +60,6 @@ SGLANG_CACHE_PATH = "/root/.cache/sglang"
 SGLANG_SERVER_ARGS = {
     "--served-model-name": ROLLOUT_MODEL,
     "--load-format": "fastsafetensors",
-    "--model-loader-extra-config": '{"enable_gds":false}',
     "--weight-loader-drop-cache-after-load": "",
     "--trust-remote-code": "",
     "--tool-call-parser": "kimi_k2",

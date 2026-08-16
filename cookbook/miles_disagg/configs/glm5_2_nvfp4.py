@@ -118,7 +118,6 @@ SGLANG_DELTA_UPDATE_MODE = "cpu"
 SGLANG_SERVER_ARGS = {
     # loading / elastic refit
     "--load-format": "fastsafetensors",
-    "--model-loader-extra-config": '{"enable_gds":false}',
     "--enable-cpu-weight-cache": "",
     "--cpu-weight-cache-max-compile-group-gb": "8",
     "--weight-loader-drop-cache-after-load": "",

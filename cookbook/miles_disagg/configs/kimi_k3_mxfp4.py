@@ -10,7 +10,6 @@ SGLANG_DELTA_UPDATE_MODE = "cpu"
 SGLANG_SERVER_ARGS = {
     "--trust-remote-code": "",
     "--load-format": "fastsafetensors",
-    "--model-loader-extra-config": '{"enable_gds":false}',
     "--weight-loader-drop-cache-after-load": "",
     "--enable-cpu-weight-cache": "",
     "--cpu-weight-cache-max-compile-group-gb": "16",
