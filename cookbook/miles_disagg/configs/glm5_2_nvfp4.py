@@ -193,6 +193,7 @@ modal = ModalConfig(
 
 class _Miles(MilesConfig):
     megatron_model_type = "glm5.2-744B-A40B"
+    train_backend = "megatron"
     async_mode = True
 
     hf_checkpoint = str(ROLLOUT_CHECKPOINT_PATH)
@@ -282,6 +283,8 @@ class _Miles(MilesConfig):
     balance_data = True
 
     fully_async = True
+    pause_generation_mode = "in_place"
+    rollout_health_check_first_wait = 600
     rollout_submission_granularity = "sample"
     custom_rollout_log_function_path = "modal_swe_metrics.log_rollout_data"
     custom_generate_function_path = (
@@ -363,6 +366,7 @@ class _Miles(MilesConfig):
     eps_clip = 0.2
     eps_clip_high = 0.28
     use_rollout_logprobs = False
+    skip_actor_forward_only = True
     use_tis = True
     get_mismatch_metrics = True
     custom_tis_function_path = (
@@ -374,6 +378,7 @@ class _Miles(MilesConfig):
     use_kl_loss = False
     kl_loss_coef = None
     kl_loss_type = None
+    observe_training_entropy = True
     entropy_coef = 0.0
 
     use_wandb = True
@@ -395,7 +400,7 @@ class _Miles(MilesConfig):
         "INDEXER_ROPE_NEOX_STYLE": "0",
         "SGLANG_DSA_TOPK_FLASHINFER_TIE_BREAK": "large",
         "RAY_health_check_timeout_ms": "60000",
-        "MILES_EXPERIMENTAL_ROLLOUT_REFACTOR": "1",
+        "RAY_health_check_failure_threshold": "30",
         "AGENT_MODEL_NAME": "model",
         "MSWEA_SILENT_STARTUP": "1",
         "MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT": "1",
