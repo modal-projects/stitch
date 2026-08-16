@@ -20,9 +20,11 @@ from stitch.watchdog import (
 class _HealthSequence:
     def __init__(self, *statuses: EngineHealthStatus) -> None:
         self._statuses = iter(statuses)
+        self.checks = 0
         self.checked = asyncio.Event()
 
     async def check_health(self) -> EngineHealth:
+        self.checks += 1
         try:
             status = next(self._statuses)
         except StopIteration:
@@ -47,28 +49,26 @@ class _FakeServer:
 def _watchdog(
     engine: _HealthSequence,
     *,
-    engine_health_may_be_stale: Callable[[], bool] = lambda: False,
+    expects_engine_progress: Callable[[], bool] = lambda: True,
     failure_threshold: int = 2,
 ) -> EngineWatchdog:
     return EngineWatchdog(
         engine,  # type: ignore[arg-type]
-        engine_health_may_be_stale=engine_health_may_be_stale,
+        expects_engine_progress=expects_engine_progress,
         interval=0.001,
         failure_threshold=failure_threshold,
     )
 
 
-def test_expected_unresponsiveness_during_weight_apply_is_recoverable() -> None:
+def test_watchdog_does_not_probe_when_progress_is_not_expected() -> None:
     async def go() -> None:
-        engine = _HealthSequence(
-            EngineHealthStatus.UNRESPONSIVE,
-            EngineHealthStatus.UNRESPONSIVE,
-        )
+        engine = _HealthSequence(EngineHealthStatus.UNRESPONSIVE)
         task = asyncio.create_task(
-            _watchdog(engine, engine_health_may_be_stale=lambda: True).run()
+            _watchdog(engine, expects_engine_progress=lambda: False).run()
         )
-        await asyncio.wait_for(engine.checked.wait(), timeout=1)
+        await asyncio.sleep(0.01)
         assert not task.done()
+        assert engine.checks == 0
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
@@ -89,18 +89,6 @@ def test_transient_idle_failure_does_not_trip_watchdog() -> None:
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
-
-    asyncio.run(go())
-
-
-def test_unreachable_engine_is_terminal_even_during_weight_apply() -> None:
-    async def go() -> None:
-        engine = _HealthSequence(
-            EngineHealthStatus.UNREACHABLE,
-            EngineHealthStatus.UNREACHABLE,
-        )
-        with pytest.raises(UnrecoverableEngineError, match="unreachable"):
-            await _watchdog(engine, engine_health_may_be_stale=lambda: True).run()
 
     asyncio.run(go())
 

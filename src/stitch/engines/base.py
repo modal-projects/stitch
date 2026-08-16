@@ -24,12 +24,11 @@ class EngineHealthStatus(str, Enum):
 
 @dataclass(frozen=True)
 class EngineHealth:
-    """One engine-liveness probe result.
+    """One functional engine-health probe result.
 
-    ``UNRESPONSIVE`` includes timeouts and non-200 health responses. Whether a
-    transition explains one is engine-specific; the rollout sidecar exempts only
-    its explicit paused-apply window. ``UNREACHABLE`` means the sidecar could not
-    establish a connection to its colocated engine at all.
+    ``UNRESPONSIVE`` includes timeouts and non-200 health responses.
+    ``UNREACHABLE`` means the sidecar could not establish a connection to its
+    colocated engine at all.
     """
 
     status: EngineHealthStatus
@@ -50,7 +49,8 @@ class Engine:
     ) -> None:
         """Apply the staged checkpoint to the serving weights; the gate covers only this.
         ``flush_cache`` (a commit-policy decision the reconciler passes) evicts the engine's
-        prefix/KV cache as part of the commit."""
+        prefix/KV cache as part of the commit. Once this begins, any failure leaves
+        the live engine state uncertain and requires replacing the replica."""
         raise NotImplementedError
 
     async def flush_cache(self) -> None:
@@ -73,9 +73,8 @@ class Engine:
     async def initialize_update_destination(self, boot_version: int = 0) -> None:
         """Initialize engine state required before staging updates.
 
-        This may run while the engine serves its boot weights. A reconciler waits
-        for it before staging the first published update. ``boot_version`` is the
-        logical version of the immutable checkpoint already loaded by the engine.
+        A replica does not enter rotation until this finishes. ``boot_version`` is
+        the logical version of the immutable checkpoint already loaded by the engine.
         """
         return
 
@@ -103,5 +102,5 @@ class Engine:
         return frozenset()
 
     async def check_health(self) -> EngineHealth:
-        """Probe whether the colocated engine can still serve requests."""
+        """Probe whether the colocated engine can make inference progress."""
         raise NotImplementedError

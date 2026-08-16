@@ -317,6 +317,7 @@ def test_staging_and_commit_have_independent_timeouts() -> None:
 class _HealthClient:
     def __init__(self, outcome) -> None:
         self.outcome = outcome
+        self.urls: list[str] = []
 
     async def __aenter__(self):
         return self
@@ -325,6 +326,7 @@ class _HealthClient:
         pass
 
     async def get(self, url: str) -> httpx.Response:
+        self.urls.append(url)
         if isinstance(self.outcome, Exception):
             raise self.outcome
         return httpx.Response(self.outcome, request=httpx.Request("GET", url))
@@ -351,13 +353,15 @@ class _HealthClient:
 def test_health_check_classifies_engine_failures(
     monkeypatch, outcome, expected
 ) -> None:
+    client = _HealthClient(outcome)
     monkeypatch.setattr(
         httpx,
         "AsyncClient",
-        lambda **_kwargs: _HealthClient(outcome),
+        lambda **_kwargs: client,
     )
     engine = SGLangEngine("http://engine", "/base", "/ckpt")
     assert asyncio.run(engine.check_health()).status is expected
+    assert client.urls == ["http://engine/health"]
 
 
 if __name__ == "__main__":

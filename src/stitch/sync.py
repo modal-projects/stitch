@@ -20,7 +20,7 @@ from contextlib import asynccontextmanager, contextmanager, suppress
 from typing import Any, Literal
 
 from stitch.engines.base import Engine
-from stitch.errors import UnrecoverableSidecarError
+from stitch.errors import UnrecoverableEngineError, UnrecoverableSidecarError
 from stitch.stores.base import Store
 from stitch.types import (
     SyncState,
@@ -218,13 +218,13 @@ class Reconciler:
         self.reconcile_interval = reconcile_interval
         self.sync_state = SyncState.IDLE
         self.last_error: str | None = None
-        self.ready = False  # latches on first catch-up, stays set even when later stale; the /health routing gate
+        # Latches after first catch-up unless the replica becomes terminal.
+        self.ready = False
         self.metrics: dict[str, Any] = {}
         self._boot_monotonic = time.monotonic()
         self._catchup_passes = 0
         self._task: asyncio.Task[None] | None = None
         self._wake_pending = False
-        self._destination_init_task: asyncio.Task[None] | None = None
         self._destination_ready = False
         self._destination_init_error: str | None = None
         self._periodic_task: asyncio.Task[None] | None = None
@@ -233,28 +233,21 @@ class Reconciler:
         self._lock = asyncio.Lock()
 
     async def startup(self) -> None:
-        # Serving the boot weights does not depend on this one-time setup. A
-        # published update waits for the task before it can enter staging.
-        self._destination_init_task = asyncio.create_task(
-            self._initialize_update_destination()
-        )
-        # Inspect the store's initially visible pointer without refreshing it:
-        # destination setup may still have boot-checkpoint files open. A replica
-        # already at that view can serve immediately while setup continues; a
-        # mid-run joiner stays out of rotation until catch-up.
-        pointer = await asyncio.to_thread(self.store.read_pointer)
-        if not self._behind(pointer):
-            self.ready = True
+        # A replica enters rotation only after it can both serve and follow the
+        # version stream. Initialization also releases boot-checkpoint files before
+        # reconciliation refreshes a shared backing store.
+        await self._initialize_update_destination()
+        if self._terminal_error is not None:
+            return
         await self.reconcile()
         if self.reconcile_interval > 0 and self._terminal_error is None:
             self._periodic_task = asyncio.create_task(self._periodic_reconcile())
 
     async def shutdown(self) -> None:
-        for task in (self._periodic_task, self._destination_init_task):
-            if task is not None:
-                task.cancel()
-                with suppress(BaseException):
-                    await task
+        if self._periodic_task is not None:
+            self._periodic_task.cancel()
+            with suppress(BaseException):
+                await self._periodic_task
 
     async def _periodic_reconcile(self) -> None:
         # Convergence backstop: re-check the pointer so a replica that missed its wake (raced the
@@ -275,7 +268,14 @@ class Reconciler:
             )
         except Exception as exc:  # noqa: BLE001
             self._destination_init_error = str(exc)
-            logger.exception("weight update destination initialization failed")
+            error = UnrecoverableEngineError(
+                "weight update destination initialization failed: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            self._record_terminal_error(error)
+            logger.exception(
+                "weight update destination initialization failed terminally"
+            )
 
     def server_info(self) -> dict[str, Any]:
         # applied = version on the GPU (the pool reads it to see which version each replica has);
@@ -310,9 +310,9 @@ class Reconciler:
         applied = self.applied.identity if self.applied else "boot"
         return f"catching up to live version (applied={applied}, state={self.sync_state.value})"
 
-    def engine_health_may_be_stale(self) -> bool:
-        """Whether the engine is paused while staged weights are applied."""
-        return self.sync_state is SyncState.COMMITTING
+    def expects_engine_progress(self) -> bool:
+        """Whether this replica should currently make inference progress."""
+        return self.ready and self.sync_state is not SyncState.COMMITTING
 
     async def wait_for_terminal_error(self) -> None:
         """Raise once reconciliation proves this replica must be replaced."""
@@ -322,6 +322,7 @@ class Reconciler:
 
     def _record_terminal_error(self, error: UnrecoverableSidecarError) -> None:
         if self._terminal_error is None:
+            self.ready = False
             self._terminal_error = error
             self._terminal_error_event.set()
 
@@ -433,20 +434,6 @@ class Reconciler:
                         )
 
     async def _reconcile_once_measured(self, m: dict[str, Any]) -> bool:
-        # Destination initialization reads the immutable boot checkpoint. Let it
-        # release those files before refreshing a shared backing store.
-        if self._destination_init_task is not None:
-            if self._destination_init_task.done():
-                await self._destination_init_task
-            else:
-                with _timed(m, "destination_init_wait_s"):
-                    await self._destination_init_task
-        if self._destination_init_error is not None:
-            raise RuntimeError(
-                "weight update destination initialization failed: "
-                f"{self._destination_init_error}"
-            )
-
         await asyncio.to_thread(self.store.refresh)
         pointer = await asyncio.to_thread(self.store.read_pointer)
         if pointer is None:
@@ -538,12 +525,19 @@ class Reconciler:
                         flush_cache=self.flush_cache_on_commit,
                     )
 
-            await self.gate.commit(
-                apply=apply,
-                on_applied=on_applied,
-                pause=self.engine.pause,
-                resume=self.engine.resume,
-            )
+            try:
+                await self.gate.commit(
+                    apply=apply,
+                    on_applied=on_applied,
+                    pause=self.engine.pause,
+                    resume=self.engine.resume,
+                )
+            except UnrecoverableSidecarError:
+                raise
+            except Exception as exc:
+                raise UnrecoverableEngineError(
+                    "weight commit failed; live engine state is uncertain"
+                ) from exc
         self.sync_state = SyncState.FETCHING
         pointer = await asyncio.to_thread(self.store.read_pointer)
         return not self._behind(pointer)  # a mid-pass publish is next tick's work
@@ -576,10 +570,17 @@ class Reconciler:
             self.applied = VersionRef(new_run, self.boot_version)
             self.last_error = None
 
-        await self.gate.commit(
-            apply=apply,
-            on_applied=on_applied,
-            pause=self.engine.pause if was_patched else None,
-            resume=self.engine.resume if was_patched else None,
-            drain_all=True,
-        )
+        try:
+            await self.gate.commit(
+                apply=apply,
+                on_applied=on_applied,
+                pause=self.engine.pause if was_patched else None,
+                resume=self.engine.resume if was_patched else None,
+                drain_all=True,
+            )
+        except UnrecoverableSidecarError:
+            raise
+        except Exception as exc:
+            raise UnrecoverableEngineError(
+                "boot checkpoint restore failed; live engine state is uncertain"
+            ) from exc

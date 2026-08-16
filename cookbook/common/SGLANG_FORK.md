@@ -38,7 +38,7 @@ images.
 
 ## API
 
-`POST /stage_weight_update` prepares a target while inference continues:
+`POST /stage_weight_update` prepares a target without changing live weights:
 
 ```json
 {
@@ -68,8 +68,8 @@ Commit remains a separate operation:
   target verification preserves generation correctness while its acceptance
   rate may change as the target evolves.
 
-The separation is the pause boundary: staging may overlap rollout generation,
-while commit is the short operation coordinated by Stitch.
+The separation is the pause boundary: after startup, staging may overlap rollout
+generation, while commit is the short operation coordinated by Stitch.
 
 ## Disk destination
 
@@ -87,11 +87,10 @@ final published target checksum remains the commit boundary.
 
 The rollout engine initially loads its boot checkpoint directly from
 `base_checkpoint_dir`. Its logical version is normally v0 and may be a saved
-version for a resumed run. Stitch initializes the mutable local checkpoint in
-the background after the boot checkpoint is serving, so initial rollout
-readiness is not delayed by a second model-sized copy. Local storage must hold
-the mutable checkpoint plus filesystem headroom; the immutable boot checkpoint
-remains in its configured source.
+version for a resumed run. Stitch initializes the mutable local checkpoint
+before the replica enters rotation, then reconciles it to the visible version.
+Local storage must hold the mutable checkpoint plus filesystem headroom; the
+immutable boot checkpoint remains in its configured source.
 
 The commit RPC still reads and transforms the complete target checkpoint. On
 each commit, Stitch forwards the load format selected for the initial server
@@ -108,10 +107,10 @@ mode:
 
 CPU mode keeps rank-ready images in RAM for the shortest commit:
 
-1. After the boot checkpoint begins serving, SGLang allocates one complete
-   rank-ready image per local TP rank and either caches one canonical checkpoint
-   per host in RAM or materializes it on host-local storage. It also builds the
-   model's native loader views once against each rank image.
+1. After loading the boot checkpoint, SGLang allocates one complete rank-ready
+   image per local TP rank and either caches one canonical checkpoint per host in
+   RAM or materializes it on host-local storage. It also builds the model's
+   native loader views once against each rank image.
 2. When the base is the boot checkpoint, it captures the already-realized active
    runtime storages into the rank images instead of repeating a model-sized
    load. A different base goes through the model's ordinary loader and
@@ -124,13 +123,10 @@ CPU mode keeps rank-ready images in RAM for the shortest commit:
    complete images into the existing CUDA storages without replacing storage
    pointers.
 
-Stitch starts step 1 in the background. A published delta waits for that same
-initialization task; it does not start a second cache build. An initialization
-or staging failure is reported and the GPU remains on its prior weights.
-Registering a model-sized rank image as CUDA host memory is also one-time work,
-but can delay active inference on very large models. Initialize the CPU
-destination before routing latency-sensitive traffic when warmup latency
-matters.
+Stitch completes step 1 before the replica enters rotation. An initialization
+failure replaces the replica; a later staging failure is reported and the GPU
+remains on its prior weights. Registering a model-sized rank image as CUDA host
+memory and capturing active GPU weights are one-time startup work.
 
 CPU mode is delta-only. It rejects FULL publications and cannot reset a patched
 live replica to another run; the controller must use disk mode or replace that
@@ -154,11 +150,11 @@ host-local storage:
 ```
 
 Use local NVMe rather than a network or shared filesystem. This path pays a
-complete checkpoint copy during background initialization and adds NVMe
-read/write work during preparation; it does not change the CPU-to-GPU engine
-pause. Set `--weight-loader-drop-cache-after-load` to release clean checkpoint
-pages after every local TP rank finishes compiling; otherwise the kernel may
-retain those reclaimable pages for later reads.
+complete checkpoint copy during initialization and adds NVMe read/write work
+during preparation; it does not change the CPU-to-GPU engine pause. Set
+`--weight-loader-drop-cache-after-load` to release clean checkpoint pages after
+every local TP rank finishes compiling; otherwise the kernel may retain those
+reclaimable pages for later reads.
 
 The group bound limits CUDA staging work; it does not tune correctness or assume
 a model architecture. An indivisible module larger than the requested bound

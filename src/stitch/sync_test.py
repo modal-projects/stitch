@@ -159,29 +159,35 @@ def test_startup_initializes_update_destination() -> None:
             store=FakeStore(), engine=engine
         )  # unclaimed pool: reconcile is a no-op
         await r.startup()
-        await r._destination_init_task
         assert "initialize_update_destination" in engine.calls
+        assert r.ready
 
     _run(go())
 
 
 @pytest.mark.parametrize(
-    "sync_state,expected",
+    "ready,sync_state,expects_progress",
     [
-        (SyncState.IDLE, False),
-        (SyncState.FETCHING, False),
-        (SyncState.STAGING, False),
-        (SyncState.COMMITTING, True),
-        (SyncState.ERROR, False),
+        (False, SyncState.IDLE, False),
+        (False, SyncState.FETCHING, False),
+        (False, SyncState.STAGING, False),
+        (False, SyncState.COMMITTING, False),
+        (False, SyncState.ERROR, False),
+        (True, SyncState.IDLE, True),
+        (True, SyncState.FETCHING, True),
+        (True, SyncState.STAGING, True),
+        (True, SyncState.COMMITTING, False),
+        (True, SyncState.ERROR, True),
     ],
 )
-def test_engine_health_may_be_stale_only_during_commit(
-    sync_state: SyncState, expected: bool
+def test_engine_progress_expectation_follows_serving_lifecycle(
+    ready: bool, sync_state: SyncState, expects_progress: bool
 ) -> None:
     reconciler = _make_reconciler(store=FakeStore(), engine=FakeEngine())
+    reconciler.ready = ready
     reconciler.sync_state = sync_state
 
-    assert reconciler.engine_health_may_be_stale() is expected
+    assert reconciler.expects_engine_progress() is expects_progress
 
 
 def test_catch_up() -> None:
@@ -370,7 +376,7 @@ def test_run_switch_exposes_paused_reset_to_engine_watchdog() -> None:
         await reset_started.wait()
         assert engine.calls == ["pause", "reset"]
         assert r.sync_state is SyncState.COMMITTING
-        assert r.engine_health_may_be_stale()
+        assert not r.expects_engine_progress()
 
         finish_reset.set()
         await switch
@@ -581,10 +587,12 @@ def test_reconcile_interval_zero_disables_backstop() -> None:
 def test_stage_waits_for_update_destination() -> None:
     async def go() -> None:
         engine = FakeEngine()
+        started = asyncio.Event()
         release = asyncio.Event()
         initialize = engine.initialize_update_destination
 
         async def slow_initialize(boot_version: int = 0) -> None:
+            started.set()
             await release.wait()
             await initialize(boot_version)
 
@@ -596,25 +604,28 @@ def test_stage_waits_for_update_destination() -> None:
         )
         r.applied = VersionRef("r1", 0)  # same run, behind -> stage v2 (no run switch)
         task = asyncio.create_task(r.startup())
-        await asyncio.sleep(0.05)
+        await started.wait()
         assert "stage:2" not in engine.calls
+        assert not r.ready
         release.set()
         await task
         assert engine.calls.index("initialize_update_destination") < engine.calls.index(
             "stage:2"
         )
-        assert r.metrics["destination_init_wait_s"] > 0
+        assert r.ready
         await r.shutdown()
 
     _run(go())
 
 
-def test_boot_weights_serve_before_update_destination_is_ready() -> None:
+def test_boot_weights_wait_for_update_destination() -> None:
     async def go() -> None:
         engine = FakeEngine()
+        started = asyncio.Event()
         release = asyncio.Event()
 
         async def slow_initialize(boot_version: int = 0) -> None:
+            started.set()
             await release.wait()
             engine.initialized_versions.append(boot_version)
             engine.calls.append("initialize_update_destination")
@@ -626,15 +637,15 @@ def test_boot_weights_serve_before_update_destination_is_ready() -> None:
             reconcile_interval=0.0,
         )
         startup = asyncio.create_task(r.startup())
-        while not r.ready:
-            await asyncio.sleep(0)
-        assert r.ready
+        await started.wait()
+        assert not r.ready
         assert r.applied == VersionRef("r1", 0)
         assert "pause" not in engine.calls
         assert not r._destination_ready
         release.set()
         await startup
         assert r._destination_ready
+        assert r.ready
         await r.shutdown()
 
     _run(go())
@@ -643,9 +654,11 @@ def test_boot_weights_serve_before_update_destination_is_ready() -> None:
 def test_store_refresh_waits_for_update_destination() -> None:
     async def go() -> None:
         engine = FakeEngine()
+        started = asyncio.Event()
         release = asyncio.Event()
 
         async def slow_initialize(boot_version: int = 0) -> None:
+            started.set()
             await release.wait()
             engine.initialized_versions.append(boot_version)
             engine.calls.append("initialize_update_destination")
@@ -662,9 +675,8 @@ def test_store_refresh_waits_for_update_destination() -> None:
         store = GuardedStore(VersionRef("r1", 0))
         r = _make_reconciler(store=store, engine=engine, reconcile_interval=0.0)
         startup = asyncio.create_task(r.startup())
-        while not r.ready:
-            await asyncio.sleep(0)
-        assert r.ready
+        await started.wait()
+        assert not r.ready
         assert store.refreshed == 0
 
         release.set()
@@ -691,14 +703,14 @@ def test_update_fails_after_update_destination_initialization_fails() -> None:
         r.applied = VersionRef("r1", 0)
         terminal = asyncio.create_task(r.wait_for_terminal_error())
         await r.startup()
-        assert r.sync_state is SyncState.ERROR
-        assert r.last_error is not None
-        assert "broken destination" in r.last_error
+        assert not r.ready
         assert "stage:2" not in engine.calls
-        assert not terminal.done()
-        terminal.cancel()
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(
+            UnrecoverableEngineError,
+            match="weight update destination initialization failed.*broken destination",
+        ):
             await terminal
+        assert "broken destination" in r.server_info()["terminal_error"]
         await r.shutdown()
 
     _run(go())
@@ -721,6 +733,43 @@ def test_unrecoverable_reconcile_error_reaches_terminal_monitor() -> None:
         with pytest.raises(UnrecoverableEngineError, match="process is gone"):
             await r.wait_for_terminal_error()
         assert r.server_info()["terminal_error"] == "engine process is gone"
+        await r.shutdown()
+
+    _run(go())
+
+
+def test_commit_failure_is_terminal() -> None:
+    async def go() -> None:
+        engine = FakeEngine()
+
+        async def fail_commit(
+            _manifest: VersionManifest,
+            *,
+            flush_cache: bool = False,
+        ) -> None:
+            raise RuntimeError("partial weight copy")
+
+        engine.commit = fail_commit  # type: ignore[method-assign]
+        r = _make_reconciler(
+            store=FakeStore(VersionRef("r1", 1), _delta("r1", 1, files=["v1"])),
+            engine=engine,
+            reconcile_interval=0,
+        )
+        await r.startup()
+
+        with pytest.raises(
+            UnrecoverableEngineError,
+            match="weight commit failed; live engine state is uncertain",
+        ):
+            await r.wait_for_terminal_error()
+        assert not r.ready
+        assert r.applied == VersionRef("r1", 0)
+        assert engine.calls == [
+            "initialize_update_destination",
+            "stage:1",
+            "pause",
+            "resume",
+        ]
         await r.shutdown()
 
     _run(go())
