@@ -12,10 +12,8 @@ demotes ``request`` to a required query param, 422-ing every call.
 
 import asyncio
 import contextlib
-import json
 import logging
 import time
-import urllib.request
 import uuid
 from collections.abc import Iterable
 from contextlib import asynccontextmanager
@@ -25,7 +23,7 @@ from stitch.engines.base import Engine
 from stitch.pools.base import Pool
 from stitch.stores.base import Store
 from stitch.sync import AdmissionGate, CommitMode, ConstraintUnmet, Reconciler
-from stitch.types import PoolState, ReplicaState, SyncState, VersionConstraint
+from stitch.types import PoolState, ReplicaState, VersionConstraint
 from stitch.watchdog import (
     EngineWatchdog,
     SidecarWatchdog,
@@ -95,7 +93,8 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        # Background reconcile so uvicorn answers /health (503 until the first catch-up) while it runs.
+        # Run startup beside the HTTP loop so /health explains why the replica is
+        # not yet admitted while destination initialization and catch-up run.
         syncing = asyncio.create_task(status.startup())
         try:
             yield
@@ -112,10 +111,8 @@ def create_app(
 
     @app.get("/health")
     async def health() -> Response:
-        # 503 until the reconciler's first catch-up, so a deployment that gates routing on readiness
-        # keeps a not-yet-synced replica out of rotation (else it's routed to and 409s the whole
-        # catch-up). A fresh boot clears at once; a mid-run joiner waits until it has applied the
-        # live version. Liveness/boot checks use /server_info instead.
+        # 503 until destination initialization and first catch-up complete. This
+        # is the routing-readiness contract; liveness and details use /server_info.
         if not status.ready:
             return JSONResponse(
                 {"ready": False, "reason": status.readiness_reason()},
@@ -314,7 +311,7 @@ def serve(
     watchdog = SidecarWatchdog(
         EngineWatchdog(
             engine,
-            engine_health_may_be_stale=reconciler.engine_health_may_be_stale,
+            expects_engine_progress=reconciler.expects_engine_progress,
             interval=watchdog_interval,
             failure_threshold=watchdog_failure_threshold,
         ),
@@ -348,22 +345,6 @@ async def readiness(pool: Pool, *, timeout: float = 15.0) -> PoolState:
         replicas = await pool.discover_replicas_async()
         states = await asyncio.gather(*(probe(c, url) for url in replicas))
     return PoolState(list(states))
-
-
-def engine_health_may_be_stale(server_info_url: str, *, timeout: float = 5.0) -> bool:
-    """Whether the engine is paused while staged weights are applied.
-
-    Staging and destination initialization run alongside inference. Suppressing
-    their health failures would mask a stalled scheduler, so only the short
-    commit window is exempt. An unreachable sidecar returns ``False`` so the
-    caller still reports an actual failure.
-    """
-    try:
-        with urllib.request.urlopen(server_info_url, timeout=timeout) as resp:
-            info = json.loads(resp.read())
-    except Exception:  # noqa: BLE001
-        return False
-    return info.get("sync_state") == SyncState.COMMITTING.value
 
 
 def await_pool_ready(

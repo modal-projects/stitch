@@ -11,8 +11,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from stitch.service import engine_health_may_be_stale
-
 from . import process
 from .constants import SGLANG_PORT, SIDECAR_PORT
 
@@ -38,8 +36,8 @@ def serve_startup(
     startup_timeout: int,
 ) -> None:
     """Start sglang + the versioned-proxy sidecar on a Server replica (from ``@modal.enter``).
-    SGLang starts directly from the immutable boot checkpoint. The sidecar initializes the
-    selected update destination in the background after serving is available."""
+    SGLang starts directly from the immutable boot checkpoint. The sidecar enters
+    rotation after its update destination is initialized and it has caught up."""
     from autoinference_utils.endpoint import (
         SGLangEndpoint,
         start_heartbeat_thread,
@@ -97,35 +95,34 @@ def serve_startup(
         commit_mode=commit_mode,
         flush_cache_on_commit=flush_cache_on_commit,
     )
-    # Modal admits the container to Flash routing when @enter returns and never re-polls /health, so
-    # blocking here on /health (503 until the reconciler's first catch-up) is the only thing that keeps a
-    # not-yet-synced replica out of rotation. Fresh boot (no pointer) clears at once; a mid-run joiner
-    # waits until it has applied the live version, bounded by startup_timeout.
+    # Modal admits the container when @enter returns. The sidecar owns readiness:
+    # /health stays 503 through destination initialization and first catch-up.
     process.wait_http(
         f"http://127.0.0.1:{SIDECAR_PORT}/health", replica.sidecar, startup_timeout
     )
 
-    def engine_health() -> str | None:
-        # Applying staged weights pauses inference. Staging does not, so a health
-        # failure during staging must remain visible as a stalled-engine signal.
-        error = replica.endpoint.health_check()
-        if error is None:
-            return None
-        return (
-            None
-            if engine_health_may_be_stale(
-                f"http://127.0.0.1:{SIDECAR_PORT}/server_info"
-            )
-            else error
+    def sidecar_http_health() -> str | None:
+        # Stitch owns SGLang functional health. This independent parent probe
+        # covers a sidecar that is alive but no longer serving HTTP.
+        return process.http_health_error(
+            f"http://127.0.0.1:{SIDECAR_PORT}/server_info",
+            replica.sidecar,
         )
 
-    import modal.experimental
+    def terminate_unresponsive_sidecar() -> None:
+        # Closing the exposed port makes Modal replace this failed Server. A
+        # graceful stop_fetching_inputs() would incorrectly report it as Done.
+        print(
+            "[heartbeat] sidecar remained unhealthy; terminating it for replacement",
+            flush=True,
+        )
+        process.terminate_process(replica.sidecar)
 
     start_heartbeat_thread(
-        engine_health,
-        on_failure=lambda: modal.experimental.stop_fetching_inputs(),
-        max_consecutive_failures=12,  # ~1 min of sustained idle-state failures
+        sidecar_http_health,
+        on_failure=terminate_unresponsive_sidecar,
     )
+
     print(
         f"Rollout server ready: model={served_model_name}, "
         f"boot_version={boot_version}, target_inputs={concurrency}"

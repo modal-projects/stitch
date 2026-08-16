@@ -96,6 +96,26 @@ def wait_http(url: str, process: subprocess.Popen | None, timeout: int) -> None:
     raise TimeoutError(f"timed out waiting for {url}; last error: {last_error}")
 
 
+def http_health_error(
+    url: str,
+    process: subprocess.Popen | None,
+    *,
+    timeout: float = 5.0,
+) -> str | None:
+    """Return why a colocated HTTP process is unavailable, or ``None``."""
+    if process is not None and process.poll() is not None:
+        return f"process exited with code {process.returncode}"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            if 200 <= resp.status < 300:
+                return None
+            return f"HTTP {resp.status} from {url}"
+    except urllib.error.HTTPError as exc:
+        return f"HTTP {exc.code} from {url}"
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        return f"{type(exc).__name__}: {exc}"
+
+
 def terminate_process(process: subprocess.Popen | None) -> None:
     if process is None or process.poll() is not None:
         return

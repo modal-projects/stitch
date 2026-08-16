@@ -1,8 +1,7 @@
 """Supervise a sidecar's colocated engine and propagate terminal failures.
 
-The reconciler owns weight-sync retries; this module owns process liveness. Keeping
-those policies separate lets a transient store or engine-control error remain
-retryable while a persistently dead local engine tears down the sidecar process.
+The reconciler owns weight-sync recovery and says when inference progress is
+expected. This module owns engine supervision and the sidecar process boundary.
 """
 
 from __future__ import annotations
@@ -67,18 +66,17 @@ class SidecarWatchdog:
 class EngineWatchdog:
     """Turn repeated engine-health failures into one terminal sidecar error.
 
-    An unresponsive health endpoint is ignored while the engine is paused to apply
-    staged weights. Staging itself runs alongside inference and is not exempt: a
-    health failure then is evidence of scheduler starvation or failure. A connection
-    failure is never expected, but still receives the consecutive-failure budget so
-    a one-off socket race does not recycle an otherwise healthy replica.
+    Probe only while the reconciler promises inference progress. Destination
+    initialization and commits supervise their own engine RPCs and may occupy the
+    engine's HTTP loop, so a concurrent health request is not an independent signal.
+    Staging runs alongside inference and remains functionally monitored.
     """
 
     def __init__(
         self,
         engine: Engine,
         *,
-        engine_health_may_be_stale: Callable[[], bool],
+        expects_engine_progress: Callable[[], bool],
         interval: float = 5.0,
         failure_threshold: int = 3,
     ) -> None:
@@ -87,7 +85,7 @@ class EngineWatchdog:
         if failure_threshold < 1:
             raise ValueError("watchdog failure threshold must be positive")
         self._engine = engine
-        self._engine_health_may_be_stale = engine_health_may_be_stale
+        self._expects_engine_progress = expects_engine_progress
         self._interval = interval
         self._failure_threshold = failure_threshold
         self._consecutive_failures = 0
@@ -95,18 +93,14 @@ class EngineWatchdog:
     async def run(self) -> None:
         """Run until cancelled or the engine is conclusively unrecoverable."""
         while True:
+            if not self._expects_engine_progress():
+                self._consecutive_failures = 0
+                await asyncio.sleep(self._interval)
+                continue
+
             health = await self._engine.check_health()
             if health.status is EngineHealthStatus.HEALTHY:
                 self._consecutive_failures = 0
-            elif (
-                health.status is EngineHealthStatus.UNRESPONSIVE
-                and self._engine_health_may_be_stale()
-            ):
-                self._consecutive_failures = 0
-                logger.debug(
-                    "ignoring engine health failure while applying weights: %s",
-                    health.detail,
-                )
             else:
                 self._consecutive_failures += 1
                 logger.warning(
@@ -133,7 +127,7 @@ async def run_server_with_watchdog(
 ) -> None:
     """Run uvicorn and make a terminal watchdog error reach the process boundary."""
     server_task = asyncio.create_task(server.serve(), name="sidecar-server")
-    watchdog_task = asyncio.create_task(watchdog.run(), name="engine-watchdog")
+    watchdog_task = asyncio.create_task(watchdog.run(), name="sidecar-watchdog")
     try:
         done, _pending = await asyncio.wait(
             {server_task, watchdog_task}, return_when=asyncio.FIRST_COMPLETED
@@ -148,7 +142,7 @@ async def run_server_with_watchdog(
         try:
             await watchdog_task
         except BaseException:
-            logger.critical("engine watchdog terminated the sidecar", exc_info=True)
+            logger.critical("sidecar watchdog terminated the process", exc_info=True)
             await _stop_server(server, server_task, timeout=shutdown_timeout)
             raise
         await _stop_server(server, server_task, timeout=shutdown_timeout)

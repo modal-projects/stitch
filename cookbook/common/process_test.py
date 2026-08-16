@@ -1,8 +1,64 @@
 from __future__ import annotations
 
+import urllib.error
+
 from cookbook.common import process, storage
 from stitch.sidecar import SidecarConfig, _load_store_factory
 from stitch.stores.s3 import S3Store
+
+
+class _Process:
+    def __init__(self, returncode: int | None = None) -> None:
+        self.returncode = returncode
+
+    def poll(self) -> int | None:
+        return self.returncode
+
+
+class _Response:
+    status = 200
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args) -> None:
+        return None
+
+
+def test_http_health_error_checks_process_and_http(monkeypatch) -> None:
+    monkeypatch.setattr(
+        process.urllib.request, "urlopen", lambda *_args, **_kwargs: _Response()
+    )
+
+    assert process.http_health_error("http://sidecar/server_info", _Process()) is None
+    assert (
+        process.http_health_error("http://sidecar/server_info", _Process(returncode=7))
+        == "process exited with code 7"
+    )
+
+
+def test_http_health_error_reports_request_failure(monkeypatch) -> None:
+    def fail(*_args, **_kwargs):
+        raise TimeoutError("sidecar stalled")
+
+    monkeypatch.setattr(process.urllib.request, "urlopen", fail)
+
+    assert (
+        process.http_health_error("http://sidecar/server_info", _Process())
+        == "TimeoutError: sidecar stalled"
+    )
+
+
+def test_http_health_error_reports_http_status(monkeypatch) -> None:
+    def fail(url, **_kwargs):
+        raise urllib.error.HTTPError(url, 503, "not ready", {}, None)
+
+    monkeypatch.setattr(process.urllib.request, "urlopen", fail)
+
+    assert (
+        process.http_health_error("http://sidecar/server_info", _Process())
+        == "HTTP 503 from http://sidecar/server_info"
+    )
 
 
 def test_start_sidecar_passes_s3_store_settings(monkeypatch) -> None:

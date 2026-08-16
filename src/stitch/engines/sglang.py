@@ -61,7 +61,7 @@ class SGLangEngine(Engine):
         )
 
     async def check_health(self) -> EngineHealth:
-        """Distinguish an absent process from an engine busy doing weight work."""
+        """Require scheduler progress through SGLang's generation health probe."""
         import httpx
 
         try:

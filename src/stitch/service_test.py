@@ -1,20 +1,16 @@
-"""Engine-health suppression derived from the sidecar's ``/server_info`` state."""
+"""Versioned sidecar proxy behavior."""
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import logging
-import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 
 import httpx
-import pytest
 
 from stitch.engines.base import Engine
-from stitch.service import create_app, engine_health_may_be_stale
+from stitch.service import create_app
 from stitch.sync import AdmissionGate
 from stitch.types import VersionRef
 
@@ -266,60 +262,3 @@ def test_metrics_bypasses_weight_admission_before_first_pointer(monkeypatch):
         assert gate_sidecar.gate.active_requests == 0
 
     asyncio.run(go())
-
-
-@contextlib.contextmanager
-def _server_info(payload):
-    """Serve ``payload`` as JSON at /server_info on a throwaway localhost port."""
-
-    class Handler(BaseHTTPRequestHandler):
-        def do_GET(self):  # noqa: N802
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(json.dumps(payload).encode())
-
-        def log_message(self, *_):  # silence
-            pass
-
-    server = HTTPServer(("127.0.0.1", 0), Handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    try:
-        yield f"http://127.0.0.1:{server.server_port}/server_info"
-    finally:
-        server.shutdown()
-
-
-@pytest.mark.parametrize(
-    "info,expected",
-    [
-        ({"update_destination_ready": True, "sync_state": "COMMITTING"}, True),
-        ({"update_destination_ready": True, "sync_state": "STAGING"}, False),
-        ({"update_destination_ready": True, "sync_state": "FETCHING"}, False),
-        (
-            {
-                "update_destination_ready": False,
-                "update_destination_error": None,
-            },
-            False,
-        ),
-        ({"update_destination_ready": True, "sync_state": "IDLE"}, False),
-        (
-            {
-                "update_destination_ready": False,
-                "update_destination_error": "boom",
-            },
-            False,
-        ),
-    ],
-)
-def test_engine_health_may_be_stale(info, expected):
-    with _server_info(info) as url:
-        assert engine_health_may_be_stale(url) is expected
-
-
-def test_unreachable_sidecar_reports_error():
-    # Nothing listening: best-effort False so the caller surfaces the engine error.
-    assert (
-        engine_health_may_be_stale("http://127.0.0.1:1/server_info", timeout=0.2)
-        is False
-    )
