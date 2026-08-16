@@ -43,8 +43,11 @@ uv run --extra modal modal run -e stitch-dev \
 
 ## Sidecar config check (CPU-only)
 
-Validates the ``python -m stitch.sidecar`` entrypoint in a bare image —
-arg-parse and flag coverage without sglang/Modal deps:
+Validates the sidecar entrypoint (``python -m stitch.sidecar``) in a bare
+stitch-only image — flag coverage (`--help`), disk-mode validation, and
+store-factory resolution without sglang/Modal deps. Real launches pass the
+consuming package's factory (this repo's recipes use ``--store-factory
+cookbook.common.storage:create_store``; see ``cookbook.common.process``).
 
 ```bash
 uv run --extra modal modal run -e stitch-dev -m tools.probes.sidecar_config

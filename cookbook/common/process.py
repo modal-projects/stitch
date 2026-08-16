@@ -16,9 +16,11 @@ from typing import Any
 
 from stitch.sidecar import SidecarConfig
 
-# The Modal-agnostic sidecar entrypoint lives in stitch core; the recipe
-# launches it beside the recipe-specific sglang server.
+# The sidecar entrypoint lives in stitch core; the recipe launches it beside the
+# recipe-specific sglang server, pointing --store-factory at the cookbook's
+# backend dispatch so core never has to know this repo's Store backends.
 SIDECAR_MODULE = "stitch.sidecar"
+STORE_FACTORY = "cookbook.common.storage:create_store"
 
 
 def start_sidecar(
@@ -41,6 +43,14 @@ def start_sidecar(
     debug_requests: bool = False,
 ) -> subprocess.Popen:
     """Launch the versioned rollout proxy (the shared sidecar) beside sglang."""
+    # Empty settings normalize to unset: only set options reach the factory.
+    store_options = {"backend": store_backend}
+    if volume_name:
+        store_options["volume_name"] = volume_name
+    if s3_root:
+        store_options["s3_root"] = s3_root
+    if s3_endpoint_url:
+        store_options["s3_endpoint_url"] = s3_endpoint_url
     config = SidecarConfig(
         host="0.0.0.0",
         port=sidecar_port,
@@ -50,10 +60,8 @@ def start_sidecar(
         local_checkpoint_dir=local_checkpoint_dir,
         delta_update_mode=delta_update_mode,
         disk_load_format=disk_load_format,
-        store_backend=store_backend,
-        volume_name=volume_name,
-        s3_root=s3_root,
-        s3_endpoint_url=s3_endpoint_url,
+        store_factory=STORE_FACTORY,
+        store_options=store_options,
         commit_mode=commit_mode,
         flush_cache_on_commit=flush_cache_on_commit,
         run_id=run_id,
