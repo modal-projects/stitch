@@ -164,19 +164,20 @@ class _Miles(MilesConfig):
     global_batch_size = 256
     rollout_temperature = 1.0
     rollout_top_p = 0.95
-    rollout_top_k = 8192
     rollout_max_response_len = 8192
     max_seq_len = MAX_SEQ_LEN
     max_weight_staleness = 6
     async_max_concurrent_samples = ROLLOUT_CONCURRENT_SAMPLES
-    async_data_buffer_capacity_factor = (
-        0.5  # at most half a batch of completed R3 state
-    )
+    # Bound finished-but-unconsumed work to three learner batches. This keeps
+    # rollout producing through short trainer stalls without an unbounded queue.
+    async_data_buffer_capacity_factor = 3.0
     async_unused_samples_handler = "drop"
     eval_interval = None
 
     use_rollout_routing_replay = True
     use_fault_tolerance = True
+    # Allow cold-start generation to settle before the first health probe.
+    rollout_health_check_first_wait = 600
 
     tensor_model_parallel_size = 2
     sequence_parallel = True
@@ -204,6 +205,9 @@ class _Miles(MilesConfig):
     use_precision_aware_optimizer = True
 
     advantage_estimator = "grpo"
+    # Reuse detached log-probs from the single training forward as the PPO
+    # denominator instead of running a redundant forward-only actor pass.
+    skip_actor_forward_only = True
     use_rollout_logprobs = False
     use_tis = True
     get_mismatch_metrics = True
@@ -244,7 +248,6 @@ class _Miles(MilesConfig):
         "CUDA_DEVICE_MAX_CONNECTIONS": "1",
         "RAY_health_check_timeout_ms": "60000",
         "RAY_health_check_failure_threshold": "30",
-        "MILES_EXPERIMENTAL_ROLLOUT_REFACTOR": "1",
         "AGENT_MODEL_NAME": "model",
         "MSWEA_SILENT_STARTUP": "1",
         "MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT": "1",
