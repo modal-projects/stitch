@@ -17,6 +17,7 @@ import time
 import uuid
 from collections.abc import Iterable
 from contextlib import asynccontextmanager
+from math import ceil
 from typing import Any, Protocol
 
 from stitch.engines.base import Engine
@@ -34,6 +35,9 @@ from stitch.watchdog import (
 logger = logging.getLogger(__name__)
 
 VERSIONED_ROUTES = ("generate", "v1/chat/completions", "v1/completions")
+
+# Temporary launch threshold; tune as we collect fleet startup and throughput data.
+POOL_READY_FRACTION = 0.75
 
 # Hop-by-hop / rewritten headers the proxy never forwards upstream.
 _DROP_HEADERS = {"host", "content-length", "connection"}
@@ -348,24 +352,57 @@ async def readiness(pool: Pool, *, timeout: float = 15.0) -> PoolState:
 
 
 def await_pool_ready(
-    pool: Pool, *, timeout: float = 20 * 60, interval: float = 30.0
+    pool: Pool,
+    *,
+    replica_floor: int,
+    timeout: float = 60 * 60,
+    interval: float = 30.0,
 ) -> bool:
-    """Block until the pool's gateway answers /health 200 — Flash holds requests through a
-    cold-starting pool, so the first rollout/hot-load meets a ready pool instead of a 5xx storm
-    while engines load. Returns True when ready; on timeout, warns and returns False (the caller
-    proceeds anyway — the trainer retries). A launch-script helper: synchronous, unlike ``readiness``."""
-    import httpx
+    """Block until the configured fraction of ``replica_floor`` reports routing readiness.
 
-    gateway = pool.gateway_url().rstrip("/")
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            if httpx.get(f"{gateway}/health", timeout=10).status_code == 200:
-                return True
-        except Exception:  # noqa: BLE001
-            pass
-        time.sleep(interval)
-    print(
-        f"WARNING: pool at {gateway} not ready after {timeout:.0f}s; proceeding (the trainer retries)"
-    )
-    return False
+    Readiness is counted from each replica's ``/server_info`` rather than inferred from the
+    pool gateway: one healthy replica makes a gateway probe succeed, but is not enough capacity
+    for a large rollout launch. Once the floor is met, the gateway is checked as well so the
+    trainer sees a working traffic path. Timeout is terminal so training never starts below the
+    requested floor. This launch-script helper is synchronous, unlike :func:`readiness`.
+    """
+    if replica_floor < 1:
+        raise ValueError(f"replica_floor must be positive, got {replica_floor}")
+    min_ready = ceil(POOL_READY_FRACTION * replica_floor)
+
+    async def wait() -> bool:
+        import httpx
+
+        deadline = time.monotonic() + timeout
+        last_counts: tuple[int, int] | None = None
+        while time.monotonic() < deadline:
+            state = await readiness(pool)
+            counts = (
+                sum(replica.ready for replica in state.replicas),
+                len(state.replicas),
+            )
+            if counts != last_counts:
+                print(
+                    f"Rollout fleet readiness: {counts[0]}/{min_ready} required "
+                    f"({counts[1]} discovered)",
+                    flush=True,
+                )
+                last_counts = counts
+            if counts[0] >= min_ready:
+                try:
+                    gateway = (await pool.gateway_url_async()).rstrip("/")
+                    async with httpx.AsyncClient(trust_env=False) as client:
+                        response = await client.get(f"{gateway}/health", timeout=10)
+                    if response.status_code == 200:
+                        return True
+                except Exception:  # noqa: BLE001
+                    pass
+            await asyncio.sleep(interval)
+
+        ready, discovered = last_counts or (0, 0)
+        raise TimeoutError(
+            f"rollout pool not ready after {timeout:.0f}s: "
+            f"{ready}/{min_ready} required ({discovered} discovered)"
+        )
+
+    return asyncio.run(wait())

@@ -205,7 +205,10 @@ def _run_attempt(*, supervise: bool) -> None:
         volume = modal.Volume.from_name(run.exp.EXPERIMENT_VOLUME_NAME, version=2)
         target = restore_resume_point(volume, resume_point)
         print(f"Restored {target.identity}; waiting for the recreated pool", flush=True)
-        await_pool_ready(ModalFlashLBPool(run.APP_NAME, "Server"))
+        await_pool_ready(
+            ModalFlashLBPool(run.APP_NAME, "Server"),
+            replica_floor=run.modal_cfg.rollout_min_containers,
+        )
         trainer_call = run.spawn_train()
 
     if not supervise:

@@ -159,6 +159,7 @@ def test_resume_restores_pointer_before_pool_readiness(monkeypatch) -> None:
     volume = object()
     run = SimpleNamespace(
         APP_NAME="app-run",
+        modal_cfg=SimpleNamespace(rollout_min_containers=2),
         exp=SimpleNamespace(EXPERIMENT_VOLUME_NAME="runs"),
         app=SimpleNamespace(
             deploy=lambda *, strategy: events.append(("deploy", strategy))
@@ -185,7 +186,7 @@ def test_resume_restores_pointer_before_pool_readiness(monkeypatch) -> None:
     monkeypatch.setattr(
         stitch.service,
         "await_pool_ready",
-        lambda _pool: events.append(("ready",)),
+        lambda _pool, **_kwargs: events.append(("ready",)),
     )
 
     launch._run_attempt(supervise=False)
