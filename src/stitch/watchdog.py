@@ -79,6 +79,7 @@ class EngineWatchdog:
         engine: Engine,
         *,
         engine_health_may_be_stale: Callable[[], bool],
+        wait_until_monitorable: Callable[[], Awaitable[None]] | None = None,
         interval: float = 5.0,
         failure_threshold: int = 3,
     ) -> None:
@@ -88,12 +89,17 @@ class EngineWatchdog:
             raise ValueError("watchdog failure threshold must be positive")
         self._engine = engine
         self._engine_health_may_be_stale = engine_health_may_be_stale
+        self._wait_until_monitorable = wait_until_monitorable
         self._interval = interval
         self._failure_threshold = failure_threshold
         self._consecutive_failures = 0
 
     async def run(self) -> None:
         """Run until cancelled or the engine is conclusively unrecoverable."""
+        if self._wait_until_monitorable is not None:
+            logger.info("engine watchdog waiting for startup initialization")
+            await self._wait_until_monitorable()
+        logger.info("engine watchdog started")
         while True:
             health = await self._engine.check_health()
             if health.status is EngineHealthStatus.HEALTHY:

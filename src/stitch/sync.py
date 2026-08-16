@@ -225,6 +225,7 @@ class Reconciler:
         self._task: asyncio.Task[None] | None = None
         self._wake_pending = False
         self._destination_init_task: asyncio.Task[None] | None = None
+        self._destination_initialization_finished = asyncio.Event()
         self._destination_ready = False
         self._destination_init_error: str | None = None
         self._periodic_task: asyncio.Task[None] | None = None
@@ -276,6 +277,8 @@ class Reconciler:
         except Exception as exc:  # noqa: BLE001
             self._destination_init_error = str(exc)
             logger.exception("weight update destination initialization failed")
+        finally:
+            self._destination_initialization_finished.set()
 
     def server_info(self) -> dict[str, Any]:
         # applied = version on the GPU (the pool reads it to see which version each replica has);
@@ -313,6 +316,10 @@ class Reconciler:
     def engine_health_may_be_stale(self) -> bool:
         """Whether the engine is paused while staged weights are applied."""
         return self.sync_state is SyncState.COMMITTING
+
+    async def wait_for_destination_initialization(self) -> None:
+        """Wait until startup has finished preparing the update destination."""
+        await self._destination_initialization_finished.wait()
 
     async def wait_for_terminal_error(self) -> None:
         """Raise once reconciliation proves this replica must be replaced."""

@@ -315,6 +315,7 @@ def serve(
         EngineWatchdog(
             engine,
             engine_health_may_be_stale=reconciler.engine_health_may_be_stale,
+            wait_until_monitorable=reconciler.wait_for_destination_initialization,
             interval=watchdog_interval,
             failure_threshold=watchdog_failure_threshold,
         ),

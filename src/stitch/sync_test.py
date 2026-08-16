@@ -165,6 +165,49 @@ def test_startup_initializes_update_destination() -> None:
     _run(go())
 
 
+def test_destination_initialization_completion_is_exposed_to_monitors() -> None:
+    async def go() -> None:
+        engine = FakeEngine()
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow_initialize(boot_version: int = 0) -> None:
+            started.set()
+            await release.wait()
+
+        engine.initialize_update_destination = slow_initialize  # type: ignore[method-assign]
+        r = _make_reconciler(store=FakeStore(), engine=engine, reconcile_interval=0.0)
+        startup = asyncio.create_task(r.startup())
+        await started.wait()
+        waiting = asyncio.create_task(r.wait_for_destination_initialization())
+        await asyncio.sleep(0)
+        assert not waiting.done()
+
+        release.set()
+        await waiting
+        await startup
+        await r.shutdown()
+
+    _run(go())
+
+
+def test_destination_initialization_failure_releases_monitors() -> None:
+    async def go() -> None:
+        engine = FakeEngine()
+
+        async def fail_initialize(boot_version: int = 0) -> None:
+            raise RuntimeError("broken destination")
+
+        engine.initialize_update_destination = fail_initialize  # type: ignore[method-assign]
+        r = _make_reconciler(store=FakeStore(), engine=engine, reconcile_interval=0.0)
+        await r.startup()
+        await asyncio.wait_for(r.wait_for_destination_initialization(), timeout=1.0)
+        assert r.server_info()["update_destination_error"] == "broken destination"
+        await r.shutdown()
+
+    _run(go())
+
+
 @pytest.mark.parametrize(
     "sync_state,expected",
     [

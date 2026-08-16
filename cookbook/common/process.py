@@ -4,6 +4,7 @@ sglang, wait on HTTP liveness, terminate cleanly, monitor host RAM, apply git pa
 
 from __future__ import annotations
 
+import json
 import os
 import signal
 import socket
@@ -94,6 +95,45 @@ def wait_http(url: str, process: subprocess.Popen | None, timeout: int) -> None:
             last_error = f"{type(exc).__name__}: {exc}"
         time.sleep(2)
     raise TimeoutError(f"timed out waiting for {url}; last error: {last_error}")
+
+
+def wait_sidecar_ready(
+    url: str, process: subprocess.Popen | None, timeout: int
+) -> None:
+    """Wait for catch-up and update-destination setup before admitting traffic."""
+    deadline = time.monotonic() + timeout
+    last_status: dict[str, Any] | None = None
+    last_error: str | None = None
+    while time.monotonic() < deadline:
+        if process is not None and process.poll() is not None:
+            raise RuntimeError(
+                f"process exited while waiting for {url}: code={process.returncode}"
+            )
+        try:
+            with urllib.request.urlopen(url, timeout=5) as resp:
+                status = json.load(resp)
+            if not isinstance(status, dict):
+                raise ValueError(f"expected JSON object, got {type(status).__name__}")
+            last_status = status
+            terminal_error = status.get("terminal_error")
+            destination_error = status.get("update_destination_error")
+            if terminal_error:
+                raise RuntimeError(f"sidecar startup failed: {terminal_error}")
+            if destination_error:
+                raise RuntimeError(
+                    "weight update destination initialization failed: "
+                    f"{destination_error}"
+                )
+            if status.get("ready") and status.get("update_destination_ready"):
+                return
+            last_error = None
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+        time.sleep(2)
+    raise TimeoutError(
+        f"timed out waiting for {url}; last status: {last_status}; "
+        f"last error: {last_error}"
+    )
 
 
 def terminate_process(process: subprocess.Popen | None) -> None:

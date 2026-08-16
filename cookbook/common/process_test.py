@@ -1,8 +1,29 @@
 from __future__ import annotations
 
+import io
+import json
+
+import pytest
+
 from cookbook.common import process, storage
 from stitch.sidecar import SidecarConfig, _load_store_factory
 from stitch.stores.s3 import S3Store
+
+
+class _JsonResponse:
+    status = 200
+
+    def __init__(self, payload: dict) -> None:
+        self._body = io.BytesIO(json.dumps(payload).encode())
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args) -> None:
+        self._body.close()
+
+    def read(self, *args, **kwargs) -> bytes:
+        return self._body.read(*args, **kwargs)
 
 
 def test_start_sidecar_passes_s3_store_settings(monkeypatch) -> None:
@@ -54,3 +75,43 @@ def test_start_sidecar_passes_s3_store_settings(monkeypatch) -> None:
     )
     assert isinstance(store, S3Store)
     assert store.run_id == "run-a"
+
+
+def test_wait_sidecar_ready_waits_for_catchup_and_destination(monkeypatch) -> None:
+    statuses = iter(
+        [
+            {"ready": False, "update_destination_ready": False},
+            {"ready": True, "update_destination_ready": False},
+            {"ready": True, "update_destination_ready": True},
+        ]
+    )
+    calls = 0
+
+    def urlopen(_url: str, timeout: int) -> _JsonResponse:
+        nonlocal calls
+        assert timeout == 5
+        calls += 1
+        return _JsonResponse(next(statuses))
+
+    monkeypatch.setattr(process.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(process.time, "sleep", lambda _seconds: None)
+
+    process.wait_sidecar_ready("http://sidecar/server_info", None, timeout=10)
+
+    assert calls == 3
+
+
+def test_wait_sidecar_ready_surfaces_destination_failure(monkeypatch) -> None:
+    def urlopen(_url: str, timeout: int) -> _JsonResponse:
+        return _JsonResponse(
+            {
+                "ready": True,
+                "update_destination_ready": False,
+                "update_destination_error": "layout failed",
+            }
+        )
+
+    monkeypatch.setattr(process.urllib.request, "urlopen", urlopen)
+
+    with pytest.raises(RuntimeError, match="layout failed"):
+        process.wait_sidecar_ready("http://sidecar/server_info", None, timeout=10)

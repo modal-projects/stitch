@@ -37,9 +37,12 @@ def serve_startup(
     flush_cache_on_commit: bool = False,
     startup_timeout: int,
 ) -> None:
-    """Start sglang + the versioned-proxy sidecar on a Server replica (from ``@modal.enter``).
-    SGLang starts directly from the immutable boot checkpoint. The sidecar initializes the
-    selected update destination in the background after serving is available."""
+    """Start sglang + the sidecar and cross Modal's admission boundary when ready.
+
+    SGLang starts directly from the immutable boot checkpoint. The sidecar prepares
+    its update destination in the background, but ``@modal.enter`` does not return
+    until both that setup and the first catch-up have finished.
+    """
     from autoinference_utils.endpoint import (
         SGLangEndpoint,
         start_heartbeat_thread,
@@ -97,12 +100,13 @@ def serve_startup(
         commit_mode=commit_mode,
         flush_cache_on_commit=flush_cache_on_commit,
     )
-    # Modal admits the container to Flash routing when @enter returns and never re-polls /health, so
-    # blocking here on /health (503 until the reconciler's first catch-up) is the only thing that keeps a
-    # not-yet-synced replica out of rotation. Fresh boot (no pointer) clears at once; a mid-run joiner
-    # waits until it has applied the live version, bounded by startup_timeout.
-    process.wait_http(
-        f"http://127.0.0.1:{SIDECAR_PORT}/health", replica.sidecar, startup_timeout
+    # Modal admits the container when @enter returns. /health describes sidecar
+    # catch-up only, so use the richer status surface to also keep startup-only
+    # engine preparation outside the traffic-serving lifetime.
+    process.wait_sidecar_ready(
+        f"http://127.0.0.1:{SIDECAR_PORT}/server_info",
+        replica.sidecar,
+        startup_timeout,
     )
 
     def engine_health() -> str | None:
