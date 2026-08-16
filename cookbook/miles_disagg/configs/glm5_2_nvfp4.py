@@ -415,8 +415,7 @@ class _Miles(MilesConfig):
         "MODAL_SWE_SETUP_TIMEOUT": "240",
         "MODAL_SWE_VERIFY_TIMEOUT": "3600",
         "MODAL_SWE_INJECT_PYTEST_REPORTER": "0",
-        "MODAL_SWE_CPUS": "2",
-        "MODAL_SWE_MEMORY_MIB": "16384",
+        "MODAL_SWE_MEMORY_MIB": "2048",
         "MODAL_SWE_AGENT_PROCESSES": "48",
         "MODAL_SWE_AGENT_THREADS_PER_PROCESS": "16",
         # Bound concurrent schedule/setup operations near the requested 500-wide
