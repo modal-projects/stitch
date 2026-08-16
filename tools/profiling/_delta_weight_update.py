@@ -443,6 +443,48 @@ def _cgroup_cpu_usage_s() -> float | None:
     return None
 
 
+def _cgroup_io_snapshot() -> dict[str, int] | None:
+    path = Path("/sys/fs/cgroup/io.stat")
+    if not path.is_file():
+        return None
+    result: dict[str, int] = {}
+    for line in path.read_text().splitlines():
+        for field in line.split()[1:]:
+            key, separator, value = field.partition("=")
+            if separator:
+                result[key] = result.get(key, 0) + int(value)
+    return result
+
+
+def _io_usage_delta(
+    before: dict[str, int] | None,
+    after: dict[str, int] | None,
+) -> dict[str, int] | None:
+    if before is None or after is None:
+        return None
+    return {
+        key: max(0, after.get(key, 0) - before.get(key, 0))
+        for key in sorted(before.keys() | after.keys())
+    }
+
+
+def _host_snapshot() -> dict[str, Any]:
+    cpuinfo = Path("/proc/cpuinfo").read_text()
+    model_name = next(
+        (
+            line.partition(":")[2].strip()
+            for line in cpuinfo.splitlines()
+            if line.startswith("model name")
+        ),
+        "unknown",
+    )
+    return {
+        "cpu_model": model_name,
+        "allowed_cpus": len(os.sched_getaffinity(0)),
+        "memory": _memory_snapshot(),
+    }
+
+
 def _cpu_usage_delta(
     before: float | None,
     after: float | None,
@@ -564,6 +606,7 @@ def run_delta_weight_update(
         "sample_id": sample_id,
         "tp_size": spec.tp_size,
         "hicache": "disabled",
+        "host": _host_snapshot(),
     }
 
     shutil.rmtree(spec.local_target_checkpoint_dir, ignore_errors=True)
@@ -625,6 +668,7 @@ def run_delta_weight_update(
         with httpx.Client(timeout=None, trust_env=False) as client:
             destination_init_started = time.perf_counter()
             destination_init_cpu_started = _cgroup_cpu_usage_s()
+            destination_init_io_started = _cgroup_io_snapshot()
             generation = _GenerationProbe(url)
             memory = _MemoryProbe()
             try:
@@ -656,6 +700,10 @@ def run_delta_weight_update(
                 _cgroup_cpu_usage_s(),
                 results["destination_init_s"],
             )
+            results["destination_init_io"] = _io_usage_delta(
+                destination_init_io_started,
+                _cgroup_io_snapshot(),
+            )
             results["destination_init_rank_stats"] = initialized.get("rank_stats")
             results["memory_after_destination_init"] = _memory_snapshot()
             if generation.errors or not generation.samples:
@@ -677,6 +725,7 @@ def run_delta_weight_update(
 
             stage_started = time.perf_counter()
             stage_cpu_started = _cgroup_cpu_usage_s()
+            stage_io_started = _cgroup_io_snapshot()
             with _GenerationProbe(url) as generation:
                 stage_payload = {
                     "base_checkpoint_dir": spec.base_checkpoint_dir,
@@ -700,6 +749,10 @@ def run_delta_weight_update(
                 _cgroup_cpu_usage_s(),
                 results["stage_s"],
             )
+            results["stage_io"] = _io_usage_delta(
+                stage_io_started,
+                _cgroup_io_snapshot(),
+            )
             results["stage_rank_stats"] = staged.get("rank_stats")
             results["generation_during_stage"] = generation.summary()
             results["memory_after_stage"] = _memory_snapshot()
@@ -717,6 +770,7 @@ def run_delta_weight_update(
 
             commit_started = time.perf_counter()
             commit_cpu_started = _cgroup_cpu_usage_s()
+            commit_io_started = _cgroup_io_snapshot()
             if update_mode == "cpu":
                 commit_path = "/update_weights_from_cpu"
                 commit_payload = {
@@ -745,6 +799,10 @@ def run_delta_weight_update(
                 commit_cpu_started,
                 _cgroup_cpu_usage_s(),
                 results["commit_rpc_s"],
+            )
+            results["commit_io"] = _io_usage_delta(
+                commit_io_started,
+                _cgroup_io_snapshot(),
             )
             results["commit_rank_stats"] = committed.get("rank_stats")
             results["stage_through_commit_s"] = round(

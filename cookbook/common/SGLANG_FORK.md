@@ -110,7 +110,8 @@ CPU mode keeps rank-ready images in RAM for the shortest commit:
 
 1. After the boot checkpoint begins serving, SGLang allocates one complete
    rank-ready image per local TP rank and either caches one canonical checkpoint
-   per host in RAM or materializes it on host-local storage.
+   per host in RAM or materializes it on host-local storage. It also builds the
+   model's native loader views once against each rank image.
 2. When the base is the boot checkpoint, it captures the already-realized active
    runtime storages into the rank images instead of repeating a model-sized
    load. A different base goes through the model's ordinary loader and
@@ -159,10 +160,11 @@ pause. Set `--weight-loader-drop-cache-after-load` to release clean checkpoint
 pages after every local TP rank finishes compiling; otherwise the kernel may
 retain those reclaimable pages for later reads.
 
-The group bound limits transient loader work; it does not tune correctness or
-assume a model architecture. An indivisible module larger than the requested
-bound remains intact and is reported. Each staging clone is reclaimed at its
-group boundary, so CUDA-required post-load transforms cannot accumulate a
+The group bound limits CUDA staging work; it does not tune correctness or assume
+a model architecture. An indivisible module larger than the requested bound
+remains intact and is reported. Loader views and their checkpoint-layout state
+remain in RAM so each update can reuse the native loader graph. Temporary GPU
+staging clones are reclaimed at their group boundary and cannot accumulate a
 second model-sized device copy.
 
 With the default in-memory canonical checkpoint, persistent host RAM is:
@@ -170,6 +172,7 @@ With the default in-memory canonical checkpoint, persistent host RAM is:
 ```text
 one canonical checkpoint per host
 + one rank-local runtime image per local TP rank
++ native-loader state per local TP rank
 ```
 
 The canonical checkpoint is interleaved across the host's allowed NUMA nodes so
@@ -178,17 +181,17 @@ images remain GPU-local because they are the source of the latency-sensitive
 CPU-to-GPU commit.
 
 With a storage-backed canonical checkpoint, persistent host RAM is the rank
-images; local storage holds one canonical checkpoint. File-cache pages used
-during preparation are reclaimable.
+images and native-loader state; local storage holds one canonical checkpoint.
+File-cache pages used during preparation are reclaimable.
 
 Measured component sizes are:
 
-| Model | TP | Canonical checkpoint per host | Rank image |
-| --- | ---: | ---: | ---: |
-| GLM-4.5-Air FP8 | 4 | 112.6 GB | 27.2 GB × 4 |
-| Kimi K2.6 NVFP4 | 4 | about 595 GB | about 151 GB × 4 |
-| GLM-5.2 mixed NVFP4/BF16 | 4 | 617.6 GB | 179.3 GB × 4 |
-| Kimi K3 MXFP4 | 8 | 1.561 TB | 207.5 GB × 8 |
+| Model | TP | Canonical checkpoint per host | Rank image | Loader state per rank |
+| --- | ---: | ---: | ---: | ---: |
+| GLM-4.5-Air FP8 | 4 | 112.6 GB | 27.2 GB × 4 | 1.64 GB |
+| Kimi K2.6 NVFP4 | 4 | about 595 GB | about 151 GB × 4 | 4.09 GB |
+| GLM-5.2 mixed NVFP4/BF16 | 4 | 617.6 GB | 179.3 GB × 4 | 20.94 GB |
+| Kimi K3 MXFP4 | 8 | 1.561 TB | 207.5 GB × 8 | 0.14 GB maximum |
 
 Allow additional memory for the engine process, delta decoding, and bounded
 loader staging. The supplied GLM-4.5 recipe requests `(512 GiB, 2 TiB)`;

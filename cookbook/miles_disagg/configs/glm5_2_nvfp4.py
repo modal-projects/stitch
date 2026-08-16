@@ -164,6 +164,8 @@ SGLANG_SERVER_ARGS = {
 modal = ModalConfig(
     gpu="B300",
     rollout_gpu="B300",
+    # CPU-cache preparation is host-memory-bandwidth sensitive. For repeatable
+    # latency, profile a B300 pool and pin its cloud and concrete region.
     region="us",
     trainer_memory_mib=(1024 * 1024, 3 * 1024 * 1024),
     # CPU mode retains the canonical checkpoint and TP rank images in memory.
