@@ -75,7 +75,7 @@ def main() -> None:
         run_id = args.resume_from
     else:
         resume_point = None
-        run_id = uuid.uuid4().hex[:8]
+        run_id = os.environ.get("RUN_ID") or uuid.uuid4().hex[:8]
     _set_attempt_env(
         os.environ,
         run_id=run_id,
@@ -86,7 +86,7 @@ def main() -> None:
 
 def _run_auto_resume(exp: Any, resume_from: str | None) -> None:
     validate_auto_resume_config(exp.miles)
-    run_id = resume_from or uuid.uuid4().hex[:8]
+    run_id = resume_from or os.environ.get("RUN_ID") or uuid.uuid4().hex[:8]
     resume_point = (
         _resume_point_for_run(exp, resume_from) if resume_from is not None else None
     )

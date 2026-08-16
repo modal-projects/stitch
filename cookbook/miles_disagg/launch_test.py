@@ -35,6 +35,7 @@ def test_supervised_attempt_preserves_run_id(monkeypatch) -> None:
 def test_auto_resume_uses_checkpoint_from_failed_attempt(monkeypatch) -> None:
     launches = []
     point = ResumePoint(19, "first-re", "/trainer", "/rollout")
+    monkeypatch.delenv("RUN_ID", raising=False)
     monkeypatch.setattr(launch.uuid, "uuid4", lambda: SimpleNamespace(hex="first-rest"))
     monkeypatch.setattr(launch, "validate_auto_resume_config", lambda _cfg: None)
     monkeypatch.setattr(launch, "_resume_point_for_run", lambda _exp, run_id: point)
@@ -69,6 +70,21 @@ def test_auto_resume_starts_from_requested_checkpoint(monkeypatch) -> None:
     launch._run_auto_resume(SimpleNamespace(miles=object()), "old")
 
     assert launches == [{"run_id": "old", "resume_point": point}]
+
+
+def test_auto_resume_honors_explicit_run_id(monkeypatch) -> None:
+    launches = []
+    monkeypatch.setenv("RUN_ID", "hero-run")
+    monkeypatch.setattr(launch, "validate_auto_resume_config", lambda _cfg: None)
+    monkeypatch.setattr(
+        launch,
+        "_run_supervised_attempt",
+        lambda **kwargs: launches.append(kwargs) or subprocess.CompletedProcess([], 0),
+    )
+
+    launch._run_auto_resume(SimpleNamespace(miles=object()), None)
+
+    assert launches == [{"run_id": "hero-run", "resume_point": None}]
 
 
 def test_set_attempt_env_uses_one_resume_payload() -> None:
@@ -135,6 +151,38 @@ def test_manual_launch_runs_directly_without_attempt_subprocess(monkeypatch) -> 
 
     assert configured == {"run_id": "old", "resume_point": point}
     assert ran == [False]
+
+
+def test_fresh_manual_launch_honors_explicit_run_id(monkeypatch) -> None:
+    configured = {}
+    monkeypatch.setattr(
+        launch,
+        "_parser",
+        lambda: SimpleNamespace(
+            parse_args=lambda: SimpleNamespace(
+                run_attempt=False,
+                auto_resume=False,
+                resume_from=None,
+            )
+        ),
+    )
+    monkeypatch.setenv("EXPERIMENT_CONFIG", "test")
+    monkeypatch.setenv("RUN_ID", "hero-run")
+    monkeypatch.setattr(
+        launch.importlib,
+        "import_module",
+        lambda _name: SimpleNamespace(miles=object()),
+    )
+    monkeypatch.setattr(
+        launch,
+        "_set_attempt_env",
+        lambda _env, **kwargs: configured.update(kwargs),
+    )
+    monkeypatch.setattr(launch, "_run_attempt", lambda *, supervise: None)
+
+    launch.main()
+
+    assert configured == {"run_id": "hero-run", "resume_point": None}
 
 
 def test_supervised_attempt_leaves_pool_deployed_when_trainer_fails(
