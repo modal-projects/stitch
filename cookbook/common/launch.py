@@ -47,14 +47,13 @@ def materialize_node_local_yaml(
 
 
 def deploy_pool_and_spawn(run: Any) -> Any:
-    """The shared body of a recipe's ``launch`` entrypoint: deploy this run's pool, block until its
-    gateway is healthy, then spawn training. ``run`` is the recipe's ``app`` module (its ``app`` /
-    ``APP_NAME`` / ``spawn_train``). Readiness rides the session-routing LB gateway, so the
-    check validates the whole traffic path (router + pool), not just the pool. Returns the
-    trainer call so the recipe can either detach or supervise it."""
+    """Deploy a run's pool, wait for it to be ready, then spawn its trainer."""
     from stitch.pools.modal_flash_lb_temp import ModalFlashLBPool
     from stitch.service import await_pool_ready
 
     run.app.deploy()
-    await_pool_ready(ModalFlashLBPool(run.APP_NAME, "Server"))
+    await_pool_ready(
+        ModalFlashLBPool(run.APP_NAME, "Server"),
+        replica_floor=run.modal_cfg.rollout_min_containers,
+    )
     return run.spawn_train()

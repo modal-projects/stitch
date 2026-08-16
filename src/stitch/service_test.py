@@ -5,14 +5,17 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
+import pytest
 
+import stitch.service as stitch_service
 from stitch.engines.base import Engine
 from stitch.service import create_app
 from stitch.sync import AdmissionGate
-from stitch.types import VersionRef
+from stitch.types import PoolState, ReplicaState, VersionRef
 
 
 class _ProxyEngine(Engine):
@@ -262,3 +265,77 @@ def test_metrics_bypasses_weight_admission_before_first_pointer(monkeypatch):
         assert gate_sidecar.gate.active_requests == 0
 
     asyncio.run(go())
+
+
+def test_await_pool_ready_waits_for_replica_threshold(monkeypatch) -> None:
+    states = iter(
+        [
+            PoolState(
+                [
+                    ReplicaState(ready=True),
+                    ReplicaState(ready=True),
+                    ReplicaState(),
+                    ReplicaState(),
+                ]
+            ),
+            PoolState(
+                [
+                    ReplicaState(ready=True),
+                    ReplicaState(ready=True),
+                    ReplicaState(ready=True),
+                    ReplicaState(),
+                ]
+            ),
+        ]
+    )
+
+    async def pool_readiness(_pool):
+        return next(states)
+
+    async def no_sleep(_seconds):
+        pass
+
+    class Pool:
+        async def gateway_url_async(self):
+            return "http://gateway"
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            pass
+
+        async def get(self, _url, **_kwargs):
+            return SimpleNamespace(status_code=200)
+
+    monkeypatch.setattr(stitch_service, "readiness", pool_readiness)
+    monkeypatch.setattr(stitch_service.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: Client())
+
+    assert stitch_service.await_pool_ready(Pool(), replica_floor=4, interval=0)
+
+
+def test_await_pool_ready_fails_closed_below_threshold(monkeypatch) -> None:
+    async def pool_readiness(_pool):
+        return PoolState([ReplicaState(ready=True), ReplicaState()])
+
+    async def no_sleep(_seconds):
+        pass
+
+    times = iter([0.0, 0.0, 2.0])
+    monkeypatch.setattr(stitch_service, "readiness", pool_readiness)
+    monkeypatch.setattr(stitch_service.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(
+        stitch_service,
+        "time",
+        SimpleNamespace(monotonic=lambda: next(times)),
+    )
+
+    with pytest.raises(
+        TimeoutError,
+        match=r"1/2 required \(2 discovered\)",
+    ):
+        stitch_service.await_pool_ready(
+            object(), replica_floor=2, timeout=1, interval=0
+        )

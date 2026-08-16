@@ -132,6 +132,7 @@ _SYNC_STATES = {s.value for s in SyncState}
 class ReplicaState:
     """One replica's ``server_info``: the version it has applied + its reconcile lifecycle."""
 
+    ready: bool = False
     applied: VersionRef | None = None
     sync_state: SyncState | None = None
     reason: str | None = None
@@ -145,13 +146,14 @@ class ReplicaState:
     def from_dict(cls, data: dict[str, Any]) -> ReplicaState:
         applied, state = data.get("applied"), data.get("sync_state")
         return cls(
+            ready=bool(data.get("ready", False)),
             applied=VersionRef.parse(applied) if applied else None,
             sync_state=SyncState(state) if state in _SYNC_STATES else None,
             reason=data.get("reason"),
         )
 
     def to_dict(self) -> dict[str, Any]:
-        data: dict[str, Any] = {}
+        data: dict[str, Any] = {"ready": self.ready}
         if self.applied is not None:
             data["applied"] = self.applied.identity
         if self.sync_state is not None:
