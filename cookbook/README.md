@@ -84,10 +84,10 @@ uv run --extra modal python -m cookbook.miles_disagg.launch
 uv run --extra modal python -m cookbook.slime_disagg.launch
 ```
 
-The launcher creates an eight-character run ID, deploys a run-scoped rollout
-pool, waits for its gateway, and starts the trainer. It prints the app name and
-stop command. Repeating the command creates a separate run and checkpoint
-lineage.
+The launcher creates an eight-character run ID unless `RUN_ID` is set explicitly,
+deploys a run-scoped rollout pool, waits for its gateway, and starts the trainer.
+It prints the app name and stop command. Repeating the command creates a separate
+run and checkpoint lineage.
 
 #### Resume a Miles run
 
