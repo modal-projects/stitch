@@ -6,11 +6,11 @@ image. [`trainer_image.py`](trainer_image.py) defines the shared default:
 ```python
 MILES_IMAGE_TAG = "radixark/miles:dev-202607290235"
 MILES_REPO_URL = "https://github.com/modal-projects/miles.git"
-MILES_REPO_REF = "60f7be88af1956111d18351d20413cfd53e0a607"
+MILES_REPO_REF = "32f981237cf62c92c9cc9e46db093f50cade9826"
 ```
 
 The pin is `modal-projects/miles:stitch-miles-fully-async-swe`. It contains a
-Miles fully-async stack based on upstream main at `6bc45ad39`, followed by the
+Miles fully-async stack based on upstream main at `5330aadc0`, followed by the
 Stitch external-fleet integration.
 
 ## Miles fully-async stack
@@ -19,33 +19,36 @@ These commits are useful independently of Stitch:
 
 | Commit | Responsibility |
 | --- | --- |
-| `ad0411c85` | Assemble additional routing-replay rows during in-place updates. |
-| `35c78a78b` | Preserve in-flight requests while changing their weight version. |
-| `6d638ba8a` | Make distributed service startup and teardown deterministic. |
-| `9be219f58` | Report generation and queue staleness separately. |
-| `63da214e1` | Distinguish explicit checkpoint resume from a fresh run. |
-| `bd0216740` | Load optional P2P weight-sync dependencies lazily. |
-| `717802e21` | Validate canonical disk-delta tensor layouts. |
-| `13dd38252` | Report trainer-rollout policy drift accurately. |
-| `a658a505c` | Make session endpoint affinity and lifecycle explicit. |
-| `6dbc5ab45` | Add the Modal Sandbox v2 transport for SWE rollouts. |
-| `080e58555` | Honor rollout-only LoRA configuration. |
-| `4e98074fa` | Add and validate the mini-SWE rollout adapter. |
-| `113271f5e` | Add CISPO policy optimization. |
-| `d688df471` | Replay exact truncated-sampling support during training. |
-| `53c402487` | Compact routing-replay expert IDs for transport. |
-| `719e2844d` | Suppress per-request session access logs. |
-| `45a2c5b25` | Reject aborted generations at the session protocol boundary. |
-| `55b69d37a` | Continue disk-delta versions from a loaded checkpoint. |
-| `a5e2999fa` | Keep transient session-transport failures local to their trajectories. |
+| `c190aca57` | Distinguish explicit checkpoint resume from a fresh run. |
+| `21feb8664` | Load optional P2P weight-sync dependencies lazily. |
+| `a1cbe0a10` | Preserve in-flight requests while changing their weight version. |
+| `9953ae5da` | Bound SGLang control-plane health requests. |
+| `10fca8606` | Resume rollout health monitoring after weight updates. |
+| `814dce696` | Close persistent asynchronous rollout producers cleanly. |
+| `2e6a9f30b` | Report generation and queue staleness separately. |
+| `b1a84e852` | Replay exact truncated-sampling support during training. |
+| `eb869236c` | Compact routing-replay expert IDs for transport. |
+| `079e49695` | Shard routing-replay transport by pipeline stage. |
+| `0324040fb` | Start session-server pools against one deadline. |
+| `615b5f48d` | Make session endpoint affinity and lifecycle explicit. |
+| `9f596da2b` | Decode session samples off the event loop and report timing. |
+| `99ea71afa` | Suppress per-request session access logs. |
+| `e04e617d3` | Reject aborted generations at the session protocol boundary. |
+| `cb6e556a6` | Keep transient session-transport failures local to their trajectories. |
+| `25a26e2c6` | Add the Modal Sandbox v2 transport for SWE rollouts. |
+| `11419cde3` | Add and validate the mini-SWE rollout adapter. |
+| `2a5fc3d5f` | Replay exact truncated-sampling support with DFlash. |
+| `1ba9b51a8` | Read current speculative-decoding counters in metrics. |
+| `7e046089e` | Adapt NVFP4 rollout checkpoints for Qwen3.6. |
+| `90ccb5034` | Validate canonical disk-delta tensor layouts. |
 
 ## Stitch integration
 
 | Commit | Responsibility |
 | --- | --- |
-| `dfbed689a` | Route fully-async generation through an external fleet with version constraints and finite timeouts. |
-| `57b27a8f6` | Publish disk deltas without Miles-managed rollout-engine handles. |
-| `60f7be88a` | Overlap external weight updates with active rollout. |
+| `954095ec4` | Route fully-async generation through an external fleet with version constraints and finite timeouts. |
+| `fd2aac692` | Publish disk deltas without Miles-managed rollout-engine handles. |
+| `32f981237` | Overlap external weight updates with active rollout. |
 
 The dated image supplies Megatron-LM, TransformerEngine, CUDA, and other
 compiled dependencies. Miles is installed over it with `--no-deps`, so the
