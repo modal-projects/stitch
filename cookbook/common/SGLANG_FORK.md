@@ -14,7 +14,7 @@ DEFAULT_SGLANG_RUNTIME = SGLangRuntime(
     image="lmsysorg/sglang:v0.5.17",
     repository="https://github.com/modal-projects/sglang.git",
     branch="stitch-sglang-v0.5.17",
-    commit="bc992874b335d0b6e314f9e883d9f55df185740d",
+    commit="6843e87bc627a40e0194081e2d8fa99137b5db50",
 )
 ```
 
