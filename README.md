@@ -66,6 +66,9 @@ activation pauses the engine.
 | GLM-5.2 mixed NVFP4/BF16 | 4 | CPU cache; canonical in RAM | 116.4 s | 3.30 s | 119.7 s |
 | GLM-5.2 mixed NVFP4/BF16 | 4 | CPU cache; canonical on NVMe | 164.5 s | 3.26 s | 167.7 s |
 | GLM-5.2 mixed NVFP4/BF16 | 4 | Disk checkpoint | 128.0 s | 299.38 s | 427.4 s |
+| GLM-5.2 FP8 | 4 | CPU cache; canonical in RAM | 108.0 s | 3.44 s | 111.5 s |
+| GLM-5.2 FP8 | 4 | CPU cache; canonical on NVMe | 340.2 s | 3.47 s | 343.7 s |
+| GLM-5.2 FP8 | 4 | Disk checkpoint | 183.8 s | 239.60 s | 423.4 s |
 | Kimi K3 MXFP4 | 8 | CPU cache; canonical in RAM | 120.5 s | 3.84 s | 124.3 s |
 | Kimi K3 MXFP4 | 8 | CPU cache; canonical on NVMe | 1,089.7 s | 3.83 s | 1,093.6 s |
 | Kimi K3 MXFP4 | 8 | Disk checkpoint | 704.0 s | 300.37 s | 1,004.4 s |
@@ -77,8 +80,8 @@ are therefore host-specific rather than model-only transformation costs. K3's
 canonical checkpoint and eight rank images occupy 3.22 TB before engine and
 staging overhead; the all-RAM sample reached 3.29 TB after staging. Its supplied
 recipe therefore keeps the canonical checkpoint on NVMe to preserve operating
-headroom. The mixed GLM-5.2 and K3 deltas are 10.04 GB and 24.13 GB compressed,
-respectively.
+headroom. The GLM-5.2 FP8, mixed GLM-5.2, and K3 deltas are 11.71 GB, 10.04 GB,
+and 24.13 GB compressed, respectively.
 
 Each profiler reconstructs and checksums the complete target and validates
 generation before, during, and after activation. See
