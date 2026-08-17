@@ -23,7 +23,13 @@ from typing import Any, Protocol
 from stitch.engines.base import Engine
 from stitch.pools.base import Pool
 from stitch.stores.base import Store
-from stitch.sync import AdmissionGate, CommitMode, ConstraintUnmet, Reconciler
+from stitch.sync import (
+    AdmissionClosed,
+    AdmissionGate,
+    CommitMode,
+    ConstraintUnmet,
+    Reconciler,
+)
 from stitch.types import PoolState, ReplicaState, VersionConstraint
 from stitch.watchdog import (
     EngineWatchdog,
@@ -256,6 +262,14 @@ def create_app(
                 )  # capture while still pinned, before a commit advances it
         except ConstraintUnmet as exc:
             return JSONResponse(exc.error, status_code=409)
+        except AdmissionClosed as exc:
+            # A restaging replica sheds: a 503 makes the router evict it and retry
+            # the session elsewhere, where a 409 would re-pin it via affinity.
+            return JSONResponse(
+                {"error": exc.error},
+                status_code=503,
+                headers={"Retry-After": "1"},
+            )
 
         if (
             is_versioned

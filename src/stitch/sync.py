@@ -53,6 +53,19 @@ class ConstraintUnmet(Exception):
         self.error = error
 
 
+class AdmissionClosed(Exception):
+    """Admission is shed while this replica restages its weights (a retryable 503).
+
+    A 503 — unlike a 409 — makes the pool router evict this replica and retry the
+    session on another one, instead of session affinity re-pinning it here while
+    the restage runs.
+    """
+
+    def __init__(self, error: dict[str, Any]) -> None:
+        super().__init__(error["message"])
+        self.error = error
+
+
 class AdmissionGate:
     """Request admission + the commit gate.
 
@@ -84,6 +97,7 @@ class AdmissionGate:
         self._active = 0
         self._committing = False
         self._drain_all = False
+        self._shedding = False
         self._exact_inflight: dict[int, int] = defaultdict(int)
 
     @property
@@ -114,10 +128,21 @@ class AdmissionGate:
     @asynccontextmanager
     async def admit(self, constraint: VersionConstraint | None = None):
         """Admit one request under a single lock acquisition, yielding the version it
-        is served on. Raises :class:`ConstraintUnmet` if the constraint can't be met."""
+        is served on. Raises :class:`ConstraintUnmet` if the constraint can't be met,
+        or :class:`AdmissionClosed` while a shedding commit runs — a shed rejects
+        arrivals (and wakes waiters to reject them) rather than queueing them behind
+        a restage of unknown duration."""
         c = constraint or VersionConstraint()
         async with self._cond:
-            await self._cond.wait_for(lambda: not self._committing)
+            await self._cond.wait_for(lambda: not self._committing or self._shedding)
+            if self._shedding:
+                raise AdmissionClosed(
+                    {
+                        "type": "ReplicaRestaging",
+                        "message": "this replica is restaging its weights",
+                        "retryable": True,
+                    }
+                )
             error = self._rejection(c)
             if error is not None:
                 self._on_reject(error)
@@ -145,17 +170,22 @@ class AdmissionGate:
         pause: Callable[[], Awaitable[None]] | None = None,
         resume: Callable[[], Awaitable[None]] | None = None,
         drain_all: bool = False,
+        shed: bool = False,
     ) -> None:
         """Wait for the commit point, close the gate, apply, flip the served version
         (``on_applied``) while the gate is held, then reopen. ``on_applied`` runs only
         after a successful apply; in ``in_place`` the flip happens before ``resume``.
         ``drain_all`` marks an incompatible transition (a boot reset): drain and gate
         every request regardless of mode — rolling requests may cross a compatible
-        weight update, never a change of lineage (stitch#32)."""
+        weight update, never a change of lineage (stitch#32). ``shed`` additionally
+        rejects arrivals with :class:`AdmissionClosed` instead of queueing them —
+        for a commit whose apply may run long (a rewind restage), so the pool routes
+        around this replica rather than parking requests on it."""
         # Close admission before draining (stitch#32), else a new in_place request can straddle a boot reset.
         async with self._cond:
             self._committing = True
             self._drain_all = drain_all
+            self._shedding = shed
             self._cond.notify_all()
         try:
             async with self._cond:
@@ -175,6 +205,7 @@ class AdmissionGate:
             async with self._cond:
                 self._committing = False
                 self._drain_all = False
+                self._shedding = False
                 self._cond.notify_all()
 
 
