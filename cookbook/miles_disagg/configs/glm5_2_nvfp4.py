@@ -52,7 +52,7 @@ ROLLOUT_INPUTS_PER_ENGINE = 16
 ROLLOUT_MAX_RUNNING_REQUESTS = 24
 # Bound scheduler-poll and routing skew to the headroom above the routing target.
 # Sustained excess load gets a retryable 503 instead of an unbounded engine queue.
-ROLLOUT_MAX_QUEUED_REQUESTS = ROLLOUT_MAX_RUNNING_REQUESTS - ROLLOUT_INPUTS_PER_ENGINE
+ROLLOUT_MAX_QUEUED_REQUESTS = 4
 ROLLOUT_ENGINES = 32
 ROLLOUT_CONCURRENT_SAMPLES = ROLLOUT_ENGINES * ROLLOUT_INPUTS_PER_ENGINE
 MAX_SEQ_LEN = 65_536
@@ -101,19 +101,19 @@ SIDECAR_COMMIT_MODE = "in_place"
 SIDECAR_FLUSH_CACHE_ON_COMMIT = False
 SGLANG_DELTA_UPDATE_MODE = "cpu"
 
-# DFLASH_SERVER_ARGS = {
-#     "--speculative-algorithm": "DFLASH",
-#     "--speculative-attention-mode": "decode",
-#     "--speculative-dflash-block-size": "8",
-#     "--speculative-num-draft-tokens": "8",
-#     "--speculative-num-steps": "1",
-#     "--speculative-eagle-topk": "1",
-#     "--speculative-draft-attention-backend": "flashinfer",
-#     "--speculative-draft-load-format": "fastsafetensors",
-#     "--speculative-draft-model-path": str(DFLASH_CHECKPOINT_PATH),
-#     "--speculative-draft-model-quantization": "unquant",
-#     "--speculative-draft-window-size": "4096",
-# }
+DFLASH_SERVER_ARGS = {
+    "--speculative-algorithm": "DFLASH",
+    "--speculative-attention-mode": "decode",
+    "--speculative-dflash-block-size": "8",
+    "--speculative-num-draft-tokens": "8",
+    "--speculative-num-steps": "1",
+    "--speculative-eagle-topk": "1",
+    "--speculative-draft-attention-backend": "flashinfer",
+    "--speculative-draft-load-format": "fastsafetensors",
+    "--speculative-draft-model-path": str(DFLASH_CHECKPOINT_PATH),
+    "--speculative-draft-model-quantization": "unquant",
+    "--speculative-draft-window-size": "4096",
+}
 
 SGLANG_SERVER_ARGS = {
     # loading / elastic refit
@@ -136,12 +136,10 @@ SGLANG_SERVER_ARGS = {
     "--dsa-decode-backend": "flashmla_kv",
     "--dsa-topk-backend": "flashinfer",
     "--page-size": "64",
-    # One attention-DP and expert-parallel rank per GPU; dense MoE paths remain TP1.
-    "--enable-dp-attention": "",
-    "--dp-size": str(ROLLOUT_GPUS_PER_ENGINE),
+    # The endpoint supplies TP4. DFlash does not support DP attention, so only
+    # expert parallelism is explicit here; dense MoE paths remain TP1.
     "--ep-size": str(ROLLOUT_GPUS_PER_ENGINE),
     "--moe-dense-tp-size": "1",
-    "--enable-dp-lm-head": "",
     # MoE
     "--moe-runner-backend": "flashinfer_trtllm_routed",
     "--disable-shared-experts-fusion": "",
@@ -153,10 +151,10 @@ SGLANG_SERVER_ARGS = {
     "--schedule-conservativeness": "1.0",
     "--schedule-policy": "lpm",
     "--cuda-graph-config": (
-        '{"decode":{"backend":"full","max_bs":32,'
-        '"bs":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32]}}'
+        '{"decode":{"backend":"full","max_bs":24,'
+        '"bs":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24]}}'
     ),
-    # **DFLASH_SERVER_ARGS,
+    **DFLASH_SERVER_ARGS,
     # RL
     "--enable-return-routed-experts": "",
 }
@@ -174,7 +172,7 @@ modal = ModalConfig(
     rollout_max_containers=None,
     rollout_target_inputs=ROLLOUT_INPUTS_PER_ENGINE,
     draft_volume=DFLASH_VOLUME,
-    routing_region="us-west",
+    routing_region="us-east",
     # CPU updates use ephemeral disk only for runtime scratch and spill.
     rollout_ephemeral_disk_mib=524_288,
     trainer_ephemeral_disk_mib=2_097_152,
@@ -215,6 +213,7 @@ class _Miles(MilesConfig):
     # A saturated engine's 503 retry holds its slot, feeding backpressure into
     # session generation instead of admitting another trajectory.
     sglang_server_concurrency = ROLLOUT_CONCURRENT_SAMPLES
+    sglang_speculative_algorithm = "DFLASH"
     rollout_endpoint_url = None
 
     custom_rollout_request_hook_path = (
@@ -307,6 +306,7 @@ class _Miles(MilesConfig):
     global_batch_size = 256
     rollout_temperature = 1.0
     rollout_top_p = 0.95
+    rollout_top_k = 4096
     rollout_max_response_len = 8192
     max_seq_len = MAX_SEQ_LEN
     use_dynamic_global_batch_size = True
@@ -415,8 +415,7 @@ class _Miles(MilesConfig):
         "MODAL_SWE_SETUP_TIMEOUT": "240",
         "MODAL_SWE_VERIFY_TIMEOUT": "3600",
         "MODAL_SWE_INJECT_PYTEST_REPORTER": "0",
-        "MODAL_SWE_CPUS": "2",
-        "MODAL_SWE_MEMORY_MIB": "16384",
+        "MODAL_SWE_MEMORY_MIB": "2048",
         "MODAL_SWE_AGENT_PROCESSES": "48",
         "MODAL_SWE_AGENT_THREADS_PER_PROCESS": "16",
         # Bound concurrent schedule/setup operations near the requested 500-wide
