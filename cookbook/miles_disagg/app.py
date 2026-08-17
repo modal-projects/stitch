@@ -54,10 +54,14 @@ from cookbook.miles_disagg.resume import (
     RESUME_POINT_ENV,
     ResumePoint,
     export_version,
+    prepare_attempt,
+    read_trainer_call,
+    record_trainer_call,
     wait_for_restored_pointer,
 )
 from cookbook.miles_disagg.trainer_image import MEGATRON_PATH, MILES_ROOT
 from stitch.pools.modal_flash_lb_temp import ModalFlashLBPool
+from stitch.service import await_pool_ready
 from stitch.types import VersionRef
 
 EXPERIMENT = os.environ[
@@ -396,6 +400,11 @@ _MULTINODE = miles_cfg.n_train_nodes > 1
     timeout=24 * 60 * MINUTES,
     startup_timeout=20 * MINUTES,
     scaledown_window=30 * MINUTES,
+    # Modal owns the retry loop: a failed attempt restarts with identical input
+    # and train() re-derives its resume state from the run volume. Containers
+    # are NOT single-use: non-zero ranks return their input immediately while
+    # serving Ray workers, so reaping a returned input would dissolve the gang.
+    retries=modal.Retries(initial_delay=0.0, max_retries=10),
     include_source=False,
     **({"experimental_options": {"efa_enabled": True}} if _MULTINODE else {}),
 )
@@ -406,7 +415,7 @@ _MULTINODE = miles_cfg.n_train_nodes > 1
 )
 class Trainer:
     """miles actor cluster. Ray comes up once per container in enter(), so back-to-back
-    runs reuse it."""
+    attempts reuse it."""
 
     @modal.enter()
     def start_ray(self) -> None:
@@ -442,20 +451,41 @@ class Trainer:
         )
 
     @modal.method()
-    def train(self, payload: dict, resume_payload: str | None = None) -> None:
-        """Run one training job from a MilesConfig payload (see MilesConfig.to_payload)."""
+    def train(self, payload: dict) -> None:
+        """Run one training attempt from a MilesConfig payload (see MilesConfig.to_payload).
+
+        Reentrant: the input is attempt-invariant, and each attempt re-derives its
+        resume state from the run volume — the newest complete checkpoint pair, or
+        a scratch restart before the first one — so a Modal retry continues the
+        run instead of replaying the original attempt's world."""
         for volume in train_volumes.values():
             volume.reload()
 
-        resume_point = (
-            ResumePoint.from_json(resume_payload)
-            if resume_payload is not None
-            else None
-        )
         cfg = MilesConfig.from_payload(payload)
         launch.materialize_node_local_yaml(cfg, "te_precision_config_file")
         if self.rank != 0:
             return
+
+        call_id = modal.current_function_call_id()
+        recorded = read_trainer_call(run_volume, RUN_ID)
+        if recorded is not None and call_id is not None and recorded != call_id:
+            print(
+                f"Run {RUN_ID} was taken over by trainer call {recorded}; exiting",
+                flush=True,
+            )
+            return
+
+        resume_point = None
+        if STORE_DEPLOYMENT.backend == storage.MODAL_VOLUME:
+            resume_point = prepare_attempt(
+                run_volume, run_id=RUN_ID, save_hf=getattr(cfg, "save_hf", None)
+            )
+        # Post-restore, replicas ahead of the checkpoint leave rotation to
+        # restage, so the ready floor counts only converged capacity.
+        await_pool_ready(
+            ModalFlashLBPool(APP_NAME, "Server"),
+            replica_floor=modal_cfg.rollout_min_containers,
+        )
 
         cfg.rollout_endpoint_url = ModalFlashLBPool(APP_NAME, "Server").gateway_url()
         if resume_point is not None:
@@ -550,12 +580,11 @@ def _build_train_cmd(cfg: MilesConfig) -> str:
 # ── Entrypoints (preparation lives in a separate app: cookbook.miles_disagg.prep_app) ──
 def spawn_train() -> Any:
     """Spawn the trainer on this run's already-deployed pool (config ships as data, so config
-    edits run without a redeploy; infra changes still require one)."""
+    edits run without a redeploy; infra changes still require one). Recording the call id
+    fences the run: a superseded call's next attempt exits instead of fighting this one."""
     trainer = modal.Cls.from_name(APP_NAME, "Trainer")()
-    call = trainer.train.spawn(
-        miles_cfg.to_payload(),
-        os.environ.get(RESUME_POINT_ENV),
-    )
+    call = trainer.train.spawn(miles_cfg.to_payload())
+    record_trainer_call(run_volume, RUN_ID, call.object_id)
     print(f"Spawned train on {APP_NAME}: {call.object_id}")
     return call
 

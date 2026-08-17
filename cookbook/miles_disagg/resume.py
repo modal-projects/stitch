@@ -14,6 +14,7 @@ from cookbook.common.constants import STITCH_PATH
 from stitch.types import WEIGHT_PREFIX, VersionRef
 
 RESUME_POINT_ENV = "STITCH_RESUME_POINT"
+TRAINER_CALL_FILE = "trainer_call_id"
 
 
 class ResumePointNotFound(ValueError):
@@ -170,6 +171,59 @@ def _check_published_version(
         raise ValueError(f"{index_path} identifies v{published}, not v{version}")
 
 
+def prepare_attempt(
+    volume: Any, *, run_id: str, save_hf: str | None
+) -> ResumePoint | None:
+    """Derive one trainer attempt's resume state from the run volume alone.
+
+    Every attempt — the first, a Modal retry, or a manual re-spawn — calls this
+    with identical inputs: the newest complete checkpoint pair is restored and
+    returned, and a run that crashed before its first pair restarts from
+    scratch with the pointer rewound to the boot version, so replicas abandon
+    the unsaved suffix either way.
+    """
+    try:
+        point = resolve_resume_point(volume, source_run_id=run_id, save_hf=save_hf)
+    except ResumePointNotFound:
+        restore_boot_pointer(volume, run_id)
+        return None
+    restore_resume_point(volume, point)
+    return point
+
+
+def restore_boot_pointer(volume: Any, run_id: str) -> None:
+    """Rewind ``latest`` to the boot version when a run has nothing to resume."""
+    pointer_path = f"{run_id}/latest"
+    try:
+        current = VersionRef.parse(
+            _read_volume_file(volume, pointer_path).decode().strip()
+        )
+    except FileNotFoundError:
+        return  # nothing claimed yet; the attempt's own claim writes v0
+    if current.run_id != run_id:
+        raise ValueError(f"latest belongs to run {current.run_id!r}, not {run_id!r}")
+    if current.version == 0:
+        return
+    with volume.batch_upload(force=True) as upload:
+        upload.put_file(BytesIO(VersionRef(run_id, 0).identity.encode()), pointer_path)
+
+
+def record_trainer_call(volume: Any, run_id: str, call_id: str) -> None:
+    """Record the run's active trainer call; a newer spawn supersedes the old."""
+    with volume.batch_upload(force=True) as upload:
+        upload.put_file(BytesIO(call_id.encode()), f"{run_id}/{TRAINER_CALL_FILE}")
+
+
+def read_trainer_call(volume: Any, run_id: str) -> str | None:
+    """Return the run's recorded trainer call id, or None before the first spawn."""
+    try:
+        return (
+            _read_volume_file(volume, f"{run_id}/{TRAINER_CALL_FILE}").decode().strip()
+        )
+    except FileNotFoundError:
+        return None
+
+
 def restore_resume_point(volume: Any, point: ResumePoint) -> VersionRef:
     """Restore the trainer tracker and Stitch pointer to one checkpoint pair."""
     target = VersionRef(point.source_run_id, point.version)
@@ -186,7 +240,9 @@ def restore_resume_point(volume: Any, point: ResumePoint) -> VersionRef:
         raise ValueError(
             f"cannot restore {target.identity!r} from {current.identity!r}"
         )
-    if target.version > current.version:
+    # One ahead is a publish interrupted between its verified files and the
+    # pointer advance; restoring forward by one completes it.
+    if target.version > current.version + 1:
         raise ValueError(
             f"resume checkpoint v{target.version} is newer than latest v{current.version}"
         )
