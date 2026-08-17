@@ -5,11 +5,12 @@ Server (sglang + stitch sidecar) is the shared common one; the Trainer runs slim
 and publishes XOR deltas through the configured checkpoint store.
 
 Prepare the model + dataset once first (a separate app, so prep never spins up the rollout
-Server floor — see ``cookbook.slime_disagg.prep_app``), then launch a run with one command — it
-mints a unique run id, stands up that run's pool, and starts training. Each launch is its own run,
-isolated even from an identical-config relaunch (see ``cookbook.slime_disagg.launch``):
+Server floor — see ``cookbook.slime_disagg.prep_app``), then deploy the run's pool and launch
+its trainer under one run id. Each run id is its own run, isolated even from an
+identical-config run (see ``cookbook.slime_disagg.launch``):
 
-    EXPERIMENT_CONFIG=kimi_k2_6_int4 uv run --extra modal python -m cookbook.slime_disagg.launch
+    EXPERIMENT_CONFIG=kimi_k2_6_int4 RUN_ID=myrun01 uv run --extra modal modal deploy -m cookbook.slime_disagg.app
+    EXPERIMENT_CONFIG=kimi_k2_6_int4 RUN_ID=myrun01 uv run --extra modal python -m cookbook.slime_disagg.launch
 
 Config access is uniform: the experiment module ``exp`` is the single source of truth —
 its ``exp.modal`` (infra), ``exp.slime`` (training), and ``exp.<CONST>`` are read directly;

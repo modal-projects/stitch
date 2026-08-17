@@ -53,6 +53,19 @@ class ConstraintUnmet(Exception):
         self.error = error
 
 
+class AdmissionClosed(Exception):
+    """Admission is shed while this replica restages its weights (a retryable 503).
+
+    A 503 — unlike a 409 — makes the pool router evict this replica and retry the
+    session on another one, instead of session affinity re-pinning it here while
+    the restage runs.
+    """
+
+    def __init__(self, error: dict[str, Any]) -> None:
+        super().__init__(error["message"])
+        self.error = error
+
+
 class AdmissionGate:
     """Request admission + the commit gate.
 
@@ -84,6 +97,7 @@ class AdmissionGate:
         self._active = 0
         self._committing = False
         self._drain_all = False
+        self._shedding = False
         self._exact_inflight: dict[int, int] = defaultdict(int)
 
     @property
@@ -114,10 +128,21 @@ class AdmissionGate:
     @asynccontextmanager
     async def admit(self, constraint: VersionConstraint | None = None):
         """Admit one request under a single lock acquisition, yielding the version it
-        is served on. Raises :class:`ConstraintUnmet` if the constraint can't be met."""
+        is served on. Raises :class:`ConstraintUnmet` if the constraint can't be met,
+        or :class:`AdmissionClosed` while a shedding commit runs — a shed rejects
+        arrivals (and wakes waiters to reject them) rather than queueing them behind
+        a restage of unknown duration."""
         c = constraint or VersionConstraint()
         async with self._cond:
-            await self._cond.wait_for(lambda: not self._committing)
+            await self._cond.wait_for(lambda: not self._committing or self._shedding)
+            if self._shedding:
+                raise AdmissionClosed(
+                    {
+                        "type": "ReplicaRestaging",
+                        "message": "this replica is restaging its weights",
+                        "retryable": True,
+                    }
+                )
             error = self._rejection(c)
             if error is not None:
                 self._on_reject(error)
@@ -145,17 +170,22 @@ class AdmissionGate:
         pause: Callable[[], Awaitable[None]] | None = None,
         resume: Callable[[], Awaitable[None]] | None = None,
         drain_all: bool = False,
+        shed: bool = False,
     ) -> None:
         """Wait for the commit point, close the gate, apply, flip the served version
         (``on_applied``) while the gate is held, then reopen. ``on_applied`` runs only
         after a successful apply; in ``in_place`` the flip happens before ``resume``.
         ``drain_all`` marks an incompatible transition (a boot reset): drain and gate
         every request regardless of mode — rolling requests may cross a compatible
-        weight update, never a change of lineage (stitch#32)."""
+        weight update, never a change of lineage (stitch#32). ``shed`` additionally
+        rejects arrivals with :class:`AdmissionClosed` instead of queueing them —
+        for a commit whose apply may run long (a rewind restage), so the pool routes
+        around this replica rather than parking requests on it."""
         # Close admission before draining (stitch#32), else a new in_place request can straddle a boot reset.
         async with self._cond:
             self._committing = True
             self._drain_all = drain_all
+            self._shedding = shed
             self._cond.notify_all()
         try:
             async with self._cond:
@@ -175,6 +205,7 @@ class AdmissionGate:
             async with self._cond:
                 self._committing = False
                 self._drain_all = False
+                self._shedding = False
                 self._cond.notify_all()
 
 
@@ -440,6 +471,8 @@ class Reconciler:
             return True
         if self.applied is None or pointer.run_id != self.applied.run_id:
             await self._switch_run(pointer.run_id)
+        if self.applied is not None and pointer.version < self.applied.version:
+            await self._rewind(pointer, m)
         if not self._behind(pointer):
             return True
 
@@ -544,6 +577,64 @@ class Reconciler:
 
     async def _commit_noop(self) -> None:
         self.sync_state = SyncState.COMMITTING
+
+    async def _rewind(self, pointer: VersionRef, m: dict[str, Any]) -> None:
+        """Converge to a pointer behind the applied version: the launcher restored
+        the run to an earlier checkpoint, so every later version this replica
+        applied left the run's lineage.
+
+        Unlike a forward update, the live weights are not a valid serving state
+        while this runs, so the whole restage happens under a closed, shedding
+        gate (arrivals 503 and the router re-routes them) instead of the
+        stage-while-serving overlap. ``_range_has_weight_changes`` has no meaning
+        across a lineage fork — the restored checkpoint always loads. A failure
+        is terminal: a replacement replica boots from the restored checkpoint
+        directly, which also covers a boot anchor above the restore point."""
+        assert self.applied is not None
+        m["rewound_from_version"] = self.applied.version
+        m["applied_version"] = self.applied.version
+        m["target_version"] = pointer.version
+        self.ready = False  # leave rotation until reconcile re-latches convergence
+        self.sync_state = SyncState.FETCHING
+        self.last_error = None
+        logger.info(
+            "pointer rewound: v%d -> v%d, restaging the restored lineage",
+            self.applied.version,
+            pointer.version,
+        )
+        target = await asyncio.to_thread(self.store.read_manifest, pointer)
+        source_dir = await asyncio.to_thread(self.store.materialize, pointer)
+
+        async def apply() -> None:
+            self.sync_state = SyncState.STAGING
+            with _timed(m, "rewind_stage_s"):
+                await self.engine.stage(target, source_dir)
+            self.sync_state = SyncState.COMMITTING
+            # The abandoned suffix gets republished with different bytes under
+            # the same version numbers, so version-keyed KV entries are poisoned:
+            # flush unconditionally, not by commit policy.
+            with _timed(m, "rewind_commit_s"):
+                await self.engine.commit(target, flush_cache=True)
+
+        def on_applied() -> None:
+            self.applied = pointer
+
+        try:
+            await self.gate.commit(
+                apply=apply,
+                on_applied=on_applied,
+                pause=self.engine.pause,
+                resume=self.engine.resume,
+                drain_all=True,
+                shed=True,
+            )
+        except UnrecoverableSidecarError:
+            raise
+        except Exception as exc:
+            raise UnrecoverableEngineError(
+                "rewind to the restored checkpoint failed; the replacement "
+                "replica boots from it directly"
+            ) from exc
 
     async def _switch_run(self, new_run: str | None) -> None:
         """Select a new run at its boot version, resetting patched weights to the

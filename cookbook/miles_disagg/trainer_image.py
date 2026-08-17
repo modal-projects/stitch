@@ -24,6 +24,16 @@ MILES_REPO_URL = "https://github.com/modal-projects/miles.git"
 MILES_REPO_REF = "778a13786471777f81c587557f68cdf03903059a"
 
 MILES_ROOT = "/root/miles"
+# Applied to the checkout at container start (after any dev overlay), so the fixes
+# also cover MILES_LOCAL_DIR; each moves to the fork and drops when the pin advances.
+MILES_RUNTIME_PATCHES = (
+    # A resumed counter continues at iteration+1, so versions never relabel.
+    "/root/cookbook/miles_disagg/patches/miles-stable-weight-versions.patch",
+    # resumed_external baseline capture tolerates 0-dim tensors (qwen3moe).
+    "/root/cookbook/miles_disagg/patches/miles-seed-baseline-scalars.patch",
+    # single_turn generate honors an external rollout endpoint.
+    "/root/cookbook/miles_disagg/patches/miles-single-turn-external-endpoint.patch",
+)
 # Source-only megatron.training must be on PYTHONPATH.
 MEGATRON_PATH = "/root/Megatron-LM"
 TORCH_DIST_CONVERT_WRAPPER = "/root/convert_hf_to_torch_dist_modal.py"

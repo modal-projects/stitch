@@ -46,14 +46,34 @@ def materialize_node_local_yaml(
         setattr(cfg, field, path)
 
 
-def deploy_pool_and_spawn(run: Any) -> Any:
-    """Deploy a run's pool, wait for it to be ready, then spawn its trainer."""
+def spawn_on_pool(run: Any) -> Any:
+    """Spawn a run's trainer on its deployed pool. The launch path never deploys
+    or redeploys — the pool's whole lifecycle belongs to explicit ``modal
+    deploy`` invocations of the run's app — so a missing pool fails fast with
+    that instruction instead."""
     from stitch.pools.modal_flash_lb_temp import ModalFlashLBPool
     from stitch.service import await_pool_ready
 
-    run.app.deploy()
-    await_pool_ready(
-        ModalFlashLBPool(run.APP_NAME, "Server"),
-        replica_floor=run.modal_cfg.rollout_min_containers,
-    )
+    pool = ModalFlashLBPool(run.APP_NAME, "Server")
+    if not _pool_reachable(pool):
+        raise SystemExit(
+            f"No deployed pool for {run.APP_NAME!r}. Deploy it first:\n"
+            f"  EXPERIMENT_CONFIG={os.environ.get('EXPERIMENT_CONFIG', '<experiment>')} "
+            f"RUN_ID={os.environ['RUN_ID']} "
+            f"uv run --extra modal modal deploy -m {run.__name__}"
+        )
+    await_pool_ready(pool, replica_floor=run.modal_cfg.rollout_min_containers)
     return run.spawn_train()
+
+
+def _pool_reachable(pool: Any) -> bool:
+    """Whether the pool's gateway resolves; a stopped or never-deployed app does
+    not. Only those two outcomes fail the launch — an unexpected error propagates
+    rather than second-guess a live pool."""
+    from modal.exception import NotFoundError
+
+    try:
+        pool.gateway_url()
+    except (NotFoundError, RuntimeError):
+        return False
+    return True

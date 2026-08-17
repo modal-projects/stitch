@@ -267,6 +267,40 @@ def test_metrics_bypasses_weight_admission_before_first_pointer(monkeypatch):
     asyncio.run(go())
 
 
+def test_shedding_commit_returns_retryable_503():
+    # A rewind restage sheds versioned traffic with a 503 so the pool router
+    # evicts this replica and retries the session elsewhere (a 409 would bounce
+    # back through session affinity).
+    async def go():
+        gate_sidecar = _GateSidecar(applied=VersionRef("r1", 5))
+        app = create_app(gate_sidecar.gate, gate_sidecar, _ProxyEngine())
+        applying = asyncio.Event()
+        finish = asyncio.Event()
+
+        async def apply() -> None:
+            applying.set()
+            await finish.wait()
+
+        commit = asyncio.create_task(
+            gate_sidecar.gate.commit(
+                apply=apply, on_applied=lambda: None, drain_all=True, shed=True
+            )
+        )
+        await applying.wait()
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://sidecar"
+        ) as sidecar:
+            response = await sidecar.post("/generate", json={"text": "hi"})
+        assert response.status_code == 503
+        assert response.headers["retry-after"] == "1"
+        assert response.json()["error"]["retryable"] is True
+
+        finish.set()
+        await commit
+
+    asyncio.run(go())
+
+
 def test_await_pool_ready_waits_for_replica_threshold(monkeypatch) -> None:
     states = iter(
         [

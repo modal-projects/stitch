@@ -1,0 +1,18 @@
+diff --git a/miles/rollout/generate_hub/single_turn.py b/miles/rollout/generate_hub/single_turn.py
+index bc74457..6bd0085 100644
+--- a/miles/rollout/generate_hub/single_turn.py
++++ b/miles/rollout/generate_hub/single_turn.py
+@@ -18,7 +18,12 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
+     sample = input.sample
+     sampling_params = input.sampling_params
+     assert sample.status in {Sample.Status.PENDING, Sample.Status.ABORTED}, f"{sample.status=}"
+-    url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}/generate"
++    # An opaque external fleet serves /generate at its own gateway; the Miles
++    # router only exists for Miles-managed engines.
++    if getattr(args, "rollout_endpoint_url", None):
++        url = f"{args.rollout_endpoint_url}/generate"
++    else:
++        url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}/generate"
+ 
+     prompt_ids = compute_prompt_ids_from_sample(input.state, sample)
+ 

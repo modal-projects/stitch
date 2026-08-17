@@ -5,12 +5,12 @@ Server (sglang + stitch sidecar) is the shared common one; the Trainer runs mile
 and publishes XOR deltas through the configured checkpoint store.
 
 Prepare the checkpoints once first (a separate app, so prep never spins up the rollout Server
-floor — see ``cookbook.miles_disagg.prep_app``), then launch a run with one command — it mints a
-unique run id, stands up that run's pool, and starts training. A fresh launch is isolated even
-from an identical-config launch; resume retains the existing run id (see
-``cookbook.miles_disagg.launch``):
+floor — see ``cookbook.miles_disagg.prep_app``), then deploy the run's pool and launch its
+trainer under one run id. A fresh run id is isolated even from an identical-config run;
+resume retains the existing one (see ``cookbook.miles_disagg.launch``):
 
-    EXPERIMENT_CONFIG=glm45_air_fp8 uv run --extra modal python -m cookbook.miles_disagg.launch
+    EXPERIMENT_CONFIG=glm45_air_fp8 RUN_ID=myrun01 uv run --extra modal modal deploy -m cookbook.miles_disagg.app
+    EXPERIMENT_CONFIG=glm45_air_fp8 RUN_ID=myrun01 uv run --extra modal python -m cookbook.miles_disagg.launch
 
 Config access is uniform: the experiment module ``exp`` is the single source of truth —
 its ``exp.modal`` (infra), ``exp.miles`` (training), and ``exp.<CONST>`` are read directly;
@@ -51,13 +51,14 @@ from cookbook.common.constants import (
 from cookbook.miles_disagg import trainer_image
 from cookbook.miles_disagg.config import YAML_CONFIG_FIELDS, MilesConfig
 from cookbook.miles_disagg.resume import (
-    RESUME_POINT_ENV,
-    ResumePoint,
-    saved_checkpoint_version,
-    wait_for_restored_pointer,
+    export_version,
+    prepare_attempt,
+    read_trainer_call,
+    record_trainer_call,
 )
 from cookbook.miles_disagg.trainer_image import MEGATRON_PATH, MILES_ROOT
 from stitch.pools.modal_flash_lb_temp import ModalFlashLBPool
+from stitch.service import await_pool_ready
 from stitch.types import VersionRef
 
 EXPERIMENT = os.environ[
@@ -70,17 +71,6 @@ MILES_LOCAL_DIR = os.environ.get(
 exp = importlib.import_module(f"cookbook.miles_disagg.configs.{EXPERIMENT}")
 modal_cfg = exp.modal
 miles_cfg = exp.miles
-
-
-def _resume_point() -> ResumePoint | None:
-    if payload := os.environ.get(RESUME_POINT_ENV):
-        return ResumePoint.from_json(payload)
-    return None
-
-
-def _rollout_boot_checkpoint() -> str:
-    point = _resume_point()
-    return point.rollout_checkpoint if point is not None else miles_cfg.hf_checkpoint
 
 
 # Minted once for a run and retained across resume. The same identity scopes the
@@ -112,7 +102,6 @@ image = trainer_image.build_trainer_image(
     image_run_commands=getattr(exp, "TRAINER_IMAGE_RUN_COMMANDS", ()),
     extra_env=STORE_DEPLOYMENT.image_environment,
 )
-# Server containers re-import this module, so persist this attempt's resume point.
 server_image = serving_image.build_serving_image(
     hf_cache_path=str(HF_CACHE_PATH),
     experiment=EXPERIMENT,
@@ -120,7 +109,6 @@ server_image = serving_image.build_serving_image(
     extra_packages=STORE_DEPLOYMENT.extra_packages,
     extra_env={
         **(getattr(exp, "SGLANG_SERVER_ENV", None) or {}),
-        RESUME_POINT_ENV: os.environ.get(RESUME_POINT_ENV, ""),
         **STORE_DEPLOYMENT.image_environment,
     },
     runtime=getattr(exp, "SGLANG_RUNTIME", serving_image.DEFAULT_SGLANG_RUNTIME),
@@ -169,7 +157,7 @@ train_volumes = {
 app = modal.App(APP_NAME)
 
 SGLANG_SERVER_ARGS = {
-    "--served-model-name": _rollout_boot_checkpoint(),
+    "--served-model-name": miles_cfg.hf_checkpoint,
     **(
         {}
         if "--cuda-graph-config" in exp.SGLANG_SERVER_ARGS
@@ -222,19 +210,8 @@ class Server:
     def startup(self) -> None:
         STORE_DEPLOYMENT.bootstrap_credentials()
         store_config = STORE_DEPLOYMENT.hook_config(APP_NAME)
-        resume_point = _resume_point()
-        if resume_point is not None:
-            wait_for_restored_pointer(
-                run_volume,
-                resume_point,
-                timeout=SERVER_STARTUP_TIMEOUT,
-            )
-        model_name = (
-            resume_point.rollout_checkpoint
-            if resume_point is not None
-            else miles_cfg.hf_checkpoint
-        )
-        boot_version = resume_point.version if resume_point is not None else 0
+        model_name = miles_cfg.hf_checkpoint
+        boot_version = 0
         save_hf = getattr(miles_cfg, "save_hf", None)
         # TODO: support larger update intervals once saved checkpoints expose the
         # exact published weight version instead of only Miles' rollout ID.
@@ -250,7 +227,9 @@ class Server:
                 raise ValueError("save_hf must be a run-relative path")
 
             # Read complete HF exports and the published pointer from one Volume
-            # snapshot. A save ahead of latest is not eligible yet.
+            # snapshot. A save ahead of latest is not eligible yet — including
+            # the abandoned suffix of a resume whose restore has not landed;
+            # the reconciler rewinds a replica that raced it.
             run_volume.reload()
             store = storage.create_store(
                 store_config["stitch_store_backend"],
@@ -274,11 +253,8 @@ class Server:
                         rollout_id=saved_rollout_id
                     ):
                         continue
-                    saved_version = saved_checkpoint_version(
-                        saved_rollout_id,
-                        resumed=resume_point is not None,
-                    )
-                    if boot_version <= saved_version <= latest.version:
+                    saved_version = export_version(saved_rollout_id)
+                    if saved_version <= latest.version:
                         checkpoints.append((saved_version, marker.parent))
                 if checkpoints:
                     saved_version, checkpoint = max(checkpoints)
@@ -399,6 +375,11 @@ _MULTINODE = miles_cfg.n_train_nodes > 1
     timeout=24 * 60 * MINUTES,
     startup_timeout=20 * MINUTES,
     scaledown_window=30 * MINUTES,
+    # Modal owns the retry loop: a failed attempt restarts with identical input
+    # and train() re-derives its resume state from the run volume. Containers
+    # are NOT single-use: non-zero ranks return their input immediately while
+    # serving Ray workers, so reaping a returned input would dissolve the gang.
+    retries=modal.Retries(initial_delay=0.0, max_retries=10),
     include_source=False,
     **({"experimental_options": {"efa_enabled": True}} if _MULTINODE else {}),
 )
@@ -409,7 +390,7 @@ _MULTINODE = miles_cfg.n_train_nodes > 1
 )
 class Trainer:
     """miles actor cluster. Ray comes up once per container in enter(), so back-to-back
-    runs reuse it."""
+    attempts reuse it."""
 
     @modal.enter()
     def start_ray(self) -> None:
@@ -423,6 +404,11 @@ class Trainer:
             list(getattr(exp, "MEGATRON_RUNTIME_PATCHES", [])),
             MEGATRON_PATH,
             "Megatron patch",
+        )
+        process.apply_git_patches(
+            list(trainer_image.MILES_RUNTIME_PATCHES),
+            MILES_ROOT,
+            "Miles patch",
         )
         self.rank = rank
         process.start_host_mem_monitor()  # per-node host-RAM trace
@@ -440,22 +426,41 @@ class Trainer:
         )
 
     @modal.method()
-    def train(self, payload: dict, resume_payload: str | None = None) -> None:
-        """Run one training job from a MilesConfig payload (see MilesConfig.to_payload)."""
+    def train(self, payload: dict) -> None:
+        """Run one training attempt from a MilesConfig payload (see MilesConfig.to_payload).
+
+        Reentrant: the input is attempt-invariant, and each attempt re-derives its
+        resume state from the run volume — the newest complete checkpoint pair, or
+        a scratch restart before the first one — so a Modal retry continues the
+        run instead of replaying the original attempt's world."""
         for volume in train_volumes.values():
             volume.reload()
 
-        resume_point = (
-            ResumePoint.from_json(resume_payload)
-            if resume_payload is not None
-            else None
-        )
         cfg = MilesConfig.from_payload(payload)
         launch.materialize_node_local_yaml(cfg, "te_precision_config_file")
         if self.rank != 0:
             return
 
-        cfg.rollout_endpoint_url = ModalFlashLBPool(APP_NAME, "Server").gateway_url()
+        call_id = modal.current_function_call_id()
+        recorded = read_trainer_call(run_volume, RUN_ID)
+        if recorded is not None and call_id is not None and recorded != call_id:
+            print(
+                f"Run {RUN_ID} was taken over by trainer call {recorded}; exiting",
+                flush=True,
+            )
+            return
+
+        resume_point = None
+        if STORE_DEPLOYMENT.backend == storage.MODAL_VOLUME:
+            resume_point = prepare_attempt(
+                run_volume, run_id=RUN_ID, save_hf=getattr(cfg, "save_hf", None)
+            )
+        pool = ModalFlashLBPool(APP_NAME, "Server")
+        # Post-restore, replicas ahead of the checkpoint leave rotation to
+        # restage, so the ready floor counts only converged capacity.
+        await_pool_ready(pool, replica_floor=modal_cfg.rollout_min_containers)
+
+        cfg.rollout_endpoint_url = pool.gateway_url()
         if resume_point is not None:
             cfg.load = resume_point.trainer_checkpoint
             cfg.hf_checkpoint = resume_point.rollout_checkpoint
@@ -547,13 +552,13 @@ def _build_train_cmd(cfg: MilesConfig) -> str:
 
 # ── Entrypoints (preparation lives in a separate app: cookbook.miles_disagg.prep_app) ──
 def spawn_train() -> Any:
-    """Spawn the trainer on this run's already-deployed pool (config ships as data, so config
-    edits run without a redeploy; infra changes still require one)."""
+    """Spawn the trainer on this run's already-deployed pool (config ships as data, so
+    config edits run without a redeploy; infra changes still require one). Recording the
+    call id fences the run: a superseded call's next attempt exits instead of fighting
+    this one."""
     trainer = modal.Cls.from_name(APP_NAME, "Trainer")()
-    call = trainer.train.spawn(
-        miles_cfg.to_payload(),
-        os.environ.get(RESUME_POINT_ENV),
-    )
+    call = trainer.train.spawn(miles_cfg.to_payload())
+    record_trainer_call(run_volume, RUN_ID, call.object_id)
     print(f"Spawned train on {APP_NAME}: {call.object_id}")
     return call
 
