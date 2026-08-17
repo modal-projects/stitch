@@ -11,7 +11,7 @@ from pathlib import PurePosixPath
 from typing import Any
 
 from cookbook.common.constants import STITCH_PATH
-from stitch.types import VersionRef
+from stitch.types import WEIGHT_PREFIX, VersionRef
 
 RESUME_POINT_ENV = "STITCH_RESUME_POINT"
 
@@ -22,9 +22,14 @@ class ResumePointNotFound(ValueError):
 
 @dataclass(frozen=True)
 class ResumePoint:
-    """One paired trainer/rollout checkpoint produced by a run."""
+    """One paired trainer/rollout checkpoint produced by a run.
+
+    ``version`` is the export's published weight version; ``iteration`` is the
+    Megatron iteration that produced it (``version == iteration + 1``).
+    """
 
     version: int
+    iteration: int
     source_run_id: str
     trainer_checkpoint: str
     rollout_checkpoint: str
@@ -37,20 +42,22 @@ class ResumePoint:
         data = json.loads(value)
         return cls(
             version=int(data["version"]),
+            iteration=int(data["iteration"]),
             source_run_id=str(data["source_run_id"]),
             trainer_checkpoint=str(data["trainer_checkpoint"]),
             rollout_checkpoint=str(data["rollout_checkpoint"]),
         )
 
 
-def saved_checkpoint_version(rollout_id: int, *, resumed: bool) -> int:
-    """Return the Stitch version stored by a Miles ``save_hf`` checkpoint.
+def export_version(iteration: int) -> int:
+    """Return the published weight version of the export saved at ``iteration``.
 
-    A fresh trainer starts rollout 0 from Stitch v0, so save N precedes the
-    publication of vN+1. A resumed trainer starts rollout N+1 from Stitch vN,
-    so subsequent save IDs and Stitch versions are equal.
+    A save at iteration N precedes the publication of vN+1, and a resumed
+    trainer continues the version counter from there (the runtime Miles patch),
+    so this mapping holds for a run's whole lifetime: version numbers are never
+    relabeled across attempts.
     """
-    return rollout_id if resumed else rollout_id + 1
+    return iteration + 1
 
 
 def validate_auto_resume_config(cfg: Any) -> None:
@@ -104,34 +111,63 @@ def resolve_resume_point(
     if tracked_version < 0:
         raise ValueError(f"invalid checkpoint version {tracked_version} in {tracker}")
 
-    checkpoint_versions = []
+    iterations = []
     for entry in volume.iterdir(str(checkpoint_root), recursive=False):
         if match := re.fullmatch(r"iter_(\d+)", PurePosixPath(entry.path).name):
-            version = int(match.group(1))
-            if version <= tracked_version:
-                checkpoint_versions.append(version)
+            iteration = int(match.group(1))
+            # Iteration 0 is never a resume point: a fresh actor also reports
+            # iteration 0, which is how the version counter tells fresh from
+            # resumed (the runtime Miles patch).
+            if 0 < iteration <= tracked_version:
+                iterations.append(iteration)
 
     save_hf = _validate_save_hf_template(save_hf)
-    for version in sorted(checkpoint_versions, reverse=True):
-        relative_hf = save_hf.format(rollout_id=version)
+    for iteration in sorted(iterations, reverse=True):
+        relative_hf = save_hf.format(rollout_id=iteration)
         hf_root = run_root / relative_hf
         try:
             _read_volume_file(volume, str(hf_root / ".complete"))
         except FileNotFoundError:
             continue
+        # A resumed run republishes the abandoned suffix in place, so the resume
+        # point's own publication must exist and identify itself — a crash
+        # between save and publish falls back one save interval instead.
+        try:
+            _check_published_version(
+                volume, run_root, version=export_version(iteration)
+            )
+        except FileNotFoundError:
+            continue
         break
     else:
         raise ResumePointNotFound(
-            f"run {source_run_id!r} has no complete Megatron/HF checkpoint pair at or "
-            f"before v{tracked_version}"
+            f"run {source_run_id!r} has no complete Megatron/HF checkpoint pair "
+            f"with a published export at or before iteration {tracked_version}"
         )
 
     return ResumePoint(
-        version=version,
+        version=export_version(iteration),
+        iteration=iteration,
         source_run_id=source_run_id,
         trainer_checkpoint=str(STITCH_PATH / checkpoint_root),
         rollout_checkpoint=str(STITCH_PATH / hf_root),
     )
+
+
+def _check_published_version(
+    volume: Any, run_root: PurePosixPath, *, version: int
+) -> None:
+    """Require ``updates/weight_vNNNNNN`` to exist and identify itself as ``version``."""
+    index_path = (
+        run_root
+        / "updates"
+        / f"{WEIGHT_PREFIX}{version:06d}"
+        / "model.safetensors.index.json"
+    )
+    index = json.loads(_read_volume_file(volume, str(index_path)))
+    published = int((index.get("metadata") or {})["version"])
+    if published != version:
+        raise ValueError(f"{index_path} identifies v{published}, not v{version}")
 
 
 def restore_resume_point(volume: Any, point: ResumePoint) -> VersionRef:
@@ -158,7 +194,7 @@ def restore_resume_point(volume: Any, point: ResumePoint) -> VersionRef:
     with volume.batch_upload(force=True) as upload:
         upload.put_file(BytesIO(target.identity.encode()), pointer_path)
         upload.put_file(
-            BytesIO(str(point.version).encode()),
+            BytesIO(str(point.iteration).encode()),
             f"{point.source_run_id}/checkpoints/latest_checkpointed_iteration.txt",
         )
     return target

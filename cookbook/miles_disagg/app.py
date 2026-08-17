@@ -53,7 +53,7 @@ from cookbook.miles_disagg.config import YAML_CONFIG_FIELDS, MilesConfig
 from cookbook.miles_disagg.resume import (
     RESUME_POINT_ENV,
     ResumePoint,
-    saved_checkpoint_version,
+    export_version,
     wait_for_restored_pointer,
 )
 from cookbook.miles_disagg.trainer_image import MEGATRON_PATH, MILES_ROOT
@@ -274,10 +274,7 @@ class Server:
                         rollout_id=saved_rollout_id
                     ):
                         continue
-                    saved_version = saved_checkpoint_version(
-                        saved_rollout_id,
-                        resumed=resume_point is not None,
-                    )
+                    saved_version = export_version(saved_rollout_id)
                     if boot_version <= saved_version <= latest.version:
                         checkpoints.append((saved_version, marker.parent))
                 if checkpoints:
@@ -423,6 +420,11 @@ class Trainer:
             list(getattr(exp, "MEGATRON_RUNTIME_PATCHES", [])),
             MEGATRON_PATH,
             "Megatron patch",
+        )
+        process.apply_git_patches(
+            list(trainer_image.MILES_RUNTIME_PATCHES),
+            MILES_ROOT,
+            "Miles patch",
         )
         self.rank = rank
         process.start_host_mem_monitor()  # per-node host-RAM trace
