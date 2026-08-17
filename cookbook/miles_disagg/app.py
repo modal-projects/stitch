@@ -5,12 +5,12 @@ Server (sglang + stitch sidecar) is the shared common one; the Trainer runs mile
 and publishes XOR deltas through the configured checkpoint store.
 
 Prepare the checkpoints once first (a separate app, so prep never spins up the rollout Server
-floor — see ``cookbook.miles_disagg.prep_app``), then launch a run with one command — it mints a
-unique run id, stands up that run's pool, and starts training. A fresh launch is isolated even
-from an identical-config launch; resume retains the existing run id (see
-``cookbook.miles_disagg.launch``):
+floor — see ``cookbook.miles_disagg.prep_app``), then deploy the run's pool and launch its
+trainer under one run id. A fresh run id is isolated even from an identical-config run;
+resume retains the existing one (see ``cookbook.miles_disagg.launch``):
 
-    EXPERIMENT_CONFIG=glm45_air_fp8 uv run --extra modal python -m cookbook.miles_disagg.launch
+    EXPERIMENT_CONFIG=glm45_air_fp8 RUN_ID=myrun01 uv run --extra modal modal deploy -m cookbook.miles_disagg.app
+    EXPERIMENT_CONFIG=glm45_air_fp8 RUN_ID=myrun01 uv run --extra modal python -m cookbook.miles_disagg.launch
 
 Config access is uniform: the experiment module ``exp`` is the single source of truth —
 its ``exp.modal`` (infra), ``exp.miles`` (training), and ``exp.<CONST>`` are read directly;
@@ -455,14 +455,12 @@ class Trainer:
             resume_point = prepare_attempt(
                 run_volume, run_id=RUN_ID, save_hf=getattr(cfg, "save_hf", None)
             )
+        pool = ModalFlashLBPool(APP_NAME, "Server")
         # Post-restore, replicas ahead of the checkpoint leave rotation to
         # restage, so the ready floor counts only converged capacity.
-        await_pool_ready(
-            ModalFlashLBPool(APP_NAME, "Server"),
-            replica_floor=modal_cfg.rollout_min_containers,
-        )
+        await_pool_ready(pool, replica_floor=modal_cfg.rollout_min_containers)
 
-        cfg.rollout_endpoint_url = ModalFlashLBPool(APP_NAME, "Server").gateway_url()
+        cfg.rollout_endpoint_url = pool.gateway_url()
         if resume_point is not None:
             cfg.load = resume_point.trainer_checkpoint
             cfg.hf_checkpoint = resume_point.rollout_checkpoint
@@ -554,9 +552,10 @@ def _build_train_cmd(cfg: MilesConfig) -> str:
 
 # ── Entrypoints (preparation lives in a separate app: cookbook.miles_disagg.prep_app) ──
 def spawn_train() -> Any:
-    """Spawn the trainer on this run's already-deployed pool (config ships as data, so config
-    edits run without a redeploy; infra changes still require one). Recording the call id
-    fences the run: a superseded call's next attempt exits instead of fighting this one."""
+    """Spawn the trainer on this run's already-deployed pool (config ships as data, so
+    config edits run without a redeploy; infra changes still require one). Recording the
+    call id fences the run: a superseded call's next attempt exits instead of fighting
+    this one."""
     trainer = modal.Cls.from_name(APP_NAME, "Trainer")()
     call = trainer.train.spawn(miles_cfg.to_payload())
     record_trainer_call(run_volume, RUN_ID, call.object_id)

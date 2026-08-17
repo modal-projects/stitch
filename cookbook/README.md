@@ -74,26 +74,36 @@ dependent format conversion. Dataset preparation is independent.
 
 ### 5. Launch an isolated run
 
-Use the launcher for the selected trainer:
+Deploy the run's pool, then launch its trainer (Slime swaps in
+`cookbook.slime_disagg`):
 
 ```bash
-# Miles
-uv run --extra modal python -m cookbook.miles_disagg.launch
+export RUN_ID=myrun01  # any unique id; each id is its own run and lineage
 
-# Slime
-uv run --extra modal python -m cookbook.slime_disagg.launch
+uv run --extra modal modal deploy -m cookbook.miles_disagg.app
+uv run --extra modal python -m cookbook.miles_disagg.launch
 ```
 
-The launcher creates an eight-character run ID unless `RUN_ID` is set explicitly,
-deploys a run-scoped rollout pool, waits for its gateway, and starts the trainer.
-It prints the app name and stop command. Repeating the command creates a separate
-run and checkpoint lineage.
+The launcher waits for the pool's floor and spawns the trainer; it prints the
+app name and stop command. It never deploys — the pool's lifecycle belongs to
+explicit `modal deploy` invocations (the same command applies infra changes
+later), and a missing pool fails fast with that instruction.
 
 #### Resume a Miles run
 
-Use the same recipe and Modal environment as the source run. A resumable point
-is the latest saved Megatron checkpoint with a matching complete Hugging Face
-export. Resume it once with:
+Recovery is automatic. The trainer runs under Modal retries with an
+attempt-invariant input, and every attempt derives its state from the run
+volume: the newest saved Megatron checkpoint whose Hugging Face export and
+published version both exist. A failed attempt resumes from that pair — live
+replicas ahead of it rewind in place — and a run that dies before its first
+pair restarts from scratch. If the pair is iteration 119, the run resumes at
+v120 and publishes v121 next; version numbers never change meaning across
+attempts. Resume requires the Modal Volume store, `update_weights_interval = 1`,
+`save_interval`, `save_hf`, and optimizer/RNG checkpointing — a launch without
+those warns and restarts from scratch on retry.
+
+Past the retry budget (ten attempts of up to 24 hours each), or to take over a
+run manually, relaunch with the same recipe and Modal environment:
 
 ```bash
 export EXPERIMENT_CONFIG=your_config_name
@@ -103,25 +113,10 @@ uv run --extra modal python -m cookbook.miles_disagg.launch \
   --resume-from existing_run_id
 ```
 
-The launcher keeps the existing run ID, recreates its rollout deployment, and
-resets `latest` before replacement engines load the saved checkpoint. If the
-checkpoint is v120, the run resumes at v120 and publishes a replacement v121
-next. Resume currently requires the Modal Volume store and
-`update_weights_interval = 1`.
-
-Add automatic resume to a fresh or resumed launch with:
-
-```bash
-uv run --extra modal python -m cookbook.miles_disagg.launch \
-  --resume-from existing_run_id \
-  --auto-resume
-```
-
-`--auto-resume` stays attached to the trainer. An unexpected exit recreates the
-same run from its newest complete checkpoint and retries until the trainer
-returns normally. Stop it with Ctrl-C. It is off by default and requires
-`save_interval`, `save_hf`, and optimizer/RNG checkpointing. A fresh run becomes
-resumable after its first complete Megatron/Hugging Face checkpoint pair.
+This reuses the run's identity and its pool — a live pool is never redeployed
+or replaced on the launch path — and spawns a fresh trainer call that
+supersedes the previous one (each run records its active trainer call ID) and
+resumes exactly like a retry.
 
 With the Modal Volume store, complete Hugging Face checkpoints also accelerate
 elastic rollout startup. When a Miles recipe saves checkpoints and updates
@@ -262,6 +257,7 @@ Each experiment Volume contains only run-scoped state:
 /stitch/
 └── <run-id>/
     ├── latest
+    ├── trainer_call_id
     ├── updates/weight_vNNNNNN/
     ├── checkpoints/
     ├── hf_checkpoints/weight_vNNNNNN/
@@ -270,9 +266,11 @@ Each experiment Volume contains only run-scoped state:
 ```
 
 The training framework owns `updates/` and the saved checkpoints; Stitch owns
-`latest`. Resume keeps the same run ID, restores `latest` to the checkpoint,
-and replaces the abandoned update suffix as training continues. Each finished
-trainer attempt writes a separate log; use Modal app logs while it is running.
+`latest` and `trainer_call_id` (the run's active trainer call — a superseded
+call exits instead of fighting a newer spawn). A resuming attempt restores
+`latest` to the checkpoint's published version and replaces the abandoned
+update suffix as training continues. Each finished trainer attempt writes a
+separate log; use Modal app logs while it is running.
 
 Datasets are independent of models and runs:
 
