@@ -136,10 +136,8 @@ SGLANG_SERVER_ARGS = {
     "--dsa-decode-backend": "flashmla_kv",
     "--dsa-topk-backend": "flashinfer",
     "--page-size": "64",
-    # The endpoint supplies TP4. DFlash does not support DP attention, so only
-    # expert parallelism is explicit here; dense MoE paths remain TP1.
-    "--ep-size": str(ROLLOUT_GPUS_PER_ENGINE),
-    "--moe-dense-tp-size": "1",
+    # The endpoint supplies TP4 in app.py
+    # "--tp-size": str(ROLLOUT_GPUS_PER_ENGINE),
     # MoE
     "--moe-runner-backend": "flashinfer_trtllm_routed",
     "--disable-shared-experts-fusion": "",
