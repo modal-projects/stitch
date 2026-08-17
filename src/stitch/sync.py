@@ -471,6 +471,8 @@ class Reconciler:
             return True
         if self.applied is None or pointer.run_id != self.applied.run_id:
             await self._switch_run(pointer.run_id)
+        if self.applied is not None and pointer.version < self.applied.version:
+            await self._rewind(pointer, m)
         if not self._behind(pointer):
             return True
 
@@ -575,6 +577,64 @@ class Reconciler:
 
     async def _commit_noop(self) -> None:
         self.sync_state = SyncState.COMMITTING
+
+    async def _rewind(self, pointer: VersionRef, m: dict[str, Any]) -> None:
+        """Converge to a pointer behind the applied version: the launcher restored
+        the run to an earlier checkpoint, so every later version this replica
+        applied left the run's lineage.
+
+        Unlike a forward update, the live weights are not a valid serving state
+        while this runs, so the whole restage happens under a closed, shedding
+        gate (arrivals 503 and the router re-routes them) instead of the
+        stage-while-serving overlap. ``_range_has_weight_changes`` has no meaning
+        across a lineage fork — the restored checkpoint always loads. A failure
+        is terminal: a replacement replica boots from the restored checkpoint
+        directly, which also covers a boot anchor above the restore point."""
+        assert self.applied is not None
+        m["rewound_from_version"] = self.applied.version
+        m["applied_version"] = self.applied.version
+        m["target_version"] = pointer.version
+        self.ready = False  # leave rotation until reconcile re-latches convergence
+        self.sync_state = SyncState.FETCHING
+        self.last_error = None
+        logger.info(
+            "pointer rewound: v%d -> v%d, restaging the restored lineage",
+            self.applied.version,
+            pointer.version,
+        )
+        target = await asyncio.to_thread(self.store.read_manifest, pointer)
+        source_dir = await asyncio.to_thread(self.store.materialize, pointer)
+
+        async def apply() -> None:
+            self.sync_state = SyncState.STAGING
+            with _timed(m, "rewind_stage_s"):
+                await self.engine.stage(target, source_dir)
+            self.sync_state = SyncState.COMMITTING
+            # The abandoned suffix gets republished with different bytes under
+            # the same version numbers, so version-keyed KV entries are poisoned:
+            # flush unconditionally, not by commit policy.
+            with _timed(m, "rewind_commit_s"):
+                await self.engine.commit(target, flush_cache=True)
+
+        def on_applied() -> None:
+            self.applied = pointer
+
+        try:
+            await self.gate.commit(
+                apply=apply,
+                on_applied=on_applied,
+                pause=self.engine.pause,
+                resume=self.engine.resume,
+                drain_all=True,
+                shed=True,
+            )
+        except UnrecoverableSidecarError:
+            raise
+        except Exception as exc:
+            raise UnrecoverableEngineError(
+                "rewind to the restored checkpoint failed; the replacement "
+                "replica boots from it directly"
+            ) from exc
 
     async def _switch_run(self, new_run: str | None) -> None:
         """Select a new run at its boot version, resetting patched weights to the

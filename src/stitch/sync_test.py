@@ -14,7 +14,7 @@ import pytest
 from stitch.engines.base import Engine
 from stitch.errors import UnrecoverableEngineError
 from stitch.stores.base import Store
-from stitch.sync import ConstraintUnmet, Reconciler
+from stitch.sync import AdmissionClosed, ConstraintUnmet, Reconciler
 from stitch.types import (
     SyncState,
     VersionConstraint,
@@ -61,6 +61,7 @@ class FakeEngine(Engine):
         self.calls: list[str] = []
         self.staged: list[VersionRef] = []
         self.committed: list[VersionRef] = []
+        self.commit_flushes: list[bool] = []
         self.initialized_versions: list[int] = []
 
     async def stage(self, manifest: VersionManifest, source_dir: str) -> None:
@@ -74,6 +75,7 @@ class FakeEngine(Engine):
         flush_cache: bool = False,
     ) -> None:
         self.committed.append(manifest.ref)
+        self.commit_flushes.append(flush_cache)
         self.calls.append(f"commit:{manifest.ref.version}")
 
     async def flush_cache(self) -> None:
@@ -424,6 +426,122 @@ def test_run_switch_drains_rolling_requests() -> None:
         assert (
             late_served[0] is not None and late_served[0].run_id == "r2"
         )  # admitted post-wipe
+
+    _run(go())
+
+
+# ── rewind (a restored checkpoint moved the pointer backward) ─────────────────
+def test_pointer_rewind_restages_in_place() -> None:
+    async def go() -> None:
+        engine = FakeEngine()
+        r = _make_reconciler(
+            store=FakeStore(VersionRef("r1", 2), _full("r1", 2)),
+            engine=engine,
+            commit_mode="in_place",
+        )
+        r.applied = VersionRef("r1", 5)
+        r.ready = True
+        await r.reconcile()
+        assert r.applied == VersionRef("r1", 2)
+        assert engine.committed[-1] == VersionRef("r1", 2)
+        # Republished suffix versions carry different bytes under the same
+        # numbers, so version-keyed KV must flush regardless of commit policy.
+        assert engine.commit_flushes[-1] is True
+        assert r.ready  # re-latches once converged on the restored lineage
+        assert r.server_info()["terminal_error"] is None
+
+    _run(go())
+
+
+def test_rewind_commits_even_when_the_range_looks_empty() -> None:
+    # The forward path skips byte-identical ranges; across a lineage fork that
+    # check has no meaning, so a rewind always reloads the restored checkpoint.
+    async def go() -> None:
+        engine = FakeEngine()
+        r = _make_reconciler(
+            store=FakeStore(VersionRef("r1", 2), _delta("r1", 2, files=[])),
+            engine=engine,
+        )
+        r.applied = VersionRef("r1", 5)
+        await r.reconcile()
+        assert VersionRef("r1", 2) in engine.committed
+
+    _run(go())
+
+
+def test_rewind_sheds_arrivals_and_drains_rolling_requests() -> None:
+    async def go() -> None:
+        engine = FakeEngine()
+        stage_started = asyncio.Event()
+        finish_stage = asyncio.Event()
+
+        async def slow_stage(manifest: VersionManifest, _source_dir: str) -> None:
+            engine.calls.append(f"stage:{manifest.ref.version}")
+            stage_started.set()
+            await finish_stage.wait()
+
+        engine.stage = slow_stage  # type: ignore[method-assign]
+        r = _make_reconciler(
+            store=FakeStore(VersionRef("r1", 2), _full("r1", 2)),
+            engine=engine,
+            commit_mode="in_place",
+        )
+        r.applied = VersionRef("r1", 5)
+        release = asyncio.Event()
+
+        async def rolling() -> None:
+            async with r.gate.admit(None):
+                await release.wait()
+
+        req = asyncio.create_task(rolling())
+        await asyncio.sleep(0)  # admitted before the rewind begins
+        sync = asyncio.create_task(r.reconcile())
+        for _ in range(1000):
+            if r.gate._committing:
+                break
+            await asyncio.sleep(0.001)
+        # The wrong-lineage bytes are never restaged under a rolling request.
+        assert "stage:2" not in engine.calls
+        assert not r.ready
+        with pytest.raises(AdmissionClosed):  # arrivals shed instead of queueing
+            async with r.gate.admit(VersionConstraint()):
+                pass
+        release.set()
+        await stage_started.wait()
+        finish_stage.set()
+        await asyncio.gather(req, sync)
+        assert r.applied == VersionRef("r1", 2)
+        assert r.ready
+        async with r.gate.admit(VersionConstraint()) as served:  # gate reopens
+            assert served == VersionRef("r1", 2)
+
+    _run(go())
+
+
+def test_rewind_failure_is_terminal() -> None:
+    # A failed rewind (e.g. the restore point precedes this replica's boot
+    # anchor) replaces the replica; the replacement boots from the restored
+    # checkpoint directly.
+    async def go() -> None:
+        engine = FakeEngine()
+
+        async def fail_stage(_manifest: VersionManifest, _source_dir: str) -> None:
+            raise RuntimeError("target precedes the base checkpoint")
+
+        engine.stage = fail_stage  # type: ignore[method-assign]
+        r = _make_reconciler(
+            store=FakeStore(VersionRef("r1", 2), _full("r1", 2)),
+            engine=engine,
+            reconcile_interval=0,
+        )
+        r.applied = VersionRef("r1", 5)
+        await r.reconcile()
+        with pytest.raises(
+            UnrecoverableEngineError,
+            match="rewind to the restored checkpoint failed",
+        ):
+            await r.wait_for_terminal_error()
+        assert not r.ready
 
     _run(go())
 
