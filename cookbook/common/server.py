@@ -21,7 +21,6 @@ def serve_startup(
     model_name: str,
     boot_version: int = 0,
     sglang_args: dict,
-    tp: int,
     concurrency: int,
     bulletin_root: str,
     local_checkpoint_dir: str | None,
@@ -56,7 +55,6 @@ def serve_startup(
     replica.endpoint = SGLangEndpoint(
         model_path=model_name,
         worker_port=SGLANG_PORT,
-        tp=tp,
         extra_server_args=sglang_args,
         health_timeout=startup_timeout,
         health_poll_interval=10.0,

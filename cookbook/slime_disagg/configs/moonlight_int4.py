@@ -25,6 +25,7 @@ SGLANG_DELTA_UPDATE_MODE = "cpu"
 
 # The pool reuses the trainer image (its SGLang serves native INT4; no Blackwell fork).
 SGLANG_SERVER_ARGS = {
+    "--tp": "1",
     # Use the no-GDS fastsafetensors path on hosts without nvidia-fs.
     "--load-format": "fastsafetensors",
     "--model-loader-extra-config": '{"enable_gds":false}',

@@ -289,7 +289,6 @@ class Server:
             model_name=model_name,
             boot_version=boot_version,
             sglang_args=SGLANG_SERVER_ARGS,
-            tp=miles_cfg.rollout_num_gpus_per_engine,
             concurrency=ROLLOUT_CONCURRENCY,
             bulletin_root=str(RUN_DIR),
             local_checkpoint_dir=exp.LOCAL_CHECKPOINT_PATH,

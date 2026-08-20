@@ -185,7 +185,6 @@ class Server:
             self,
             model_name=slime_cfg.hf_checkpoint,
             sglang_args=SGLANG_SERVER_ARGS,
-            tp=slime_cfg.rollout_num_gpus_per_engine,
             concurrency=ROLLOUT_CONCURRENCY,
             bulletin_root=str(RUN_DIR),
             local_checkpoint_dir=exp.LOCAL_CHECKPOINT_PATH,

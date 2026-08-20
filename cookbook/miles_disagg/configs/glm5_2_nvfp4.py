@@ -116,6 +116,7 @@ DFLASH_SERVER_ARGS = {
 }
 
 SGLANG_SERVER_ARGS = {
+    "--tp": "4",
     # loading / elastic refit
     "--load-format": "fastsafetensors",
     "--model-loader-extra-config": '{"enable_gds":false}',
@@ -136,8 +137,6 @@ SGLANG_SERVER_ARGS = {
     "--dsa-decode-backend": "flashmla_kv",
     "--dsa-topk-backend": "flashinfer",
     "--page-size": "64",
-    # The endpoint supplies TP4 in app.py
-    # "--tp-size": str(ROLLOUT_GPUS_PER_ENGINE),
     # MoE
     "--moe-runner-backend": "flashinfer_trtllm_routed",
     "--disable-shared-experts-fusion": "",
