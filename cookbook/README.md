@@ -4,13 +4,16 @@ The cookbook contains runnable Modal deployments that connect Miles or Slime
 trainers to elastic SGLang rollout pools through Stitch. Recipes define the
 model, trainer, rollout fleet, data, and weight-update policy; the shared
 infrastructure handles preparation, isolated runs, and pool lifecycle.
+`standalone` deploys the same rollout pool without a trainer: an external
+trainer or harness publishes weight updates through the configured checkpoint
+store and sends rollout traffic through the pool's session router.
 
 ## Common workflow
 
 ### 1. Select a recipe
 
-Set `EXPERIMENT_CONFIG` to a module in `miles_disagg/configs` or
-`slime_disagg/configs`:
+Set `EXPERIMENT_CONFIG` to a module in `miles_disagg/configs`,
+`slime_disagg/configs`, or `standalone/configs`:
 
 ```bash
 export EXPERIMENT_CONFIG=your_config_name
@@ -68,6 +71,14 @@ uv run --extra modal modal run -d \
   -m cookbook.slime_disagg.prep_app::prepare_dataset
 ```
 
+Standalone recipes serve a quantized release checkpoint as published, so
+download is the whole preparation:
+
+```bash
+uv run --extra modal modal run -d \
+  -m cookbook.standalone.prep_app::download_base
+```
+
 Preparation is idempotent. A complete artifact is reused; an incomplete one
 fails rather than becoming a launch input. Model preparation must finish before
 dependent format conversion. Dataset preparation is independent.
@@ -82,6 +93,9 @@ uv run --extra modal python -m cookbook.miles_disagg.launch
 
 # Slime
 uv run --extra modal python -m cookbook.slime_disagg.launch
+
+# Standalone pool (no trainer)
+uv run --extra modal python -m cookbook.standalone.launch
 ```
 
 The launcher creates an eight-character run ID unless `RUN_ID` is set explicitly,
