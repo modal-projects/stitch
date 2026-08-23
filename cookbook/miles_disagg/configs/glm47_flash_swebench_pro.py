@@ -50,6 +50,7 @@ SGLANG_SERVER_ENV = {
     "SGLANG_SANITIZE_NAN_LOGITS": "true",
 }
 SGLANG_SERVER_ARGS = {
+    "--tp": "1",
     "--load-format": "auto",
     "--enable-cpu-weight-cache": "",
     "--cpu-weight-cache-max-compile-group-gb": "8",

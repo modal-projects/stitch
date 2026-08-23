@@ -8,6 +8,7 @@ ROLLOUT_NUM_GPUS_PER_ENGINE = 8
 SGLANG_DELTA_UPDATE_MODE = "cpu"
 
 SGLANG_SERVER_ARGS = {
+    "--tp": "8",
     "--trust-remote-code": "",
     "--load-format": "fastsafetensors",
     "--model-loader-extra-config": '{"enable_gds":false}',

@@ -31,6 +31,7 @@ MEGATRON_RUNTIME_PATCHES = [
 # No --quantization flag — NVFP4 comes from the served checkpoint's quant config.
 # mem-fraction / context-length are starting points; measure.
 SGLANG_SERVER_ARGS = {
+    "--tp": "1",
     # Use the no-GDS fastsafetensors path on hosts without nvidia-fs.
     "--load-format": "fastsafetensors",
     "--model-loader-extra-config": '{"enable_gds":false}',

@@ -99,6 +99,7 @@ SGLANG_SERVER_ENV = {
 # runner (emits per-token routed experts for R3 replay). NVFP4 comes from the served
 # checkpoint's own quant config — no --quantization flag.
 SGLANG_SERVER_ARGS = {
+    "--tp": "1",
     "--weight-loader-prefetch-checkpoints": "",
     "--weight-loader-prefetch-num-threads": "8",
     "--enable-cpu-weight-cache": "",
