@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import importlib
 import os
-import shutil
 from pathlib import Path
 
 import modal
@@ -24,6 +23,12 @@ from cookbook.common.constants import (
     DATA_PATH,
     HF_CACHE_PATH,
     MINUTES,
+)
+from cookbook.common.hf_download import (
+    DOWNLOAD_MAX_CONTAINERS,
+    LocalRepoFile,
+    download_local_safetensors_file,
+    download_local_snapshot,
 )
 from cookbook.slime_disagg import trainer_image
 
@@ -41,9 +46,6 @@ image = trainer_image.build_trainer_image(
     hf_cache_path=str(HF_CACHE_PATH), experiment=EXPERIMENT, slime_local=SLIME_LOCAL_DIR
 )
 
-hf_cache_volume = modal.Volume.from_name(
-    "huggingface-cache", create_if_missing=True, version=2
-)
 data_volume = modal.Volume.from_name("slime-data", create_if_missing=True, version=2)
 checkpoint_volume = modal.Volume.from_name(
     "slime-checkpoints",
@@ -56,35 +58,34 @@ app = modal.App(f"{exp.APP_NAME}-prep")
 
 @app.function(
     image=image,
-    volumes={
-        str(HF_CACHE_PATH): hf_cache_volume,
-        str(CHECKPOINTS_PATH): checkpoint_volume,
-    },
+    cpu=4,
+    memory=4096,
+    max_containers=DOWNLOAD_MAX_CONTAINERS,
+    volumes={str(CHECKPOINTS_PATH): checkpoint_volume},
     timeout=2 * 60 * MINUTES,
     secrets=[modal.Secret.from_name("huggingface-secret")],
     include_source=False,
 )
-def download_model() -> None:
-    """Materialize the configured model artifact in the checkpoint Volume."""
-    from huggingface_hub import snapshot_download
+def _download_model_file(repo_file: LocalRepoFile) -> str:
+    return download_local_safetensors_file(repo_file, commit=checkpoint_volume.commit)
 
-    checkpoint_volume.reload()
-    target = Path(slime_cfg.hf_checkpoint)
-    if (target / "config.json").is_file():
-        print(f"reusing model checkpoint {target}")
-        return
-    if target.exists():
-        raise RuntimeError(f"incomplete model checkpoint: {target}")
-    partial = target.with_name(f"{target.name}.partial")
-    shutil.rmtree(partial, ignore_errors=True)
-    snapshot_download(
-        repo_id=exp.SOURCE_MODEL,
-        revision=getattr(exp, "SOURCE_REVISION", None),
-        local_dir=partial,
+
+@app.function(
+    image=image,
+    volumes={str(CHECKPOINTS_PATH): checkpoint_volume},
+    timeout=2 * 60 * MINUTES,
+    secrets=[modal.Secret.from_name("huggingface-secret")],
+    include_source=False,
+)
+def download_model() -> str:
+    """Materialize the configured model artifact with one input per repo file."""
+    return download_local_snapshot(
+        _download_model_file,
+        exp.SOURCE_MODEL,
+        getattr(exp, "SOURCE_REVISION", None),
+        Path(slime_cfg.hf_checkpoint),
+        volume=checkpoint_volume,
     )
-    shutil.rmtree(partial / ".cache", ignore_errors=True)
-    partial.rename(target)
-    checkpoint_volume.commit()
 
 
 @app.function(

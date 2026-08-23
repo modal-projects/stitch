@@ -10,14 +10,17 @@ element-wise synthetic delta, and runs one verified update.
 
 from __future__ import annotations
 
-import json
-import os
-import shutil
 from pathlib import Path
 
 import modal
 
 from cookbook.common.constants import CHECKPOINTS_PATH
+from cookbook.common.hf_download import (
+    DOWNLOAD_MAX_CONTAINERS,
+    LocalRepoFile,
+    download_local_safetensors_file,
+    download_local_snapshot,
+)
 from cookbook.common.serving_image import build_serving_image
 from cookbook.miles_disagg.configs import glm45_air_fp8 as model
 from tools.profiling._delta_weight_update import (
@@ -53,7 +56,6 @@ BASE_CHECKPOINT_DIR = str(model.ROLLOUT_CHECKPOINT_PATH)
 LOCAL_TARGET_CHECKPOINT_DIR = "/local-checkpoint/glm45-air-fp8/target"
 LOCAL_CANONICAL_CHECKPOINT_DIR = "/local-checkpoint/glm45-air-fp8/canonical"
 SGLANG_CACHE_PATH = "/root/.cache/sglang"
-SOURCE_MARKER = ".stitch-source.json"
 
 SGLANG_SERVER_ARGS = {
     "--served-model-name": model.ROLLOUT_SOURCE_MODEL,
@@ -97,58 +99,32 @@ serving_image = build_serving_image(
 
 @app.function(
     image=serving_image,
-    cpu=32,
-    memory=(16 * 1024, 256 * 1024),
+    cpu=4,
+    memory=4096,
+    max_containers=DOWNLOAD_MAX_CONTAINERS,
+    volumes={str(CHECKPOINTS_PATH): checkpoint_volume},
+    secrets=[modal.Secret.from_name("huggingface-secret")],
+    timeout=6 * 60 * 60,
+)
+def _download_base_file(repo_file: LocalRepoFile) -> str:
+    return download_local_safetensors_file(repo_file, commit=checkpoint_volume.commit)
+
+
+@app.function(
+    image=serving_image,
     volumes={str(CHECKPOINTS_PATH): checkpoint_volume},
     secrets=[modal.Secret.from_name("huggingface-secret")],
     timeout=6 * 60 * 60,
 )
 def prepare_base() -> str:
     """Materialize the pinned public FP8 checkpoint as one immutable artifact."""
-
-    from huggingface_hub import HfApi, snapshot_download
-
-    checkpoint_volume.reload()
-    destination = Path(BASE_CHECKPOINT_DIR)
-    expected = {
-        "repo_id": model.ROLLOUT_SOURCE_MODEL,
-        "revision": model.ROLLOUT_SOURCE_REVISION,
-    }
-    marker = destination / SOURCE_MARKER
-    index = destination / "model.safetensors.index.json"
-    if marker.is_file() and index.is_file():
-        if json.loads(marker.read_text()) == expected:
-            print(f"Reusing pinned checkpoint at {destination}")
-            return str(destination)
-
-    staging = destination.with_name(f"{destination.name}.partial")
-    staging.mkdir(parents=True, exist_ok=True)
-    files = HfApi().list_repo_files(
-        repo_id=model.ROLLOUT_SOURCE_MODEL,
-        revision=model.ROLLOUT_SOURCE_REVISION,
+    return download_local_snapshot(
+        _download_base_file,
+        model.ROLLOUT_SOURCE_MODEL,
+        model.ROLLOUT_SOURCE_REVISION,
+        BASE_CHECKPOINT_DIR,
+        volume=checkpoint_volume,
     )
-    weights = sorted(name for name in files if name.endswith(".safetensors"))
-    batches = [sorted(set(files) - set(weights))]
-    batches.extend(weights[offset : offset + 4] for offset in range(0, len(weights), 4))
-    for batch_index, batch in enumerate(batches, start=1):
-        snapshot_download(
-            repo_id=model.ROLLOUT_SOURCE_MODEL,
-            revision=model.ROLLOUT_SOURCE_REVISION,
-            local_dir=staging,
-            allow_patterns=batch,
-            max_workers=4,
-        )
-        checkpoint_volume.commit()
-        print(f"Committed checkpoint batch {batch_index}/{len(batches)}")
-
-    shutil.rmtree(staging / ".cache", ignore_errors=True)
-    (staging / SOURCE_MARKER).write_text(json.dumps(expected, sort_keys=True) + "\n")
-    if destination.exists():
-        shutil.rmtree(destination)
-    os.replace(staging, destination)
-    checkpoint_volume.commit()
-    print(f"Prepared pinned checkpoint at {destination}")
-    return str(destination)
 
 
 @app.function(

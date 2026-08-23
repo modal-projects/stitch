@@ -26,6 +26,16 @@ from cookbook.common.constants import (
     HF_CACHE_PATH,
     MINUTES,
 )
+from cookbook.common.hf_download import (
+    DOWNLOAD_MAX_CONTAINERS,
+    CachedRepoFile,
+    LocalRepoFile,
+    download_cached_safetensors_file,
+    download_cached_snapshot,
+    download_local_safetensors_file,
+    download_local_snapshot,
+    local_cached_snapshot,
+)
 from cookbook.miles_disagg import prep, trainer_image
 
 EXPERIMENT = os.environ[
@@ -66,6 +76,36 @@ checkpoint_gpu = (
 
 @app.function(
     image=image,
+    cpu=4,
+    memory=4096,
+    max_containers=DOWNLOAD_MAX_CONTAINERS,
+    volumes={str(HF_CACHE_PATH): hf_cache_volume},
+    timeout=6 * 60 * MINUTES,
+    secrets=[modal.Secret.from_name("huggingface-secret")],
+    include_source=False,
+)
+def _download_source_file(repo_file: CachedRepoFile) -> str:
+    prep.apply_prep_environment(exp)
+    return download_cached_safetensors_file(repo_file, commit=hf_cache_volume.commit)
+
+
+@app.function(
+    image=image,
+    cpu=4,
+    memory=4096,
+    max_containers=DOWNLOAD_MAX_CONTAINERS,
+    volumes={str(CHECKPOINTS_PATH): checkpoint_volume},
+    timeout=6 * 60 * MINUTES,
+    secrets=[modal.Secret.from_name("huggingface-secret")],
+    include_source=False,
+)
+def _download_rollout_file(repo_file: LocalRepoFile) -> str:
+    prep.apply_prep_environment(exp)
+    return download_local_safetensors_file(repo_file, commit=checkpoint_volume.commit)
+
+
+@app.function(
+    image=image,
     gpu=checkpoint_gpu,
     volumes={
         str(HF_CACHE_PATH): hf_cache_volume,
@@ -77,7 +117,27 @@ checkpoint_gpu = (
     include_source=False,
 )
 def prepare_checkpoints() -> None:
-    prep.prepare_checkpoints(exp, checkpoint_volume)
+    source_snapshot = download_cached_snapshot(
+        _download_source_file,
+        exp.SOURCE_MODEL,
+        getattr(exp, "SOURCE_REVISION", None),
+        volume=hf_cache_volume,
+    )
+    rollout_snapshot = None
+    if rollout_source := getattr(exp, "ROLLOUT_SOURCE_MODEL", None):
+        rollout_snapshot = download_local_snapshot(
+            _download_rollout_file,
+            rollout_source,
+            getattr(exp, "ROLLOUT_SOURCE_REVISION", None),
+            miles_cfg.hf_checkpoint,
+            volume=checkpoint_volume,
+        )
+    prep.prepare_checkpoints(
+        exp,
+        checkpoint_volume,
+        source_snapshot=source_snapshot,
+        rollout_snapshot=rollout_snapshot,
+    )
 
 
 # torch_dist conversion is clustered across nodes (a large MoE won't fit an 8-way split).
@@ -109,10 +169,20 @@ _TORCH_DIST_MULTINODE = modal_cfg.torch_dist_prep_nodes > 1
     else lambda fn: fn
 )
 def prepare_torch_dist() -> None:
+    hf_cache_volume.reload()
     rank, master_addr, _ = ray_cluster.get_modal_cluster_context(
         modal_cfg.torch_dist_prep_nodes
     )
-    prep.prepare_torch_dist(exp, checkpoint_volume, rank=rank, master_addr=master_addr)
+    prep.prepare_torch_dist(
+        exp,
+        checkpoint_volume,
+        rank=rank,
+        master_addr=master_addr,
+        source_snapshot=local_cached_snapshot(
+            exp.SOURCE_MODEL,
+            getattr(exp, "SOURCE_REVISION", None),
+        ),
+    )
 
 
 @app.function(

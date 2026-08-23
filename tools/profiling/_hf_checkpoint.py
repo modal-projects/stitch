@@ -3,44 +3,27 @@
 from __future__ import annotations
 
 import shutil
-from collections.abc import Callable
 from pathlib import Path
+from typing import Any
+
+from cookbook.common.hf_download import download_cached_snapshot
 
 
 def download_snapshot(
+    download_file: Any,
     repo_id: str,
     revision: str,
-    cache_dir: str,
     *,
-    commit: Callable[[], None],
+    volume: Any,
 ) -> str:
-    """Download and durably commit a model-sized snapshot in bounded batches."""
+    """Download and durably commit a profiling snapshot across Modal workers."""
 
-    from huggingface_hub import HfApi, snapshot_download
-
-    files = HfApi().list_repo_files(repo_id=repo_id, revision=revision)
-    weights = sorted(path for path in files if path.endswith(".safetensors"))
-    batches = [sorted(set(files) - set(weights))]
-    batches.extend(weights[offset : offset + 4] for offset in range(0, len(weights), 4))
-    for index, batch in enumerate(batches, start=1):
-        snapshot_download(
-            repo_id=repo_id,
-            revision=revision,
-            cache_dir=cache_dir,
-            allow_patterns=batch,
-            max_workers=4,
-        )
-        commit()
-        print(f"Committed checkpoint download batch {index}/{len(batches)}")
-
-    path = snapshot_download(
-        repo_id=repo_id,
-        revision=revision,
-        cache_dir=cache_dir,
-        local_files_only=True,
+    return download_cached_snapshot(
+        download_file,
+        repo_id,
+        revision,
+        volume=volume,
     )
-    print(f"Downloaded {repo_id}@{revision} to {path}")
-    return path
 
 
 def materialize_checkpoint_view(source_dir: str, target_dir: str) -> None:

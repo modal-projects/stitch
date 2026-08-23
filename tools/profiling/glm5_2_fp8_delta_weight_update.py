@@ -15,6 +15,12 @@ from pathlib import Path
 import modal
 
 from cookbook.common.constants import HF_CACHE_PATH
+from cookbook.common.hf_download import (
+    DOWNLOAD_MAX_CONTAINERS,
+    CachedRepoFile,
+    download_cached_safetensors_file,
+    local_cached_snapshot,
+)
 from cookbook.common.serving_image import build_serving_image
 from tools.profiling._delta_weight_update import (
     WeightUpdateSpec,
@@ -51,9 +57,6 @@ DELTA_SPEC = SyntheticDeltaSpec(
 )
 DELTA_ID = f"glm5-2-fp8/{ROLLOUT_REVISION}/{synthetic_delta_profile_id(DELTA_SPEC)}"
 DELTA_SOURCE_DIR = f"{DELTA_MOUNT}/{DELTA_ID}"
-HF_SNAPSHOT_DIR = (
-    f"{HF_CACHE_PATH}/models--zai-org--GLM-5.2-FP8/snapshots/{ROLLOUT_REVISION}"
-)
 LOCAL_CHECKPOINT_ROOT = "/local-checkpoint/glm5-2-fp8"
 BASE_CHECKPOINT_DIR = f"{LOCAL_CHECKPOINT_ROOT}/base"
 LOCAL_TARGET_CHECKPOINT_DIR = f"{LOCAL_CHECKPOINT_ROOT}/target"
@@ -147,18 +150,29 @@ def _pipeline_shard_for_tensor(name: str) -> int:
 
 @app.function(
     image=download_image,
-    cpu=32,
-    memory=(16 * 1024, 256 * 1024),
+    cpu=4,
+    memory=4096,
+    max_containers=DOWNLOAD_MAX_CONTAINERS,
+    volumes={str(HF_CACHE_PATH): hf_cache_volume},
+    secrets=[modal.Secret.from_name("huggingface-secret")],
+    timeout=6 * 60 * 60,
+)
+def _download_model_file(repo_file: CachedRepoFile) -> str:
+    return download_cached_safetensors_file(repo_file, commit=hf_cache_volume.commit)
+
+
+@app.function(
+    image=download_image,
     volumes={str(HF_CACHE_PATH): hf_cache_volume},
     secrets=[modal.Secret.from_name("huggingface-secret")],
     timeout=6 * 60 * 60,
 )
 def download_model() -> str:
     return download_snapshot(
+        _download_model_file,
         ROLLOUT_MODEL,
         ROLLOUT_REVISION,
-        str(HF_CACHE_PATH),
-        commit=hf_cache_volume.commit,
+        volume=hf_cache_volume,
     )
 
 
@@ -174,7 +188,7 @@ def download_model() -> str:
 )
 def prepare_delta() -> dict:
     return prepare_standard_delta(
-        HF_SNAPSHOT_DIR,
+        local_cached_snapshot(ROLLOUT_MODEL, ROLLOUT_REVISION),
         DELTA_SOURCE_DIR,
         spec=DELTA_SPEC,
         commit=delta_volume.commit,
@@ -202,7 +216,10 @@ def benchmark(
     runtime: str,
     sample_id: str,
 ) -> dict:
-    materialize_checkpoint_view(HF_SNAPSHOT_DIR, BASE_CHECKPOINT_DIR)
+    materialize_checkpoint_view(
+        local_cached_snapshot(ROLLOUT_MODEL, ROLLOUT_REVISION),
+        BASE_CHECKPOINT_DIR,
+    )
     return run_delta_weight_update(
         WeightUpdateSpec(
             model_name="GLM-5.2 FP8",
