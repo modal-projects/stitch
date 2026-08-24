@@ -8,7 +8,6 @@ from __future__ import annotations
 import json
 import os
 import shlex
-import shutil
 import subprocess
 import threading
 import time
@@ -22,7 +21,7 @@ from cookbook.miles_disagg.trainer_image import (
 )
 
 
-def _apply_prep_environment(exp) -> None:
+def apply_prep_environment(exp) -> None:
     """Apply download toggles and the experiment's checkpoint quantizer contract."""
     if getattr(exp, "DISABLE_HF_XET", False):
         os.environ["HF_HUB_DISABLE_XET"] = "1"
@@ -33,25 +32,22 @@ def _apply_prep_environment(exp) -> None:
     os.environ.update(getattr(exp, "PREP_ENV", {}))
 
 
-def _source_snapshot(exp) -> str:
-    _apply_prep_environment(exp)
-    from huggingface_hub import snapshot_download
-
-    return snapshot_download(
-        exp.SOURCE_MODEL,
-        revision=getattr(exp, "SOURCE_REVISION", None),
-    )
-
-
-def _bf16_masters(exp) -> str:
+def _bf16_masters(exp, source_snapshot: str) -> str:
     """Resolve the immutable BF16 source used by both checkpoint converters."""
-    src = _source_snapshot(exp)
-    if _is_int4(src) or getattr(exp, "MATERIALIZE_BF16_MASTERS", True):
+    if _is_int4(source_snapshot) or getattr(
+        exp, "MATERIALIZE_BF16_MASTERS", True
+    ):
         return str(exp.BF16_CHECKPOINT_PATH)
-    return src
+    return source_snapshot
 
 
-def prepare_checkpoints(exp, checkpoint_volume) -> None:
+def prepare_checkpoints(
+    exp,
+    checkpoint_volume,
+    *,
+    source_snapshot: str,
+    rollout_snapshot: str | None,
+) -> None:
     """Build the bf16 masters (trainer arch source) + the served base on a GPU.
 
     masters (bf16): a quantized source (Kimi INT4) is dequantized; a bf16 source IS the
@@ -66,7 +62,7 @@ def prepare_checkpoints(exp, checkpoint_volume) -> None:
         raise SystemExit(f"unsupported SERVED_CHECKPOINT_FORMAT={served_format!r}")
     tools = f"{MILES_ROOT}/tools"
 
-    src = _source_snapshot(exp)
+    src = source_snapshot
     is_int4 = _is_int4(src)  # read the source's quant scheme, not its repo name
 
     def _build_bf16(out: str) -> None:
@@ -106,20 +102,11 @@ def prepare_checkpoints(exp, checkpoint_volume) -> None:
 
     rollout_source = getattr(exp, "ROLLOUT_SOURCE_MODEL", None)
     if rollout_source:
-        rollout_revision = getattr(exp, "ROLLOUT_SOURCE_REVISION", None)
-
-        def _download_rollout_checkpoint(out: str) -> None:
-            from huggingface_hub import snapshot_download
-
-            snapshot_download(
-                rollout_source,
-                revision=rollout_revision,
-                local_dir=out,
+        if rollout_snapshot != served_dir:
+            raise ValueError(
+                "rollout snapshot must be downloaded directly to the served path: "
+                f"{rollout_snapshot!r} != {served_dir!r}"
             )
-            shutil.rmtree(os.path.join(out, ".cache"), ignore_errors=True)
-
-        _staged(served_dir, _download_rollout_checkpoint, resume=True)
-        checkpoint_volume.commit()
         print(f"Prepared masters={bf16_dir} served_base={served_dir}")
         return
 
@@ -159,13 +146,20 @@ def prepare_checkpoints(exp, checkpoint_volume) -> None:
     print(f"Prepared masters={bf16_dir} served_base={served_dir}")
 
 
-def prepare_torch_dist(exp, checkpoint_volume, *, rank: int, master_addr: str) -> None:
+def prepare_torch_dist(
+    exp,
+    checkpoint_volume,
+    *,
+    rank: int,
+    master_addr: str,
+    source_snapshot: str,
+) -> None:
     """Build the raw-mode torch_dist reference checkpoint from the BF16 source."""
     torch_dist_path = getattr(exp, "TORCH_DIST_CHECKPOINT_PATH", None)
     if torch_dist_path is None:
         raise SystemExit("this config does not use a torch_dist trainer checkpoint")
     checkpoint_volume.reload()
-    bf16_dir = _bf16_masters(exp)
+    bf16_dir = _bf16_masters(exp, source_snapshot)
     torch_dist_dir = str(torch_dist_path)
     if os.path.exists(
         os.path.join(torch_dist_dir, "latest_checkpointed_iteration.txt")

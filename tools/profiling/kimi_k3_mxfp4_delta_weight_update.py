@@ -24,6 +24,12 @@ from pathlib import Path
 
 import modal
 
+from cookbook.common.hf_download import (
+    DOWNLOAD_MAX_CONTAINERS,
+    CachedRepoFile,
+    download_cached_safetensors_file,
+    local_cached_snapshot,
+)
 from cookbook.common.serving_image import build_serving_image
 from cookbook.miles_disagg.configs import kimi_k3_mxfp4 as model
 from tools.profiling._delta_weight_update import (
@@ -47,10 +53,6 @@ from tools.profiling._synthetic_delta import (
 APP_NAME = "profile-kimi-k3-mxfp4-delta-weight-update"
 EXPERIMENT = "kimi_k3_mxfp4"
 HF_CACHE_PATH = "/root/.cache/huggingface"
-HF_SNAPSHOT_DIR = (
-    f"{HF_CACHE_PATH}/models--moonshotai--Kimi-K3/snapshots/"
-    f"{model.ROLLOUT_SOURCE_REVISION}"
-)
 DELTA_MOUNT = "/synthetic-delta"
 DELTA_SPEC = SyntheticDeltaSpec(
     checkpoint_format="mxfp4",
@@ -120,18 +122,29 @@ serving_image = build_serving_image(
 
 @app.function(
     image=download_image,
-    cpu=32,
-    memory=(16 * 1024, 256 * 1024),
+    cpu=4,
+    memory=4096,
+    max_containers=DOWNLOAD_MAX_CONTAINERS,
+    volumes={HF_CACHE_PATH: hf_cache_volume},
+    secrets=[modal.Secret.from_name("huggingface-secret")],
+    timeout=6 * 60 * 60,
+)
+def _download_model_file(repo_file: CachedRepoFile) -> str:
+    return download_cached_safetensors_file(repo_file, commit=hf_cache_volume.commit)
+
+
+@app.function(
+    image=download_image,
     volumes={HF_CACHE_PATH: hf_cache_volume},
     secrets=[modal.Secret.from_name("huggingface-secret")],
     timeout=6 * 60 * 60,
 )
 def download_model() -> str:
     return download_snapshot(
+        _download_model_file,
         model.ROLLOUT_SOURCE_MODEL,
         model.ROLLOUT_SOURCE_REVISION,
-        HF_CACHE_PATH,
-        commit=hf_cache_volume.commit,
+        volume=hf_cache_volume,
     )
 
 
@@ -147,7 +160,10 @@ def download_model() -> str:
 )
 def prepare_delta() -> dict:
     return prepare_standard_delta(
-        HF_SNAPSHOT_DIR,
+        local_cached_snapshot(
+            model.ROLLOUT_SOURCE_MODEL,
+            model.ROLLOUT_SOURCE_REVISION,
+        ),
         DELTA_SOURCE_DIR,
         spec=DELTA_SPEC,
         commit=delta_volume.commit,
@@ -173,7 +189,13 @@ def benchmark(
     runtime: str,
     sample_id: str,
 ) -> dict:
-    materialize_checkpoint_view(HF_SNAPSHOT_DIR, BASE_CHECKPOINT_DIR)
+    materialize_checkpoint_view(
+        local_cached_snapshot(
+            model.ROLLOUT_SOURCE_MODEL,
+            model.ROLLOUT_SOURCE_REVISION,
+        ),
+        BASE_CHECKPOINT_DIR,
+    )
     server_args = dict(model.SGLANG_SERVER_ARGS)
     server_args["--cpu-weight-cache-max-compile-group-gb"] = CPU_CACHE_GROUP_GB
     return run_delta_weight_update(

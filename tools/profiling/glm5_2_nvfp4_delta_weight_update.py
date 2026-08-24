@@ -20,6 +20,12 @@ from pathlib import Path
 import modal
 
 from cookbook.common.constants import CHECKPOINTS_PATH, HF_CACHE_PATH
+from cookbook.common.hf_download import (
+    DOWNLOAD_MAX_CONTAINERS,
+    CachedRepoFile,
+    download_cached_safetensors_file,
+    download_cached_snapshot,
+)
 from cookbook.common.serving_image import build_serving_image
 from cookbook.miles_disagg import prep, trainer_image
 from cookbook.miles_disagg.configs import glm5_2_nvfp4 as model
@@ -139,6 +145,20 @@ def _pipeline_shard_for_tensor(name: str) -> int:
 
 @app.function(
     image=prep_image,
+    cpu=4,
+    memory=4096,
+    max_containers=DOWNLOAD_MAX_CONTAINERS,
+    volumes={str(HF_CACHE_PATH): hf_cache_volume},
+    secrets=[modal.Secret.from_name("huggingface-secret")],
+    timeout=6 * 60 * 60,
+)
+def _download_source_file(repo_file: CachedRepoFile) -> str:
+    prep.apply_prep_environment(model)
+    return download_cached_safetensors_file(repo_file, commit=hf_cache_volume.commit)
+
+
+@app.function(
+    image=prep_image,
     gpu=f"{model.modal.gpu}:1",
     memory=model.modal.trainer_memory_mib,
     volumes={
@@ -149,7 +169,18 @@ def _pipeline_shard_for_tensor(name: str) -> int:
     timeout=6 * 60 * 60,
 )
 def prepare_base() -> None:
-    prep.prepare_checkpoints(model, checkpoint_volume)
+    source_snapshot = download_cached_snapshot(
+        _download_source_file,
+        model.SOURCE_MODEL,
+        getattr(model, "SOURCE_REVISION", None),
+        volume=hf_cache_volume,
+    )
+    prep.prepare_checkpoints(
+        model,
+        checkpoint_volume,
+        source_snapshot=source_snapshot,
+        rollout_snapshot=None,
+    )
 
 
 @app.function(
