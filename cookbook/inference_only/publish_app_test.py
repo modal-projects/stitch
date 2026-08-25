@@ -161,6 +161,7 @@ _server_seq = 0
 def _make_server(
     tmp_path: Path,
     pointer: VersionRef | None = None,
+    server_info_provider: object = _empty_server_infos,
     *,
     label: str | None = None,
     volume_reloader: Callable[[], None] | None = None,
@@ -175,10 +176,28 @@ def _make_server(
         store=_FakeStore(pointer),
         run_dir=run_dir,
         port=0,
+        server_info_provider=server_info_provider,  # type: ignore[arg-type]
         # Unit tests must never invoke the real run_volume.reload() (needs Modal auth).
         volume_reloader=volume_reloader or (lambda: None),
     )
 
+
+_MIXED_INFOS = [
+    {"applied_version": 3, "sync_state": "IDLE", "target_version": 3},
+    {"applied_version": 4, "sync_state": "HOLDING", "target_version": 5},
+]
+
+_UNMIXED_INFOS = [
+    {"applied_version": 3, "sync_state": "IDLE", "target_version": 3},
+    {"applied_version": 3, "sync_state": "IDLE", "target_version": 3},
+]
+
+
+def _provider_of(infos: list[dict]) -> object:
+    async def provider() -> list[dict]:
+        return infos
+
+    return provider
 
 
 def _make_publish_source(tmp_path: Path) -> Path:
@@ -364,6 +383,7 @@ def _make_recording_server(
         store=store,
         run_dir=run_dir,
         port=0,
+        server_info_provider=_empty_server_infos,  # type: ignore[arg-type]
         volume_reloader=reloader,
     )
     return server, store
@@ -532,6 +552,81 @@ def test_publisher_lifecycle(
     assert resp.status_code == 200
     assert resp.json()["status"] == "pending"
     assert store.calls == [], "/job never reloads the volume"
+
+    source = _make_publish_source(tmp_path)
+    fake_spawn = _FakeSpawn()
+    monkeypatch.setattr(publish_app, "materialize_version", fake_spawn)
+    server = _make_server(tmp_path, server_info_provider=_provider_of(_MIXED_INFOS))
+    client = TestClient(server.build_app())
+    resp = client.post(
+        "/publish",
+        json={"run_id": publish_app.RUN_ID, "version": 5, "source": str(source)},
+    )
+    assert resp.status_code == 409
+    body = resp.json()
+    assert body["status"] == "retryable"
+    assert body["reason"] == "fleet mixed"
+    assert body["detail"]["applied_versions"] == [3, 4]
+    assert body["detail"]["transitioning_replicas"] == [
+        {"sync_state": "HOLDING", "target_version": 5, "applied_version": 4}
+    ]
+    assert fake_spawn.calls == []
+
+    # fleet_is_mixed truth table: one applied version across the fleet is not
+    # mixed; two applied versions are; one applied version with a replica
+    # moving toward a newer target is; an empty/unreachable probe is not
+    # (the publisher must work standalone).
+    assert publish_app.fleet_is_mixed(_UNMIXED_INFOS)[0] is False
+    assert publish_app.fleet_is_mixed(_MIXED_INFOS)[0] is True
+    transitioning = [
+        {"applied_version": 3, "sync_state": "IDLE", "target_version": 3},
+        {"applied_version": 3, "sync_state": "STAGING", "target_version": 4},
+    ]
+    mixed, detail = publish_app.fleet_is_mixed(transitioning)
+    assert mixed is True
+    assert detail["applied_versions"] == [3]
+    assert detail["transitioning_replicas"] == [
+        {"sync_state": "STAGING", "target_version": 4, "applied_version": 3}
+    ]
+    assert publish_app.fleet_is_mixed([]) == (
+        False,
+        {"applied_versions": [], "transitioning_replicas": []},
+    )
+
+    fake_spawn = _FakeSpawn(job_id="fc-force-1")
+    monkeypatch.setattr(publish_app, "materialize_version", fake_spawn)
+    server = _make_server(tmp_path, server_info_provider=_provider_of(_MIXED_INFOS))
+    client = TestClient(server.build_app())
+    resp = client.post(
+        "/publish",
+        json={
+            "run_id": publish_app.RUN_ID,
+            "version": 5,
+            "source": str(source),
+            "force": True,
+        },
+    )
+    assert resp.status_code == 202
+    assert resp.json()["job_id"] == "fc-force-1"
+
+    fake_spawn = _FakeSpawn(job_id="fc-unmixed-1")
+    monkeypatch.setattr(publish_app, "materialize_version", fake_spawn)
+    server = _make_server(tmp_path, server_info_provider=_provider_of(_UNMIXED_INFOS))
+    client = TestClient(server.build_app())
+    resp = client.post(
+        "/publish",
+        json={"run_id": publish_app.RUN_ID, "version": 4, "source": str(source)},
+    )
+    assert resp.status_code == 202
+    assert fake_spawn.calls == [
+        {
+            "run_id": publish_app.RUN_ID,
+            "version": 4,
+            "source": str(source),
+            "publish": True,
+        }
+    ]
+
 
 def test_publisher_guards(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
