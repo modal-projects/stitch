@@ -23,6 +23,14 @@ RAY_PORT = 6379
 # cookbook router when selecting a rollout replica.
 MODAL_SESSION_ID_HEADER = "Modal-Session-ID"
 
+# Optional client override of Modal-Session-ID for router stickiness.
+STITCH_SESSION_HEADER = "Stitch-Session-Id"
+
+# Internal lease-identity header. Modal-Session-ID is platform-reserved and
+# does not survive the *.modal.direct edge intact, so the router strips it
+# and re-injects the session value as Stitch-Lease-Key upstream.
+STITCH_LEASE_HEADER = "Stitch-Lease-Key"
+
 # Timeouts.
 MINUTES = 60
 SERVER_STARTUP_TIMEOUT = 60 * MINUTES

@@ -41,6 +41,8 @@ def start_sidecar(
     commit_mode: str,
     flush_cache_on_commit: bool = False,
     debug_requests: bool = False,
+    version_lease_ttl: float | None = None,
+    lease_header: str | None = None,
 ) -> subprocess.Popen:
     """Launch the versioned rollout proxy (the shared sidecar) beside sglang."""
     # Empty settings normalize to unset: only set options reach the factory.
@@ -67,6 +69,12 @@ def start_sidecar(
         run_id=run_id,
         boot_version=boot_version,
         debug_requests=debug_requests,
+        version_lease_ttl=(
+            0.0 if version_lease_ttl is None else float(version_lease_ttl)
+        ),
+        lease_header=(
+            "Modal-Session-ID" if lease_header is None else lease_header
+        ),
     )
     cmd = [
         "python3",
