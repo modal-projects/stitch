@@ -8,6 +8,7 @@ from the inference pool so it scales independently.
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import json
 import logging
@@ -15,7 +16,7 @@ import os
 import shutil
 import tempfile
 import threading
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -93,6 +94,9 @@ class PublishRequest(BaseModel):
     # Accepted for API compat; full-vs-delta is derived from the index's
     # `delta_encoding` key by stitch.publish, not from this flag.
     delta: bool = False
+    # Skip the fleet-mixed gate (e.g. republish after the operator confirms the
+    # mixed state is expected). The gate is a safety rail, not a lock.
+    force: bool = False
 
 
 class FabricateRequest(BaseModel):
@@ -655,6 +659,78 @@ def fabricate_delta_version(
     }
 
 
+# ── Fleet-mixed publish gate ─────────────────────────────────────────────────
+
+# Sync states in which a replica is mid-transition toward a newer version;
+# publishing into that fleet would strand the in-flight rollout.
+# Lowercase because infos are compared via ``.lower()`` (sidecar casing varies).
+_FLEET_TRANSITION_STATES = frozenset({"holding", "staging", "committing"})
+
+
+def fleet_is_mixed(infos: list[dict[str, Any]]) -> tuple[bool, dict[str, Any]]:
+    """True when replicas disagree on applied_version, or any replica is
+    holding/staging/committing toward a newer target. Empty ``infos`` is
+    not mixed (publisher must work standalone).
+    """
+    applied_versions = sorted(
+        {info.get("applied_version") for info in infos},
+        key=lambda v: (v is None, v),
+    )
+    offenders: list[dict[str, Any]] = []
+    for info in infos:
+        sync_state = info.get("sync_state")
+        if not isinstance(sync_state, str):
+            continue
+        if sync_state.lower() not in _FLEET_TRANSITION_STATES:
+            continue
+        target = info.get("target_version")
+        if target is None:
+            continue
+        applied = info.get("applied_version")
+        if target > (applied if applied is not None else -1):
+            offenders.append(
+                {
+                    "sync_state": sync_state,
+                    "target_version": target,
+                    "applied_version": applied,
+                }
+            )
+    detail: dict[str, Any] = {
+        "applied_versions": applied_versions,
+        "transitioning_replicas": offenders,
+    }
+    return len(applied_versions) > 1 or bool(offenders), detail
+
+
+async def _default_server_info_provider() -> list[dict[str, Any]]:
+    """Discover pool replicas and GET each sidecar's /server_info (200s only)."""
+    import httpx
+
+    from stitch.pools.modal_flash import ModalFlashPool
+
+    try:
+        pool = ModalFlashPool(app_name=POOL_APP_NAME, cls_name=POOL_CLS_NAME)
+        urls = await pool.discover_replicas_async()
+    except Exception as exc:  # noqa: BLE001
+        # Pool down/undiscoverable == empty probe, and an empty probe is NOT
+        # mixed — the publisher must still work standalone (no 500 here).
+        logger.warning("replica discovery failed; treating as empty probe: %s", exc)
+        return []
+
+    async def fetch(client: Any, url: str) -> dict[str, Any] | None:
+        try:
+            resp = await client.get(f"{url}/server_info")
+            if resp.status_code == 200:
+                return resp.json()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("server_info probe failed for %s: %s", url, exc)
+        return None
+
+    async with httpx.AsyncClient(timeout=5.0, trust_env=False) as client:
+        results = await asyncio.gather(*(fetch(client, url) for url in urls))
+    return [info for info in results if info is not None]
+
+
 def _default_volume_reloader() -> None:
     """Reload the run volume's view (same guard as ``materialize_version``)."""
     if STORE_DEPLOYMENT.backend == storage.MODAL_VOLUME:
@@ -670,12 +746,14 @@ class PublisherServer:
         store: Store,
         run_dir: Path,
         port: int = PUBLISHER_PORT,
+        server_info_provider: Callable[[], Awaitable[list[dict[str, Any]]]] | None = None,
         volume_reloader: Callable[[], None] | None = None,
     ) -> None:
         self.store = store
         self.run_dir = run_dir
         self.updates_dir = _updates_dir(run_dir)
         self.port = port
+        self._server_info_provider = server_info_provider or _default_server_info_provider
         self._volume_reloader = volume_reloader or _default_volume_reloader
         # In-memory single-writer guard. A Flash recycle resets it; the store
         # pointer's rewind guard is the durable backstop.
@@ -763,6 +841,25 @@ class PublisherServer:
                     "version": request.version,
                     "path": str(version_dir),
                 }
+
+            # force=True bypasses; an empty probe (pool down) is not mixed.
+            if not request.force:
+                infos = await self._server_info_provider()
+                mixed, detail = fleet_is_mixed(infos)
+                if mixed:
+                    logger.warning(
+                        "rejecting /publish for version %d: fleet mixed (%s)",
+                        request.version,
+                        detail,
+                    )
+                    return JSONResponse(
+                        status_code=409,
+                        content={
+                            "status": "retryable",
+                            "reason": "fleet mixed",
+                            "detail": detail,
+                        },
+                    )
 
             source_path = Path(request.source)
             if not source_path.exists():

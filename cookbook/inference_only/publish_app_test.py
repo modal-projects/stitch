@@ -1,10 +1,11 @@
-"""Publisher: index generation, pointer-keyed no-op, delta fabrication."""
+"""Publisher: index generation, pointer-keyed no-op, fleet-mixed gate."""
 
 import os
 
 os.environ.setdefault("EXPERIMENT_CONFIG", "qwen3_0p6b_poc")
 os.environ.setdefault("RUN_ID", "publish-app-test")
 
+import asyncio
 import json
 import struct
 from collections.abc import Callable
@@ -443,12 +444,82 @@ def _patch_job_poll(
     )
 
 
+def test_fleet_is_mixed() -> None:
+    infos = [
+        {"applied_version": 3, "sync_state": "IDLE", "target_version": 3},
+        {"applied_version": 3, "sync_state": "IDLE", "target_version": 3},
+    ]
+    mixed, detail = publish_app.fleet_is_mixed(infos)
+    assert mixed is False
+    assert detail["applied_versions"] == [3]
+    assert detail["transitioning_replicas"] == []
+
+    mixed, detail = publish_app.fleet_is_mixed([])
+    assert mixed is False
+    assert detail["applied_versions"] == []
+
+    infos = [
+        {"applied_version": 3, "sync_state": "IDLE"},
+        {"applied_version": 4, "sync_state": "IDLE"},
+    ]
+    mixed, detail = publish_app.fleet_is_mixed(infos)
+    assert mixed is True
+    assert detail["applied_versions"] == [3, 4]
+
+    infos = [
+        {"applied_version": 3, "sync_state": "Holding", "target_version": 4},
+        {"applied_version": 3, "sync_state": "IDLE", "target_version": 3},
+    ]
+    mixed, detail = publish_app.fleet_is_mixed(infos)
+    assert mixed is True
+    assert detail["transitioning_replicas"] == [
+        {"sync_state": "Holding", "target_version": 4, "applied_version": 3}
+    ]
+
+    for info in (
+        {"applied_version": 3, "sync_state": "HOLDING", "target_version": None},
+        {"applied_version": 3, "sync_state": "STAGING"},
+    ):
+        mixed, detail = publish_app.fleet_is_mixed([info])
+        assert mixed is False
+        assert detail["transitioning_replicas"] == [], (
+            "a transition state without a target_version is not mixed"
+        )
+
+    for info in (
+        {"applied_version": 3, "target_version": 9},
+        {"applied_version": 3, "sync_state": None, "target_version": 9},
+    ):
+        mixed, _ = publish_app.fleet_is_mixed([info])
+        assert mixed is False
+
+    infos = [
+        {"applied_version": 4, "sync_state": "COMMITTING", "target_version": 4},
+        {"applied_version": 4, "sync_state": "STAGING", "target_version": 3},
+    ]
+    mixed, detail = publish_app.fleet_is_mixed(infos)
+    assert mixed is False
+    assert detail["transitioning_replicas"] == []
+
+    infos = [{"applied_version": None, "sync_state": "staging", "target_version": 0}]
+    mixed, detail = publish_app.fleet_is_mixed(infos)
+    assert mixed is True
+    assert detail["transitioning_replicas"] == [
+        {"sync_state": "staging", "target_version": 0, "applied_version": None}
+    ]
+
+
+async def _empty_server_infos() -> list[dict]:
+    return []
+
+
 _server_seq = 0
 
 
 def _make_server(
     tmp_path: Path,
     pointer: VersionRef | None = None,
+    server_info_provider: object = _empty_server_infos,
     *,
     label: str | None = None,
     volume_reloader: Callable[[], None] | None = None,
@@ -463,9 +534,28 @@ def _make_server(
         store=_FakeStore(pointer),
         run_dir=run_dir,
         port=0,
+        server_info_provider=server_info_provider,  # type: ignore[arg-type]
         # Unit tests must never invoke the real run_volume.reload() (needs Modal auth).
         volume_reloader=volume_reloader or (lambda: None),
     )
+
+
+_MIXED_INFOS = [
+    {"applied_version": 3, "sync_state": "IDLE", "target_version": 3},
+    {"applied_version": 4, "sync_state": "HOLDING", "target_version": 5},
+]
+
+_UNMIXED_INFOS = [
+    {"applied_version": 3, "sync_state": "IDLE", "target_version": 3},
+    {"applied_version": 3, "sync_state": "IDLE", "target_version": 3},
+]
+
+
+def _provider_of(infos: list[dict]) -> object:
+    async def provider() -> list[dict]:
+        return infos
+
+    return provider
 
 
 def _make_publish_source(tmp_path: Path) -> Path:
@@ -498,6 +588,7 @@ def _make_recording_server(
         store=store,
         run_dir=run_dir,
         port=0,
+        server_info_provider=_empty_server_infos,  # type: ignore[arg-type]
         volume_reloader=reloader,
     )
     return server, store
@@ -507,7 +598,8 @@ def test_publisher_lifecycle(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """publish -> job -> status lifecycle: status variants, pointer-keyed no-op,
-    spawn/409, job states, volume-reload ordering, and server start/stop.
+    spawn/409, job states, volume-reload ordering, mixed-fleet gate, and server
+    start/stop.
     """
     from fastapi.testclient import TestClient
 
@@ -690,6 +782,57 @@ def test_publisher_lifecycle(
     assert resp.status_code == 200
     assert resp.json()["status"] == "pending"
     assert store.calls == [], "/job never reloads the volume"
+
+    source = _make_publish_source(tmp_path)
+    fake_spawn = _FakeSpawn()
+    monkeypatch.setattr(publish_app, "materialize_version", fake_spawn)
+    server = _make_server(tmp_path, server_info_provider=_provider_of(_MIXED_INFOS))
+    client = TestClient(server.build_app())
+    resp = client.post(
+        "/publish",
+        json={"run_id": publish_app.RUN_ID, "version": 5, "source": str(source)},
+    )
+    assert resp.status_code == 409
+    body = resp.json()
+    assert body["status"] == "retryable"
+    assert body["reason"] == "fleet mixed"
+    assert body["detail"]["applied_versions"] == [3, 4]
+    assert fake_spawn.calls == []
+
+    fake_spawn = _FakeSpawn(job_id="fc-force-1")
+    monkeypatch.setattr(publish_app, "materialize_version", fake_spawn)
+    server = _make_server(tmp_path, server_info_provider=_provider_of(_MIXED_INFOS))
+    client = TestClient(server.build_app())
+    resp = client.post(
+        "/publish",
+        json={
+            "run_id": publish_app.RUN_ID,
+            "version": 5,
+            "source": str(source),
+            "force": True,
+        },
+    )
+    assert resp.status_code == 202
+    assert resp.json()["job_id"] == "fc-force-1"
+
+    fake_spawn = _FakeSpawn(job_id="fc-unmixed-1")
+    monkeypatch.setattr(publish_app, "materialize_version", fake_spawn)
+    server = _make_server(tmp_path, server_info_provider=_provider_of(_UNMIXED_INFOS))
+    client = TestClient(server.build_app())
+    resp = client.post(
+        "/publish",
+        json={"run_id": publish_app.RUN_ID, "version": 4, "source": str(source)},
+    )
+    assert resp.status_code == 202
+    assert fake_spawn.calls == [
+        {
+            "run_id": publish_app.RUN_ID,
+            "version": 4,
+            "source": str(source),
+            "publish": True,
+        }
+    ]
+
 
     # start() binds uvicorn on the configured port; stop() exits the server.
     import sys
@@ -944,7 +1087,7 @@ def test_publisher_guards(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Foreign run_id rejected; truncated shards recopied; volume reload/commit;
-    job poll errors are unknown."""
+    discovery failure is an empty probe; job poll errors are unknown."""
     from fastapi.testclient import TestClient
 
     real_materialize = publish_app.materialize_version
@@ -1028,6 +1171,18 @@ def test_publisher_guards(
     _patch_job_poll(monkeypatch, calls)
     state = publish_app._job_state("fc-modal-to")
     assert state["status"] == "pending"
+
+    import stitch.pools.modal_flash as modal_flash
+
+    class _DownPool:
+        def __init__(self, **kwargs: object) -> None:
+            pass
+
+        async def discover_replicas_async(self) -> list[str]:
+            raise RuntimeError("pool down")
+
+    monkeypatch.setattr(modal_flash, "ModalFlashPool", _DownPool)
+    assert asyncio.run(publish_app._default_server_info_provider()) == []
 
     def _boom(job_id: str) -> object:
         raise RuntimeError("modal lookup down")
