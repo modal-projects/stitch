@@ -9,10 +9,11 @@ deploy, one stop — the router scales and dies with the pool.
 Why it exists: with a per-container queue bound (sglang ``--max-queued-requests``), Flash's
 own sticky routing turns the first saturated replicas into 503 attractors — sessions stuck
 on a full replica keep retrying it while the rest of the pool starves. Here, the registry
-polls every replica's live queue depth (``/v1/loads`` + a ``/health`` zombie check); the
-router pins each ``modal-session-id`` to a healthy replica with spare capacity via the
-``modal-flash-upstream`` header, and a 503 from a pinned replica evicts it from rotation and
-retries on a healthier one, so load spreads instead of sticking.
+polls every replica's ``/server_info`` (authoritative membership: applied_version, leases,
+sync_state, target_version) and ``/v1/loads`` (live queue depth only); the router pins each
+session to a replica with spare capacity via the ``modal-flash-upstream`` header, and a 503
+from a pinned replica evicts it from rotation and retries on a healthier one, so load
+spreads instead of sticking.
 
 Deltas from the upstream router: no proxy-auth/api-key secret plumbing (cookbook pools are
 ``unauthenticated``), replica discovery reuses Stitch's ``ModalFlashPool`` adapter, stdlib
@@ -38,11 +39,14 @@ import httpx
 import modal
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, TypeAdapter
+from pydantic import BaseModel, Field, TypeAdapter
 
 from stitch.pools.modal_flash import list_flash_containers_async
 
-from .constants import MODAL_SESSION_ID_HEADER
+from .constants import (
+    MODAL_SESSION_ID_HEADER,
+    STITCH_LEASE_HEADER,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +98,16 @@ def session_routes_dict(app_name: str) -> modal.Dict:
 class ContainerInfo(BaseModel):
     task_id: str
     upstream: str  # host:port of the replica
-    load: int  # queued + running requests, last successful poll
+    load: int  # queued + running requests, last successful /v1/loads poll
+    load_stale: bool = False  # True when load is last-known, not live
+    # False while booting or after a terminal engine error; excluded from every
+    # selection path. Older sidecars omit it (treated as ready).
+    ready: bool = True
+    applied_version: int | None = None
+    leases: dict[str, int] = Field(default_factory=dict)  # /server_info; JSON keys are strings
+    sync_state: str | None = None
+    target_version: int | None = None  # None when idle
+    draining: bool = False  # excluded from every proxy selection path
 
 
 ContainerInfoList = TypeAdapter(list[ContainerInfo])
@@ -132,6 +145,7 @@ def filter_headers(headers: dict[str, str]) -> dict[str, str]:
         "modal-key",
         "modal-secret",
         MODAL_SESSION_ID_HEADER.lower(),
+        STITCH_LEASE_HEADER.lower(),
         "x-forwarded-for",
         "x-forwarded-host",
         "x-forwarded-port",
@@ -140,6 +154,18 @@ def filter_headers(headers: dict[str, str]) -> dict[str, str]:
         "x-forwarded-server",
     }
     return {k: v for k, v in headers.items() if k.lower() not in removed}
+
+
+def session_id_from_headers(headers: Any) -> str | None:
+    """Session identity for stickiness: ``Modal-Session-ID``."""
+    return headers.get(MODAL_SESSION_ID_HEADER)
+
+
+def relay_lease_header(headers: dict[str, str], session_id: str | None) -> dict[str, str]:
+    """Copy the stickiness session id into ``Stitch-Lease-Key``. Mutates ``headers``."""
+    if session_id:
+        headers[STITCH_LEASE_HEADER] = session_id
+    return headers
 
 
 def select_underloaded_container(
@@ -157,7 +183,10 @@ def select_underloaded_container(
         for container in containers.values()
         if container.load < overload_threshold
     ]
-    return random.choice(candidates or list(containers.values()))
+    pool = candidates or list(containers.values())
+    if not pool:
+        raise ValueError("select_underloaded_container: no containers to select from")
+    return random.choice(pool)
 
 
 async def route_session(
@@ -165,10 +194,12 @@ async def route_session(
     session_id: str,
     containers: dict[str, ContainerInfo],
     overload_threshold: int,
-) -> ContainerInfo:
-    """Pick the replica for one session: the most-recently-used of its known replicas
-    that has room below the pool's configured soft capacity, else a random replica with
-    headroom. Mutates and persists the session's routes."""
+    exact_version: int | None = None,
+) -> ContainerInfo | None:
+    """Pick the replica for one session: sticky if healthy and (when set)
+    applied_version == exact_version, else the lowest-load same-version replica.
+    Returns None — and does not persist a route — when exact_version is set
+    but no ready replica matches it."""
     current_time = time.time()
 
     routes: list[RouteEntry] = RouteEntryList.validate_python(
@@ -192,26 +223,98 @@ async def route_session(
             ),
         )
 
-    for entry in routes:
-        container = containers[entry.task_id]
+    for entry in list(routes):
+        # Re-lookup defensively: a concurrent 503-evict can pop the shared map
+        # while this coroutine is suspended in save_routes() — indexing would
+        # turn that race into a KeyError 500.
+        container = containers.get(entry.task_id)
+        if container is None:
+            continue
+        if not container.ready:
+            # Booting (stale boot weights) or dead-engine replica: evict so the
+            # session migrates instead of pinning stale weights.
+            logger.info(
+                "session %s: sticky route %s is not ready; evicting",
+                session_id,
+                container.task_id,
+            )
+            routes.remove(entry)
+            await save_routes()
+            continue
         if container.load < overload_threshold:
+            if exact_version is not None and container.applied_version != exact_version:
+                logger.info(
+                    "session %s: sticky route %s has applied_version %s, "
+                    "not matching exact_version %d; evicting",
+                    session_id,
+                    container.task_id,
+                    container.applied_version,
+                    exact_version,
+                )
+                continue
             entry.last_sent = current_time
             await save_routes()
             return container
 
-    selected = select_underloaded_container(containers, overload_threshold)
+    candidates = [
+        container
+        for container in containers.values()
+        if container.load < overload_threshold and container.ready
+    ]
+    # Unpinned fallback is overloaded-but-ready; an all-not-ready fleet yields None.
+    fallback = candidates or [
+        container for container in containers.values() if container.ready
+    ]
+
+    if exact_version is not None:
+        version_matched = [c for c in candidates if c.applied_version == exact_version]
+        if not version_matched:
+            # Overloaded-but-matching fallback: the threshold ranks versions,
+            # it never denies the only correct version. Saturated at-version
+            # replicas still take the pinned request (queue there) — a 409
+            # here stops lease renewals, the holds collapse, sessions die.
+            version_matched = [
+                container
+                for container in containers.values()
+                if container.applied_version == exact_version and container.ready
+            ]
+        if version_matched:
+            selected = min(version_matched, key=lambda container: container.load)
+        else:
+            # No healthy upstream at the pinned version: return None rather than
+            # landing on a wrong-version replica (which would 409).
+            logger.info(
+                "session %s: no healthy upstream at exact_version=%d "
+                "(%d replicas known); not re-pinning",
+                session_id,
+                exact_version,
+                len(containers),
+            )
+            return None
+    else:
+        if not fallback:
+            logger.info(
+                "session %s: no ready replica available; no selection",
+                session_id,
+            )
+            return None
+        selected = random.choice(fallback)
+
     reason = (
         f"previous upstreams [{', '.join(entry.task_id for entry in routes)}] overloaded"
         f" (load >= {overload_threshold})"
         if routes
         else "no previous upstream"
     )
+    log_suffix = f" (exact_version={exact_version})" if exact_version is not None else ""
     logger.info(
-        "session %s: %s; pinning new upstream %s (load %d)",
+        "session %s: %s; pinning new upstream %s (load %d, applied_version=%s)%s",
         session_id,
         reason,
         selected.task_id,
         selected.load,
+        selected.applied_version,
+        log_suffix,
     )
     routes.insert(0, RouteEntry(task_id=selected.task_id, last_sent=current_time))
     await save_routes()
@@ -306,26 +409,80 @@ def stop_server(replica: Any) -> None:
         server.stop()
 
 
+class _ReplicaPoll:
+    """One replica's poll result. ``load=None`` means /v1/loads failed — the
+    replica stays a member (/server_info is the membership contract) with its
+    last-known load."""
+
+    def __init__(
+        self,
+        *,
+        load: int | None,
+        applied_version: int | None,
+        leases: dict[str, int],
+        sync_state: str | None,
+        target_version: int | None,
+        ready: bool,
+    ) -> None:
+        self.load = load
+        self.applied_version = applied_version
+        self.leases = leases
+        self.sync_state = sync_state
+        self.target_version = target_version
+        self.ready = ready
+
+
 class _RegistryApp(_UvicornApp):
-    """Polls upstream replicas for load and serves the snapshot at ``/loads``."""
+    """Poll /server_info (membership) and /v1/loads (queue depth); serve ``/loads``."""
 
     def __init__(self, *, app_name: str, upstream_cls: str) -> None:
         self.app_name = app_name
         self.upstream_cls = upstream_cls
         self.containers: list[ContainerInfo] = []
+        self._last_loads: dict[str, int] = {}
 
-    async def _container_load(self, upstream: str) -> int:
-        loads_response, health_response = await asyncio.gather(
+    async def _poll_container(self, upstream: str) -> _ReplicaPoll:
+        """/server_info is membership (failure drops the replica). /v1/loads is
+        the load number only: its failure never drops the replica — a
+        STAGING/COMMITTING sidecar blocks /v1/loads for minutes."""
+        server_info_response, loads_response = await asyncio.gather(
+            self.client.get(f"https://{upstream}/server_info"),
             self.client.get(f"https://{upstream}/v1/loads", params={"include": "core"}),
-            self.client.get(f"https://{upstream}/health"),
+            return_exceptions=True,
         )
-        loads_response.raise_for_status()
-        health_response.raise_for_status()
+        if isinstance(server_info_response, BaseException):
+            raise server_info_response
+        server_info_response.raise_for_status()
+        data = server_info_response.json()
+        raw_leases = data.get("leases") or {}
+        # JSON object keys arrive as strings.
+        leases = {str(version): int(count) for version, count in raw_leases.items()}
+        sync_state = data.get("sync_state")
+        target_version = data.get("target_version")
+        if (sync_state or "").upper() == "ERROR":
+            # An errored replica has no target; never trust a leftover value.
+            target_version = None
 
-        loads = loads_response.json()["loads"]
-        queued = sum(int(load["num_waiting_reqs"]) for load in loads)
-        running = sum(int(load["num_running_reqs"]) for load in loads)
-        return queued + running
+        load: int | None = None
+        if not isinstance(loads_response, BaseException):
+            try:
+                loads_response.raise_for_status()
+                loads = loads_response.json()["loads"]
+                queued = sum(int(load["num_waiting_reqs"]) for load in loads)
+                running = sum(int(load["num_running_reqs"]) for load in loads)
+                load = queued + running
+            except Exception as exc:
+                logger.debug("loads poll failed for %s: %r", upstream, exc)
+
+        return _ReplicaPoll(
+            load=load,
+            applied_version=data.get("applied_version"),
+            leases=leases,
+            sync_state=sync_state,
+            target_version=target_version,
+            # Older sidecars don't expose `ready`; treat absence as ready.
+            ready=bool(data.get("ready", True)),
+        )
 
     async def _poll_once(self) -> list[ContainerInfo]:
         discovered = await list_flash_containers_async(self.app_name, self.upstream_cls)
@@ -339,20 +496,36 @@ class _RegistryApp(_UvicornApp):
             if task_id and addr:
                 upstreams[task_id] = addr
         results = await asyncio.gather(
-            *(self._container_load(upstream) for upstream in upstreams.values()),
+            *(self._poll_container(upstream) for upstream in upstreams.values()),
             return_exceptions=True,
         )
         updated: list[ContainerInfo] = []
         for (task_id, upstream), result in zip(upstreams.items(), results, strict=True):
             if isinstance(result, BaseException):
                 logger.warning(
-                    "load poll failed for replica %s: %r; dropping from registry",
+                    "server_info poll failed for replica %s: %r; dropping from registry",
                     task_id,
                     result,
                 )
+                self._last_loads.pop(task_id, None)
                 continue
+            if result.load is None:
+                load, load_stale = self._last_loads.get(task_id, 0), True
+            else:
+                load, load_stale = result.load, False
+                self._last_loads[task_id] = load
             updated.append(
-                ContainerInfo(task_id=task_id, upstream=upstream, load=result)
+                ContainerInfo(
+                    task_id=task_id,
+                    upstream=upstream,
+                    load=load,
+                    load_stale=load_stale,
+                    applied_version=result.applied_version,
+                    leases=result.leases,
+                    sync_state=result.sync_state,
+                    target_version=result.target_version,
+                    ready=result.ready,
+                )
             )
         return updated
 
@@ -533,11 +706,24 @@ class _ProxyApp(_UvicornApp):
                 return Response(content=b"", status_code=200, media_type="text/plain")
 
             body = await request.body()
-            session_id = request.headers.get(MODAL_SESSION_ID_HEADER)
+            session_id = session_id_from_headers(request.headers)
             log_prefix = f"[request {uuid.uuid4()}, session {session_id}]"
+
+            exact_version: int | None = None
+            exact_version_header = request.headers.get("stitch-exact-version", "").strip()
+            if exact_version_header:
+                try:
+                    exact_version = int(exact_version_header)
+                except ValueError:
+                    logger.warning(
+                        "%s ignoring malformed stitch-exact-version header: %r",
+                        log_prefix,
+                        exact_version_header,
+                    )
 
             try:
                 headers = filter_headers(dict(request.headers))
+                relay_lease_header(headers, session_id)
 
                 for attempt in range(MAX_SESSION_RETRIES + 1):
                     container = None
@@ -547,14 +733,29 @@ class _ProxyApp(_UvicornApp):
                             session_id,
                             self.containers,
                             self.overload_threshold,
+                            exact_version=exact_version,
                         )
+                        if container is None:
+                            # No healthy upstream at the pin: 409, do not re-pin.
+                            logger.info(
+                                "%s no healthy upstream (exact_version=%s); "
+                                "answering 409",
+                                log_prefix,
+                                exact_version,
+                            )
+                            return Response(
+                                content=b"No healthy upstream",
+                                status_code=409,
+                                media_type="text/plain",
+                            )
                         headers["modal-flash-upstream"] = container.upstream
 
                     logger.info(
-                        "%s proxying to replica %s (attempt=%d)",
+                        "%s proxying to replica %s (attempt=%d, exact_version=%s)",
                         log_prefix,
                         container.task_id if container else None,
                         attempt,
+                        exact_version,
                     )
 
                     stream = self.upstream_stream(
@@ -562,14 +763,14 @@ class _ProxyApp(_UvicornApp):
                     )
                     response: httpx.Response = await anext(stream)
 
-                    # Resolve stale upstream state to avoid repeated 503s: a pinned
-                    # replica that refuses the request leaves rotation, and the
-                    # session re-routes instead of retrying its saturator.
+                    # Only 503 evicts. A 409 is a version mismatch; the client
+                    # retries and the next registry poll refreshes applied_version.
                     if response.status_code == 503 and container is not None:
                         logger.warning(
-                            "%s replica %s returned 503 on attempt %d/%d; evicting",
+                            "%s replica %s returned %d on attempt %d/%d; evicting",
                             log_prefix,
                             container.task_id,
+                            response.status_code,
                             attempt + 1,
                             MAX_SESSION_RETRIES + 1,
                         )
