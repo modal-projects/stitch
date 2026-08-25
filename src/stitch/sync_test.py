@@ -5,6 +5,7 @@ against fake Store / Engine — no Modal, sglang, or GPU. Runnable directly
 from __future__ import annotations
 
 import asyncio
+import time
 import queue
 import threading
 from functools import partial
@@ -14,7 +15,7 @@ import pytest
 from stitch.engines.base import Engine
 from stitch.errors import UnrecoverableEngineError
 from stitch.stores.base import Store
-from stitch.sync import ConstraintUnmet, Reconciler
+from stitch.sync import AdmissionGate, ConstraintUnmet, Reconciler
 from stitch.types import (
     SyncState,
     VersionConstraint,
@@ -170,11 +171,13 @@ def test_startup_initializes_update_destination() -> None:
     [
         (False, SyncState.IDLE, False),
         (False, SyncState.FETCHING, False),
+        (False, SyncState.HOLDING, False),
         (False, SyncState.STAGING, False),
         (False, SyncState.COMMITTING, False),
         (False, SyncState.ERROR, False),
         (True, SyncState.IDLE, True),
         (True, SyncState.FETCHING, True),
+        (True, SyncState.HOLDING, True),
         (True, SyncState.STAGING, True),
         (True, SyncState.COMMITTING, False),
         (True, SyncState.ERROR, True),
@@ -1001,6 +1004,103 @@ def test_version_flips_before_resume() -> None:
         )  # flipped under the gate, before resume
 
     _run(go())
+
+
+# ── version leases ───────────────────────────────────────────────────────────
+def test_lease_lifecycle() -> None:
+    """Acquire, renew, think-time hold, expiry, snapshot counts, then commit."""
+
+    async def go() -> None:
+        gate = AdmissionGate(served_version=lambda: VersionRef("r1", 3), version_lease_ttl=0.1)
+        pin = VersionConstraint(exact_version=3)
+        async with gate.admit(pin, lease_key="sess-1"):
+            pass
+        # The lease outlives its request: think-time still holds the version.
+        assert gate.leases_snapshot() == {3: 1}
+        await asyncio.sleep(0.06)
+        async with gate.admit(pin, lease_key="sess-1"):
+            pass
+        await asyncio.sleep(0.06)
+        assert gate.leases_snapshot() == {3: 1}
+        await asyncio.sleep(0.1)
+        assert gate.leases_snapshot() == {}
+
+        gate = AdmissionGate(served_version=lambda: VersionRef("r1", 3), version_lease_ttl=30.0)
+        for key in ("sess-1", "sess-2"):
+            async with gate.admit(pin, lease_key=key):
+                pass
+        assert gate.leases_snapshot() == {3: 2}
+
+        gate = AdmissionGate(served_version=lambda: VersionRef("r1", 5), version_lease_ttl=60.0)
+        async with gate.admit(VersionConstraint(exact_version=5), lease_key="sess"):
+            pass
+        assert gate.leases_snapshot() == {5: 1}
+        applied: list[str] = []
+
+        async def apply() -> None:
+            applied.append("applied")
+
+        await asyncio.wait_for(
+            gate.commit(apply=apply, on_applied=lambda: None, target_version=5),
+            timeout=1.0,
+        )
+        assert applied == ["applied"], "lease at or above target does not block commit"
+
+        r = _make_reconciler(
+            store=FakeStore(VersionRef("r1", 3), _full("r1", 3)),
+            engine=FakeEngine(),
+            version_lease_ttl=30.0,
+        )
+        r.applied = VersionRef("r1", 3)
+        async with r.gate.admit(VersionConstraint(exact_version=3), lease_key="sess-1"):
+            pass
+        info = r.server_info()
+        assert info["applied_version"] == 3
+        assert info["leases"] == {3: 1}
+        r = _make_reconciler(store=FakeStore(), engine=FakeEngine())
+        info = r.server_info()
+        assert info["applied_version"] == 0
+        assert info["leases"] == {}
+
+    _run(go())
+
+
+def test_lease_admitted_in_hold_close_gap_reenters_hold() -> None:
+    """A lease slipping in between the hold returning and admission closing
+    must re-enter the hold, never be committed past."""
+    asyncio.run(_lease_slips_into_hold_close_gap())
+
+
+async def _lease_slips_into_hold_close_gap() -> None:
+    gate = AdmissionGate(commit_mode="in_place", version_lease_ttl=60.0)
+    original_hold = gate.hold_for_leases
+    slipped = False
+
+    async def hold_then_slip(target: int) -> None:
+        nonlocal slipped
+        await original_hold(target)
+        if not slipped:
+            slipped = True
+            # Admitted lease lands after the hold returns, before the close.
+            gate._leases["late-session"] = (1, time.monotonic() + 60.0)
+
+    gate.hold_for_leases = hold_then_slip  # type: ignore[method-assign]
+    applied: list[bool] = []
+
+    async def apply() -> None:
+        applied.append(True)
+
+    commit_task = asyncio.create_task(
+        gate.commit(apply=apply, on_applied=lambda: None, target_version=2)
+    )
+    await asyncio.sleep(0.05)
+    assert not applied, "commit must not proceed past the slipped lease"
+    assert not gate._committing, "admission must stay open while re-holding"
+    del gate._leases["late-session"]
+    async with gate._cond:
+        gate._cond.notify_all()
+    await asyncio.wait_for(commit_task, timeout=2.0)
+    assert applied, "commit proceeds once the slipped lease is gone"
 
 
 if __name__ == "__main__":

@@ -72,12 +72,15 @@ def create_app(
     *,
     versioned_routes: Iterable[str] = VERSIONED_ROUTES,
     upstream_timeout: float | None = 3600.0,
+    lease_header: str = "Modal-Session-ID",
 ):
     """The versioned rollout proxy. Versioned routes are admitted through the gate
     (constraint enforced, serving version captured), stamped by the engine, forwarded,
     and the response stamped with the served version. A rejected constraint returns a
     retryable 409; a client disconnect aborts the upstream generation. A local-engine
-    transport failure returns a retryable 503 instead of escaping as a sidecar 500."""
+    transport failure returns a retryable 503 instead of escaping as a sidecar 500.
+    An admitted exact-pin carrying ``lease_header`` acquires or renews a
+    version lease in the gate."""
     import httpx
     from fastapi import FastAPI, Request
     from fastapi.responses import JSONResponse, Response
@@ -183,7 +186,12 @@ def create_app(
             async with (
                 contextlib.nullcontext()
                 if request.method == "GET" and route == "metrics"
-                else gate.admit(constraint if is_versioned else None)
+                else gate.admit(
+                    constraint if is_versioned else None,
+                    lease_key=(
+                        request.headers.get(lease_header) if is_versioned else None
+                    ),
+                )
             ) as served:
                 if is_versioned and payload is not None and served is not None:
                     engine.stamp_request(payload, served)
@@ -291,6 +299,8 @@ def serve(
     boot_version: int = 0,
     commit_mode: CommitMode = "in_place",
     flush_cache_on_commit: bool = False,
+    version_lease_ttl: float = 0.0,
+    lease_header: str = "Modal-Session-ID",
     host: str = "0.0.0.0",
     port: int = 8000,
     debug_requests: bool = False,
@@ -309,6 +319,7 @@ def serve(
         boot_version=boot_version,
         commit_mode=commit_mode,
         flush_cache_on_commit=flush_cache_on_commit,
+        version_lease_ttl=version_lease_ttl,
         debug_requests=debug_requests,
         reconcile_interval=reconcile_interval,
     )
@@ -322,7 +333,7 @@ def serve(
         TerminalFailureMonitor(reconciler.wait_for_terminal_error),
     )
     config = uvicorn.Config(
-        create_app(reconciler.gate, reconciler, engine),
+        create_app(reconciler.gate, reconciler, engine, lease_header=lease_header),
         host=host,
         port=port,
         log_level="info",
