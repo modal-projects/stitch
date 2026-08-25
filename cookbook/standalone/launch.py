@@ -21,8 +21,13 @@ import os
 import sys
 import uuid
 
+CLAIM_FUNCTION_NAME = "claim_boot_pointer"
+
 
 def main() -> None:
+    if "EXPERIMENT_CONFIG" not in os.environ:
+        raise SystemExit("EXPERIMENT_CONFIG is required")
+
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--run-id",
@@ -39,6 +44,12 @@ def main() -> None:
     run = importlib.import_module("cookbook.standalone.app")
     print(f"Deploying pool {run.APP_NAME}", flush=True)
     run.app.deploy()
+
+    import modal
+
+    # The default checkpoint store is only accessible where its Volume is
+    # mounted, so claim through the deployed app before waiting for replicas.
+    modal.Function.from_name(run.APP_NAME, CLAIM_FUNCTION_NAME).remote()
     pool = ModalFlashLBPool(run.APP_NAME, "Server")
     if not await_pool_ready(pool, replica_floor=run.modal_cfg.rollout_min_containers):
         print(f"Pool {run.APP_NAME} did not reach its replica floor", flush=True)

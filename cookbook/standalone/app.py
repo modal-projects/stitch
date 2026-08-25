@@ -31,6 +31,7 @@ from cookbook.common.constants import (
     SIDECAR_PORT,
     STITCH_PATH,
 )
+from cookbook.standalone import checkpoint
 
 EXPERIMENT = os.environ[
     "EXPERIMENT_CONFIG"
@@ -69,7 +70,7 @@ hf_cache_volume = modal.Volume.from_name(
     "huggingface-cache", create_if_missing=True, version=2
 )
 checkpoint_volume = modal.Volume.from_name(
-    "miles-checkpoints", create_if_missing=True, version=2
+    exp.CHECKPOINT_VOLUME_NAME, create_if_missing=True, version=2
 )
 run_volume = modal.Volume.from_name(
     exp.EXPERIMENT_VOLUME_NAME, create_if_missing=True, version=2
@@ -138,11 +139,20 @@ class Server:
     def startup(self) -> None:
         STORE_DEPLOYMENT.bootstrap_credentials()
         store_config = STORE_DEPLOYMENT.hook_config(APP_NAME)
+        checkpoint.require_checkpoint(exp.BASE_CHECKPOINT_PATH)
+        store = storage.create_store(
+            store_config["stitch_store_backend"],
+            local_root=RUN_DIR,
+            run_id=RUN_ID,
+            volume_name=exp.EXPERIMENT_VOLUME_NAME,
+            s3_root=store_config.get("stitch_s3_root"),
+            s3_endpoint_url=store_config.get("stitch_s3_endpoint_url"),
+        )
+        checkpoint.wait_for_boot_pointer(store, RUN_ID)
         common_server.serve_startup(
             self,
             model_name=str(exp.BASE_CHECKPOINT_PATH),
             sglang_args=SGLANG_SERVER_ARGS,
-            tp=exp.ROLLOUT_GPUS_PER_ENGINE,
             concurrency=ROLLOUT_CONCURRENCY,
             bulletin_root=str(RUN_DIR),
             local_checkpoint_dir=exp.LOCAL_CHECKPOINT_PATH,
@@ -160,6 +170,36 @@ class Server:
     @modal.exit()
     def stop(self) -> None:
         common_server.serve_stop(self)
+
+
+# The launcher invokes this one-shot function after deploy. Keeping replicas
+# read-only avoids a multi-replica claim race, while the short wait in startup
+# keeps them out of rotation until the claim is visible.
+@app.function(
+    image=server_image,
+    volumes=(
+        {str(STITCH_PATH): run_volume}
+        if STORE_DEPLOYMENT.backend == storage.MODAL_VOLUME
+        else {}
+    ),
+    secrets=STORE_SECRETS,
+    include_source=False,
+    timeout=10 * MINUTES,
+)
+def claim_boot_pointer() -> None:
+    """Claim this run's v0 pointer through the deployed checkpoint store."""
+
+    STORE_DEPLOYMENT.bootstrap_credentials()
+    store_config = STORE_DEPLOYMENT.hook_config(APP_NAME)
+    store = storage.create_store(
+        store_config["stitch_store_backend"],
+        local_root=RUN_DIR,
+        run_id=RUN_ID,
+        volume_name=exp.EXPERIMENT_VOLUME_NAME,
+        s3_root=store_config.get("stitch_s3_root"),
+        s3_endpoint_url=store_config.get("stitch_s3_endpoint_url"),
+    )
+    checkpoint.claim_boot_pointer(store, RUN_ID)
 
 
 # ── Session-routing LB (cookbook/common/router.py) ─────────────────────────────

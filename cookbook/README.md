@@ -6,7 +6,8 @@ model, trainer, rollout fleet, data, and weight-update policy; the shared
 infrastructure handles preparation, isolated runs, and pool lifecycle.
 `standalone` deploys the same rollout pool without a trainer: an external
 trainer or harness publishes weight updates through the configured checkpoint
-store and sends rollout traffic through the pool's session router.
+store and sends rollout traffic through the pool's session router. Its launcher
+claims the run's boot pointer at v0 before the pool enters rotation.
 
 ## Common workflow
 
@@ -99,9 +100,9 @@ uv run --extra modal python -m cookbook.standalone.launch
 ```
 
 The launcher creates an eight-character run ID unless `RUN_ID` is set explicitly,
-deploys a run-scoped rollout pool, waits for its gateway, and starts the trainer.
-It prints the app name and stop command. Repeating the command creates a separate
-run and checkpoint lineage.
+deploys a run-scoped rollout pool, and waits for its gateway. Miles and Slime then
+start the trainer; standalone claims `latest` at v0 and stops after the pool is
+ready. Repeating the command creates a separate run and checkpoint lineage.
 
 #### Resume a Miles run
 
@@ -284,9 +285,11 @@ Each experiment Volume contains only run-scoped state:
 ```
 
 The training framework owns `updates/` and the saved checkpoints; Stitch owns
-`latest`. Resume keeps the same run ID, restores `latest` to the checkpoint,
-and replaces the abandoned update suffix as training continues. Each finished
-trainer attempt writes a separate log; use Modal app logs while it is running.
+`latest`. For standalone pools, the launcher establishes `latest` at v0 and the
+external publisher owns subsequent updates. Resume keeps the same run ID,
+restores `latest` to the checkpoint, and replaces the abandoned update suffix as
+training continues. Each finished trainer attempt writes a separate log; use
+Modal app logs while it is running.
 
 Datasets are independent of models and runs:
 

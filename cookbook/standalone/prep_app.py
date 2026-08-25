@@ -12,10 +12,17 @@ from __future__ import annotations
 
 import importlib
 import os
+from pathlib import Path
 
 import modal
 
 from cookbook.common.constants import CHECKPOINTS_PATH, MINUTES
+from cookbook.common.hf_download import (
+    DOWNLOAD_MAX_CONTAINERS,
+    LocalRepoFile,
+    download_local_safetensors_file,
+    download_local_snapshot,
+)
 
 EXPERIMENT = os.environ[
     "EXPERIMENT_CONFIG"
@@ -24,7 +31,7 @@ exp = importlib.import_module(f"cookbook.standalone.configs.{EXPERIMENT}")
 
 app = modal.App(f"{exp.APP_NAME}-prep")
 checkpoint_volume = modal.Volume.from_name(
-    "miles-checkpoints", create_if_missing=True, version=2
+    exp.CHECKPOINT_VOLUME_NAME, create_if_missing=True, version=2
 )
 image = (
     modal.Image.debian_slim(python_version="3.11")
@@ -33,34 +40,46 @@ image = (
         {
             "HF_XET_HIGH_PERFORMANCE": "1",
             "HF_HUB_ENABLE_HF_TRANSFER": "1",
+            "EXPERIMENT_CONFIG": EXPERIMENT,
+            "PYTHONPATH": "/root",
         }
+    )
+    .add_local_dir(
+        str(Path(__file__).resolve().parent.parent),
+        remote_path="/root/cookbook",
+        ignore=["**/__pycache__", "**/*.pyc"],
     )
 )
 
 
 @app.function(
     image=image,
-    cpu=32,
-    memory=(16 * 1024, 256 * 1024),
+    cpu=4,
+    memory=4096,
+    max_containers=DOWNLOAD_MAX_CONTAINERS,
     volumes={str(CHECKPOINTS_PATH): checkpoint_volume},
     secrets=[modal.Secret.from_name("huggingface-secret")],
     timeout=6 * 60 * MINUTES,
+    include_source=False,
+)
+def _download_base_file(repo_file: LocalRepoFile) -> str:
+    return download_local_safetensors_file(repo_file, commit=checkpoint_volume.commit)
+
+
+@app.function(
+    image=image,
+    volumes={str(CHECKPOINTS_PATH): checkpoint_volume},
+    secrets=[modal.Secret.from_name("huggingface-secret")],
+    timeout=6 * 60 * MINUTES,
+    include_source=False,
 )
 def download_base() -> str:
-    """Download the pinned served base as plain files (sglang and the sidecar's
-    canonical checkpoint space both read this directory)."""
-    from huggingface_hub import snapshot_download
+    """Materialize the pinned served base with one call per safetensors shard."""
 
-    target = exp.BASE_CHECKPOINT_PATH
-    marker = target / ".complete"
-    if marker.exists():
-        print(f"Base checkpoint already prepared: {target}")
-        return str(target)
-    snapshot_download(
+    return download_local_snapshot(
+        _download_base_file,
         exp.SOURCE_MODEL,
-        revision=exp.SOURCE_REVISION,
-        local_dir=str(target),
+        exp.SOURCE_REVISION,
+        exp.BASE_CHECKPOINT_PATH,
+        volume=checkpoint_volume,
     )
-    marker.touch()
-    checkpoint_volume.commit()
-    return str(target)

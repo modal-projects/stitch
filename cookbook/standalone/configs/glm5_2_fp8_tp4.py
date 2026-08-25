@@ -14,6 +14,7 @@ from cookbook.common.constants import CHECKPOINTS_PATH, DRAFT_PATH
 
 APP_NAME = "stitch-standalone-glm5-2-fp8-tp4"
 EXPERIMENT_VOLUME_NAME = "stitch-standalone-glm5-2-fp8-tp4"
+CHECKPOINT_VOLUME_NAME = "miles-checkpoints"
 LOCAL_CHECKPOINT_PATH = None
 
 SOURCE_MODEL = "zai-org/GLM-5.2-FP8"
@@ -57,6 +58,7 @@ DFLASH_SERVER_ARGS = {
 }
 
 SGLANG_SERVER_ARGS = {
+    "--tp": str(ROLLOUT_GPUS_PER_ENGINE),
     # loading / elastic refit
     "--load-format": "fastsafetensors",
     "--model-loader-extra-config": '{"enable_gds":false}',
