@@ -23,6 +23,12 @@ RAY_PORT = 6379
 # cookbook router when selecting a rollout replica.
 MODAL_SESSION_ID_HEADER = "Modal-Session-ID"
 
+# Internal lease-identity header. The platform hashes Modal-Session-ID for its
+# own session affinity, which takes precedence over an explicit ``modal-flash-upstream``
+# pin mid-path, so the router strips it and relays the session value upstream
+# as Stitch-Lease-Key instead.
+STITCH_LEASE_HEADER = "Stitch-Lease-Key"
+
 # Timeouts.
 MINUTES = 60
 SERVER_STARTUP_TIMEOUT = 60 * MINUTES
