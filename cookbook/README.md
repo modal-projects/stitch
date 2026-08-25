@@ -1,16 +1,17 @@
 # Cookbook
 
 The cookbook contains runnable Modal deployments that connect Miles or Slime
-trainers to elastic SGLang rollout pools through Stitch. Recipes define the
-model, trainer, rollout fleet, data, and weight-update policy; the shared
-infrastructure handles preparation, isolated runs, and pool lifecycle.
+trainers — or an inference-only client — to elastic SGLang rollout pools
+through Stitch. Recipes define the model, optional trainer, rollout fleet, data,
+and weight-update policy; the shared infrastructure handles preparation,
+isolated runs, and pool lifecycle.
 
 ## Common workflow
 
 ### 1. Select a recipe
 
-Set `EXPERIMENT_CONFIG` to a module in `miles_disagg/configs` or
-`slime_disagg/configs`:
+Set `EXPERIMENT_CONFIG` to a module in `miles_disagg/configs`,
+`slime_disagg/configs`, or `inference_only/configs`:
 
 ```bash
 export EXPERIMENT_CONFIG=your_config_name
@@ -68,13 +69,20 @@ uv run --extra modal modal run -d \
   -m cookbook.slime_disagg.prep_app::prepare_dataset
 ```
 
+Inference-only recipes expose model preparation:
+
+```bash
+uv run --extra modal modal run -d \
+  -m cookbook.inference_only.prep_app::download_model
+```
+
 Preparation is idempotent. A complete artifact is reused; an incomplete one
 fails rather than becoming a launch input. Model preparation must finish before
 dependent format conversion. Dataset preparation is independent.
 
 ### 5. Launch an isolated run
 
-Use the launcher for the selected trainer:
+Use the launcher for the selected recipe:
 
 ```bash
 # Miles
@@ -82,12 +90,17 @@ uv run --extra modal python -m cookbook.miles_disagg.launch
 
 # Slime
 uv run --extra modal python -m cookbook.slime_disagg.launch
+
+# Inference-only (no trainer)
+uv run --extra modal python -m cookbook.inference_only.launch
 ```
 
-The launcher creates an eight-character run ID unless `RUN_ID` is set explicitly,
-deploys a run-scoped rollout pool, waits for its gateway, and starts the trainer.
-It prints the app name and stop command. Repeating the command creates a separate
-run and checkpoint lineage.
+The launcher creates an eight-character run ID unless `RUN_ID` is set explicitly
+and deploys a run-scoped rollout pool. Miles and Slime then start the trainer.
+Inference-only waits for the gateway and stops there: a later publisher can
+advance `latest` through the same store protocol. It prints the app name and
+stop command. Repeating the command creates a separate run and checkpoint
+lineage.
 
 #### Resume a Miles run
 
@@ -162,6 +175,8 @@ EXPERIMENT_CONFIG=your_config_name RUN_ID=your_run_id \
   uv run --extra modal modal deploy -m cookbook.miles_disagg.app
 ```
 
+Use `cookbook.slime_disagg.app` or `cookbook.inference_only.app` for those recipes.
+
 Modal rolls replicas to the new configuration without changing the run's
 checkpoint lineage.
 
@@ -215,6 +230,35 @@ produced 0.469 GB compressed deltas. The complete steady-state path is roughly
 published 25 consecutive versions, with exact-version smoke checks through
 v25.
 
+## GLM-5.2 FP8 inference-only example
+
+`glm5_2_fp8` is a complete inference-only example of the workflow above. It
+stands up a warm SGLang fleet with no trainer. A later publisher advances
+`latest`; clients can pin `exact_version`.
+
+| Component | Configuration |
+| --- | --- |
+| Trainer | None |
+| Rollout | 1 replica × 4 B300 GPUs |
+| Model | `zai-org/GLM-5.2-FP8`, pinned revision |
+| Weight sync | Disk mode; flush KV on commit |
+
+The config is
+[`glm5_2_fp8.py`](inference_only/configs/glm5_2_fp8.py).
+After creating `huggingface-secret`, prepare and launch it with:
+
+```bash
+export EXPERIMENT_CONFIG=glm5_2_fp8
+
+uv run --extra modal modal run -d \
+  -m cookbook.inference_only.prep_app::download_model
+uv run --extra modal python -m cookbook.inference_only.launch
+```
+
+Model preparation snapshots the pinned FP8 checkpoint into
+`inference-checkpoints`. Launch mints a run ID, claims `latest` at v0, and
+deploys the pool.
+
 ## Weight-update modes
 
 Each recipe sets `SGLANG_DELTA_UPDATE_MODE`:
@@ -229,9 +273,10 @@ space. CPU mode accepts deltas only and requires a new replica for a new
 lineage. Disk mode accepts full checkpoints and deltas and can reset a live
 replica.
 
-Every bundled recipe serves `cpu` updates except Kimi K3, which uses `disk`.
-The profiling scripts exercise both modes. Memory sizing and SGLang details are
-in [`SGLANG_FORK.md`](common/SGLANG_FORK.md).
+Bundled Miles and Slime recipes serve `cpu` updates. The inference-only GLM-5.2
+FP8 recipe uses `disk` so a later publisher can land full checkpoints or deltas.
+The profiling scripts exercise both modes.
+Memory sizing and SGLang details are in [`SGLANG_FORK.md`](common/SGLANG_FORK.md).
 
 ## Persistent storage
 
@@ -242,7 +287,7 @@ Run publications use either the experiment Volume or S3, according to
 | Volume | Mount | Contents |
 | --- | --- | --- |
 | `huggingface-cache` | `/root/.cache/huggingface` | Pinned source-model downloads |
-| `miles-checkpoints` or `slime-checkpoints` | `/checkpoints` | Immutable prepared model layouts |
+| `miles-checkpoints`, `slime-checkpoints`, or `inference-checkpoints` | `/checkpoints` | Immutable prepared model layouts |
 | `miles-data` or `slime-data` | `/data` | Pinned datasets |
 | `stitch-<framework>-<model>` | `/stitch` | Run-scoped checkpoints and logs; publications when using the Volume backend |
 | `sglang-cache` | `/root/.cache/sglang` | Compiled SGLang kernels |
@@ -270,9 +315,11 @@ Each experiment Volume contains only run-scoped state:
 ```
 
 The training framework owns `updates/` and the saved checkpoints; Stitch owns
-`latest`. Resume keeps the same run ID, restores `latest` to the checkpoint,
-and replaces the abandoned update suffix as training continues. Each finished
-trainer attempt writes a separate log; use Modal app logs while it is running.
+`latest`. An inference-only run has no trainer: the first replica claims
+`latest` at v0, and a later publisher writes `updates/`. Resume keeps the same
+run ID, restores `latest` to the checkpoint, and replaces the abandoned update
+suffix as training continues. Each finished trainer attempt writes a separate
+log; use Modal app logs while it is running.
 
 Datasets are independent of models and runs:
 
