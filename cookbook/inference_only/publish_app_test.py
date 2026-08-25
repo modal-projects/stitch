@@ -1,4 +1,4 @@
-"""Publisher: index generation, pointer-keyed no-op."""
+"""Publisher: index generation, pointer-keyed no-op, fleet-mixed gate."""
 
 import os
 
@@ -7,10 +7,13 @@ os.environ.setdefault("RUN_ID", "publish-app-test")
 
 import json
 import struct
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from modal.exception import ConnectionError as ModalConnectionError
+from modal.exception import TimeoutError as ModalTimeoutError
 
 from cookbook.inference_only import publish_app
 from stitch.types import VersionRef
@@ -62,7 +65,6 @@ def _make_source(path: Path, shards: tuple[str, ...] = ("model.safetensors",)) -
     return path
 
 
-
 def test_prepare_version_dir(tmp_path: Path) -> None:
     # fresh copy
     source = _make_source(tmp_path / "source")
@@ -96,6 +98,19 @@ def test_prepare_version_dir(tmp_path: Path) -> None:
     assert publish_app._prepare_version_dir(target, source) == "kept"
     assert (target / "extra-note").exists()
 
+    # truncated shard with the right name is not a valid target -> recopied
+    target = tmp_path / "weight_v000005"
+    target.mkdir()
+    source_shard = source / "model.safetensors"
+    (target / "model.safetensors").write_bytes(source_shard.read_bytes()[:-4])
+    (target / "model.safetensors.index.json").write_text(json.dumps({"metadata": {}, "weight_map": {}}))
+    assert publish_app._target_is_valid(target, source) is False
+    assert publish_app._prepare_version_dir(target, source) == "copied"
+    assert (target / "model.safetensors").stat().st_size == source_shard.stat().st_size
+
+
+# ── Job spawn / polling fakes ────────────────────────────────────────────────
+
 
 class _FakeSpawn:
     """Stands in for the materialize_version Modal function's .spawn()."""
@@ -121,6 +136,10 @@ class _FakeFunctionCall:
             raise TimeoutError("still running")  # builtins, as modal 1.5.4 actually raises
         if self.state == "failure":
             raise RuntimeError("remote boom")
+        if self.state == "query-error":
+            raise ModalConnectionError("transient poll error")
+        if self.state == "modal-timeout":
+            raise ModalTimeoutError("still running")
         return self.result
 
 
@@ -132,6 +151,10 @@ def _patch_job_poll(
     )
 
 
+async def _empty_server_infos() -> list[dict]:
+    return []
+
+
 _server_seq = 0
 
 
@@ -140,6 +163,7 @@ def _make_server(
     pointer: VersionRef | None = None,
     *,
     label: str | None = None,
+    volume_reloader: Callable[[], None] | None = None,
 ) -> publish_app.PublisherServer:
     global _server_seq
     if label is None:
@@ -151,14 +175,80 @@ def _make_server(
         store=_FakeStore(pointer),
         run_dir=run_dir,
         port=0,
+        # Unit tests must never invoke the real run_volume.reload() (needs Modal auth).
+        volume_reloader=volume_reloader or (lambda: None),
     )
+
+
+
+def _make_publish_source(tmp_path: Path) -> Path:
+    source = tmp_path / "source"
+    source.mkdir(exist_ok=True)
+    _write_tiny_safetensors(source / "model.safetensors")
+    return source
+
+
+def _patch_materialize_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, events: list[str]
+) -> list[dict]:
+    """Point materialize_version at a tmp RUN_DIR backed by a recording volume;
+    returns the list that publish_version.local kwargs are appended to."""
+    monkeypatch.setattr(
+        publish_app,
+        "run_volume",
+        SimpleNamespace(
+            reload=lambda: events.append("reload"),
+            commit=lambda: events.append("commit"),
+        ),
+    )
+    monkeypatch.setattr(publish_app, "RUN_DIR", tmp_path / "run")
+    monkeypatch.setattr(
+        publish_app,
+        "STORE_DEPLOYMENT",
+        SimpleNamespace(backend=publish_app.storage.MODAL_VOLUME),
+    )
+    published: list[dict] = []
+    monkeypatch.setattr(
+        publish_app,
+        "publish_version",
+        SimpleNamespace(local=lambda **kwargs: published.append(kwargs)),
+    )
+    return published
+
+
+# ── Server-path volume reload ────────────────────────────────────────────────
+
+
+def _make_recording_server(
+    tmp_path: Path,
+    *,
+    label: str,
+    staged_on_reload: tuple[int, ...] = (),
+) -> tuple[publish_app.PublisherServer, _FakeStore]:
+    """Server whose reloader records order and exposes dirs staged elsewhere."""
+    run_dir = tmp_path / label
+    (run_dir / "updates").mkdir(parents=True, exist_ok=True)
+    store = _FakeStore(None)
+
+    def reloader() -> None:
+        store.calls.append("reload")
+        for version in staged_on_reload:
+            (run_dir / "updates" / f"weight_v{version:06d}").mkdir(exist_ok=True)
+
+    server = publish_app.PublisherServer(
+        store=store,
+        run_dir=run_dir,
+        port=0,
+        volume_reloader=reloader,
+    )
+    return server, store
 
 
 def test_publisher_lifecycle(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """publish -> job -> status lifecycle: status variants, pointer-keyed no-op,
-    spawn/409, and job states."""
+    spawn/409, job states, volume-reload ordering, and the mixed-fleet gate."""
     from fastapi.testclient import TestClient
 
     # /status variants: latest_version is the store pointer, staged_versions the
@@ -182,6 +272,7 @@ def test_publisher_lifecycle(
         resp = TestClient(server.build_app()).get("/status")
         assert resp.status_code == 200
         assert resp.json() == expected, "latest is the pointer, not a partial dir"
+
     def _fail(*args: object, **kwargs: object) -> None:
         raise AssertionError("materialize job must not spawn on a no-op")
 
@@ -264,6 +355,33 @@ def test_publisher_lifecycle(
     )
     assert resp.status_code == 202
 
+    # Server paths reload the volume before reading state (a sibling container
+    # may have staged dirs since this container last looked).
+    monkeypatch.setattr(publish_app, "materialize_version", _FakeSpawn("fc-reload-pub"))
+    server, store = _make_recording_server(tmp_path, label="reload-publish")
+    client = TestClient(server.build_app())
+    resp = client.post(
+        "/publish",
+        json={"run_id": publish_app.RUN_ID, "version": 1, "source": str(source)},
+    )
+    assert resp.status_code == 202
+    assert store.calls == ["reload", "refresh", "refresh", "read_pointer"], (
+        "/publish reloads, then the no-op check refreshes and reads the pointer"
+    )
+
+    server, store = _make_recording_server(
+        tmp_path, label="reload-status", staged_on_reload=(7,)
+    )
+    client = TestClient(server.build_app())
+    resp = client.get("/status")
+    assert resp.status_code == 200
+    assert resp.json()["staged_versions"] == [7], (
+        "/status reload exposes a dir staged by another container"
+    )
+    assert store.calls == ["reload", "refresh", "read_pointer"], (
+        "/status reloads before reading the pointer"
+    )
+
     _patch_job_poll(
         monkeypatch,
         {
@@ -281,3 +399,79 @@ def test_publisher_lifecycle(
     assert bad["status"] == "failure"
     assert "remote boom" in bad["error"]
 
+    # /job reads no volume state, so it must not invoke the reloader.
+    server, store = _make_recording_server(tmp_path, label="reload-job")
+    _patch_job_poll(monkeypatch, {"fc-job": _FakeFunctionCall("pending")})
+    client = TestClient(server.build_app())
+    resp = client.get("/job/fc-job")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "pending"
+    assert store.calls == [], "/job never reloads the volume"
+
+def test_publisher_guards(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Foreign run_id rejected before spawn; volume reload/commit ordering;
+    poll timeouts and errors keep the single-writer guard."""
+    from fastapi.testclient import TestClient
+
+    real_materialize = publish_app.materialize_version
+
+    with pytest.raises(ValueError, match="refusing to build a store"):
+        publish_app._build_store("someone-elses-run")
+
+    source = _make_publish_source(tmp_path)
+    fake_spawn = _FakeSpawn()
+    monkeypatch.setattr(publish_app, "materialize_version", fake_spawn)
+    client = TestClient(_make_server(tmp_path).build_app())
+    resp = client.post(
+        "/publish",
+        json={"run_id": "someone-elses-run", "version": 2, "source": str(source)},
+    )
+    assert resp.status_code == 400
+    assert "does not match" in resp.json()["detail"]
+    assert fake_spawn.calls == []
+
+    events: list[str] = []
+    published = _patch_materialize_env(monkeypatch, tmp_path, events)
+    source_dir = _make_source(tmp_path / "src-mat")
+    monkeypatch.setattr(publish_app, "materialize_version", real_materialize)
+    result = publish_app.materialize_version.local(
+        run_id=publish_app.RUN_ID, version=1, source=str(source_dir), publish=False
+    )
+    assert result["published"] is False
+    assert events == ["reload", "commit"], "staging path reloads then commits"
+
+    events.clear()
+    result = publish_app.materialize_version.local(
+        run_id=publish_app.RUN_ID, version=2, source=str(source_dir), publish=True
+    )
+    assert result["published"] is True
+    assert events == ["reload"], "publish path reloads without staging commit"
+    assert published == [
+        {
+            "run_id": publish_app.RUN_ID,
+            "model_dir": publish_app._version_dir(tmp_path / "run", 2),
+        }
+    ]
+
+    calls = {"fc-modal-to": _FakeFunctionCall("modal-timeout")}
+    _patch_job_poll(monkeypatch, calls)
+    assert publish_app._job_state("fc-modal-to")["status"] == "pending"
+
+    monkeypatch.setattr(publish_app, "materialize_version", _FakeSpawn())
+    calls = {"fc-test-1": _FakeFunctionCall("pending")}
+    _patch_job_poll(monkeypatch, calls)
+    client = TestClient(_make_server(tmp_path).build_app())
+    resp = client.post(
+        "/publish",
+        json={"run_id": publish_app.RUN_ID, "version": 1, "source": str(source)},
+    )
+    assert resp.status_code == 202
+    calls["fc-test-1"].state = "query-error"
+    resp = client.post(
+        "/publish",
+        json={"run_id": publish_app.RUN_ID, "version": 2, "source": str(source)},
+    )
+    assert resp.status_code == 409, "unknown poll keeps the single-writer guard"
+    assert "still running" in resp.json()["detail"]
