@@ -63,6 +63,11 @@ class AdmissionGate:
     incompatible transition (a run switch's boot reset) commits with ``drain_all=True``,
     which also drains all in-flight requests. The version flips before admission reopens.
 
+    Version leases (``version_lease_ttl > 0``) hold a replica on its applied
+    version while pinned sessions are active. An ``in_place`` commit waits,
+    admission still open, until no unexpired lease names a version below the
+    target.
+
     The gate does not own the served version: it reads it through the injected
     ``served_version`` reader, always under its condition lock, and reports every
     rejection to the ``on_reject`` hook (so the owner can treat a 409 as a catch-up
@@ -76,15 +81,19 @@ class AdmissionGate:
         commit_mode: CommitMode = "in_place",
         served_version: Callable[[], VersionRef | None] | None = None,
         on_reject: Callable[[dict[str, Any]], None] | None = None,
+        version_lease_ttl: float = 0.0,
     ) -> None:
         self.commit_mode = commit_mode
         self._served_version = served_version or (lambda: None)
         self._on_reject = on_reject or (lambda error: None)
+        self._lease_ttl = version_lease_ttl
         self._cond = asyncio.Condition()
         self._active = 0
         self._committing = False
         self._drain_all = False
         self._exact_inflight: dict[int, int] = defaultdict(int)
+        # lease_key -> (exact version, monotonic expiry). Pruned lazily.
+        self._leases: dict[str, tuple[int, float]] = {}
 
     @property
     def active_requests(self) -> int:
@@ -111,10 +120,71 @@ class AdmissionGate:
             return not any(self._exact_inflight.values())
         return self._active == 0
 
+    def _prune_leases(self, now: float) -> None:
+        expired = [k for k, (_, exp) in self._leases.items() if exp <= now]
+        for k in expired:
+            del self._leases[k]
+
+    def leases_snapshot(self) -> dict[int, int]:
+        """Live (unexpired) lease count per version, for ``/server_info``."""
+        self._prune_leases(time.monotonic())
+        counts: dict[int, int] = defaultdict(int)
+        for version, _ in self._leases.values():
+            counts[version] += 1
+        return dict(counts)
+
+    @property
+    def leases_enabled(self) -> bool:
+        return self._lease_ttl > 0
+
+    def leases_blocking(self, target_version: int) -> bool:
+        """True when a live lease pins a version below ``target_version``."""
+        now = time.monotonic()
+        self._prune_leases(now)
+        return any(version < target_version for version, _ in self._leases.values())
+
+    async def hold_for_leases(self, target_version: int) -> None:
+        """Wait out leases below ``target_version`` with admission still open.
+
+        No-op for ``quiesce`` gates and when leases are disabled (ttl 0).
+        """
+        if self.commit_mode == "in_place" and self._lease_ttl > 0:
+            await self._hold_for_leases(target_version)
+
+    async def _hold_for_leases(self, target_version: int) -> None:
+        """Wait until no live lease names a version below ``target_version``.
+
+        Stragglers renewing below-target leases extend the wait; pins at or
+        above the target 409 and never block. Each wait wakes at the soonest
+        blocker expiry.
+        """
+        async with self._cond:
+            while True:
+                now = time.monotonic()
+                self._prune_leases(now)
+                blockers = [
+                    exp
+                    for version, exp in self._leases.values()
+                    if version < target_version
+                ]
+                if not blockers:
+                    return
+                with suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(
+                        self._cond.wait(), timeout=min(blockers) - now
+                    )
+
     @asynccontextmanager
-    async def admit(self, constraint: VersionConstraint | None = None):
+    async def admit(
+        self,
+        constraint: VersionConstraint | None = None,
+        *,
+        lease_key: str | None = None,
+    ):
         """Admit one request under a single lock acquisition, yielding the version it
-        is served on. Raises :class:`ConstraintUnmet` if the constraint can't be met."""
+        is served on. Raises :class:`ConstraintUnmet` if the constraint can't be met.
+        An admitted exact-pin with a ``lease_key`` renews that key's lease so
+        think-time still holds the replica on its version."""
         c = constraint or VersionConstraint()
         async with self._cond:
             await self._cond.wait_for(lambda: not self._committing)
@@ -126,6 +196,11 @@ class AdmissionGate:
             self._active += 1
             if c.exact_version is not None:
                 self._exact_inflight[c.exact_version] += 1
+                if lease_key is not None and self._lease_ttl > 0:
+                    self._leases[lease_key] = (
+                        c.exact_version,
+                        time.monotonic() + self._lease_ttl,
+                    )
         try:
             yield served
         finally:
@@ -145,18 +220,47 @@ class AdmissionGate:
         pause: Callable[[], Awaitable[None]] | None = None,
         resume: Callable[[], Awaitable[None]] | None = None,
         drain_all: bool = False,
+        target_version: int | None = None,
+        on_hold_start: Callable[[], None] | None = None,
+        on_hold_end: Callable[[], None] | None = None,
     ) -> None:
         """Wait for the commit point, close the gate, apply, flip the served version
         (``on_applied``) while the gate is held, then reopen. ``on_applied`` runs only
         after a successful apply; in ``in_place`` the flip happens before ``resume``.
         ``drain_all`` marks an incompatible transition (a boot reset): drain and gate
         every request regardless of mode — rolling requests may cross a compatible
-        weight update, never a change of lineage (stitch#32)."""
-        # Close admission before draining (stitch#32), else a new in_place request can straddle a boot reset.
-        async with self._cond:
-            self._committing = True
-            self._drain_all = drain_all
-            self._cond.notify_all()
+        weight update, never a change of lineage (stitch#32).
+        ``on_hold_start`` / ``on_hold_end`` bracket the pre-close lease hold (if any).
+        """
+        if not drain_all and target_version is not None:
+            # Fire the hooks only when the hold can actually run (the same guard
+            # hold_for_leases applies), so a no-op hold never surfaces as one.
+            can_hold = self.commit_mode == "in_place" and self._lease_ttl > 0
+            if can_hold and on_hold_start is not None:
+                on_hold_start()
+            try:
+                while True:
+                    await self.hold_for_leases(target_version)
+                    # Re-check under the lock before closing: a lease admitted
+                    # between the hold returning and admission closing would
+                    # otherwise be committed past and its next request 409s.
+                    async with self._cond:
+                        if can_hold and self.leases_blocking(target_version):
+                            continue
+                        self._committing = True
+                        self._drain_all = drain_all
+                        self._cond.notify_all()
+                        break
+            finally:
+                if can_hold and on_hold_end is not None:
+                    on_hold_end()
+        else:
+            # Close admission before draining (stitch#32), else a new in_place
+            # request can straddle a boot reset.
+            async with self._cond:
+                self._committing = True
+                self._drain_all = drain_all
+                self._cond.notify_all()
         try:
             async with self._cond:
                 await self._cond.wait_for(self._commit_ready)
@@ -195,6 +299,7 @@ class Reconciler:
         boot_version: int = 0,
         commit_mode: CommitMode = "in_place",
         flush_cache_on_commit: bool = False,
+        version_lease_ttl: float = 0.0,
         debug_requests: bool = False,
         reconcile_interval: float = 5.0,
     ) -> None:
@@ -213,6 +318,7 @@ class Reconciler:
             commit_mode=commit_mode,
             served_version=lambda: self.applied,
             on_reject=self._on_reject,
+            version_lease_ttl=version_lease_ttl,
         )
         self.debug_requests = debug_requests
         self.reconcile_interval = reconcile_interval
@@ -283,6 +389,8 @@ class Reconciler:
         return {
             "ready": self.ready,
             "applied": self.applied.identity if self.applied else None,
+            "applied_version": self.applied.version if self.applied else None,
+            "leases": self.gate.leases_snapshot(),
             "sync_state": self.sync_state.value,
             "reason": self.last_error,
             "run_id": self.run_id,
@@ -313,6 +421,20 @@ class Reconciler:
     def expects_engine_progress(self) -> bool:
         """Whether this replica should currently make inference progress."""
         return self.ready and self.sync_state is not SyncState.COMMITTING
+
+    def _lease_hold_hooks(self) -> tuple[Callable[[], None], Callable[[], None]]:
+        """Surface a gate-internal lease hold as HOLDING so drain selection
+        and the watchdog stay live (admission open, engine serving)."""
+        prior: dict[str, SyncState] = {}
+
+        def on_hold_start() -> None:
+            prior["state"] = self.sync_state
+            self.sync_state = SyncState.HOLDING
+
+        def on_hold_end() -> None:
+            self.sync_state = prior["state"]
+
+        return on_hold_start, on_hold_end
 
     async def wait_for_terminal_error(self) -> None:
         """Raise once reconciliation proves this replica must be replaced."""
@@ -465,7 +587,14 @@ class Reconciler:
         if not has_weight_changes:
             # Nothing changed across the applied→target range: advance the
             # version without preparing or loading byte-identical weights.
-            await self.gate.commit(apply=self._commit_noop, on_applied=on_applied)
+            on_hold_start, on_hold_end = self._lease_hold_hooks()
+            await self.gate.commit(
+                apply=self._commit_noop,
+                on_applied=on_applied,
+                target_version=pointer.version,
+                on_hold_start=on_hold_start,
+                on_hold_end=on_hold_end,
+            )
             m["skipped_weight_update"] = True
         else:
             # Preparation runs while serving. Re-read the head once before the
@@ -526,11 +655,15 @@ class Reconciler:
                     )
 
             try:
+                on_hold_start, on_hold_end = self._lease_hold_hooks()
                 await self.gate.commit(
                     apply=apply,
                     on_applied=on_applied,
                     pause=self.engine.pause,
                     resume=self.engine.resume,
+                    target_version=pointer.version,
+                    on_hold_start=on_hold_start,
+                    on_hold_end=on_hold_end,
                 )
             except UnrecoverableSidecarError:
                 raise

@@ -118,8 +118,19 @@ class _MetricsUpstream:
         )
 
 
+class _JsonUpstream:
+    """A healthy engine: answer every request 200 with a small JSON body."""
+
+    async def request(self, _method: str, _url: str, **_kwargs: Any) -> httpx.Response:
+        return httpx.Response(200, json={"ok": True})
+
+
 async def _asgi_post(
-    app: Any, payload: dict[str, Any], *, disconnect_on: asyncio.Event | None = None
+    app: Any,
+    payload: dict[str, Any],
+    *,
+    disconnect_on: asyncio.Event | None = None,
+    extra_headers: list[tuple[bytes, bytes]] | None = None,
 ):
     """Issue one request directly to the ASGI app, optionally disconnecting after its body."""
     body = json.dumps(payload).encode()
@@ -150,7 +161,7 @@ async def _asgi_post(
             "path": "/generate",
             "raw_path": b"/generate",
             "query_string": b"",
-            "headers": [(b"content-type", b"application/json")],
+            "headers": [(b"content-type", b"application/json"), *(extra_headers or [])],
             "client": ("127.0.0.1", 1234),
             "server": ("sidecar", 8000),
         },
@@ -263,6 +274,58 @@ def test_metrics_bypasses_weight_admission_before_first_pointer(monkeypatch):
         assert response.content.startswith(b"# TYPE sglang:num_running_reqs gauge")
         assert upstream.requests == [("GET", "http://local-engine:8001/metrics")]
         assert gate_sidecar.gate.active_requests == 0
+
+    asyncio.run(go())
+
+
+def test_proxy_lease_headers(monkeypatch):
+    """Lease-header variants: default header keys the lease; headerless requests
+    add none; a configured lease_header takes over the keying."""
+
+    async def go():
+        gate = AdmissionGate(
+            served_version=lambda: VersionRef("run", 3), version_lease_ttl=60.0
+        )
+        gate_sidecar = _GateSidecar(VersionRef("run", 3))
+        monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: _JsonUpstream())
+        app = create_app(gate, gate_sidecar, _ProxyEngine())
+        pin = {"weight_version": {"exact_version": 3}}
+
+        status, _, _ = await _asgi_post(
+            app, pin, extra_headers=[(b"modal-session-id", b"sess-1")]
+        )
+        assert status == 200
+        assert gate.leases_snapshot() == {3: 1}, (
+            "default Modal-Session-Id header keys the lease"
+        )
+
+        status, _, _ = await _asgi_post(app, pin)
+        assert status == 200
+        assert gate.leases_snapshot() == {3: 1}, (
+            "headerless request is served on the body pin and adds no lease"
+        )
+
+        gate = AdmissionGate(
+            served_version=lambda: VersionRef("run", 3), version_lease_ttl=60.0
+        )
+        gate_sidecar = _GateSidecar(VersionRef("run", 3))
+        app = create_app(gate, gate_sidecar, _ProxyEngine(), lease_header="X-Session")
+
+        status, _, _ = await _asgi_post(
+            app, pin, extra_headers=[(b"x-session", b"sess-9")]
+        )
+        assert status == 200
+        assert gate.leases_snapshot() == {3: 1}, (
+            "configured lease_header keys the lease"
+        )
+
+        status, _, _ = await _asgi_post(
+            app, pin, extra_headers=[(b"modal-session-id", b"sess-10")]
+        )
+        assert status == 200
+        assert gate.leases_snapshot() == {3: 1}, (
+            "default header no longer keys leases once lease_header is set"
+        )
 
     asyncio.run(go())
 

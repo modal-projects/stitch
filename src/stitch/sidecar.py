@@ -58,6 +58,8 @@ class SidecarConfig:
     store_options: dict[str, str] = field(default_factory=dict)
     commit_mode: CommitMode = "in_place"
     flush_cache_on_commit: bool = False
+    version_lease_ttl: float = 0.0  # seconds; 0 disables version leases
+    lease_header: str = "Modal-Session-ID"
     run_id: str
     boot_version: int = 0
     debug_requests: bool = False
@@ -106,6 +108,10 @@ class SidecarConfig:
             self.store_factory,
             "--commit-mode",
             self.commit_mode,
+            "--version-lease-ttl",
+            str(self.version_lease_ttl),
+            "--lease-header",
+            self.lease_header,
             "--run-id",
             self.run_id,
             "--boot-version",
@@ -155,6 +161,8 @@ class SidecarConfig:
             store_options=store_options,
             commit_mode=args.commit_mode,
             flush_cache_on_commit=args.flush_cache_on_commit,
+            version_lease_ttl=args.version_lease_ttl,
+            lease_header=args.lease_header,
             run_id=args.run_id,
             boot_version=args.boot_version,
             debug_requests=args.debug_requests,
@@ -183,6 +191,13 @@ def _sidecar_parser() -> argparse.ArgumentParser:
         help="extra keyword argument for the store factory; repeatable",
     )
     p.add_argument("--commit-mode", choices=["in_place", "quiesce"], default="in_place")
+    p.add_argument(
+        "--version-lease-ttl",
+        type=float,
+        default=0.0,
+        help="seconds a pinned session's version lease outlives its last request; 0 disables leases",
+    )
+    p.add_argument("--lease-header", default="Modal-Session-ID")
     p.add_argument("--run-id", required=True)
     p.add_argument("--boot-version", type=int, default=0)
     p.add_argument(
@@ -230,6 +245,8 @@ def run(config: SidecarConfig, store: Store) -> None:
         boot_version=config.boot_version,
         commit_mode=config.commit_mode,
         flush_cache_on_commit=config.flush_cache_on_commit,
+        version_lease_ttl=config.version_lease_ttl,
+        lease_header=config.lease_header,
         host=config.host,
         port=config.port,
         debug_requests=config.debug_requests,
