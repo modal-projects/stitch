@@ -38,6 +38,9 @@ class ModalConfig:
     router_target_concurrency: int = 50
     rollout_ephemeral_disk_mib: int | None = None
     rollout_memory_mib: tuple[int, int] | None = None
+    # Version of the shared "huggingface-cache" Volume to mount. v2 is the current
+    # layout; older environments may still have a v1 volume (set 1 there).
+    hf_cache_volume_version: int = 2
     torch_dist_prep_nodes: int = 2
     torch_dist_prep_gpus_per_node: int = 8
     torch_dist_convert_extra_args: str = ""

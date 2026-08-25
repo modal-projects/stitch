@@ -98,7 +98,7 @@ The core package is trainer-, engine-, and provider-agnostic through the
 [`Pool`](src/stitch/pools/base.py) interfaces.
 
 Stitch includes Modal Volume and S3 stores, SGLang engines, Modal Flash pools,
-and reference Miles and Slime deployments. See the
+and reference Miles, Slime, and inference-only deployments. See the
 [`cookbook`](cookbook/README.md) to choose an update mode, launch a run, scale
 the rollout fleet, and validate an update. Fork pins and re-porting notes are
 in [`SGLANG_FORK.md`](cookbook/common/SGLANG_FORK.md) and

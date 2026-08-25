@@ -1,8 +1,9 @@
-"""Trainer-launch infrastructure shared by every recipe."""
+"""Pool-launch infrastructure shared by every recipe."""
 
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from typing import Any
 
 
@@ -46,14 +47,35 @@ def materialize_node_local_yaml(
         setattr(cfg, field, path)
 
 
-def deploy_pool_and_spawn(run: Any) -> Any:
-    """Deploy a run's pool, wait for it to be ready, then spawn its trainer."""
+def deploy_pool(
+    run: Any,
+    after_deploy: Callable[[], None] | None = None,
+    ready_timeout: float | None = None,
+) -> None:
+    """Deploy a run's pool and wait until the configured replica floor is ready.
+
+    ``after_deploy`` runs right after the app deploy persists, before awaiting
+    readiness — e.g. a one-shot remote boot-pointer claim that must land inside
+    the replicas' wait window. ``ready_timeout`` bounds the readiness wait when
+    set; when ``None``, ``await_pool_ready``'s default timeout applies.
+    """
     from stitch.pools.modal_flash_lb_temp import ModalFlashLBPool
     from stitch.service import await_pool_ready
 
     run.app.deploy()
+    if after_deploy is not None:
+        after_deploy()
+    wait_kwargs: dict[str, Any] = {}
+    if ready_timeout is not None:
+        wait_kwargs["timeout"] = ready_timeout
     await_pool_ready(
         ModalFlashLBPool(run.APP_NAME, "Server"),
         replica_floor=run.modal_cfg.rollout_min_containers,
+        **wait_kwargs,
     )
+
+
+def deploy_pool_and_spawn(run: Any) -> Any:
+    """Deploy a run's pool, wait for it to be ready, then spawn its trainer."""
+    deploy_pool(run)
     return run.spawn_train()
