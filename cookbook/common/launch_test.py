@@ -4,6 +4,26 @@ from cookbook.common import launch
 from stitch import service
 
 
+def test_deploy_pool_waits_for_readiness(monkeypatch) -> None:
+    events = []
+    run = SimpleNamespace(
+        APP_NAME="app-run",
+        app=SimpleNamespace(deploy=lambda: events.append("deploy")),
+        modal_cfg=SimpleNamespace(rollout_min_containers=32),
+    )
+
+    def wait(pool, **kwargs):
+        events.append(("ready", pool.app_name, kwargs))
+
+    monkeypatch.setattr(service, "await_pool_ready", wait)
+
+    launch.deploy_pool(run)
+    assert events == [
+        "deploy",
+        ("ready", "app-run", {"replica_floor": 32}),
+    ]
+
+
 def test_deploy_pool_waits_for_readiness_before_spawning(monkeypatch) -> None:
     events = []
     run = SimpleNamespace(
@@ -23,4 +43,25 @@ def test_deploy_pool_waits_for_readiness_before_spawning(monkeypatch) -> None:
         "deploy",
         ("ready", "app-run", {"replica_floor": 32}),
         "spawn",
+    ]
+
+
+def test_deploy_pool_passes_ready_timeout(monkeypatch) -> None:
+    """ready_timeout threads into await_pool_ready as its timeout kwarg."""
+    events = []
+    run = SimpleNamespace(
+        APP_NAME="app-run",
+        app=SimpleNamespace(deploy=lambda: events.append("deploy")),
+        modal_cfg=SimpleNamespace(rollout_min_containers=32),
+    )
+
+    def wait(pool, **kwargs):
+        events.append(("ready", pool.app_name, kwargs))
+
+    monkeypatch.setattr(service, "await_pool_ready", wait)
+
+    launch.deploy_pool(run, ready_timeout=123.5)
+    assert events == [
+        "deploy",
+        ("ready", "app-run", {"replica_floor": 32, "timeout": 123.5}),
     ]
