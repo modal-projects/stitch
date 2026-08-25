@@ -15,7 +15,7 @@ import stitch.service as stitch_service
 from stitch.engines.base import Engine
 from stitch.service import create_app
 from stitch.sync import AdmissionGate
-from stitch.types import PoolState, ReplicaState, VersionRef
+from stitch.types import PoolState, ReplicaState, VersionConstraint, VersionRef
 
 
 class _ProxyEngine(Engine):
@@ -446,3 +446,43 @@ def test_await_pool_ready_fails_closed_below_threshold(monkeypatch) -> None:
         stitch_service.await_pool_ready(
             object(), replica_floor=2, timeout=1, interval=0
         )
+
+
+def test_staging_pause_is_retryable_503_and_never_reaches_engine(monkeypatch):
+    # During a generation-pausing stage the proxy rejects new work with
+    # 503 + Retry-After without forwarding anything to the paused engine; a
+    # session that already holds a lease gets it renewed by the same rejection.
+    async def go():
+        upstream = _HangingUpstream()
+        sidecar = _GateSidecar(VersionRef("run", 3))
+        gate = AdmissionGate(
+            served_version=lambda: VersionRef("run", 3), version_lease_ttl=30.0
+        )
+        monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: upstream)
+        app = create_app(gate, sidecar, _ProxyEngine())
+
+        async with gate.admit(VersionConstraint(exact_version=3), lease_key="sess-1"):
+            pass  # an established pinned session
+        assert gate.leases_snapshot() == {3: 1}
+        expiry_before = gate._leases["sess-1"][1]
+
+        gate.staging_pause = True
+        status, headers, body = await _asgi_post(
+            app,
+            {"weight_version": {"exact_version": 3}},
+            extra_headers=[(b"modal-session-id", b"sess-1")],
+        )
+        assert status == 503
+        assert headers["retry-after"] == "1"
+        data = json.loads(body)
+        assert data["error"]["type"] == "GenerationPaused"
+        assert data["error"]["retryable"] is True
+        assert gate._leases["sess-1"][1] > expiry_before  # renewed, not served
+        assert not upstream.started.is_set()  # nothing enqueued behind the pause
+        assert gate.active_requests == 0
+
+        status, _, _ = await _asgi_post(app, {})  # brand-new work: same 503
+        assert status == 503
+        assert not upstream.started.is_set()
+
+    asyncio.run(go())

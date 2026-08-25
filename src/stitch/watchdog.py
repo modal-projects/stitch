@@ -67,9 +67,9 @@ class EngineWatchdog:
     """Turn repeated engine-health failures into one terminal sidecar error.
 
     Probe only while the reconciler promises inference progress. Destination
-    initialization and commits supervise their own engine RPCs and may occupy the
-    engine's HTTP loop, so a concurrent health request is not an independent signal.
-    Staging runs alongside inference and remains functionally monitored.
+    initialization, staging, and commits supervise their own engine RPCs and may
+    occupy the engine's HTTP loop, so a concurrent health request is not an
+    independent signal then.
     """
 
     def __init__(
