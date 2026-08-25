@@ -230,7 +230,12 @@ class RouterRegistry:
 
     @modal.enter()
     def enter(self) -> None:
-        router.serve_registry(self, app_name=APP_NAME, upstream_cls="Server")
+        router.serve_registry(
+            self,
+            app_name=APP_NAME,
+            upstream_cls="Server",
+            rollout_concurrency=ROLLOUT_CONCURRENCY,
+        )
 
     @modal.exit()
     def exit(self) -> None:

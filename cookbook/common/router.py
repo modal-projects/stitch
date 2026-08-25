@@ -13,7 +13,9 @@ polls every replica's ``/server_info`` (authoritative membership: applied_versio
 sync_state, target_version) and ``/v1/loads`` (live queue depth only); the router pins each
 session to a replica with spare capacity via the ``modal-flash-upstream`` header, and a 503
 from a pinned replica evicts it from rotation and retries on a healthier one, so load
-spreads instead of sticking.
+spreads instead of sticking. When a newer version starves, the registry marks one
+old-version replica ``draining`` at a time; draining replicas are excluded from
+every proxy selection path until their applied_version flips.
 
 Deltas from the upstream router: no proxy-auth/api-key secret plumbing (cookbook pools are
 ``unauthenticated``), replica discovery reuses Stitch's ``ModalFlashPool`` adapter, stdlib
@@ -58,6 +60,21 @@ CONTAINER_POLL_TIMEOUT_SECONDS = 3.0
 
 MAX_SESSION_RETRIES = 3
 
+# Consolidation: a victim is marked draining only after the drain condition
+# holds for this many consecutive registry polls (hysteresis against blips).
+DRAIN_HYSTERESIS_POLLS = 5
+# ...and a persisted victim is cleared only after this many consecutive polls
+# where the keep-condition fails: a single /server_info blip (the victim's
+# poll failed and dropped it from one snapshot) must not flap the drain.
+DRAIN_CLEAR_HYSTERESIS_POLLS = 3
+# Drain only when the old version's leases fit on the remaining k-1 replicas
+# with this safety margin below the engine overload threshold.
+DRAIN_SAFETY_FACTOR = 0.7
+# sync_states that mean "new-version capacity is imminent" — draining then is
+# premature. HOLDING is deliberately absent: holders are the starved
+# lease-holders the drain exists to free.
+_DRAIN_BLOCKING_STATES = frozenset({"FETCHING", "STAGING", "COMMITTING"})
+
 _COOKBOOK_DIR = Path(__file__).resolve().parent.parent
 
 
@@ -90,6 +107,35 @@ def build_router_image(
 def session_routes_dict(app_name: str) -> modal.Dict:
     """The run's session→replica affinity store, namespaced to the run app."""
     return modal.Dict.from_name(f"{app_name}-session-routes", create_if_missing=True)
+
+
+def consolidation_dict(app_name: str) -> modal.Dict:
+    """The run's consolidation record (single fleet-wide drain victim), namespaced
+    to the run app. Persisted outside /loads so a registry restart or a victim's
+    poll blip cannot silently clear or duplicate the victim."""
+    return modal.Dict.from_name(f"{app_name}-consolidation", create_if_missing=True)
+
+
+class _DictMethod:
+    """Duck-types a Modal SDK synchronicity-wrapped Dict method (callable + .aio)."""
+
+    def __init__(self, fn: Any) -> None:
+        self.fn = fn
+
+    def __call__(self, *args: Any) -> Any:
+        return self.fn(*args)
+
+    async def aio(self, *args: Any) -> Any:
+        return self.fn(*args)
+
+
+class _LocalDict:
+    """In-memory stand-in for the consolidation modal.Dict (tests, single-process)."""
+
+    def __init__(self) -> None:
+        self._store: dict[str, Any] = {}
+        self.get = _DictMethod(lambda key, default=None: self._store.get(key, default))
+        self.put = _DictMethod(lambda key, value: self._store.__setitem__(key, value))
 
 
 # ── routing state ────────────────────────────────────────────────────────────
@@ -189,6 +235,82 @@ def select_underloaded_container(
     return random.choice(pool)
 
 
+def select_packed_container(
+    candidates: list[ContainerInfo], exact_version: int
+) -> ContainerInfo:
+    """Among replicas applied at ``exact_version``, pick the lowest-load
+    lease-holder (all candidates if none hold leases). Packing onto the
+    most-leased replica stampedes it past the engine overload threshold."""
+
+    def lease_count(container: ContainerInfo) -> int:
+        return container.leases.get(str(exact_version), 0)
+
+    lease_holders = [c for c in candidates if lease_count(c) > 0]
+    pool = lease_holders or list(candidates)
+    if not pool:
+        raise ValueError("select_packed_container: no candidates to select from")
+    # A stale load is last-known, not live (a paused replica can sit at a
+    # frozen zero): when any candidate reports fresh load, pack only across
+    # those.
+    fresh = [c for c in pool if not c.load_stale]
+    pool = fresh or pool
+    min_load = min(c.load for c in pool)
+    best = [c for c in pool if c.load == min_load]
+    return random.choice(best)
+
+
+def select_drain_victim(
+    containers: list[ContainerInfo],
+    rollout_concurrency: int,
+    *,
+    safety_factor: float = DRAIN_SAFETY_FACTOR,
+) -> tuple[int, str] | None:
+    """The consolidation candidate: ``(version, task_id)`` to drain, or None.
+
+    Oldest applied version V with k>=2 lease-holders and some replica targeting
+    newer than V (a k=1 group is skipped, not fatal). Drain when leases at V
+    fit on k-1 survivors under ``rollout_concurrency * DRAIN_SAFETY_FACTOR``
+    and every survivor's load is below ``rollout_concurrency``. None while any
+    replica is FETCHING/STAGING/COMMITTING. Victim is min(task_id).
+    """
+    targets = [c.target_version for c in containers if c.target_version is not None]
+    if not targets:
+        return None
+    max_target = max(targets)
+    if any(
+        (c.sync_state or "").upper() in _DRAIN_BLOCKING_STATES for c in containers
+    ):
+        return None
+
+    by_version: dict[int, list[ContainerInfo]] = {}
+    for container in containers:
+        if container.applied_version is None or container.draining:
+            continue
+        if container.leases.get(str(container.applied_version), 0) > 0:
+            by_version.setdefault(container.applied_version, []).append(container)
+
+    for version in sorted(by_version):
+        if version >= max_target:
+            continue
+        group = by_version[version]
+        k = len(group)
+        if k < 2:
+            continue
+        victim = min(group, key=lambda c: c.task_id)
+        survivors = [c for c in group if c.task_id != victim.task_id]
+        total_leases = sum(c.leases.get(str(version), 0) for c in group)
+        if total_leases > (k - 1) * rollout_concurrency * safety_factor:
+            continue
+        if any(c.load_stale for c in survivors):
+            # A stale survivor load is unverifiable spare capacity — never
+            # approve a drain on a frozen (possibly zero) reading.
+            continue
+        if any(c.load >= rollout_concurrency for c in survivors):
+            continue
+        return version, victim.task_id
+    return None
+
+
 async def route_session(
     session_routes: modal.Dict,
     session_id: str,
@@ -197,9 +319,10 @@ async def route_session(
     exact_version: int | None = None,
 ) -> ContainerInfo | None:
     """Pick the replica for one session: sticky if healthy and (when set)
-    applied_version == exact_version, else the lowest-load same-version replica.
+    applied_version == exact_version, else a packed same-version replica.
+    Draining replicas are excluded; sticky routes to them are deleted.
     Returns None — and does not persist a route — when exact_version is set
-    but no ready replica matches it."""
+    but no non-draining replica matches it."""
     current_time = time.time()
 
     routes: list[RouteEntry] = RouteEntryList.validate_python(
@@ -230,9 +353,19 @@ async def route_session(
         container = containers.get(entry.task_id)
         if container is None:
             continue
+        if container.draining:
+            # Delete, don't skip: a kept sticky route would re-admit the victim on a blip.
+            logger.info(
+                "session %s: sticky route %s is draining; evicting",
+                session_id,
+                container.task_id,
+            )
+            routes.remove(entry)
+            await save_routes()
+            continue
         if not container.ready:
-            # Booting (stale boot weights) or dead-engine replica: evict so the
-            # session migrates instead of pinning stale weights.
+            # Booting (stale boot weights) or dead-engine replica: evict like
+            # draining so the session migrates instead of pinning stale weights.
             logger.info(
                 "session %s: sticky route %s is not ready; evicting",
                 session_id,
@@ -259,11 +392,15 @@ async def route_session(
     candidates = [
         container
         for container in containers.values()
-        if container.load < overload_threshold and container.ready
+        if container.load < overload_threshold
+        and not container.draining
+        and container.ready
     ]
-    # Unpinned fallback is overloaded-but-ready; an all-not-ready fleet yields None.
+    # Unpinned fallback is overloaded-but-not-draining; an all-draining fleet yields None.
     fallback = candidates or [
-        container for container in containers.values() if container.ready
+        container
+        for container in containers.values()
+        if not container.draining and container.ready
     ]
 
     if exact_version is not None:
@@ -276,13 +413,16 @@ async def route_session(
             version_matched = [
                 container
                 for container in containers.values()
-                if container.applied_version == exact_version and container.ready
+                if container.applied_version == exact_version
+                and not container.draining
+                and container.ready
             ]
         if version_matched:
-            selected = min(version_matched, key=lambda container: container.load)
+            selected = select_packed_container(version_matched, exact_version)
         else:
             # No healthy upstream at the pinned version: return None rather than
-            # landing on a wrong-version replica (which would 409).
+            # landing on a wrong-version or draining replica (which would 409
+            # and re-pin the session onto the victim).
             logger.info(
                 "session %s: no healthy upstream at exact_version=%d "
                 "(%d replicas known); not re-pinning",
@@ -294,7 +434,7 @@ async def route_session(
     else:
         if not fallback:
             logger.info(
-                "session %s: no ready replica available; no selection",
+                "session %s: no non-draining replica available; no selection",
                 session_id,
             )
             return None
@@ -376,9 +516,24 @@ class _RequestCancelledMiddleware:
             return None
 
 
-def serve_registry(replica: Any, *, app_name: str, upstream_cls: str) -> None:
+def serve_registry(
+    replica: Any,
+    *,
+    app_name: str,
+    upstream_cls: str,
+    rollout_concurrency: int,
+    consolidation: Any = None,
+) -> None:
     """Start the load-registry server on a ``RouterRegistry`` container (@modal.enter)."""
-    registry = _RegistryApp(app_name=app_name, upstream_cls=upstream_cls)
+    # Router containers default to WARNING; routing decisions ("pinning new
+    # upstream", "marking … draining") are INFO and must reach the log store.
+    logging.basicConfig(level=logging.INFO)
+    registry = _RegistryApp(
+        app_name=app_name,
+        upstream_cls=upstream_cls,
+        rollout_concurrency=rollout_concurrency,
+        consolidation=consolidation,
+    )
     registry.start()
     replica._router_server = registry
 
@@ -392,6 +547,7 @@ def serve_router(
     overload_threshold: int,
 ) -> None:
     """Start the session-routing proxy on a ``Router`` container (@modal.enter)."""
+    logging.basicConfig(level=logging.INFO)
     router = _ProxyApp(
         registry_url=registry_url,
         upstream_url=upstream_url,
@@ -435,11 +591,26 @@ class _ReplicaPoll:
 class _RegistryApp(_UvicornApp):
     """Poll /server_info (membership) and /v1/loads (queue depth); serve ``/loads``."""
 
-    def __init__(self, *, app_name: str, upstream_cls: str) -> None:
+    def __init__(
+        self,
+        *,
+        app_name: str,
+        upstream_cls: str,
+        rollout_concurrency: int = 1,
+        consolidation: Any = None,
+    ) -> None:
         self.app_name = app_name
         self.upstream_cls = upstream_cls
+        # Engine overload threshold (the recipe's rollout_target_inputs) — the
+        # capacity unit of the drain condition, NOT the router's own Flash
+        # target_concurrency.
+        self.rollout_concurrency = rollout_concurrency
+        self.consolidation = consolidation if consolidation is not None else _LocalDict()
         self.containers: list[ContainerInfo] = []
         self._last_loads: dict[str, int] = {}
+        self._drain_pending: tuple[int, str] | None = None
+        self._drain_pending_polls = 0
+        self._drain_clear_polls = 0
 
     async def _poll_container(self, upstream: str) -> _ReplicaPoll:
         """/server_info is membership (failure drops the replica). /v1/loads is
@@ -527,7 +698,73 @@ class _RegistryApp(_UvicornApp):
                     ready=result.ready,
                 )
             )
+        await self._update_drain(updated)
         return updated
+
+    async def _update_drain(self, containers: list[ContainerInfo]) -> None:
+        """Mark/unmark the single fleet-wide drain victim.
+
+        The record lives in the shared consolidation dict (survives registry
+        restart). Unmarked when applied_version changes, no replica targets
+        newer, or the victim left — each only after DRAIN_CLEAR_HYSTERESIS_POLLS
+        consecutive failing polls. A new victim requires
+        DRAIN_HYSTERESIS_POLLS consecutive polls of the same candidate.
+        """
+        record = await self.consolidation.get.aio("victim", None) or {}
+        victim_id, version = record.get("victim_task_id"), record.get("version")
+        if victim_id is not None and version is not None:
+            victim = next((c for c in containers if c.task_id == victim_id), None)
+            newer_target = any(
+                c.target_version is not None and c.target_version > version
+                for c in containers
+            )
+            if victim is not None and victim.applied_version == version and newer_target:
+                victim.draining = True
+                self._drain_clear_polls = 0
+                return
+            # The keep-condition failed on this poll. A single blip (the
+            # victim's /server_info poll failed and dropped it from this
+            # snapshot, or a stale read mid-flip) must not flap the drain:
+            # clear the record only after DRAIN_CLEAR_HYSTERESIS_POLLS
+            # consecutive failing polls.
+            self._drain_clear_polls += 1
+            if self._drain_clear_polls < DRAIN_CLEAR_HYSTERESIS_POLLS:
+                if victim is not None and victim.applied_version == version:
+                    victim.draining = True  # status quo across the blip
+                return
+            await self.consolidation.put.aio(
+                "victim", {"victim_task_id": None, "version": None}
+            )
+            if victim is not None:
+                victim.draining = False
+            self._drain_pending = None
+            self._drain_pending_polls = 0
+            self._drain_clear_polls = 0
+
+        candidate = select_drain_victim(containers, self.rollout_concurrency)
+        if candidate is None:
+            self._drain_pending = None
+            self._drain_pending_polls = 0
+            return
+        if candidate == self._drain_pending:
+            self._drain_pending_polls += 1
+        else:
+            self._drain_pending = candidate
+            self._drain_pending_polls = 1
+        if self._drain_pending_polls >= DRAIN_HYSTERESIS_POLLS:
+            victim_version, victim_id = candidate
+            await self.consolidation.put.aio(
+                "victim", {"victim_task_id": victim_id, "version": victim_version}
+            )
+            self._drain_clear_polls = 0
+            for container in containers:
+                if container.task_id == victim_id:
+                    container.draining = True
+            logger.info(
+                "consolidation: marking replica %s draining at version %d",
+                victim_id,
+                victim_version,
+            )
 
     async def poll_containers(self) -> None:
         await asyncio.sleep(CONTAINER_POLL_INTERVAL_SECONDS)
