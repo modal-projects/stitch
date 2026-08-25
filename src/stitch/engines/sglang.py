@@ -84,11 +84,32 @@ class SGLangEngine(Engine):
         )
 
     async def stage(self, manifest: VersionManifest, source_dir: str) -> None:
+        destination = self._destination_for(manifest)
+        if destination == "cpu":
+            # The fork serializes nothing between the cpu-image compile and
+            # generation forwards (today the engine recompiles the FULL image
+            # on each delta — ~5-6 min at GLM scale measured; a dirty-group
+            # fast path is under investigation), and overlapping forwards
+            # crashed DeepGEMM in production. Pause the scheduler around the
+            # stage RPC — the same pause the commit path uses. Requests queued
+            # during the pause resume automatically afterward. Disk-destination
+            # stages are pure file I/O and stay un-paused.
+            await self.pause()
+            try:
+                await self._stage_weight_update(
+                    checkpoint_source_dir=str(Path(source_dir).parent),
+                    target_version=manifest.ref.version,
+                    base_version=self._boot_version,
+                    destination=destination,
+                )
+            finally:
+                await self.resume()
+            return
         await self._stage_weight_update(
             checkpoint_source_dir=str(Path(source_dir).parent),
             target_version=manifest.ref.version,
             base_version=self._boot_version,
-            destination=self._destination_for(manifest),
+            destination=destination,
         )
 
     async def initialize_update_destination(self, boot_version: int = 0) -> None:

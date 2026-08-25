@@ -5,6 +5,7 @@ against fake Store / Engine — no Modal, sglang, or GPU. Runnable directly
 from __future__ import annotations
 
 import asyncio
+import time
 import queue
 import threading
 from functools import partial
@@ -14,7 +15,7 @@ import pytest
 from stitch.engines.base import Engine
 from stitch.errors import UnrecoverableEngineError
 from stitch.stores.base import Store
-from stitch.sync import ConstraintUnmet, Reconciler
+from stitch.sync import AdmissionGate, ConstraintUnmet, Reconciler, StagingPaused
 from stitch.types import (
     SyncState,
     VersionConstraint,
@@ -170,12 +171,14 @@ def test_startup_initializes_update_destination() -> None:
     [
         (False, SyncState.IDLE, False),
         (False, SyncState.FETCHING, False),
+        (False, SyncState.HOLDING, False),
         (False, SyncState.STAGING, False),
         (False, SyncState.COMMITTING, False),
         (False, SyncState.ERROR, False),
         (True, SyncState.IDLE, True),
         (True, SyncState.FETCHING, True),
-        (True, SyncState.STAGING, True),
+        (True, SyncState.HOLDING, True),
+        (True, SyncState.STAGING, False),
         (True, SyncState.COMMITTING, False),
         (True, SyncState.ERROR, True),
     ],
@@ -237,7 +240,7 @@ def test_latest_advance_during_stage_coalesces_before_commit() -> None:
         assert engine.committed == [VersionRef("r1", 10)]
         assert r.applied == VersionRef("r1", 10)
         assert r.metrics["initial_target_version"] == 7
-        assert r.metrics["target_version"] == 10
+        assert "target_version" not in r.metrics  # cleared once IDLE
         assert r.metrics["coalesced_versions"] == 3
 
     _run(go())
@@ -1003,9 +1006,424 @@ def test_version_flips_before_resume() -> None:
     _run(go())
 
 
+# ── version leases ───────────────────────────────────────────────────────────
+def test_lease_lifecycle() -> None:
+    """Acquire, renew, think-time hold, expiry, snapshot counts, then commit."""
+
+    async def go() -> None:
+        gate = AdmissionGate(
+            served_version=lambda: VersionRef("r1", 3), version_lease_ttl=0.1
+        )
+        pin = VersionConstraint(exact_version=3)
+        async with gate.admit(pin, lease_key="sess-1"):
+            pass
+        # The lease outlives its request: think-time still holds the version.
+        assert gate.leases_snapshot() == {3: 1}
+        await asyncio.sleep(0.06)
+        async with gate.admit(pin, lease_key="sess-1"):
+            pass
+        await asyncio.sleep(0.06)
+        assert gate.leases_snapshot() == {3: 1}
+        await asyncio.sleep(0.1)
+        assert gate.leases_snapshot() == {}
+
+        gate = AdmissionGate(
+            served_version=lambda: VersionRef("r1", 3), version_lease_ttl=30.0
+        )
+        for key in ("sess-1", "sess-2"):
+            async with gate.admit(pin, lease_key=key):
+                pass
+        assert gate.leases_snapshot() == {3: 2}
+
+        gate = AdmissionGate(
+            served_version=lambda: VersionRef("r1", 5), version_lease_ttl=60.0
+        )
+        async with gate.admit(VersionConstraint(exact_version=5), lease_key="sess"):
+            pass
+        assert gate.leases_snapshot() == {5: 1}
+        applied: list[str] = []
+
+        async def apply() -> None:
+            applied.append("applied")
+
+        await asyncio.wait_for(
+            gate.commit(apply=apply, on_applied=lambda: None, target_version=5),
+            timeout=1.0,
+        )
+        assert applied == ["applied"], "lease at or above target does not block commit"
+
+        gate = AdmissionGate(served_version=lambda: VersionRef("r1", 3))
+        async with gate.admit(VersionConstraint(exact_version=3), lease_key="sess"):
+            pass
+        assert gate.leases_snapshot() == {}
+        applied = []
+        await asyncio.wait_for(
+            gate.commit(apply=apply, on_applied=lambda: None, target_version=4),
+            timeout=1.0,
+        )
+        assert applied == ["applied"], "ttl 0 skips the hold"
+
+        r = _make_reconciler(
+            store=FakeStore(VersionRef("r1", 3), _full("r1", 3)),
+            engine=FakeEngine(),
+            version_lease_ttl=30.0,
+        )
+        r.applied = VersionRef("r1", 3)
+        async with r.gate.admit(VersionConstraint(exact_version=3), lease_key="sess-1"):
+            pass
+        info = r.server_info()
+        assert info["applied_version"] == 3
+        assert info["leases"] == {3: 1}
+        r = _make_reconciler(store=FakeStore(), engine=FakeEngine())
+        info = r.server_info()
+        assert info["applied_version"] == 0
+        assert info["leases"] == {}
+
+    _run(go())
+
+
+def test_reconcile_holds_before_stage() -> None:
+    """Hold blocks stage/commit with admission open; renew extends; pointer
+    re-read after the hold; ttl 0 stages immediately."""
+
+    async def go() -> None:
+        engine = FakeEngine()
+        r = _make_reconciler(
+            store=FakeStore(VersionRef("r1", 4), _full("r1", 4)),
+            engine=engine,
+            commit_mode="in_place",
+            version_lease_ttl=0.15,
+        )
+        r.applied = VersionRef("r1", 3)
+        pin = VersionConstraint(exact_version=3)
+
+        async def pinned() -> None:
+            async with r.gate.admit(pin, lease_key="sess-1"):
+                pass
+
+        await pinned()
+        assert r.gate.leases_snapshot() == {3: 1}
+        r.ready = True
+        sync = asyncio.create_task(r.reconcile())
+        await asyncio.sleep(0.05)
+        assert "stage:4" not in engine.calls
+        assert "commit:4" not in engine.calls
+        assert not r.gate._committing
+        assert engine.staged == []
+        assert r.sync_state is SyncState.HOLDING
+        assert r.expects_engine_progress()
+        info = r.server_info()
+        assert info["sync_state"] == "HOLDING"
+        assert info["target_version"] == 4
+
+        rolling_served: list[VersionRef | None] = []
+        async with r.gate.admit(None) as served:
+            rolling_served.append(served)
+        assert rolling_served == [VersionRef("r1", 3)]
+
+        await pinned()  # renew extends the hold
+        await asyncio.sleep(0.1)
+        assert "stage:4" not in engine.calls
+        assert "commit:4" not in engine.calls
+
+        await asyncio.wait_for(sync, 2.0)
+        assert engine.calls.index("stage:4") < engine.calls.index("commit:4")
+        assert engine.staged == [VersionRef("r1", 4)]
+        assert engine.committed == [VersionRef("r1", 4)]
+        assert r.applied == VersionRef("r1", 4)
+        assert r.gate.leases_snapshot() == {}
+        assert "hold_s" in r.metrics
+        info = r.server_info()
+        assert info["sync_state"] == "IDLE"
+        assert info["target_version"] is None
+
+        manifests = [_delta("r1", v, files=[f"v{v}"]) for v in (4, 5)]
+        store = FakeStore(VersionRef("r1", 4), *manifests)
+        engine = FakeEngine()
+        r = _make_reconciler(
+            store=store,
+            engine=engine,
+            commit_mode="in_place",
+            version_lease_ttl=0.1,
+        )
+        r.applied = VersionRef("r1", 3)
+        async with r.gate.admit(VersionConstraint(exact_version=3), lease_key="sess"):
+            pass
+        sync = asyncio.create_task(r.reconcile())
+        await asyncio.sleep(0.03)
+        assert r.sync_state is SyncState.HOLDING
+        store.advance_pointer(VersionRef("r1", 5))
+        await asyncio.wait_for(sync, 2.0)
+        assert engine.staged == [VersionRef("r1", 5)]
+        assert engine.committed == [VersionRef("r1", 5)]
+        assert r.applied == VersionRef("r1", 5)
+        assert r.metrics["initial_target_version"] == 4
+        assert "target_version" not in r.metrics
+        assert r.metrics["coalesced_versions"] == 1
+
+        engine = FakeEngine()
+        r = _make_reconciler(
+            store=FakeStore(VersionRef("r1", 4), _full("r1", 4)),
+            engine=engine,
+            commit_mode="in_place",
+            version_lease_ttl=30.0,
+        )
+        r.applied = VersionRef("r1", 3)
+        await r.reconcile()
+        assert engine.staged == [VersionRef("r1", 4)]
+        assert engine.committed == [VersionRef("r1", 4)]
+        assert r.applied == VersionRef("r1", 4)
+        assert "hold_s" not in r.metrics
+
+        engine = FakeEngine()
+        r = _make_reconciler(
+            store=FakeStore(VersionRef("r1", 4), _full("r1", 4)),
+            engine=engine,
+            commit_mode="in_place",
+        )
+        r.applied = VersionRef("r1", 3)
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def inflight() -> None:
+            async with r.gate.admit(
+                VersionConstraint(exact_version=3), lease_key="sess"
+            ):
+                entered.set()
+                await release.wait()
+
+        pin_task = asyncio.create_task(inflight())
+        await entered.wait()
+        assert r.gate.leases_snapshot() == {}
+        sync = asyncio.create_task(r.reconcile())
+        await asyncio.sleep(0.05)
+        assert engine.staged == [VersionRef("r1", 4)]
+        assert "commit:4" not in engine.calls
+        release.set()
+        await asyncio.wait_for(sync, 2.0)
+        assert engine.committed == [VersionRef("r1", 4)]
+        assert "hold_s" not in r.metrics
+        await pin_task
+
+        engine = FakeEngine()
+        engine.delta_update_mode = "disk"  # type: ignore[attr-defined]
+        r = _make_reconciler(
+            store=FakeStore(VersionRef("r1", 4), _full("r1", 4)),
+            engine=engine,
+            commit_mode="in_place",
+            version_lease_ttl=0.2,
+        )
+        r.applied = VersionRef("r1", 3)
+        r.ready = True
+        base_stage = engine.stage
+        staged = asyncio.Event()
+
+        async def stage_then_pin(manifest: VersionManifest, source_dir: str) -> None:
+            await base_stage(manifest, source_dir)
+            async with r.gate.admit(VersionConstraint(exact_version=3), lease_key="sess"):
+                pass
+            staged.set()
+
+        engine.stage = stage_then_pin  # type: ignore[method-assign]
+        sync = asyncio.create_task(r.reconcile())
+        await staged.wait()
+        await asyncio.sleep(0.05)
+        assert "commit:4" not in engine.calls
+        assert not r.gate._committing
+        assert r.sync_state is SyncState.HOLDING
+        assert r.expects_engine_progress()
+        assert r.server_info()["sync_state"] == "HOLDING"
+        await asyncio.wait_for(sync, 2.0)
+        assert engine.committed == [VersionRef("r1", 4)]
+        assert r.applied == VersionRef("r1", 4)
+        assert r.sync_state is SyncState.IDLE
+
+    _run(go())
+
+
+def test_stage_failure_and_metrics_clear() -> None:
+    async def go() -> None:
+        engine = FakeEngine()
+        r = _make_reconciler(
+            store=FakeStore(VersionRef("r1", 4), _full("r1", 4)),
+            engine=engine,
+            commit_mode="in_place",
+            version_lease_ttl=0.05,
+        )
+        r.applied = VersionRef("r1", 3)
+        async with r.gate.admit(VersionConstraint(exact_version=3), lease_key="sess"):
+            pass
+
+        async def failing_stage(manifest: VersionManifest, source_dir: str) -> None:
+            raise RuntimeError("stage boom")
+
+        engine.stage = failing_stage  # type: ignore[method-assign]
+        await r.reconcile()
+        assert r.sync_state is SyncState.ERROR
+        assert r.last_error == "stage boom"
+        assert r.applied == VersionRef("r1", 3)
+        assert not r.gate._committing
+        assert r.server_info()["target_version"] is None
+        assert "target_version" not in r.metrics
+        assert r.metrics["error"] == "stage boom"
+        assert r.server_info()["metrics"].get("target_version") is None
+
+        engine = FakeEngine()
+        r = _make_reconciler(
+            store=FakeStore(VersionRef("r1", 4), _full("r1", 4)), engine=engine
+        )
+        r.applied = VersionRef("r1", 3)
+        await r.reconcile()
+        assert r.sync_state is SyncState.IDLE
+        assert "target_version" not in r.metrics
+        assert "stage_s" in r.metrics
+        assert r.server_info()["metrics"].get("target_version") is None
+
+    _run(go())
+
+
+def test_staging_pause_cpu_vs_disk() -> None:
+    """Staging pause rejects new work but renews existing; cpu closes admission,
+    disk keeps it open; watchdog probes disk STAGING, not cpu STAGING."""
+
+    async def go() -> None:
+        gate = AdmissionGate(
+            served_version=lambda: VersionRef("r1", 3), version_lease_ttl=0.2
+        )
+        async with gate.admit(VersionConstraint(exact_version=3), lease_key="sess"):
+            pass
+        assert gate.leases_snapshot() == {3: 1}
+        expiry_before = gate._leases["sess"][1]
+        gate.staging_pause = True
+        await asyncio.sleep(0.02)
+        with pytest.raises(StagingPaused):
+            async with gate.admit(
+                VersionConstraint(exact_version=3), lease_key="sess"
+            ):
+                pass
+        assert gate._leases["sess"][1] > expiry_before
+        assert gate.active_requests == 0
+        with pytest.raises(StagingPaused):
+            async with gate.admit(None):
+                pass
+        assert gate.active_requests == 0
+        gate.staging_pause = False
+        async with gate.admit(None) as served:
+            assert served == VersionRef("r1", 3)
+
+        engine = FakeEngine()
+        engine.delta_update_mode = "cpu"  # type: ignore[attr-defined]
+        r = _make_reconciler(
+            store=FakeStore(VersionRef("r1", 4), _full("r1", 4)), engine=engine
+        )
+        r.applied = VersionRef("r1", 3)
+        stage_started = asyncio.Event()
+        finish_stage = asyncio.Event()
+        base_stage = engine.stage
+
+        async def slow_stage(manifest: VersionManifest, source_dir: str) -> None:
+            await base_stage(manifest, source_dir)
+            stage_started.set()
+            await finish_stage.wait()
+
+        engine.stage = slow_stage  # type: ignore[method-assign]
+        sync = asyncio.create_task(r.reconcile())
+        await stage_started.wait()
+        assert r.sync_state is SyncState.STAGING
+        assert r.gate.staging_pause
+        with pytest.raises(StagingPaused):
+            async with r.gate.admit(None):
+                pass
+        finish_stage.set()
+        await asyncio.wait_for(sync, 2.0)
+        assert not r.gate.staging_pause
+        assert r.applied == VersionRef("r1", 4)
+
+        engine = FakeEngine()
+        engine.delta_update_mode = "disk"  # type: ignore[attr-defined]
+        r = _make_reconciler(
+            store=FakeStore(VersionRef("r1", 4), _full("r1", 4)), engine=engine
+        )
+        r.applied = VersionRef("r1", 3)
+        stage_started = asyncio.Event()
+        finish_stage = asyncio.Event()
+        base_stage = engine.stage
+
+        async def slow_disk(manifest: VersionManifest, source_dir: str) -> None:
+            await base_stage(manifest, source_dir)
+            stage_started.set()
+            await finish_stage.wait()
+
+        engine.stage = slow_disk  # type: ignore[method-assign]
+        sync = asyncio.create_task(r.reconcile())
+        await stage_started.wait()
+        assert r.sync_state is SyncState.STAGING
+        assert not r.gate.staging_pause
+        async with r.gate.admit(None) as served:
+            assert served == VersionRef("r1", 3)
+        finish_stage.set()
+        await asyncio.wait_for(sync, 2.0)
+        assert r.applied == VersionRef("r1", 4)
+
+        engine = FakeEngine()
+        engine.delta_update_mode = "disk"  # type: ignore[attr-defined]
+        r = _make_reconciler(store=FakeStore(), engine=engine)
+        r.ready = True
+        r.sync_state = SyncState.STAGING
+        assert r.expects_engine_progress() is True
+        r.sync_state = SyncState.COMMITTING
+        assert r.expects_engine_progress() is False
+        engine = FakeEngine()
+        engine.delta_update_mode = "cpu"  # type: ignore[attr-defined]
+        r = _make_reconciler(store=FakeStore(), engine=engine)
+        r.ready = True
+        r.sync_state = SyncState.STAGING
+        assert r.expects_engine_progress() is False
+
+    _run(go())
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:
         t()
         print(f"  ok  {t.__name__}")
     print(f"reconcile harness: {len(tests)} PASS")
+
+
+def test_lease_admitted_in_hold_close_gap_reenters_hold() -> None:
+    """A lease slipping in between the hold returning and admission closing
+    must re-enter the hold, never be committed past."""
+    asyncio.run(_lease_slips_into_hold_close_gap())
+
+
+async def _lease_slips_into_hold_close_gap() -> None:
+    gate = AdmissionGate(commit_mode="in_place", version_lease_ttl=60.0)
+    original_hold = gate.hold_for_leases
+    slipped = False
+
+    async def hold_then_slip(target: int) -> None:
+        nonlocal slipped
+        await original_hold(target)
+        if not slipped:
+            slipped = True
+            # Admitted lease lands after the hold returns, before the close.
+            gate._leases["late-session"] = (1, time.monotonic() + 60.0)
+
+    gate.hold_for_leases = hold_then_slip  # type: ignore[method-assign]
+    applied: list[bool] = []
+
+    async def apply() -> None:
+        applied.append(True)
+
+    commit_task = asyncio.create_task(
+        gate.commit(apply=apply, on_applied=lambda: None, target_version=2)
+    )
+    await asyncio.sleep(0.05)
+    assert not applied, "commit must not proceed past the slipped lease"
+    assert not gate._committing, "admission must stay open while re-holding"
+    del gate._leases["late-session"]
+    async with gate._cond:
+        gate._cond.notify_all()
+    await asyncio.wait_for(commit_task, timeout=2.0)
+    assert applied, "commit proceeds once the slipped lease is gone"

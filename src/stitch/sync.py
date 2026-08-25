@@ -53,6 +53,15 @@ class ConstraintUnmet(Exception):
         self.error = error
 
 
+class StagingPaused(Exception):
+    """Admission is closed while a generation-pausing stage occupies the engine
+    (a retryable 503): nothing new enqueues behind the paused engine."""
+
+    def __init__(self, error: dict[str, Any]) -> None:
+        super().__init__(error["error"]["message"])
+        self.error = error
+
+
 class AdmissionGate:
     """Request admission + the commit gate.
 
@@ -62,6 +71,12 @@ class AdmissionGate:
     newly arriving request is attributed to the version it will actually run on. An
     incompatible transition (a run switch's boot reset) commits with ``drain_all=True``,
     which also drains all in-flight requests. The version flips before admission reopens.
+
+    Version leases (``version_lease_ttl > 0``) hold a replica on its applied
+    version while pinned sessions are active. An ``in_place`` commit waits,
+    admission still open, until no unexpired lease names a version below the
+    target; the reconciler runs that wait *before* staging, because a
+    cpu-destination stage pauses generation for minutes.
 
     The gate does not own the served version: it reads it through the injected
     ``served_version`` reader, always under its condition lock, and reports every
@@ -76,19 +91,35 @@ class AdmissionGate:
         commit_mode: CommitMode = "in_place",
         served_version: Callable[[], VersionRef | None] | None = None,
         on_reject: Callable[[dict[str, Any]], None] | None = None,
+        version_lease_ttl: float = 0.0,
     ) -> None:
         self.commit_mode = commit_mode
         self._served_version = served_version or (lambda: None)
         self._on_reject = on_reject or (lambda error: None)
+        self._lease_ttl = version_lease_ttl
         self._cond = asyncio.Condition()
         self._active = 0
         self._committing = False
         self._drain_all = False
         self._exact_inflight: dict[int, int] = defaultdict(int)
+        # Set by the reconciler while a generation-pausing (cpu-destination)
+        # stage occupies the engine: admit rejects new work instead of queueing
+        # it behind the pause.
+        self._staging_pause = False
+        # lease_key -> (exact version, monotonic expiry). Pruned lazily.
+        self._leases: dict[str, tuple[int, float]] = {}
 
     @property
     def active_requests(self) -> int:
         return self._active
+
+    @property
+    def staging_pause(self) -> bool:
+        return self._staging_pause
+
+    @staging_pause.setter
+    def staging_pause(self, active: bool) -> None:
+        self._staging_pause = active
 
     def _rejection(self, c: VersionConstraint) -> dict[str, Any] | None:
         served = self._served_version()
@@ -111,13 +142,93 @@ class AdmissionGate:
             return not any(self._exact_inflight.values())
         return self._active == 0
 
+    def _prune_leases(self, now: float) -> None:
+        expired = [k for k, (_, exp) in self._leases.items() if exp <= now]
+        for k in expired:
+            del self._leases[k]
+
+    def leases_snapshot(self) -> dict[int, int]:
+        """Live (unexpired) lease count per version, for ``/server_info``."""
+        self._prune_leases(time.monotonic())
+        counts: dict[int, int] = defaultdict(int)
+        for version, _ in self._leases.values():
+            counts[version] += 1
+        return dict(counts)
+
+    @property
+    def leases_enabled(self) -> bool:
+        return self._lease_ttl > 0
+
+    def leases_blocking(self, target_version: int) -> bool:
+        """True when a live lease pins a version below ``target_version``."""
+        now = time.monotonic()
+        self._prune_leases(now)
+        return any(version < target_version for version, _ in self._leases.values())
+
+    async def hold_for_leases(self, target_version: int) -> None:
+        """Wait out leases below ``target_version`` with admission still open.
+
+        No-op for ``quiesce`` gates and when leases are disabled (ttl 0).
+        """
+        if self.commit_mode == "in_place" and self._lease_ttl > 0:
+            await self._hold_for_leases(target_version)
+
+    async def _hold_for_leases(self, target_version: int) -> None:
+        """Wait until no live lease names a version below ``target_version``.
+
+        Stragglers renewing below-target leases extend the wait; pins at or
+        above the target 409 and never block. Each wait wakes at the soonest
+        blocker expiry.
+        """
+        async with self._cond:
+            while True:
+                now = time.monotonic()
+                self._prune_leases(now)
+                blockers = [
+                    exp
+                    for version, exp in self._leases.values()
+                    if version < target_version
+                ]
+                if not blockers:
+                    return
+                with suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(
+                        self._cond.wait(), timeout=min(blockers) - now
+                    )
+
     @asynccontextmanager
-    async def admit(self, constraint: VersionConstraint | None = None):
+    async def admit(
+        self,
+        constraint: VersionConstraint | None = None,
+        *,
+        lease_key: str | None = None,
+    ):
         """Admit one request under a single lock acquisition, yielding the version it
-        is served on. Raises :class:`ConstraintUnmet` if the constraint can't be met."""
+        is served on. Raises :class:`ConstraintUnmet` if the constraint can't be met.
+        An admitted exact-pin with a ``lease_key`` renews that key's lease so
+        think-time still holds the replica on its version."""
         c = constraint or VersionConstraint()
         async with self._cond:
             await self._cond.wait_for(lambda: not self._committing)
+            if self._staging_pause:
+                # A generation-pausing stage is in flight: enqueue nothing
+                # behind the paused engine. A session that already holds a
+                # lease gets it renewed — its post-resume retry still pins
+                # this replica — then a retryable rejection.
+                now = time.monotonic()
+                self._prune_leases(now)
+                if lease_key is not None and lease_key in self._leases:
+                    version, _ = self._leases[lease_key]
+                    self._leases[lease_key] = (version, now + self._lease_ttl)
+                raise StagingPaused(
+                    {
+                        "error": {
+                            "type": "GenerationPaused",
+                            "message": "engine generation is paused for a weight stage; retry shortly",
+                            "retryable": True,
+                        }
+                    }
+                )
             error = self._rejection(c)
             if error is not None:
                 self._on_reject(error)
@@ -126,6 +237,11 @@ class AdmissionGate:
             self._active += 1
             if c.exact_version is not None:
                 self._exact_inflight[c.exact_version] += 1
+                if lease_key is not None and self._lease_ttl > 0:
+                    self._leases[lease_key] = (
+                        c.exact_version,
+                        time.monotonic() + self._lease_ttl,
+                    )
         try:
             yield served
         finally:
@@ -145,18 +261,47 @@ class AdmissionGate:
         pause: Callable[[], Awaitable[None]] | None = None,
         resume: Callable[[], Awaitable[None]] | None = None,
         drain_all: bool = False,
+        target_version: int | None = None,
+        on_hold_start: Callable[[], None] | None = None,
+        on_hold_end: Callable[[], None] | None = None,
     ) -> None:
         """Wait for the commit point, close the gate, apply, flip the served version
         (``on_applied``) while the gate is held, then reopen. ``on_applied`` runs only
         after a successful apply; in ``in_place`` the flip happens before ``resume``.
         ``drain_all`` marks an incompatible transition (a boot reset): drain and gate
         every request regardless of mode — rolling requests may cross a compatible
-        weight update, never a change of lineage (stitch#32)."""
-        # Close admission before draining (stitch#32), else a new in_place request can straddle a boot reset.
-        async with self._cond:
-            self._committing = True
-            self._drain_all = drain_all
-            self._cond.notify_all()
+        weight update, never a change of lineage (stitch#32).
+        ``on_hold_start`` / ``on_hold_end`` bracket the pre-close lease hold (if any).
+        """
+        if not drain_all and target_version is not None:
+            # Fire the hooks only when the hold can actually run (the same guard
+            # hold_for_leases applies), so a no-op hold never surfaces as one.
+            can_hold = self.commit_mode == "in_place" and self._lease_ttl > 0
+            if can_hold and on_hold_start is not None:
+                on_hold_start()
+            try:
+                while True:
+                    await self.hold_for_leases(target_version)
+                    # Re-check under the lock before closing: a lease admitted
+                    # between the hold returning and admission closing would
+                    # otherwise be committed past and its next request 409s.
+                    async with self._cond:
+                        if can_hold and self.leases_blocking(target_version):
+                            continue
+                        self._committing = True
+                        self._drain_all = drain_all
+                        self._cond.notify_all()
+                        break
+            finally:
+                if can_hold and on_hold_end is not None:
+                    on_hold_end()
+        else:
+            # Close admission before draining (stitch#32), else a new in_place
+            # request can straddle a boot reset.
+            async with self._cond:
+                self._committing = True
+                self._drain_all = drain_all
+                self._cond.notify_all()
         try:
             async with self._cond:
                 await self._cond.wait_for(self._commit_ready)
@@ -195,6 +340,7 @@ class Reconciler:
         boot_version: int = 0,
         commit_mode: CommitMode = "in_place",
         flush_cache_on_commit: bool = False,
+        version_lease_ttl: float = 0.0,
         debug_requests: bool = False,
         reconcile_interval: float = 5.0,
     ) -> None:
@@ -204,6 +350,13 @@ class Reconciler:
             raise ValueError("boot_version must be non-negative")
         self.store = store
         self.engine = engine
+        # Only a cpu-destination stage pauses generation (the engine pauses its
+        # scheduler around the stage RPC); disk-destination stages are pure file
+        # I/O. An engine that declares no mode is treated as pausing — the
+        # historical, conservative behavior for the watchdog.
+        self._stage_pauses_generation = (
+            getattr(engine, "delta_update_mode", "cpu") == "cpu"
+        )
         self.flush_cache_on_commit = flush_cache_on_commit
         self.run_id = run_id
         self.boot_version = boot_version
@@ -213,11 +366,13 @@ class Reconciler:
             commit_mode=commit_mode,
             served_version=lambda: self.applied,
             on_reject=self._on_reject,
+            version_lease_ttl=version_lease_ttl,
         )
         self.debug_requests = debug_requests
         self.reconcile_interval = reconcile_interval
         self.sync_state = SyncState.IDLE
         self.last_error: str | None = None
+        self._target_version: int | None = None
         # Latches after first catch-up unless the replica becomes terminal.
         self.ready = False
         self.metrics: dict[str, Any] = {}
@@ -283,7 +438,10 @@ class Reconciler:
         return {
             "ready": self.ready,
             "applied": self.applied.identity if self.applied else None,
+            "applied_version": self.applied.version if self.applied else None,
+            "leases": self.gate.leases_snapshot(),
             "sync_state": self.sync_state.value,
+            "target_version": self._target_version,
             "reason": self.last_error,
             "run_id": self.run_id,
             "commit_mode": self.gate.commit_mode,
@@ -312,7 +470,32 @@ class Reconciler:
 
     def expects_engine_progress(self) -> bool:
         """Whether this replica should currently make inference progress."""
-        return self.ready and self.sync_state is not SyncState.COMMITTING
+        # A cpu-destination stage or a commit RPC can occupy the engine's HTTP
+        # loop for minutes (a first cpu-mode delta compiles the full weight
+        # image), so a health probe timing out then is not an independent
+        # engine-health signal. Disk-destination stages are pure file I/O: the
+        # engine keeps serving, and the watchdog keeps probing.
+        if not self.ready:
+            return False
+        if self.sync_state is SyncState.COMMITTING:
+            return False
+        return not (
+            self.sync_state is SyncState.STAGING and self._stage_pauses_generation
+        )
+
+    def _lease_hold_hooks(self) -> tuple[Callable[[], None], Callable[[], None]]:
+        """Surface a gate-internal lease hold as HOLDING so drain selection
+        and the watchdog stay live (admission open, engine serving)."""
+        prior: dict[str, SyncState] = {}
+
+        def on_hold_start() -> None:
+            prior["state"] = self.sync_state
+            self.sync_state = SyncState.HOLDING
+
+        def on_hold_end() -> None:
+            self.sync_state = prior["state"]
+
+        return on_hold_start, on_hold_end
 
     async def wait_for_terminal_error(self) -> None:
         """Raise once reconciliation proves this replica must be replaced."""
@@ -352,12 +535,18 @@ class Reconciler:
             except UnrecoverableSidecarError as exc:
                 self.last_error = str(exc)
                 self.sync_state = SyncState.ERROR
+                self._target_version = None
+                # No live target: a stale metrics.target_version must not
+                # advertise one through /server_info.
+                self.metrics.pop("target_version", None)
                 self._record_terminal_error(exc)
                 logger.exception("reconcile failed terminally")
                 return
             except Exception as exc:  # noqa: BLE001
                 self.last_error = str(exc)
                 self.sync_state = SyncState.ERROR
+                self._target_version = None
+                self.metrics.pop("target_version", None)
                 logger.exception("reconcile failed")
                 if self._wake_pending:
                     continue
@@ -366,6 +555,8 @@ class Reconciler:
                 if self._wake_pending:
                     continue
                 self.sync_state = SyncState.IDLE
+                self._target_version = None
+                self.metrics.pop("target_version", None)
                 if not self.ready:
                     logger.info(
                         "caught up to v%d in %d pass(es), %.0fs — entering rotation",
@@ -465,17 +656,31 @@ class Reconciler:
         if not has_weight_changes:
             # Nothing changed across the applied→target range: advance the
             # version without preparing or loading byte-identical weights.
-            await self.gate.commit(apply=self._commit_noop, on_applied=on_applied)
+            on_hold_start, on_hold_end = self._lease_hold_hooks()
+            await self.gate.commit(
+                apply=self._commit_noop,
+                on_applied=on_applied,
+                target_version=pointer.version,
+                on_hold_start=on_hold_start,
+                on_hold_end=on_hold_end,
+            )
             m["skipped_weight_update"] = True
         else:
-            # Preparation runs while serving. Re-read the head once before the
-            # commit so a slow stage does not force an avoidable GPU update to an
-            # already-obsolete version. One re-check bounds the work when the
-            # trainer publishes continuously.
-            self.sync_state = SyncState.STAGING
             initial_pointer = pointer
-            with _timed(m, "stage_s"):
-                await self.engine.stage(target, source_dir)
+            self._target_version = pointer.version
+            if (
+                self.gate.commit_mode == "in_place"
+                and self.gate.leases_enabled
+                and self.gate.leases_blocking(pointer.version)
+            ):
+                # A cpu-destination stage pauses generation for minutes, so wait
+                # out live leases first — admission open, engine serving.
+                # HOLDING is not a stage/commit: the watchdog stays fully live.
+                self.sync_state = SyncState.HOLDING
+                with _timed(m, "hold_s"):
+                    await self.gate.hold_for_leases(pointer.version)
+                # The hold can last minutes; re-read the head so coalescing
+                # stages the newest target, never a stale one.
                 try:
                     await asyncio.to_thread(self.store.refresh)
                     latest = await asyncio.to_thread(self.store.read_pointer)
@@ -494,22 +699,72 @@ class Reconciler:
                         latest = None
                 except Exception as exc:  # noqa: BLE001
                     latest = None
-                    m["coalesce_error"] = str(exc)
+                    m["hold_coalesce_error"] = str(exc)
                     logger.warning(
-                        "could not inspect a newer target; committing staged v%d",
+                        "could not inspect a newer target after the lease hold; "
+                        "staging v%d",
                         pointer.version,
                         exc_info=True,
                     )
-
                 if latest is not None:
                     logger.info(
-                        "catch-up: staging advanced head v%d -> v%d before commit",
+                        "catch-up: lease hold advanced head v%d -> v%d before staging",
                         pointer.version,
                         latest.version,
                     )
-                    await self.engine.stage(latest_target, latest_source_dir)
                     pointer = latest
                     target = latest_target
+                    source_dir = latest_source_dir
+                    self._target_version = pointer.version
+            # Preparation runs while serving. Re-read the head once before the
+            # commit so a slow stage does not force an avoidable GPU update to an
+            # already-obsolete version. One re-check bounds the work when the
+            # trainer publishes continuously.
+            self.sync_state = SyncState.STAGING
+            # A cpu-destination stage pauses generation, possibly for minutes:
+            # close admission to new work for the pause (existing lease holders
+            # still renew) rather than enqueue abandoned requests behind the
+            # paused engine. Disk-destination stages serve throughout.
+            self.gate.staging_pause = self._stage_pauses_generation
+            try:
+                with _timed(m, "stage_s"):
+                    await self.engine.stage(target, source_dir)
+                    try:
+                        await asyncio.to_thread(self.store.refresh)
+                        latest = await asyncio.to_thread(self.store.read_pointer)
+                        if (
+                            latest is not None
+                            and latest.run_id == pointer.run_id
+                            and latest.version > pointer.version
+                        ):
+                            latest_target = await asyncio.to_thread(
+                                self.store.read_manifest, latest
+                            )
+                            latest_source_dir = await asyncio.to_thread(
+                                self.store.materialize, latest
+                            )
+                        else:
+                            latest = None
+                    except Exception as exc:  # noqa: BLE001
+                        latest = None
+                        m["coalesce_error"] = str(exc)
+                        logger.warning(
+                            "could not inspect a newer target; committing staged v%d",
+                            pointer.version,
+                            exc_info=True,
+                        )
+
+                    if latest is not None:
+                        logger.info(
+                            "catch-up: staging advanced head v%d -> v%d before commit",
+                            pointer.version,
+                            latest.version,
+                        )
+                        await self.engine.stage(latest_target, latest_source_dir)
+                        pointer = latest
+                        target = latest_target
+            finally:
+                self.gate.staging_pause = False
 
             if pointer != initial_pointer:
                 m["initial_target_version"] = initial_pointer.version
@@ -526,11 +781,15 @@ class Reconciler:
                     )
 
             try:
+                on_hold_start, on_hold_end = self._lease_hold_hooks()
                 await self.gate.commit(
                     apply=apply,
                     on_applied=on_applied,
                     pause=self.engine.pause,
                     resume=self.engine.resume,
+                    target_version=pointer.version,
+                    on_hold_start=on_hold_start,
+                    on_hold_end=on_hold_end,
                 )
             except UnrecoverableSidecarError:
                 raise

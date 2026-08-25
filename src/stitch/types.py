@@ -120,6 +120,7 @@ class VersionConstraint:
 class SyncState(str, Enum):
     IDLE = "IDLE"
     FETCHING = "FETCHING"
+    HOLDING = "HOLDING"
     STAGING = "STAGING"
     COMMITTING = "COMMITTING"
     ERROR = "ERROR"

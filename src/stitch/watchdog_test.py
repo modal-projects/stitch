@@ -8,6 +8,8 @@ from collections.abc import Callable
 import pytest
 
 from stitch.engines.base import EngineHealth, EngineHealthStatus
+from stitch.sync import Reconciler
+from stitch.types import SyncState
 from stitch.watchdog import (
     EngineWatchdog,
     SidecarWatchdog,
@@ -72,6 +74,60 @@ def test_watchdog_does_not_probe_when_progress_is_not_expected() -> None:
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
+
+    asyncio.run(go())
+
+
+def test_probe_timeouts_during_staging_do_not_trip_watchdog() -> None:
+    """A stage RPC can occupy the engine's HTTP loop for minutes (a first
+    cpu-mode delta compiles the full weight image); probe timeouts during it
+    must not count toward the unrecoverable verdict. Once the stage finishes
+    and the engine is still unresponsive, the watchdog must trip."""
+
+    async def go() -> None:
+        reconciler = Reconciler(store=None, engine=None, run_id="r1")  # type: ignore[arg-type]
+        reconciler.ready = True
+        reconciler.sync_state = SyncState.STAGING
+        engine = _HealthSequence(
+            EngineHealthStatus.UNRESPONSIVE,
+            EngineHealthStatus.UNRESPONSIVE,
+            EngineHealthStatus.UNRESPONSIVE,
+        )
+        task = asyncio.create_task(
+            _watchdog(
+                engine,
+                expects_engine_progress=reconciler.expects_engine_progress,
+            ).run()
+        )
+        await asyncio.sleep(0.05)
+        assert not task.done()
+        assert engine.checks == 0
+
+        reconciler.sync_state = SyncState.IDLE
+        with pytest.raises(UnrecoverableEngineError, match="unresponsive"):
+            await asyncio.wait_for(task, timeout=1)
+
+    asyncio.run(go())
+
+
+def test_probe_timeouts_during_lease_hold_count_toward_watchdog() -> None:
+    """HOLDING is not a stage/commit: the engine still serves, so probe
+    failures count toward the unrecoverable verdict."""
+
+    async def go() -> None:
+        reconciler = Reconciler(store=None, engine=None, run_id="r1")  # type: ignore[arg-type]
+        reconciler.ready = True
+        reconciler.sync_state = SyncState.HOLDING
+        engine = _HealthSequence(
+            EngineHealthStatus.UNRESPONSIVE,
+            EngineHealthStatus.UNRESPONSIVE,
+        )
+        with pytest.raises(UnrecoverableEngineError, match="unresponsive"):
+            await _watchdog(
+                engine,
+                expects_engine_progress=reconciler.expects_engine_progress,
+            ).run()
+        assert engine.checks == 2
 
     asyncio.run(go())
 
