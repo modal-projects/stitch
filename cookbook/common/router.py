@@ -13,7 +13,9 @@ polls every replica's ``/server_info`` (authoritative membership: applied_versio
 sync_state, target_version) and ``/v1/loads`` (live queue depth only); the router pins each
 session to a replica with spare capacity via the ``modal-flash-upstream`` header, and a 503
 from a pinned replica evicts it from rotation and retries on a healthier one, so load
-spreads across the pool.
+spreads across the pool. When a newer version starves, the registry marks one
+old-version replica ``draining`` at a time; draining replicas are excluded from
+every proxy selection path until their applied_version flips.
 
 Deltas from the upstream router: no proxy-auth/api-key secret plumbing (cookbook pools are
 ``unauthenticated``), replica discovery reuses Stitch's ``ModalFlashPool`` adapter, stdlib
@@ -42,6 +44,11 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, TypeAdapter
 
+from cookbook.common.consolidation import (
+    DrainPolicy,
+    _LocalDict,
+    consolidation_dict,  # noqa: F401  # re-exported for inference_only.app
+)
 from stitch.pools.modal_flash import list_flash_containers_async
 
 from .constants import (
@@ -109,6 +116,10 @@ class ContainerInfo(BaseModel):
     sync_state: str | None = None
     target_version: int | None = None  # None when idle
     draining: bool = False  # excluded from every proxy selection path
+    # Transiently occupied by a generation-pausing weight stage: excluded from
+    # fresh placements only. Unlike draining, sticky routes survive — a sticky
+    # arrival parks at the sidecar's admission hold, the correctness backstop.
+    staging_pause: bool = False
 
 
 ContainerInfoList = TypeAdapter(list[ContainerInfo])
@@ -190,6 +201,24 @@ def select_underloaded_container(
     return random.choice(pool)
 
 
+def select_packed_container(
+    candidates: list[ContainerInfo], exact_version: int
+) -> ContainerInfo:
+    """Among replicas applied at ``exact_version``, pick the lowest-load
+    lease-holder (all candidates if none hold leases). Packing onto the
+    most-leased replica stampedes it past the engine overload threshold."""
+    holders = [c for c in candidates if c.leases.get(str(exact_version), 0) > 0]
+    pool = holders or list(candidates)
+    if not pool:
+        raise ValueError("select_packed_container: no candidates to select from")
+    # A stale load is last-known, not live (a paused replica can sit at a
+    # frozen zero): when any candidate reports fresh load, pack only across
+    # those.
+    pool = [c for c in pool if not c.load_stale] or pool
+    min_load = min(c.load for c in pool)
+    return random.choice([c for c in pool if c.load == min_load])
+
+
 async def route_session(
     session_routes: modal.Dict,
     session_id: str,
@@ -198,9 +227,10 @@ async def route_session(
     exact_version: int | None = None,
 ) -> ContainerInfo | None:
     """Pick the replica for one session: sticky if healthy and (when set)
-    applied_version == exact_version, else the lowest-load same-version replica.
+    applied_version == exact_version, else a packed same-version replica.
+    Draining replicas are excluded; sticky routes to them are deleted.
     Returns None — and does not persist a route — when exact_version is set
-    but no ready replica matches it."""
+    but no non-draining replica matches it."""
     current_time = time.time()
 
     routes: list[RouteEntry] = RouteEntryList.validate_python(
@@ -224,6 +254,11 @@ async def route_session(
             ),
         )
 
+    def _in_rotation(c: ContainerInfo) -> bool:
+        # A pause is transient, so it bars fresh placements without evicting
+        # sticky routes; draining is terminal for the version, so it does both.
+        return c.ready and not c.draining and not c.staging_pause
+
     for entry in list(routes):
         # Re-lookup defensively: a concurrent 503-evict can pop the shared map
         # while this coroutine is suspended in save_routes() — indexing would
@@ -231,13 +266,15 @@ async def route_session(
         container = containers.get(entry.task_id)
         if container is None:
             continue
-        if not container.ready:
-            # Booting (stale boot weights) or dead-engine replica: evict so the
-            # session migrates off stale weights.
+        if container.draining or not container.ready:
+            # Delete, don't skip: a kept sticky route would re-admit the victim
+            # on a blip. A booting (stale boot weights) or dead-engine replica
+            # is evicted like draining so the session migrates off stale weights.
             logger.info(
-                "session %s: sticky route %s is not ready; evicting",
+                "session %s: sticky route %s is %s; evicting",
                 session_id,
                 container.task_id,
+                "draining" if container.draining else "not ready",
             )
             routes.remove(entry)
             await save_routes()
@@ -260,12 +297,10 @@ async def route_session(
     candidates = [
         container
         for container in containers.values()
-        if container.load < overload_threshold and container.ready
+        if container.load < overload_threshold and _in_rotation(container)
     ]
-    # Unpinned fallback is overloaded-but-ready; an all-not-ready fleet yields None.
-    fallback = candidates or [
-        container for container in containers.values() if container.ready
-    ]
+    # Unpinned fallback is overloaded-but-not-draining; an all-draining fleet yields None.
+    fallback = candidates or [c for c in containers.values() if _in_rotation(c)]
 
     if exact_version is not None:
         version_matched = [c for c in candidates if c.applied_version == exact_version]
@@ -277,13 +312,14 @@ async def route_session(
             version_matched = [
                 container
                 for container in containers.values()
-                if container.applied_version == exact_version and container.ready
+                if container.applied_version == exact_version and _in_rotation(container)
             ]
         if version_matched:
-            selected = min(version_matched, key=lambda container: container.load)
+            selected = select_packed_container(version_matched, exact_version)
         else:
             # No healthy upstream at the pinned version: return None rather than
-            # landing on a wrong-version replica (which would 409).
+            # landing on a wrong-version or draining replica (which would 409
+            # and re-pin the session onto the victim).
             logger.info(
                 "session %s: no healthy upstream at exact_version=%d "
                 "(%d replicas known); not re-pinning",
@@ -295,7 +331,7 @@ async def route_session(
     else:
         if not fallback:
             logger.info(
-                "session %s: no ready replica available; no selection",
+                "session %s: no non-draining replica available; no selection",
                 session_id,
             )
             return None
@@ -377,9 +413,29 @@ class _RequestCancelledMiddleware:
             return None
 
 
-def serve_registry(replica: Any, *, app_name: str, upstream_cls: str) -> None:
-    """Start the load-registry server on a ``RouterRegistry`` container (@modal.enter)."""
-    registry = _RegistryApp(app_name=app_name, upstream_cls=upstream_cls)
+def serve_registry(
+    replica: Any,
+    *,
+    app_name: str,
+    upstream_cls: str,
+    rollout_concurrency: int | None = None,
+    consolidation: Any = None,
+) -> None:
+    """Start the load-registry server on a ``RouterRegistry`` container (@modal.enter).
+
+    ``rollout_concurrency`` is the engine's per-replica overload threshold and
+    the capacity unit of the consolidation drain policy. The default ``None``
+    disables the policy entirely: no drain victim is ever selected.
+    """
+    # Router containers default to WARNING; routing decisions ("pinning new
+    # upstream", "marking … draining") are INFO and must reach the log store.
+    logging.basicConfig(level=logging.INFO)
+    registry = _RegistryApp(
+        app_name=app_name,
+        upstream_cls=upstream_cls,
+        rollout_concurrency=rollout_concurrency,
+        consolidation=consolidation,
+    )
     registry.start()
     replica._router_server = registry
 
@@ -393,6 +449,7 @@ def serve_router(
     overload_threshold: int,
 ) -> None:
     """Start the session-routing proxy on a ``Router`` container (@modal.enter)."""
+    logging.basicConfig(level=logging.INFO)
     router = _ProxyApp(
         registry_url=registry_url,
         upstream_url=upstream_url,
@@ -422,16 +479,30 @@ class _ReplicaPoll:
     sync_state: str | None
     target_version: int | None
     ready: bool
+    staging_pause: bool
 
 
 class _RegistryApp(_UvicornApp):
     """Poll /server_info (membership) and /v1/loads (queue depth); serve ``/loads``."""
 
-    def __init__(self, *, app_name: str, upstream_cls: str) -> None:
+    def __init__(
+        self,
+        *,
+        app_name: str,
+        upstream_cls: str,
+        rollout_concurrency: int | None = None,
+        consolidation: Any = None,
+    ) -> None:
         self.app_name = app_name
         self.upstream_cls = upstream_cls
+        # Engine overload threshold (the recipe's rollout_target_inputs) — the
+        # capacity unit of the drain condition, NOT the router's own Flash
+        # target_concurrency. None disables the drain policy (no victim selection).
+        self.rollout_concurrency = rollout_concurrency
+        self.consolidation = consolidation if consolidation is not None else _LocalDict()
         self.containers: list[ContainerInfo] = []
         self._last_loads: dict[str, int] = {}
+        self._drain_policy = DrainPolicy(rollout_concurrency, self.consolidation)
 
     async def _poll_container(self, upstream: str) -> _ReplicaPoll:
         """/server_info is membership (failure drops the replica). /v1/loads is
@@ -474,6 +545,8 @@ class _RegistryApp(_UvicornApp):
             target_version=target_version,
             # Older sidecars don't expose `ready`; treat absence as ready.
             ready=bool(data.get("ready", True)),
+            # Older sidecars don't expose `staging_pause`; treat absence as unpaused.
+            staging_pause=bool(data.get("staging_pause", False)),
         )
 
     async def _poll_once(self) -> list[ContainerInfo]:
@@ -517,9 +590,15 @@ class _RegistryApp(_UvicornApp):
                     sync_state=result.sync_state,
                     target_version=result.target_version,
                     ready=result.ready,
+                    staging_pause=result.staging_pause,
                 )
             )
+        await self._update_drain(updated)
         return updated
+
+    async def _update_drain(self, containers: list[ContainerInfo]) -> None:
+        """Mark/unmark the drain victim — the policy lives in cookbook.common.consolidation."""
+        await self._drain_policy.update(containers)
 
     async def poll_containers(self) -> None:
         await asyncio.sleep(CONTAINER_POLL_INTERVAL_SECONDS)

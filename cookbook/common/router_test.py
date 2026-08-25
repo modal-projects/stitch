@@ -15,6 +15,7 @@ from cookbook.common import router
 from cookbook.common.router import (
     SESSION_ROUTE_TTL_SECONDS,
     ContainerInfo,
+    ContainerInfoList,
     RouteEntry,
     RouteEntryList,
     _container_addr,
@@ -23,6 +24,7 @@ from cookbook.common.router import (
     filter_headers,
     relay_lease_header,
     route_session,
+    select_packed_container,
     select_underloaded_container,
     session_id_from_headers,
 )
@@ -302,9 +304,23 @@ def _leased(
     )
 
 
+def _draining(task_id: str, applied_version: int, leases: dict[str, int]) -> ContainerInfo:
+    return _leased(task_id, 0, applied_version, leases).model_copy(
+        update={"draining": True}
+    )
+
+
+def _rollout_fleet() -> dict[str, ContainerInfo]:
+    return {
+        "ta-victim": _draining("ta-victim", 1, {"1": 3}),
+        "ta-s1": _leased("ta-s1", 0, 2, {"2": 4}),
+        "ta-s2": _leased("ta-s2", 0, 2, {"2": 2}),
+    }
+
+
 def test_route_session_version_boundary() -> None:
-    """Version preference, no-match no-repin, and saturation queuing — one
-    walk of the pinned-session boundary."""
+    """Version preference, saturation queuing, draining exclusion, and the
+    no-fallback boundary — one walk of the pinned-session boundary."""
     containers = {
         "ta-0": ContainerInfo(
             task_id="ta-0", upstream="h0:8000", load=0, applied_version=1
@@ -354,6 +370,106 @@ def test_route_session_version_boundary() -> None:
     )
     assert picked.task_id == "ta-0", "saturated matching replica queues rather than 409s"
     assert routes.store["s1"][0]["task_id"] == "ta-0"
+
+    routes = FakeRoutes()
+    _seeded(routes, "s1", [{"task_id": "ta-0", "last_sent": time.time()}])
+    drain = {
+        "ta-0": _draining("ta-0", 1, {"1": 3}),
+        "ta-1": _leased("ta-1", 0, 1, {"1": 1}),
+    }
+    picked = asyncio.run(route_session(routes, "s1", drain, 4, exact_version=1))
+    assert picked.task_id == "ta-1", "sticky draining route is deleted"
+    assert [entry["task_id"] for entry in routes.store["s1"]] == ["ta-1"]
+    picked = asyncio.run(
+        route_session(FakeRoutes(), "s1", drain, 4, exact_version=1)
+    )
+    assert picked.task_id == "ta-1", "draining excluded from version-matched candidates"
+
+    paused = {
+        "ta-0": _leased("ta-0", 0, 1, {"1": 1}).model_copy(
+            update={"staging_pause": True}
+        ),
+        "ta-1": _leased("ta-1", 0, 1, {"1": 1}),
+    }
+    routes = FakeRoutes()
+    picked = asyncio.run(route_session(routes, "s1", paused, 4, exact_version=1))
+    assert picked.task_id == "ta-1", (
+        "fresh placements route around a staging_pause replica"
+    )
+    routes = FakeRoutes()
+    _seeded(routes, "s1", [{"task_id": "ta-0", "last_sent": time.time()}])
+    picked = asyncio.run(route_session(routes, "s1", paused, 4, exact_version=1))
+    assert picked.task_id == "ta-0", (
+        "a sticky route to a paused replica survives; the arrival parks at the "
+        "sidecar hold"
+    )
+    assert [entry["task_id"] for entry in routes.store["s1"]] == ["ta-0"], (
+        "unlike draining, a pause never evicts the sticky route"
+    )
+
+    no_fallback_fleets = [
+        {
+            "ta-0": _draining("ta-0", 2, {"2": 3}),
+            "ta-1": _leased("ta-1", 0, 2, {}),
+        },
+        {"ta-0": _draining("ta-0", 1, {"1": 1})},
+        _rollout_fleet(),
+    ]
+    for fleet in no_fallback_fleets:
+        routes = FakeRoutes()
+        for i in range(5):
+            picked = asyncio.run(
+                route_session(routes, f"s{i}", fleet, 4, exact_version=1)
+            )
+            assert picked is None, (
+                "no match never falls back to draining or wrong version"
+            )
+        assert routes.store == {}, "pinned miss must not re-pin"
+
+    assert (
+        asyncio.run(
+            route_session(
+                FakeRoutes(), "s1", {"ta-0": _draining("ta-0", 1, {"1": 1})}, 4
+            )
+        )
+        is None
+    ), "all-draining fleet yields None"
+
+
+def test_select_packed_container_fresh_load_and_zero_leases() -> None:
+    candidates = [
+        _leased("ta-0", load=2, applied_version=3, leases={"1": 4}),
+        _leased("ta-1", load=1, applied_version=3, leases={}),
+    ]
+    assert select_packed_container(candidates, 3).task_id == "ta-1", (
+        "zero leases at the pin degenerates to lowest load"
+    )
+    candidates = [
+        _leased("ta-0", 0, 1, {"1": 1}).model_copy(update={"load_stale": True}),
+        _leased("ta-1", 3, 1, {"1": 1}),
+    ]
+    for _ in range(5):
+        assert select_packed_container(candidates, 1).task_id == "ta-1", (
+            "fresh load preferred over a stale zero"
+        )
+    candidates[1] = candidates[1].model_copy(update={"load_stale": True})
+    assert select_packed_container(candidates, 1).task_id in {"ta-0", "ta-1"}
+
+    original = [
+        _leased("ta-0", load=1, applied_version=2, leases={"2": 3, "1": 1}).model_copy(
+            update={"sync_state": "HOLDING", "target_version": 3, "draining": True}
+        )
+    ]
+    payload = ContainerInfoList.dump_python(original, mode="json")
+    assert payload[0]["leases"] == {"2": 3, "1": 1}
+    assert payload[0]["sync_state"] == "HOLDING"
+    assert payload[0]["target_version"] == 3
+    assert payload[0]["draining"] is True
+    parsed = ContainerInfoList.validate_python(payload)
+    assert parsed[0].leases == {"2": 3, "1": 1}
+    assert parsed[0].sync_state == "HOLDING"
+    assert parsed[0].target_version == 3
+    assert parsed[0].draining is True
 
 
 class _FakeResp:
@@ -506,32 +622,33 @@ async def _post(
         )
 
 
-def test_forward_409_passthrough_and_503_eviction() -> None:
-    """A 409 is passed through without eviction; only 503 evicts; a pin with no
-    matching version is a 409 that never touches an upstream."""
+def test_forward_pinned_vs_draining() -> None:
+    """A 409 is passed through without eviction; only 503 evicts; the victim
+    is never touched."""
 
     async def run() -> None:
-        fleet = {
-            "ta-s1": _leased("ta-s1", 0, 2, {"2": 4}),
-            "ta-s2": _leased("ta-s2", 0, 2, {"2": 2}),
-        }
-        proxy, app = _proxy(fleet)
+        proxy, app = _proxy(_rollout_fleet())
+        fake = _FakeUpstreamClient({"ta-victim:8000": 200})
+        proxy.client = fake
+        responses = await asyncio.gather(
+            *[_post(app, f"s{i}", 1) for i in range(6)]
+        )
+        assert all(r.status_code == 409 for r in responses), (
+            "pinned v1 with only a draining victim is 409, never a victim 200"
+        )
+        assert fake.requested_upstreams == []
+        assert set(proxy.containers) == {"ta-victim", "ta-s1", "ta-s2"}
+
+        proxy, app = _proxy(_rollout_fleet())
         fake = _FakeUpstreamClient({"ta-s1:8000": 409, "ta-s2:8000": 409})
         proxy.client = fake
         response = await _post(app, "s1", 2)
-        assert response.status_code == 409, "409 from a pinned replica is passed through"
+        assert response.status_code == 409, "409 from a pinned survivor is passed through"
         assert len(fake.requested_upstreams) == 1
         assert fake.requested_upstreams[0] in {"ta-s1:8000", "ta-s2:8000"}
-        assert set(proxy.containers) == {"ta-s1", "ta-s2"}, "409 does not evict"
-
-        proxy, app = _proxy({"ta-s1": _leased("ta-s1", 0, 2, {"2": 4})})
-        fake = _FakeUpstreamClient({})
-        proxy.client = fake
-        response = await _post(app, "s1", 1)
-        assert response.status_code == 409, (
-            "no v1 replica: 409, never a wrong-version upstream"
+        assert set(proxy.containers) == {"ta-victim", "ta-s1", "ta-s2"}, (
+            "409 does not evict"
         )
-        assert fake.requested_upstreams == []
 
         proxy, app = _proxy(
             {
@@ -549,20 +666,18 @@ def test_forward_409_passthrough_and_503_eviction() -> None:
         assert response.headers["retry-after"] == "1"
         assert fake.requested_upstreams == []
 
-        fleet = {
-            "ta-s1": _leased("ta-s1", 0, 2, {"2": 4}),
-            "ta-s2": _leased("ta-s2", 1, 2, {"2": 2}),
-        }
+        fleet = _rollout_fleet()
+        fleet["ta-s2"] = fleet["ta-s2"].model_copy(update={"load": 1})
         proxy, app = _proxy(fleet)
         fake = _FakeUpstreamClient({"ta-s1:8000": 503, "ta-s2:8000": 200})
         proxy.client = fake
         response = await _post(app, "s1", 2)
         assert response.status_code == 200
         assert fake.requested_upstreams == ["ta-s1:8000", "ta-s2:8000"], (
-            "ta-s1 is the lowest-load v2 match, so the 503-retry lands on ta-s2"
+            "ta-s1 is the least-loaded v2 lease-holder, so 503-retry lands on ta-s2"
         )
         assert "ta-s1" not in proxy.containers
-        assert set(proxy.containers) == {"ta-s2"}
+        assert set(proxy.containers) == {"ta-victim", "ta-s2"}
 
     asyncio.run(run())
 

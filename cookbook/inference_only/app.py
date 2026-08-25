@@ -222,6 +222,7 @@ router_image = router.build_router_image(
     extra_env=STORE_DEPLOYMENT.image_environment,
 )
 session_routes = router.session_routes_dict(APP_NAME)
+consolidation = router.consolidation_dict(APP_NAME)
 
 
 @app.server(
@@ -239,7 +240,13 @@ class RouterRegistry:
 
     @modal.enter()
     def enter(self) -> None:
-        router.serve_registry(self, app_name=APP_NAME, upstream_cls="Server")
+        router.serve_registry(
+            self,
+            app_name=APP_NAME,
+            upstream_cls="Server",
+            rollout_concurrency=ROLLOUT_CONCURRENCY,
+            consolidation=consolidation,
+        )
 
     @modal.exit()
     def exit(self) -> None:
