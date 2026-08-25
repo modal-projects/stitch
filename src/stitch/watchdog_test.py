@@ -78,11 +78,42 @@ def test_watchdog_does_not_probe_when_progress_is_not_expected() -> None:
     asyncio.run(go())
 
 
-def test_probe_timeouts_during_lease_hold_count_toward_watchdog() -> None:
-    """HOLDING is not a stage/commit: the engine still serves, so probe
-    failures count toward the unrecoverable verdict."""
+def test_probe_timeouts_and_watchdog_states() -> None:
+    """Probe-timeout accounting depends on sync state. A stage RPC can occupy
+    the engine's HTTP loop for minutes (a first cpu-mode delta compiles the
+    full weight image), so probe timeouts during STAGING must not count toward
+    the unrecoverable verdict; HOLDING is not a stage/commit — the engine still
+    serves — so there probe failures do count."""
 
     async def go() -> None:
+        # The STAGING probe exemption is cpu-mode specific (a mode-less engine
+        # keeps stock behavior: progress expected, probes count).
+        class _CpuEngine:
+            delta_update_mode = "cpu"
+
+        reconciler = Reconciler(store=None, engine=_CpuEngine(), run_id="r1")  # type: ignore[arg-type]
+        reconciler.ready = True
+        reconciler.sync_state = SyncState.STAGING
+        engine = _HealthSequence(
+            EngineHealthStatus.UNRESPONSIVE,
+            EngineHealthStatus.UNRESPONSIVE,
+            EngineHealthStatus.UNRESPONSIVE,
+        )
+        task = asyncio.create_task(
+            _watchdog(
+                engine,
+                expects_engine_progress=reconciler.expects_engine_progress,
+            ).run()
+        )
+        await asyncio.sleep(0.05)
+        assert not task.done(), "probe timeouts during staging must not trip the watchdog"
+        assert engine.checks == 0, "no probes are sent while a stage occupies the engine"
+
+        reconciler.sync_state = SyncState.IDLE
+        with pytest.raises(UnrecoverableEngineError, match="unresponsive"):
+            await asyncio.wait_for(task, timeout=1)
+        # (stage finished, engine still unresponsive -> the watchdog trips)
+
         reconciler = Reconciler(store=None, engine=None, run_id="r1")  # type: ignore[arg-type]
         reconciler.ready = True
         reconciler.sync_state = SyncState.HOLDING
@@ -95,7 +126,9 @@ def test_probe_timeouts_during_lease_hold_count_toward_watchdog() -> None:
                 engine,
                 expects_engine_progress=reconciler.expects_engine_progress,
             ).run()
-        assert engine.checks == 2
+        assert engine.checks == 2, (
+            "HOLDING still serves, so probe timeouts count toward the verdict"
+        )
 
     asyncio.run(go())
 

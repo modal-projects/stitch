@@ -442,3 +442,31 @@ def test_await_pool_ready_fails_closed_below_threshold(monkeypatch) -> None:
         )
 
 
+def test_staging_pause_holds_admission_until_cleared(monkeypatch):
+    # During a generation-pausing stage the proxy holds new work (no error
+    # surfaces); once the pause clears the held request is admitted and
+    # forwarded normally.
+    async def go():
+        upstream = _HangingUpstream()
+        allow_disconnect = asyncio.Event()
+        sidecar = _GateSidecar(VersionRef("run", 3))
+        monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: upstream)
+        app = create_app(sidecar.gate, sidecar, _ProxyEngine())
+
+        sidecar.gate.staging_pause = True
+        request = asyncio.create_task(
+            _asgi_post(app, {"rid": "rollout-3"}, disconnect_on=allow_disconnect)
+        )
+        await asyncio.sleep(0.02)
+        assert not request.done(), "the request holds behind the staging pause"
+        assert not upstream.started.is_set()  # nothing enqueued behind the pause
+        assert sidecar.gate.active_requests == 0
+
+        await sidecar.gate.clear_staging_pause()
+        await asyncio.wait_for(upstream.started.wait(), 2.0)  # admitted + forwarded
+        assert sidecar.gate.active_requests == 1
+        allow_disconnect.set()
+        status, _, _ = await request
+        assert status == 499, "released by the disconnect — never a pause rejection"
+
+    asyncio.run(go())

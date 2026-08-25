@@ -195,6 +195,7 @@ def test_cpu_mode_stages_deltas_in_cpu() -> None:
     engine._post = fake_post  # type: ignore[method-assign]
     asyncio.run(engine.stage(_manifest(VersionKind.DELTA), "/source/weight_v000005"))
     assert requests == [
+        ("/pause_generation", {"mode": "in_place"}),
         (
             "/stage_weight_update",
             {
@@ -204,8 +205,45 @@ def test_cpu_mode_stages_deltas_in_cpu() -> None:
                 "target_version": 5,
                 "destination": "cpu",
             },
-        )
+        ),
+        ("/continue_generation", {}),
     ]
+
+
+def test_cpu_stage_resumes_generation_after_stage_failure() -> None:
+    engine = SGLangEngine(
+        "http://engine",
+        "/base",
+        "/ckpt",
+        delta_update_mode="cpu",
+    )
+    requests = []
+
+    async def fake_post(path, payload, *, timeout=None, action=None):
+        requests.append(path)
+        if path == "/stage_weight_update":
+            raise RuntimeError("compile OOM")
+
+    engine._post = fake_post  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="compile OOM"):
+        asyncio.run(engine.stage(_manifest(VersionKind.DELTA), "/source/weight_v000005"))
+    assert requests == [
+        "/pause_generation",
+        "/stage_weight_update",
+        "/continue_generation",
+    ]
+
+
+def test_disk_stage_does_not_pause_generation() -> None:
+    engine = SGLangEngine("http://engine", "/base", "/ckpt")
+    requests = []
+
+    async def fake_post(path, payload, *, timeout=None, action=None):
+        requests.append(path)
+
+    engine._post = fake_post  # type: ignore[method-assign]
+    asyncio.run(engine.stage(_manifest(VersionKind.DELTA), "/source/weight_v000005"))
+    assert requests == ["/stage_weight_update"]
 
 
 def test_cpu_mode_rejects_full_checkpoint_staging() -> None:
@@ -289,7 +327,14 @@ def test_resumed_destination_preserves_boot_version(mode: str) -> None:
     }
     if mode == "disk":
         staged["local_checkpoint_dir"] = "/ckpt"
-    assert requests == [("/stage_weight_update", staged)]
+    expected = [("/stage_weight_update", staged)]
+    if mode == "cpu":
+        expected = [
+            ("/pause_generation", {"mode": "in_place"}),
+            *expected,
+            ("/continue_generation", {}),
+        ]
+    assert requests == expected
 
 
 def test_staging_and_commit_have_independent_timeouts() -> None:

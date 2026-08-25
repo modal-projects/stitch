@@ -27,6 +27,14 @@ from stitch.types import (
 _make_reconciler = partial(Reconciler, run_id="r1")
 
 
+async def _admit_served(
+    gate: AdmissionGate, constraint: VersionConstraint | None
+) -> VersionRef | None:
+    """One admission returning the version it was served on."""
+    async with gate.admit(constraint) as served:
+        return served
+
+
 class FakeStore(Store):
     def __init__(
         self, pointer: VersionRef | None = None, *manifests: VersionManifest
@@ -178,6 +186,9 @@ def test_startup_initializes_update_destination() -> None:
         (True, SyncState.IDLE, True),
         (True, SyncState.FETCHING, True),
         (True, SyncState.HOLDING, True),
+        # A mode-less engine keeps stock behavior (no staging pause): STAGING
+        # expects progress. The cpu-mode pause case lives in
+        # test_staging_pause_cpu_vs_disk.
         (True, SyncState.STAGING, True),
         (True, SyncState.COMMITTING, False),
         (True, SyncState.ERROR, True),
@@ -240,7 +251,7 @@ def test_latest_advance_during_stage_coalesces_before_commit() -> None:
         assert engine.committed == [VersionRef("r1", 10)]
         assert r.applied == VersionRef("r1", 10)
         assert r.metrics["initial_target_version"] == 7
-        assert r.metrics["target_version"] == 10
+        assert "target_version" not in r.metrics  # cleared once IDLE
         assert r.metrics["coalesced_versions"] == 3
 
     _run(go())
@@ -1061,6 +1072,313 @@ def test_lease_lifecycle() -> None:
         info = r.server_info()
         assert info["applied_version"] == 0
         assert info["leases"] == {}
+
+    _run(go())
+
+
+def _reconciler_v4(engine: FakeEngine, **kwargs) -> Reconciler:
+    """Reconciler targeting v4 with v3 applied, in-place commits."""
+    kwargs.setdefault("store", FakeStore(VersionRef("r1", 4), _full("r1", 4)))
+    r = _make_reconciler(engine=engine, commit_mode="in_place", **kwargs)
+    r.applied = VersionRef("r1", 3)
+    return r
+
+
+def test_reconcile_holds_before_stage() -> None:
+    """Hold blocks stage/commit with admission open; renew extends; pointer
+    re-read after the hold; in-flight pins block commit, not stage."""
+
+    async def go() -> None:
+        engine = FakeEngine()
+        r = _reconciler_v4(engine, version_lease_ttl=0.15)
+        pin = VersionConstraint(exact_version=3)
+
+        async def pinned() -> None:
+            async with r.gate.admit(pin, lease_key="sess-1"):
+                pass
+
+        await pinned()
+        assert r.gate.leases_snapshot() == {3: 1}
+        r.ready = True
+        sync = asyncio.create_task(r.reconcile())
+        await asyncio.sleep(0.05)
+        assert "stage:4" not in engine.calls
+        assert "commit:4" not in engine.calls
+        assert not r.gate._committing
+        assert engine.staged == []
+        assert r.sync_state is SyncState.HOLDING
+        assert r.expects_engine_progress()
+        info = r.server_info()
+        assert info["sync_state"] == "HOLDING"
+        assert info["target_version"] == 4
+
+        rolling_served: list[VersionRef | None] = []
+        async with r.gate.admit(None) as served:
+            rolling_served.append(served)
+        assert rolling_served == [VersionRef("r1", 3)]
+
+        await pinned()  # renew extends the hold
+        await asyncio.sleep(0.1)
+        assert "stage:4" not in engine.calls
+        assert "commit:4" not in engine.calls
+
+        await asyncio.wait_for(sync, 2.0)
+        assert engine.calls.index("stage:4") < engine.calls.index("commit:4")
+        assert engine.staged == [VersionRef("r1", 4)]
+        assert engine.committed == [VersionRef("r1", 4)]
+        assert r.applied == VersionRef("r1", 4)
+        assert r.gate.leases_snapshot() == {}
+        assert "hold_s" in r.metrics
+        info = r.server_info()
+        assert info["sync_state"] == "IDLE"
+        assert info["target_version"] is None
+
+        engine = FakeEngine()
+        manifests = [_delta("r1", v, files=[f"v{v}"]) for v in (4, 5)]
+        store = FakeStore(VersionRef("r1", 4), *manifests)
+        r = _reconciler_v4(engine, store=store, version_lease_ttl=0.1)
+        async with r.gate.admit(VersionConstraint(exact_version=3), lease_key="sess"):
+            pass
+        sync = asyncio.create_task(r.reconcile())
+        await asyncio.sleep(0.03)
+        assert r.sync_state is SyncState.HOLDING
+        store.advance_pointer(VersionRef("r1", 5))
+        await asyncio.wait_for(sync, 2.0)
+        assert engine.staged == [VersionRef("r1", 5)]
+        assert engine.committed == [VersionRef("r1", 5)]
+        assert r.applied == VersionRef("r1", 5)
+        assert r.metrics["initial_target_version"] == 4
+        assert "target_version" not in r.metrics
+        assert r.metrics["coalesced_versions"] == 1
+
+        engine = FakeEngine()
+        r = _reconciler_v4(engine)
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def inflight() -> None:
+            async with r.gate.admit(
+                VersionConstraint(exact_version=3), lease_key="sess"
+            ):
+                entered.set()
+                await release.wait()
+
+        pin_task = asyncio.create_task(inflight())
+        await entered.wait()
+        assert r.gate.leases_snapshot() == {}
+        sync = asyncio.create_task(r.reconcile())
+        await asyncio.sleep(0.05)
+        assert engine.staged == [VersionRef("r1", 4)]
+        assert "commit:4" not in engine.calls
+        release.set()
+        await asyncio.wait_for(sync, 2.0)
+        assert engine.committed == [VersionRef("r1", 4)]
+        assert "hold_s" not in r.metrics
+        await pin_task
+
+        engine = FakeEngine()
+        engine.delta_update_mode = "disk"  # type: ignore[attr-defined]
+        r = _reconciler_v4(engine, version_lease_ttl=0.2)
+        r.ready = True
+        base_stage = engine.stage
+        staged = asyncio.Event()
+
+        async def stage_then_pin(manifest: VersionManifest, source_dir: str) -> None:
+            await base_stage(manifest, source_dir)
+            async with r.gate.admit(VersionConstraint(exact_version=3), lease_key="sess"):
+                pass
+            staged.set()
+
+        engine.stage = stage_then_pin  # type: ignore[method-assign]
+        sync = asyncio.create_task(r.reconcile())
+        await staged.wait()
+        await asyncio.sleep(0.05)
+        assert "commit:4" not in engine.calls
+        assert not r.gate._committing
+        assert r.sync_state is SyncState.HOLDING
+        assert r.expects_engine_progress()
+        assert r.server_info()["sync_state"] == "HOLDING"
+        await asyncio.wait_for(sync, 2.0)
+        assert engine.committed == [VersionRef("r1", 4)]
+        assert r.applied == VersionRef("r1", 4)
+        assert r.sync_state is SyncState.IDLE
+
+    _run(go())
+
+
+def test_ttl_positive_without_live_leases_stages_immediately() -> None:
+    """ttl>0 but zero live leases: the pre-stage hold never engages — a
+    pointer move stages at once, in stock order."""
+
+    async def go() -> None:
+        engine = FakeEngine()
+        r = _reconciler_v4(engine, version_lease_ttl=30.0)
+        r.ready = True
+        stage_started = asyncio.Event()
+        finish_stage = asyncio.Event()
+        base_stage = engine.stage
+
+        async def slow_stage(manifest: VersionManifest, source_dir: str) -> None:
+            await base_stage(manifest, source_dir)
+            stage_started.set()
+            await finish_stage.wait()
+
+        engine.stage = slow_stage  # type: ignore[method-assign]
+        sync = asyncio.create_task(r.reconcile())
+        await asyncio.wait_for(stage_started.wait(), 0.5)  # no hold detour
+        assert r.sync_state is SyncState.STAGING
+        finish_stage.set()
+        await asyncio.wait_for(sync, 2.0)
+        assert engine.calls == ["stage:4", "pause", "commit:4", "resume"]
+        assert r.applied == VersionRef("r1", 4)
+        assert "hold_s" not in r.metrics
+        assert r.gate.leases_snapshot() == {}
+
+    _run(go())
+
+
+def test_staging_pause_cpu_vs_disk() -> None:
+    """cpu vs disk staging-pause asymmetry: a cpu stage holds admission, a
+    disk stage keeps it open; the watchdog expects progress on disk STAGING,
+    not cpu STAGING."""
+
+    async def go() -> None:
+        engine = FakeEngine()
+        engine.delta_update_mode = "cpu"  # type: ignore[attr-defined]
+        r = _make_reconciler(
+            store=FakeStore(VersionRef("r1", 4), _full("r1", 4)), engine=engine
+        )
+        r.applied = VersionRef("r1", 3)
+        stage_started = asyncio.Event()
+        finish_stage = asyncio.Event()
+        base_stage = engine.stage
+
+        async def slow_stage(manifest: VersionManifest, source_dir: str) -> None:
+            await base_stage(manifest, source_dir)
+            stage_started.set()
+            await finish_stage.wait()
+
+        engine.stage = slow_stage  # type: ignore[method-assign]
+        sync = asyncio.create_task(r.reconcile())
+        await stage_started.wait()
+        assert r.sync_state is SyncState.STAGING
+        assert r.gate.staging_pause
+        assert r.server_info()["staging_pause"] is True
+        held_open = asyncio.create_task(_admit_served(r.gate, None))
+        held_pinned = asyncio.create_task(
+            _admit_served(r.gate, VersionConstraint(exact_version=3))
+        )
+        await asyncio.sleep(0.02)
+        assert not held_open.done() and not held_pinned.done(), (
+            "admissions hold behind the cpu staging pause"
+        )
+        finish_stage.set()
+        await asyncio.wait_for(sync, 2.0)
+        assert not r.gate.staging_pause
+        assert r.server_info()["staging_pause"] is False
+        assert r.applied == VersionRef("r1", 4)
+        assert await asyncio.wait_for(held_open, 2.0) == VersionRef("r1", 4), (
+            "an unconstrained request held through the pause is admitted after"
+        )
+        with pytest.raises(ConstraintUnmet):
+            await held_pinned  # v4 applied: the stale pin 409s as usual
+
+        engine = FakeEngine()
+        engine.delta_update_mode = "disk"  # type: ignore[attr-defined]
+        r = _make_reconciler(
+            store=FakeStore(VersionRef("r1", 4), _full("r1", 4)), engine=engine
+        )
+        r.applied = VersionRef("r1", 3)
+        stage_started = asyncio.Event()
+        finish_stage = asyncio.Event()
+        base_stage = engine.stage
+
+        async def slow_disk(manifest: VersionManifest, source_dir: str) -> None:
+            await base_stage(manifest, source_dir)
+            stage_started.set()
+            await finish_stage.wait()
+
+        engine.stage = slow_disk  # type: ignore[method-assign]
+        sync = asyncio.create_task(r.reconcile())
+        await stage_started.wait()
+        assert r.sync_state is SyncState.STAGING
+        assert not r.gate.staging_pause
+        async with r.gate.admit(None) as served:
+            assert served == VersionRef("r1", 3)
+        finish_stage.set()
+        await asyncio.wait_for(sync, 2.0)
+        assert r.applied == VersionRef("r1", 4)
+
+        engine = FakeEngine()
+        engine.delta_update_mode = "disk"  # type: ignore[attr-defined]
+        r = _make_reconciler(store=FakeStore(), engine=engine)
+        r.ready = True
+        r.sync_state = SyncState.STAGING
+        assert r.expects_engine_progress() is True
+        r.sync_state = SyncState.COMMITTING
+        assert r.expects_engine_progress() is False
+        engine = FakeEngine()
+        engine.delta_update_mode = "cpu"  # type: ignore[attr-defined]
+        r = _make_reconciler(store=FakeStore(), engine=engine)
+        r.ready = True
+        r.sync_state = SyncState.STAGING
+        assert r.expects_engine_progress() is False
+
+    _run(go())
+
+
+def test_staging_pause_default_mode_is_stock() -> None:
+    """An engine that declares no ``delta_update_mode`` keeps stock behavior:
+    the staging pause is disabled."""
+    engine = FakeEngine()
+    assert not hasattr(engine, "delta_update_mode")
+    r = _make_reconciler(store=FakeStore(), engine=engine)
+    assert r._stage_pauses_generation is False
+    assert not r.gate.staging_pause
+
+
+def test_stage_failure_releases_pause_and_recovers() -> None:
+    """A stage that raises lands the reconciler in ERROR with the admission
+    hold released (the finally clears it); a later pass reconciles cleanly."""
+
+    async def go() -> None:
+        engine = FakeEngine()
+        engine.delta_update_mode = "cpu"  # type: ignore[attr-defined]
+        r = _make_reconciler(
+            store=FakeStore(VersionRef("r1", 4), _full("r1", 4)), engine=engine
+        )
+        r.applied = VersionRef("r1", 3)
+        base_stage = engine.stage
+        stage_entered = asyncio.Event()
+        release_stage = asyncio.Event()
+
+        async def fail_stage(manifest: VersionManifest, source_dir: str) -> None:
+            stage_entered.set()
+            await release_stage.wait()
+            raise RuntimeError("stage boom")
+
+        engine.stage = fail_stage  # type: ignore[method-assign]
+        sync = asyncio.create_task(r.reconcile())
+        await stage_entered.wait()
+        assert r.gate.staging_pause  # the cpu-mode pause brackets the stage
+        held = asyncio.create_task(_admit_served(r.gate, None))
+        await asyncio.sleep(0.02)
+        assert not held.done(), "admission holds behind the staging pause"
+        release_stage.set()
+        await asyncio.wait_for(sync, 2.0)
+        assert r.sync_state is SyncState.ERROR
+        assert "stage boom" in (r.last_error or "")
+        assert not r.gate.staging_pause
+        assert r.server_info()["staging_pause"] is False
+        assert await asyncio.wait_for(held, 2.0) == VersionRef("r1", 3), (
+            "the finally-cleared pause releases the held admission"
+        )
+
+        engine.stage = base_stage  # type: ignore[method-assign]
+        await r.reconcile()
+        assert r.applied == VersionRef("r1", 4)
+        assert r.sync_state is SyncState.IDLE
+        assert not r.gate.staging_pause
 
     _run(go())
 

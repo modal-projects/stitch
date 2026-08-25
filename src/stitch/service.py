@@ -23,7 +23,12 @@ from typing import Any, Protocol
 from stitch.engines.base import Engine
 from stitch.pools.base import Pool
 from stitch.stores.base import Store
-from stitch.sync import AdmissionGate, CommitMode, ConstraintUnmet, Reconciler
+from stitch.sync import (
+    AdmissionGate,
+    CommitMode,
+    ConstraintUnmet,
+    Reconciler,
+)
 from stitch.types import PoolState, ReplicaState, VersionConstraint
 from stitch.watchdog import (
     EngineWatchdog,
@@ -77,7 +82,8 @@ def create_app(
     """The versioned rollout proxy. Versioned routes are admitted through the gate
     (constraint enforced, serving version captured), stamped by the engine, forwarded,
     and the response stamped with the served version. A rejected constraint returns a
-    retryable 409; a client disconnect aborts the upstream generation. A local-engine
+    retryable 409; admission during a generation-pausing stage returns a retryable
+    503; a client disconnect aborts the upstream generation. A local-engine
     transport failure returns a retryable 503 instead of escaping as a sidecar 500.
     An admitted exact-pin carrying ``lease_header`` acquires or renews a
     version lease in the gate."""
