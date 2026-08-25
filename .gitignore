@@ -199,4 +199,4 @@ docgen_tmp/
 # End of https://www.toptal.com/developers/gitignore/api/python,rust,zig
 
 
-AGENTS.md
+AGENTS.md.agents/
