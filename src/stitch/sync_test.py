@@ -1237,6 +1237,68 @@ def test_ttl_positive_without_live_leases_stages_immediately() -> None:
     _run(go())
 
 
+def test_ttl_zero_reconcile_path_is_legacy_identical() -> None:
+    """ttl 0 (the default) is byte-for-byte stock across the FULL reconcile
+    path: no lease table writes, no HOLDING state (pre-stage hold included),
+    no hold metrics — stage and commit run in the stock order, with only
+    the cpu-mode staging hold applied."""
+
+    async def go() -> None:
+        engine = FakeEngine()
+        engine.delta_update_mode = "cpu"  # type: ignore[attr-defined]
+        r = _make_reconciler(
+            store=FakeStore(VersionRef("r1", 4), _full("r1", 4)),
+            engine=engine,
+            commit_mode="in_place",
+        )  # version_lease_ttl defaults to 0
+        r.applied = VersionRef("r1", 3)
+        r.ready = True
+
+        # A pinned admit carrying a lease key writes nothing without ttl.
+        async with r.gate.admit(VersionConstraint(exact_version=3), lease_key="sess"):
+            pass
+        assert r.gate.leases_snapshot() == {}
+
+        stage_started = asyncio.Event()
+        finish_stage = asyncio.Event()
+        base_stage = engine.stage
+
+        async def slow_stage(manifest: VersionManifest, source_dir: str) -> None:
+            await base_stage(manifest, source_dir)
+            stage_started.set()
+            await finish_stage.wait()
+
+        engine.stage = slow_stage  # type: ignore[method-assign]
+        sync = asyncio.create_task(r.reconcile())
+        await stage_started.wait()
+        # Staging begins immediately: the pre-stage hold never engages without
+        # ttl, so the state is STAGING, never HOLDING.
+        assert r.sync_state is SyncState.STAGING
+        assert r.gate.staging_pause  # the cpu-mode pause is ttl-independent
+        held = asyncio.create_task(_admit_served(r.gate, None))
+        await asyncio.sleep(0.02)
+        assert not held.done(), "admission holds behind the staging pause"
+        assert r.gate.leases_snapshot() == {}, "a held admission writes no leases"
+        finish_stage.set()
+        await asyncio.wait_for(sync, 2.0)
+        assert await asyncio.wait_for(held, 2.0) == VersionRef("r1", 4), (
+            "the held request is admitted after the pause clears"
+        )
+
+        # Stock staging order: stage fully precedes the commit, and the
+        # pause/resume pair brackets the commit exactly.
+        assert engine.calls == ["stage:4", "pause", "commit:4", "resume"]
+        assert engine.staged == [VersionRef("r1", 4)]
+        assert engine.committed == [VersionRef("r1", 4)]
+        assert r.applied == VersionRef("r1", 4)
+        assert r.sync_state is SyncState.IDLE
+        assert not r.gate.staging_pause
+        assert "hold_s" not in r.metrics
+        assert r.gate.leases_snapshot() == {}
+
+    _run(go())
+
+
 def test_staging_pause_cpu_vs_disk() -> None:
     """cpu vs disk staging-pause asymmetry: a cpu stage holds admission, a
     disk stage keeps it open; the watchdog expects progress on disk STAGING,
