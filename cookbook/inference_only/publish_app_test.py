@@ -188,6 +188,39 @@ def _make_publish_source(tmp_path: Path) -> Path:
     return source
 
 
+# ── cpu-mode FULL guard ──────────────────────────────────────────────────────
+
+
+def _make_delta_dir(
+    path: Path,
+    *,
+    version: int = 2,
+    base_version: int = 1,
+    shards: tuple[str, ...] = ("model-00001-of-00002.safetensors",),
+    index_shards: tuple[str, ...] = ("model-00001-of-00002.safetensors",),
+) -> Path:
+    """A staged DELTA dir: index metadata carries delta_encoding; weight_map lists
+    only the delta's own shards (a subset of any full checkpoint's shard set)."""
+    path.mkdir(parents=True, exist_ok=True)
+    for shard in shards:
+        _write_tiny_safetensors(path / shard)
+    (path / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {
+                "metadata": {
+                    "version": version,
+                    "base_version": base_version,
+                    "delta_encoding": "xor",
+                    "compression_format": "zstd",
+                    "checksum_format": "xxh3-128",
+                },
+                "weight_map": {f"w{i}": shard for i, shard in enumerate(index_shards)},
+            }
+        )
+    )
+    return path
+
+
 def _patch_materialize_env(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, events: list[str]
 ) -> list[dict]:
@@ -214,6 +247,98 @@ def _patch_materialize_env(
         SimpleNamespace(local=lambda **kwargs: published.append(kwargs)),
     )
     return published
+
+
+def test_cpu_mode_full_publish_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """cpu update mode is delta-only: the /publish handler rejects a FULL source
+    pre-spawn (400, no job spawned) but accepts a delta source, and the spawned
+    materialize job re-checks post-index, pre-pointer (RuntimeError, no publish,
+    no staging commit) so the two checks cannot drift."""
+    from fastapi.testclient import TestClient
+
+    real_materialize = publish_app.materialize_version
+
+    # cpu mode rejects FULL sources pre-spawn but accepts a delta source.
+    monkeypatch.setattr(publish_app.exp, "SGLANG_DELTA_UPDATE_MODE", "cpu")
+    fake_spawn = _FakeSpawn("fc-cpu")
+    monkeypatch.setattr(publish_app, "materialize_version", fake_spawn)
+    client = TestClient(_make_server(tmp_path).build_app())
+
+    # Missing index is treated as FULL (the job would generate a non-delta index).
+    source_no_index = _make_publish_source(tmp_path)
+    resp = client.post(
+        "/publish",
+        json={"run_id": publish_app.RUN_ID, "version": 1, "source": str(source_no_index)},
+    )
+    assert resp.status_code == 400
+    detail = resp.json()["detail"]
+    assert "cpu update mode is delta-only" in detail
+    assert "FULL version 1" in detail
+    assert "model.safetensors.index.json" in detail
+    assert fake_spawn.calls == []
+
+    # An existing index without delta_encoding is also FULL.
+    source_full_index = _make_source(tmp_path / "source-full-index")
+    resp = client.post(
+        "/publish",
+        json={
+            "run_id": publish_app.RUN_ID,
+            "version": 2,
+            "source": str(source_full_index),
+        },
+    )
+    assert resp.status_code == 400
+    assert "FULL version 2" in resp.json()["detail"]
+    assert fake_spawn.calls == []
+
+    # A delta source (delta_encoding in metadata) passes the guard and spawns.
+    source_delta = _make_delta_dir(tmp_path / "source-delta", version=3, base_version=2)
+    resp = client.post(
+        "/publish",
+        json={"run_id": publish_app.RUN_ID, "version": 3, "source": str(source_delta)},
+    )
+    assert resp.status_code == 202
+    assert fake_spawn.calls == [
+        {
+            "run_id": publish_app.RUN_ID,
+            "version": 3,
+            "source": str(source_delta),
+            "publish": True,
+        }
+    ]
+
+    # The spawned job re-checks after index stamping and before publish_version.
+    monkeypatch.setattr(publish_app, "materialize_version", real_materialize)
+    events: list[str] = []
+    published = _patch_materialize_env(monkeypatch, tmp_path, events)
+
+    full_source = _make_publish_source(tmp_path)
+    with pytest.raises(RuntimeError, match="cpu update mode is delta-only"):
+        publish_app.materialize_version.local(
+            run_id=publish_app.RUN_ID,
+            version=1,
+            source=str(full_source),
+            publish=True,
+        )
+    assert published == []
+    assert events == ["reload"], "no staging commit should run on the rejected publish"
+
+    delta_source = _make_delta_dir(tmp_path / "delta-source", version=2, base_version=1)
+    result = publish_app.materialize_version.local(
+        run_id=publish_app.RUN_ID,
+        version=2,
+        source=str(delta_source),
+        publish=True,
+    )
+    assert result["published"] is True
+    assert published == [
+        {
+            "run_id": publish_app.RUN_ID,
+            "model_dir": publish_app._version_dir(tmp_path / "run", 2),
+        }
+    ]
 
 
 # ── Server-path volume reload ────────────────────────────────────────────────

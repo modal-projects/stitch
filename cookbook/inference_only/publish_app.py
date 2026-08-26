@@ -25,6 +25,7 @@ from pydantic import BaseModel
 from cookbook.common import storage
 from cookbook.common.constants import CHECKPOINTS_PATH, MINUTES, STITCH_PATH
 from cookbook.inference_only.publish_materialize import (
+    _delta_index_metadata,
     _ensure_safetensors_index,
     _prepare_version_dir,
     _target_is_valid,
@@ -92,6 +93,9 @@ class PublishRequest(BaseModel):
     run_id: str
     version: int
     source: str  # local path to the model directory
+    # Accepted for API compat; full-vs-delta is derived from the index's
+    # `delta_encoding` key by stitch.publish, not from this flag.
+    delta: bool = False
 
 
 class StatusResponse(BaseModel):
@@ -145,6 +149,27 @@ def _is_already_published(store: Store, version: int) -> bool:
     store.refresh()
     pointer = store.read_pointer()
     return pointer is not None and pointer.version >= version
+
+
+def _reject_full_publish_in_cpu_mode(version_dir: Path, version: int) -> None:
+    """Refuse a FULL publish when the run is in cpu (delta-only) update mode.
+
+    cpu mode applies XOR deltas in place; a FULL publish wedges the run
+    (replicas ERROR-loop post-pointer). A dir is FULL when its index has no
+    ``delta_encoding`` — including a MISSING index (the materialize job's
+    ``_ensure_safetensors_index`` would generate a non-delta one). Shared by the
+    /publish handler (pre-spawn, on the source) and the materialize job
+    (post-index, pre-pointer) so the two checks cannot drift.
+    """
+    if getattr(exp, "SGLANG_DELTA_UPDATE_MODE", "disk") != "cpu":
+        return
+    if _delta_index_metadata(version_dir) is not None:
+        return
+    index_path = version_dir / "model.safetensors.index.json"
+    raise RuntimeError(
+        f"cpu update mode is delta-only: refusing to publish FULL version {version} "
+        f"(no delta_encoding in {index_path}); publish a delta or use a disk-mode run"
+    )
 
 
 def _function_call_from_id(job_id: str) -> modal.FunctionCall:
@@ -253,6 +278,9 @@ def materialize_version(run_id: str, version: int, source: str, publish: bool) -
     _ensure_safetensors_index(version_dir, version)
 
     if publish:
+        # Defense in depth: /publish checks the source pre-spawn, but a FULL dir
+        # here (e.g. the index generated above) must never move the pointer.
+        _reject_full_publish_in_cpu_mode(version_dir, version)
         publish_version.local(run_id=run_id, model_dir=version_dir)
         logger.info("published version %d via stitch", version)
     elif STORE_DEPLOYMENT.backend == storage.MODAL_VOLUME:
@@ -354,6 +382,11 @@ class PublisherServer:
                     status_code=400,
                     detail=f"source directory not found: {source_path}",
                 )
+
+            try:
+                _reject_full_publish_in_cpu_mode(source_path, request.version)
+            except RuntimeError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
 
             job_id = self._spawn_materialize(
                 run_id=request.run_id,
