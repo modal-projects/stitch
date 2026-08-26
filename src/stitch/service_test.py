@@ -330,6 +330,50 @@ def test_proxy_lease_headers(monkeypatch):
     asyncio.run(go())
 
 
+def test_headerless_request_under_enabled_leases_behaves_as_stock(monkeypatch):
+    """Backward compatibility: with leases enabled (ttl > 0), a request carrying
+    no lease header must be served exactly as stock — same status, same body,
+    same payload forwarded upstream (rid excepted), and no lease created."""
+
+    class _RecordingUpstream:
+        def __init__(self) -> None:
+            self.payloads: list[dict[str, Any]] = []
+
+        async def request(self, _method: str, _url: str, **kwargs: Any) -> httpx.Response:
+            self.payloads.append(dict(kwargs.get("json") or {}))
+            return httpx.Response(200, json={"ok": True})
+
+    async def go():
+        outcomes = []
+        for ttl in (0.0, 60.0):
+            gate = AdmissionGate(
+                served_version=lambda: VersionRef("run", 3), version_lease_ttl=ttl
+            )
+            gate_sidecar = _GateSidecar(VersionRef("run", 3))
+            upstream = _RecordingUpstream()
+            monkeypatch.setattr(
+                httpx, "AsyncClient", lambda _u=upstream, **_kwargs: _u
+            )
+            app = create_app(gate, gate_sidecar, _ProxyEngine())
+            status, _, body = await _asgi_post(
+                app, {"weight_version": {"exact_version": 3}, "prompt": "hi"}
+            )
+            assert status == 200
+            assert gate.leases_snapshot() == {}, (
+                "headerless request creates no lease, even with ttl > 0"
+            )
+            assert len(upstream.payloads) == 1
+            forwarded = upstream.payloads[0]
+            forwarded.pop("rid", None)  # random per request, lease-independent
+            outcomes.append((status, body, forwarded))
+        assert outcomes[0] == outcomes[1], (
+            "a headerless request under enabled leases must be indistinguishable "
+            "from stock (ttl = 0)"
+        )
+
+    asyncio.run(go())
+
+
 def test_await_pool_ready_waits_for_replica_threshold(monkeypatch) -> None:
     states = iter(
         [
