@@ -43,6 +43,7 @@ class _GateSidecar:
         self.applied = applied
         self.ready = True
         self.gate = AdmissionGate(served_version=lambda: self.applied)
+        self.reconcile_now_calls = 0
 
     def readiness_reason(self) -> str:
         return ""
@@ -52,6 +53,9 @@ class _GateSidecar:
 
     def wake(self) -> None:
         pass
+
+    def reconcile_now(self) -> None:
+        self.reconcile_now_calls += 1
 
     async def startup(self) -> None:
         pass
@@ -263,6 +267,42 @@ def test_metrics_bypasses_weight_admission_before_first_pointer(monkeypatch):
         assert response.content.startswith(b"# TYPE sglang:num_running_reqs gauge")
         assert upstream.requests == [("GET", "http://local-engine:8001/metrics")]
         assert gate_sidecar.gate.active_requests == 0
+
+    asyncio.run(go())
+
+
+def test_reconcile_endpoint_triggers_a_pass_and_reports_server_info() -> None:
+    """POST /reconcile is ungated by admission: it nudges the reconciler and answers
+    with the server_info snapshot, in either reconcile mode."""
+
+    async def go():
+        gate_sidecar = _GateSidecar(VersionRef("run", 3))
+        app = create_app(gate_sidecar.gate, gate_sidecar, _ProxyEngine())
+        sidecar = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://sidecar"
+        )
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def apply() -> None:
+            entered.set()
+            await release.wait()
+
+        async with sidecar:
+            commit = asyncio.create_task(
+                gate_sidecar.gate.commit(apply=apply, on_applied=lambda: None)
+            )
+            await entered.wait()  # admission is closed for the weight commit
+            response = await sidecar.post("/reconcile")  # ungated: answers anyway
+            assert response.status_code == 200
+            assert response.json() == {"ready": True}
+            assert gate_sidecar.reconcile_now_calls == 1
+            release.set()
+            await commit
+
+            again = await sidecar.post("/reconcile")  # idempotent nudge
+            assert again.status_code == 200
+            assert gate_sidecar.reconcile_now_calls == 2
 
     asyncio.run(go())
 

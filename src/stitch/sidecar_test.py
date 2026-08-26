@@ -87,6 +87,7 @@ _FULL = SidecarConfig(
     boot_version=3,
     debug_requests=True,
     reconcile_interval=2.5,
+    reconcile_mode="manual",
     watchdog_interval=1.0,
     watchdog_failure_threshold=7,
 )
@@ -113,6 +114,20 @@ def test_from_argv_fills_unflagged_fields_with_defaults() -> None:
         ]
     )
     assert parsed == _MINIMAL
+
+
+def test_reconcile_mode_defaults_to_auto() -> None:
+    assert SidecarConfig(**_BASE, delta_update_mode="cpu").reconcile_mode == "auto"
+
+
+def test_sidecar_config_rejects_unknown_reconcile_mode() -> None:
+    with pytest.raises(ValueError, match="reconcile_mode"):
+        SidecarConfig(**_BASE, delta_update_mode="cpu", reconcile_mode="sometimes")
+
+
+def test_from_argv_rejects_unknown_reconcile_mode() -> None:
+    with pytest.raises(SystemExit):
+        SidecarConfig.from_argv([*_MINIMAL.to_argv(), "--reconcile-mode", "sometimes"])
 
 
 def test_disk_mode_requires_local_checkpoint_dir() -> None:
@@ -170,6 +185,7 @@ def test_run_builds_engine_and_serves(monkeypatch: pytest.MonkeyPatch) -> None:
         boot_version=2,
         debug_requests=True,
         reconcile_interval=0.0,
+        reconcile_mode="manual",
         watchdog_interval=1.0,
         watchdog_failure_threshold=7,
     )
@@ -193,6 +209,7 @@ def test_run_builds_engine_and_serves(monkeypatch: pytest.MonkeyPatch) -> None:
         "port": 8000,
         "debug_requests": True,
         "reconcile_interval": 0.0,
+        "reconcile_mode": "manual",
         "watchdog_interval": 1.0,
         "watchdog_failure_threshold": 7,
     }

@@ -23,7 +23,13 @@ from typing import Any, Protocol
 from stitch.engines.base import Engine
 from stitch.pools.base import Pool
 from stitch.stores.base import Store
-from stitch.sync import AdmissionGate, CommitMode, ConstraintUnmet, Reconciler
+from stitch.sync import (
+    AdmissionGate,
+    CommitMode,
+    ConstraintUnmet,
+    ReconcileMode,
+    Reconciler,
+)
 from stitch.types import PoolState, ReplicaState, VersionConstraint
 from stitch.watchdog import (
     EngineWatchdog,
@@ -59,6 +65,8 @@ class SidecarStatus(Protocol):
     def server_info(self) -> dict[str, Any]: ...
 
     def wake(self) -> None: ...
+
+    def reconcile_now(self) -> None: ...
 
     async def startup(self) -> None: ...
 
@@ -131,6 +139,14 @@ def create_app(
     @app.post("/wake")
     async def wake() -> dict[str, Any]:
         status.wake()
+        return status.server_info()
+
+    @app.post("/reconcile")
+    async def reconcile() -> dict[str, Any]:
+        # The router's reconciliation trigger: one pass toward the current latest
+        # pointer. Ungated by admission (like /server_info), idempotent, and a
+        # harmless nudge in auto mode.
+        status.reconcile_now()
         return status.server_info()
 
     async def _watch_disconnect(request: Request) -> None:
@@ -295,6 +311,7 @@ def serve(
     port: int = 8000,
     debug_requests: bool = False,
     reconcile_interval: float = 5.0,
+    reconcile_mode: ReconcileMode = "auto",
     watchdog_interval: float = 5.0,
     watchdog_failure_threshold: int = 3,
 ) -> None:
@@ -311,6 +328,7 @@ def serve(
         flush_cache_on_commit=flush_cache_on_commit,
         debug_requests=debug_requests,
         reconcile_interval=reconcile_interval,
+        reconcile_mode=reconcile_mode,
     )
     watchdog = SidecarWatchdog(
         EngineWatchdog(

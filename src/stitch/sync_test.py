@@ -889,6 +889,119 @@ def test_constrained_409_recovers_without_backstop() -> None:
     _run(go())
 
 
+# ── manual reconcile mode ────────────────────────────────────────────────────
+def test_manual_mode_boot_catch_up_latches_ready() -> None:
+    """The boot catch-up to latest runs unchanged; only post-ready triggers are gated."""
+
+    async def go() -> None:
+        engine = FakeEngine()
+        r = _make_reconciler(
+            store=FakeStore(VersionRef("r1", 3), _full("r1", 3)),
+            engine=engine,
+            reconcile_interval=0.02,
+            reconcile_mode="manual",
+        )
+        await r.startup()
+        assert r.ready
+        assert r.applied == VersionRef("r1", 3)
+        assert r._periodic_task is None  # the poll is never armed in manual mode
+        await r.shutdown()
+
+    _run(go())
+
+
+def test_manual_mode_ignores_poll_wake_and_409_nudge() -> None:
+    """After ready, nothing but /reconcile moves the replica; new pins keep 409-ing."""
+
+    async def go() -> None:
+        store = FakeStore(VersionRef("r1", 3), _full("r1", 3), _full("r1", 5))
+        r = _make_reconciler(
+            store=store,
+            engine=FakeEngine(),
+            reconcile_interval=0.02,
+            reconcile_mode="manual",
+        )
+        await r.startup()
+        assert r.applied == VersionRef("r1", 3)
+
+        store.advance_pointer(VersionRef("r1", 5))
+        await asyncio.sleep(0.1)  # in auto mode the poll would have caught up by now
+        assert r.applied == VersionRef("r1", 3)
+
+        r.wake()  # a publish wake lands on the gated trigger
+        r._on_reject({"type": "WeightVersionNotReady"})  # the 409 nudge path
+        await asyncio.sleep(0.1)
+        assert r.applied == VersionRef("r1", 3)
+        assert r._task is None
+
+        try:
+            async with r.gate.admit(VersionConstraint(exact_version=5)):
+                raise AssertionError("should have rejected")
+        except ConstraintUnmet as e:
+            assert e.error["type"] == "WeightVersionNotReady"
+            assert e.error["target_version"] == 5
+        await asyncio.sleep(0.1)
+        assert r.applied == VersionRef("r1", 3)  # even the rejection's nudge is inert
+        await r.shutdown()
+
+    _run(go())
+
+
+def test_manual_mode_reconcile_now_converges_to_latest() -> None:
+    """The router-facing trigger converges the replica; subsequent pins serve."""
+
+    async def go() -> None:
+        store = FakeStore(VersionRef("r1", 3), _full("r1", 3), _full("r1", 5))
+        r = _make_reconciler(
+            store=store,
+            engine=FakeEngine(),
+            reconcile_interval=0.02,
+            reconcile_mode="manual",
+        )
+        await r.startup()
+        store.advance_pointer(VersionRef("r1", 5))
+
+        r.reconcile_now()
+        assert await _converged(r, VersionRef("r1", 5))
+        async with r.gate.admit(VersionConstraint(exact_version=5)) as served:
+            assert served == VersionRef("r1", 5)
+        await r.shutdown()
+
+    _run(go())
+
+
+def test_reconcile_now_in_auto_mode_is_a_harmless_nudge() -> None:
+    """Auto mode keeps the same mechanics: reconcile_now is an extra wake, idempotent."""
+
+    async def go() -> None:
+        store = FakeStore(VersionRef("r1", 3), _full("r1", 3), _full("r1", 5))
+        r = _make_reconciler(store=store, engine=FakeEngine(), reconcile_interval=0)
+        await r.startup()
+        store.advance_pointer(VersionRef("r1", 5))
+
+        r.reconcile_now()
+        assert await _converged(r, VersionRef("r1", 5))
+        r.reconcile_now()  # coalesces into the caught-up state
+        assert await _converged(r, VersionRef("r1", 5))
+        await r.shutdown()
+
+    _run(go())
+
+
+def test_reconcile_mode_defaults_to_auto() -> None:
+    assert (
+        _make_reconciler(store=FakeStore(), engine=FakeEngine()).reconcile_mode
+        == "auto"
+    )
+
+
+def test_reconcile_mode_is_validated() -> None:
+    with pytest.raises(ValueError, match="reconcile_mode"):
+        _make_reconciler(
+            store=FakeStore(), engine=FakeEngine(), reconcile_mode="sometimes"
+        )
+
+
 # ── admission gate ───────────────────────────────────────────────────────────
 def test_admit_satisfied() -> None:
     async def go() -> None:

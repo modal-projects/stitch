@@ -34,6 +34,8 @@ logger = logging.getLogger(__name__)
 
 CommitMode = Literal["quiesce", "in_place"]
 
+ReconcileMode = Literal["auto", "manual"]
+
 
 @contextmanager
 def _timed(metrics: dict[str, Any], key: str):
@@ -184,7 +186,13 @@ class Reconciler:
     :class:`AdmissionGate` (``self.gate``), which reads ``self.applied`` under its
     own lock while commits flip that same attribute through ``gate.commit``. A run
     change restores the immutable boot checkpoint, so one run's chain is never
-    mistaken for another's."""
+    mistaken for another's.
+
+    ``reconcile_mode`` gates the post-ready triggers, not the mechanics: in
+    ``manual`` the boot catch-up still runs to the ready latch, but afterwards
+    only :meth:`reconcile_now` (the router-facing ``POST /reconcile``) starts a
+    pass — the periodic poll is never armed and a publish wake or 409 nudge is
+    inert. ``auto`` is stock behavior."""
 
     def __init__(
         self,
@@ -197,11 +205,16 @@ class Reconciler:
         flush_cache_on_commit: bool = False,
         debug_requests: bool = False,
         reconcile_interval: float = 5.0,
+        reconcile_mode: ReconcileMode = "auto",
     ) -> None:
         if not run_id:
             raise ValueError("run_id is required")
         if boot_version < 0:
             raise ValueError("boot_version must be non-negative")
+        if reconcile_mode not in ("auto", "manual"):
+            raise ValueError(
+                f"reconcile_mode must be 'auto' or 'manual', got {reconcile_mode!r}"
+            )
         self.store = store
         self.engine = engine
         self.flush_cache_on_commit = flush_cache_on_commit
@@ -216,6 +229,7 @@ class Reconciler:
         )
         self.debug_requests = debug_requests
         self.reconcile_interval = reconcile_interval
+        self.reconcile_mode = reconcile_mode
         self.sync_state = SyncState.IDLE
         self.last_error: str | None = None
         # Latches after first catch-up unless the replica becomes terminal.
@@ -240,7 +254,11 @@ class Reconciler:
         if self._terminal_error is not None:
             return
         await self.reconcile()
-        if self.reconcile_interval > 0 and self._terminal_error is None:
+        if (
+            self.reconcile_mode == "auto"
+            and self.reconcile_interval > 0
+            and self._terminal_error is None
+        ):
             self._periodic_task = asyncio.create_task(self._periodic_reconcile())
 
     async def shutdown(self) -> None:
@@ -333,8 +351,19 @@ class Reconciler:
         """Nudge reconciliation now (a publish wake or a 409).
 
         Multiple wakes coalesce because each pass reads the authoritative pointer. A
-        wake during an active pass requests one more pass instead of being dropped.
-        """
+        wake during an active pass requests one more pass instead of being dropped. In
+        manual mode this trigger is inert: only the router's ``POST /reconcile``
+        (:meth:`reconcile_now`) moves the replica after the boot catch-up."""
+        if self.reconcile_mode == "manual":
+            return
+        self.reconcile_now()
+
+    def reconcile_now(self) -> None:
+        """Trigger one reconciliation pass toward the current ``latest`` pointer.
+
+        The router-facing trigger (``POST /reconcile``): ungated by the reconcile
+        mode, idempotent (passes coalesce), and a harmless extra nudge in auto
+        mode — the same mechanics a publish wake uses."""
         if self._terminal_error is not None:
             return
         if self._task is not None and not self._task.done():

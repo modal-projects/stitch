@@ -27,7 +27,7 @@ from typing import Literal
 from stitch.engines.sglang import SGLangEngine
 from stitch.service import serve
 from stitch.stores.base import Store
-from stitch.sync import CommitMode
+from stitch.sync import CommitMode, ReconcileMode
 
 DeltaUpdateMode = Literal["disk", "cpu"]
 
@@ -62,6 +62,7 @@ class SidecarConfig:
     boot_version: int = 0
     debug_requests: bool = False
     reconcile_interval: float = 5.0
+    reconcile_mode: ReconcileMode = "auto"
     watchdog_interval: float = 5.0
     watchdog_failure_threshold: int = 3
 
@@ -70,6 +71,11 @@ class SidecarConfig:
             raise ValueError("run_id is required")
         if self.boot_version < 0:
             raise ValueError("boot_version must be non-negative")
+        if self.reconcile_mode not in ("auto", "manual"):
+            raise ValueError(
+                "reconcile_mode must be either 'auto' or 'manual', "
+                f"got {self.reconcile_mode!r}"
+            )
         if self.delta_update_mode == "disk" and not self.local_checkpoint_dir:
             raise ValueError("local_checkpoint_dir is required in disk mode")
         if ":" not in self.store_factory:
@@ -112,6 +118,8 @@ class SidecarConfig:
             str(self.boot_version),
             "--reconcile-interval",
             str(self.reconcile_interval),
+            "--reconcile-mode",
+            self.reconcile_mode,
             "--watchdog-interval",
             str(self.watchdog_interval),
             "--watchdog-failure-threshold",
@@ -159,6 +167,7 @@ class SidecarConfig:
             boot_version=args.boot_version,
             debug_requests=args.debug_requests,
             reconcile_interval=args.reconcile_interval,
+            reconcile_mode=args.reconcile_mode,
             watchdog_interval=args.watchdog_interval,
             watchdog_failure_threshold=args.watchdog_failure_threshold,
         )
@@ -188,6 +197,7 @@ def _sidecar_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--reconcile-interval", type=float, default=5.0
     )  # 0 disables the periodic re-check
+    p.add_argument("--reconcile-mode", choices=["auto", "manual"], default="auto")
     p.add_argument("--watchdog-interval", type=float, default=5.0)
     p.add_argument("--watchdog-failure-threshold", type=int, default=3)
     p.add_argument("--local-checkpoint-dir")
@@ -234,6 +244,7 @@ def run(config: SidecarConfig, store: Store) -> None:
         port=config.port,
         debug_requests=config.debug_requests,
         reconcile_interval=config.reconcile_interval,
+        reconcile_mode=config.reconcile_mode,
         watchdog_interval=config.watchdog_interval,
         watchdog_failure_threshold=config.watchdog_failure_threshold,
     )
