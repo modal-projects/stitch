@@ -274,10 +274,14 @@ class _RequestCancelledMiddleware:
             return None
 
 
-def serve_registry(replica: Any, *, app_name: str, upstream_cls: str, upstream_url: str) -> None:
+def serve_registry(replica: Any, *, app_name: str, upstream_cls: str) -> None:
     """Start the load-registry server on a ``RouterRegistry`` container (@modal.enter)."""
+    # Polls go through the upstream class's own URL (same app), derived here so recipes
+    # only name the class — mirrors flash-smart-router's from_name lookup in @modal.enter.
     registry = _RegistryApp(
-        app_name=app_name, upstream_cls=upstream_cls, upstream_url=upstream_url
+        app_name=app_name,
+        upstream_cls=upstream_cls,
+        upstream_url=modal.Server.from_name(app_name, upstream_cls).get_url(),
     )
     registry.start()
     replica._router_server = registry
