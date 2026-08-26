@@ -334,7 +334,9 @@ class RouterRegistry:
 
     @modal.enter()
     def enter(self) -> None:
-        router.serve_registry(self, app_name=APP_NAME, upstream_cls="Server")
+        router.serve_registry(
+            self, app_name=APP_NAME, upstream_cls="Server", upstream_url=Server.get_url()
+        )
 
     @modal.exit()
     def exit(self) -> None:

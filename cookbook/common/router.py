@@ -9,10 +9,11 @@ deploy, one stop — the router scales and dies with the pool.
 Why it exists: with a per-container queue bound (sglang ``--max-queued-requests``), Flash's
 own sticky routing turns the first saturated replicas into 503 attractors — sessions stuck
 on a full replica keep retrying it while the rest of the pool starves. Here, the registry
-polls every replica's live queue depth (``/v1/loads`` + a ``/health`` zombie check); the
-router pins each ``modal-session-id`` to a healthy replica with spare capacity via the
-``modal-flash-upstream`` header, and a 503 from a pinned replica evicts it from rotation and
-retries on a healthier one, so load spreads instead of sticking.
+polls every replica's live queue depth (``/v1/loads`` + a ``/health`` zombie check, sent
+through the pool's own URL with ``modal-flash-upstream`` so polls traverse the same path as
+traffic); the router pins each ``modal-session-id`` to a healthy replica with spare capacity
+via the ``modal-flash-upstream`` header, and a 503 from a pinned replica evicts it from
+rotation and retries on a healthier one, so load spreads instead of sticking.
 
 Deltas from the upstream router: no proxy-auth/api-key secret plumbing (cookbook pools are
 ``unauthenticated``), replica discovery reuses Stitch's ``ModalFlashPool`` adapter, stdlib
@@ -273,9 +274,11 @@ class _RequestCancelledMiddleware:
             return None
 
 
-def serve_registry(replica: Any, *, app_name: str, upstream_cls: str) -> None:
+def serve_registry(replica: Any, *, app_name: str, upstream_cls: str, upstream_url: str) -> None:
     """Start the load-registry server on a ``RouterRegistry`` container (@modal.enter)."""
-    registry = _RegistryApp(app_name=app_name, upstream_cls=upstream_cls)
+    registry = _RegistryApp(
+        app_name=app_name, upstream_cls=upstream_cls, upstream_url=upstream_url
+    )
     registry.start()
     replica._router_server = registry
 
@@ -309,15 +312,21 @@ def stop_server(replica: Any) -> None:
 class _RegistryApp(_UvicornApp):
     """Polls upstream replicas for load and serves the snapshot at ``/loads``."""
 
-    def __init__(self, *, app_name: str, upstream_cls: str) -> None:
+    def __init__(self, *, app_name: str, upstream_cls: str, upstream_url: str) -> None:
         self.app_name = app_name
         self.upstream_cls = upstream_cls
+        self.upstream_url = upstream_url.rstrip("/")
         self.containers: list[ContainerInfo] = []
 
     async def _container_load(self, upstream: str) -> int:
+        headers = {"modal-flash-upstream": upstream}
         loads_response, health_response = await asyncio.gather(
-            self.client.get(f"https://{upstream}/v1/loads", params={"include": "core"}),
-            self.client.get(f"https://{upstream}/health"),
+            self.client.get(
+                f"{self.upstream_url}/v1/loads",
+                params={"include": "core"},
+                headers=headers,
+            ),
+            self.client.get(f"{self.upstream_url}/health", headers=headers),
         )
         loads_response.raise_for_status()
         health_response.raise_for_status()
