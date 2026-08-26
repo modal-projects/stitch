@@ -19,7 +19,10 @@ dev = [
     "modal>=1.5.4.dev11",
     "fastapi",
     "httpx",
+    "numpy",
     "safetensors>=0.4.0",
+    "xxhash",
+    "zstandard",
 ]
 
 [build-system]
