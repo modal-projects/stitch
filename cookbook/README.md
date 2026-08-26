@@ -4,13 +4,17 @@ The cookbook contains runnable Modal deployments that connect Miles or Slime
 trainers to elastic SGLang rollout pools through Stitch. Recipes define the
 model, trainer, rollout fleet, data, and weight-update policy; the shared
 infrastructure handles preparation, isolated runs, and pool lifecycle.
+`standalone` deploys the same rollout pool without a trainer: an external
+trainer or harness publishes weight updates through the configured checkpoint
+store and sends rollout traffic through the pool's session router. Its launcher
+claims the run's boot pointer at v0 before the pool enters rotation.
 
 ## Common workflow
 
 ### 1. Select a recipe
 
-Set `EXPERIMENT_CONFIG` to a module in `miles_disagg/configs` or
-`slime_disagg/configs`:
+Set `EXPERIMENT_CONFIG` to a module in `miles_disagg/configs`,
+`slime_disagg/configs`, or `standalone/configs`:
 
 ```bash
 export EXPERIMENT_CONFIG=your_config_name
@@ -68,6 +72,14 @@ uv run --extra modal modal run -d \
   -m cookbook.slime_disagg.prep_app::prepare_dataset
 ```
 
+Standalone recipes serve a quantized release checkpoint as published, so
+download is the whole preparation:
+
+```bash
+uv run --extra modal modal run -d \
+  -m cookbook.standalone.prep_app::download_base
+```
+
 Preparation is idempotent. A complete artifact is reused; an incomplete one
 fails rather than becoming a launch input. Model preparation must finish before
 dependent format conversion. Dataset preparation is independent.
@@ -82,12 +94,15 @@ uv run --extra modal python -m cookbook.miles_disagg.launch
 
 # Slime
 uv run --extra modal python -m cookbook.slime_disagg.launch
+
+# Standalone pool (no trainer)
+uv run --extra modal python -m cookbook.standalone.launch
 ```
 
 The launcher creates an eight-character run ID unless `RUN_ID` is set explicitly,
-deploys a run-scoped rollout pool, waits for its gateway, and starts the trainer.
-It prints the app name and stop command. Repeating the command creates a separate
-run and checkpoint lineage.
+deploys a run-scoped rollout pool, and waits for its gateway. Miles and Slime then
+start the trainer; standalone claims `latest` at v0 and stops after the pool is
+ready. Repeating the command creates a separate run and checkpoint lineage.
 
 #### Resume a Miles run
 
@@ -270,9 +285,11 @@ Each experiment Volume contains only run-scoped state:
 ```
 
 The training framework owns `updates/` and the saved checkpoints; Stitch owns
-`latest`. Resume keeps the same run ID, restores `latest` to the checkpoint,
-and replaces the abandoned update suffix as training continues. Each finished
-trainer attempt writes a separate log; use Modal app logs while it is running.
+`latest`. For standalone pools, the launcher establishes `latest` at v0 and the
+external publisher owns subsequent updates. Resume keeps the same run ID,
+restores `latest` to the checkpoint, and replaces the abandoned update suffix as
+training continues. Each finished trainer attempt writes a separate log; use
+Modal app logs while it is running.
 
 Datasets are independent of models and runs:
 
