@@ -204,6 +204,14 @@ class Reconciler:
             raise ValueError("boot_version must be non-negative")
         self.store = store
         self.engine = engine
+        # A cpu-destination stage does its heavy work inside the engine (the lazy
+        # full CPU-weight-image compile occupies the engine's HTTP loop for
+        # minutes at large-model scale), so the watchdog must not probe then.
+        # Learn the mode once: an engine that declares none keeps stock
+        # supervision (disk stages are pure file I/O beside a serving engine).
+        self._staging_occupies_engine = (
+            getattr(engine, "delta_update_mode", "disk") == "cpu"
+        )
         self.flush_cache_on_commit = flush_cache_on_commit
         self.run_id = run_id
         self.boot_version = boot_version
@@ -312,7 +320,13 @@ class Reconciler:
 
     def expects_engine_progress(self) -> bool:
         """Whether this replica should currently make inference progress."""
-        return self.ready and self.sync_state is not SyncState.COMMITTING
+        if not self.ready:
+            return False
+        if self.sync_state is SyncState.COMMITTING:
+            return False
+        return not (
+            self.sync_state is SyncState.STAGING and self._staging_occupies_engine
+        )
 
     async def wait_for_terminal_error(self) -> None:
         """Raise once reconciliation proves this replica must be replaced."""

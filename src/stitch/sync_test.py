@@ -190,6 +190,31 @@ def test_engine_progress_expectation_follows_serving_lifecycle(
     assert reconciler.expects_engine_progress() is expects_progress
 
 
+@pytest.mark.parametrize(
+    "delta_update_mode,expects_progress",
+    [
+        ("cpu", False),  # the cpu-weight-image compile occupies the engine's HTTP loop
+        ("disk", True),  # disk staging is pure file I/O beside a serving engine
+        (None, True),  # a mode-less engine keeps stock supervision
+    ],
+)
+def test_staging_progress_expectation_follows_delta_update_mode(
+    delta_update_mode: str | None, expects_progress: bool
+) -> None:
+    engine = FakeEngine()
+    if delta_update_mode is not None:
+        engine.delta_update_mode = delta_update_mode
+    reconciler = _make_reconciler(store=FakeStore(), engine=engine)
+    reconciler.ready = True
+
+    reconciler.sync_state = SyncState.STAGING
+    assert reconciler.expects_engine_progress() is expects_progress
+    reconciler.sync_state = SyncState.IDLE
+    assert reconciler.expects_engine_progress() is True
+    reconciler.sync_state = SyncState.COMMITTING
+    assert reconciler.expects_engine_progress() is False
+
+
 def test_catch_up() -> None:
     async def go() -> None:
         engine = FakeEngine()
