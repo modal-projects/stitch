@@ -19,6 +19,7 @@ dev = [
     "modal>=1.5.4.dev11",
     "fastapi",
     "httpx",
+    "safetensors>=0.4.0",
 ]
 
 [build-system]
