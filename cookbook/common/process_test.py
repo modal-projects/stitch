@@ -110,3 +110,43 @@ def test_start_sidecar_passes_s3_store_settings(monkeypatch) -> None:
     )
     assert isinstance(store, S3Store)
     assert store.run_id == "run-a"
+
+
+def test_start_sidecar_reconcile_interval_round_trip(monkeypatch) -> None:
+    """serve_startup's reconcile_interval pass-through lands on the sidecar argv
+    as --reconcile-interval and parses back to the same value; unset defaults
+    to the stock 5.0 seconds."""
+    commands: list[list[str]] = []
+
+    def popen(command: list[str], **_kwargs):
+        commands.append(command)
+        return object()
+
+    monkeypatch.setattr(process.subprocess, "Popen", popen)
+
+    base_kwargs = dict(
+        sidecar_port=8000,
+        sglang_port=8001,
+        bulletin_root="/cache/run-a",
+        base_checkpoint_dir="/model",
+        local_checkpoint_dir=None,
+        delta_update_mode="cpu",
+        disk_load_format="auto",
+        store_backend=storage.MODAL_VOLUME,
+        volume_name="run-volume",
+        s3_root=None,
+        s3_endpoint_url=None,
+        run_id="run-a",
+        boot_version=0,
+        commit_mode="in_place",
+    )
+
+    process.start_sidecar(**base_kwargs)
+    config = SidecarConfig.from_argv(commands[0][3:])
+    assert config.reconcile_interval == 5.0, "unset defaults to the stock interval"
+
+    process.start_sidecar(**base_kwargs, reconcile_interval=365 * 24 * 3600.0)
+    command = commands[1]
+    assert command[command.index("--reconcile-interval") + 1] == "31536000.0"
+    config = SidecarConfig.from_argv(command[3:])
+    assert config.reconcile_interval == 365 * 24 * 3600.0

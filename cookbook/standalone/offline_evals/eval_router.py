@@ -20,20 +20,23 @@ from typing import Any
 
 import modal
 from fastapi import Response
-from pydantic import TypeAdapter
+from pydantic import BaseModel, TypeAdapter
 
 from cookbook.common.router import (
     SESSION_ROUTE_MAX_UPSTREAMS,
     SESSION_ROUTE_TTL_SECONDS,
     ContainerInfo,
-    RouteEntry,
-    RouteEntryList,
     _container_addr,
     _ProxyApp,
     _RegistryApp,
     select_underloaded_container,
 )
 from cookbook.common.router import filter_headers as _stock_filter_headers
+from cookbook.standalone.offline_evals.rollout_control import (
+    DEFAULT_SESSION_TTL_SECONDS,
+    RolloutPolicy,
+    tombstone_session,
+)
 from stitch.pools.modal_flash import list_flash_containers_async
 from stitch.types import VersionRef
 
@@ -50,9 +53,28 @@ class EvalContainerInfo(ContainerInfo):
     # From /server_info's ``applied`` identity; None when nothing is applied yet.
     applied_version: int | None = None
     draining: bool = False  # excluded from every proxy selection path
+    # Session records pinned here (registry-computed; drives packing) and
+    # in-flight requests (/server_info; gates the reconcile nudge).
+    live_sessions: int = 0
+    active_requests: int = 0
 
 
 EvalContainerInfoList = TypeAdapter(list[EvalContainerInfo])
+
+
+class EvalRouteEntry(BaseModel):
+    """One session route entry: the replica's applied version at pin time, the
+    last placement touch, and the tombstone. Every stored entry carries the
+    full schema."""
+
+    task_id: str
+    last_sent: float
+    version: int | None
+    last_seen: float
+    tombstoned: bool = False
+
+
+EvalRouteEntryList = TypeAdapter(list[EvalRouteEntry])
 
 
 def filter_headers(headers: dict[str, str]) -> dict[str, str]:
@@ -104,6 +126,19 @@ def _version_matched(
     return underloaded or in_rotation
 
 
+def select_packed_container(candidates: list[EvalContainerInfo]) -> EvalContainerInfo:
+    """Pack pinned-version traffic onto replicas already holding live sessions:
+    lowest load among the holders, or among all candidates when none hold any.
+    Packing concentrates same-version sessions so empty old-version replicas
+    drain to zero live sessions and become reconcile candidates."""
+    holders = [c for c in candidates if c.live_sessions > 0]
+    # A stale load is last-known, not live (a staged replica can sit at a
+    # frozen zero): when any candidate reports fresh load, pack across those.
+    fresh = [c for c in (holders or candidates) if not c.load_stale]
+    pool = fresh or holders or list(candidates)
+    return min(pool, key=lambda c: c.load)
+
+
 async def route_session(
     session_routes: modal.Dict,
     session_id: str,
@@ -118,23 +153,25 @@ async def route_session(
     the session's routes."""
     current_time = time.time()
 
-    routes: list[RouteEntry] = RouteEntryList.validate_python(
+    routes: list[EvalRouteEntry] = EvalRouteEntryList.validate_python(
         await session_routes.get.aio(session_id, [])
     )
-    # Drop expired routes and replicas this pod hasn't discovered (they may just be
-    # new; every session lands on some pod's view, so this only trims the dead).
+    # Drop expired routes, tombstoned entries (an ended session re-pins clean),
+    # and replicas this pod hasn't discovered (they may just be new; every
+    # session lands on some pod's view, so this only trims the dead).
     routes = [
         entry
         for entry in routes
         if current_time - entry.last_sent <= SESSION_ROUTE_TTL_SECONDS
         and entry.task_id in containers
+        and not entry.tombstoned
     ]
     routes.sort(key=lambda entry: entry.last_sent, reverse=True)
 
     async def save_routes() -> None:
         await session_routes.put.aio(
             session_id,
-            RouteEntryList.dump_python(
+            EvalRouteEntryList.dump_python(
                 routes[:SESSION_ROUTE_MAX_UPSTREAMS], mode="json"
             ),
         )
@@ -169,6 +206,7 @@ async def route_session(
                 )
                 continue
             entry.last_sent = current_time
+            entry.last_seen = current_time
             await save_routes()
             return container
 
@@ -183,7 +221,7 @@ async def route_session(
                 len(containers),
             )
             return None
-        selected = min(matched, key=lambda container: container.load)
+        selected = select_packed_container(matched)
     else:
         in_rotation = {
             container.task_id: container
@@ -205,19 +243,43 @@ async def route_session(
         exact_version,
         ", ".join(entry.task_id for entry in routes),
     )
-    routes.insert(0, RouteEntry(task_id=selected.task_id, last_sent=current_time))
+    routes.insert(
+        0,
+        EvalRouteEntry(
+            task_id=selected.task_id,
+            last_sent=current_time,
+            version=selected.applied_version,
+            last_seen=current_time,
+        ),
+    )
     await save_routes()
     return selected
 
 
-def serve_eval_registry(replica: Any, *, app_name: str, upstream_cls: str) -> None:
+def serve_eval_registry(
+    replica: Any,
+    *,
+    app_name: str,
+    upstream_cls: str,
+    session_routes: Any,
+    control: Any,
+    store: Any,
+    session_ttl: float = DEFAULT_SESSION_TTL_SECONDS,
+) -> None:
     """Start the version-aware load registry on a ``RouterRegistry`` container
     (@modal.enter). Polls go through the upstream class's own URL, derived here
-    so recipes only name the class."""
+    so recipes only name the class. The registry also drives the rollout control
+    loop (rollout_control): it reads the store's ``latest`` pointer each poll and
+    reconciles stale replicas toward it. ``session_ttl`` bounds how long an idle
+    session record counts as live; explicit tombstones are the primary signal."""
     registry = EvalRegistryApp(
         app_name=app_name,
         upstream_cls=upstream_cls,
         upstream_url=modal.Server.from_name(app_name, upstream_cls).get_url(),
+        session_routes=session_routes,
+        control=control,
+        store=store,
+        session_ttl=session_ttl,
     )
     registry.start()
     replica._router_server = registry
@@ -251,18 +313,73 @@ class _ReplicaPoll:
     load: int | None
     applied_version: int | None
     ready: bool
+    active_requests: int
 
 
 class EvalRegistryApp(_RegistryApp):
     """Polls replicas' /server_info (membership, applied version) and /v1/loads
-    (queue depth) through the pool URL; serves the snapshot at /loads."""
+    (queue depth) through the pool URL; serves the snapshot at /loads. Between
+    polls it drives the rollout control loop: pointer watch, session liveness,
+    pending-reconcile marks, reconciliation nudges."""
 
-    def __init__(self, *, app_name: str, upstream_cls: str, upstream_url: str) -> None:
+    def __init__(
+        self,
+        *,
+        app_name: str,
+        upstream_cls: str,
+        upstream_url: str,
+        session_routes: Any,
+        control: Any,
+        store: Any,
+        session_ttl: float = DEFAULT_SESSION_TTL_SECONDS,
+    ) -> None:
         super().__init__(
             app_name=app_name, upstream_cls=upstream_cls, upstream_url=upstream_url
         )
         self.containers: list[EvalContainerInfo] = []
         self._last_loads: dict[str, int] = {}
+        self.store = store
+        self._pointer_version: int | None = None
+        self._rollout_policy = RolloutPolicy(
+            session_routes=session_routes,
+            control=control,
+            session_ttl=session_ttl,
+            reconcile=self._post_wake,
+        )
+
+    def _read_pointer_version(self) -> int | None:
+        """The store's ``latest`` pointer, cached — only a change logs (and arms
+        the retire pass). Reuses the standard store read path, so any publish —
+        library-path included — is observed. A read failure keeps last-known."""
+        if self.store is None:
+            return None
+        try:
+            self.store.refresh()
+            pointer = self.store.read_pointer()
+        except Exception:
+            logger.exception("rollout: pointer read failed; keeping last-known")
+            return self._pointer_version
+        version = pointer.version if pointer is not None else None
+        if version != self._pointer_version:
+            logger.info(
+                "rollout: store pointer %s -> %s", self._pointer_version, version
+            )
+            self._pointer_version = version
+        return self._pointer_version
+
+    async def _post_wake(self, upstream: str) -> None:
+        """POST /wake to one replica through the pool URL (the same path
+        polls traverse): the stock sidecar wake, which reconciles the replica
+        to the store pointer. A failed nudge is logged, never fatal — the
+        control loop re-nudges on its bounded schedule."""
+        try:
+            response = await self.client.post(
+                f"{self.upstream_url}/wake",
+                headers={"modal-flash-upstream": upstream},
+            )
+            response.raise_for_status()
+        except Exception:
+            logger.exception("rollout: wake nudge failed for %s", upstream)
 
     async def _poll_container(self, upstream: str) -> _ReplicaPoll:
         """/server_info is membership and liveness in one probe: its failure drops
@@ -310,6 +427,7 @@ class EvalRegistryApp(_RegistryApp):
             load=load,
             applied_version=applied_version,
             ready=bool(data.get("ready", True)),
+            active_requests=int(data.get("active_requests") or 0),
         )
 
     async def _poll_once(self) -> list[EvalContainerInfo]:
@@ -349,13 +467,43 @@ class EvalRegistryApp(_RegistryApp):
                     load_stale=load_stale,
                     applied_version=result.applied_version,
                     ready=result.ready,
+                    active_requests=result.active_requests,
                 )
             )
+        pointer_version = self._read_pointer_version()
+        try:
+            await self._rollout_policy.update(updated, pointer_version, time.time())
+        except Exception:
+            # The placement snapshot must still refresh — a control-loop bug
+            # costs reconciliation, never routing data.
+            logger.exception("rollout: control update failed")
         return updated
 
 
 class EvalProxyApp(_ProxyApp):
     """Version-aware placement over the stock proxy via the two routing hooks."""
+
+    def build_app(self) -> Any:
+        fastapi_app = super().build_app()
+
+        @fastapi_app.post("/sessions/{session_id}/end")
+        async def end_session(session_id: str) -> Response:
+            # Session tombstone — the primary end-of-session signal. Idempotent
+            # and 200 always: ending an unknown or already-ended session is a
+            # no-op.
+            await tombstone_session(self.session_routes, session_id)
+            return Response(status_code=200)
+
+        # The decorator appends; the tombstone must precede the stock catch-all
+        # proxy route or it never matches.
+        routes = fastapi_app.router.routes
+        catch_all = next(
+            i
+            for i, route in enumerate(routes)
+            if getattr(route, "path", None) == "/{path:path}"
+        )
+        routes.insert(catch_all, routes.pop())
+        return fastapi_app
 
     async def get_containers(self) -> dict[str, EvalContainerInfo]:
         response = await self.client.get(f"{self.registry_url}/loads")
@@ -380,7 +528,7 @@ class EvalProxyApp(_ProxyApp):
             matched = _version_matched(
                 self.containers, self.overload_threshold, exact_version
             )
-            return min(matched, key=lambda c: c.load) if matched else None
+            return select_packed_container(matched) if matched else None
         if session_id and self.containers:
             return await route_session(
                 self.session_routes,

@@ -164,6 +164,8 @@ class Server:
             run_id=RUN_ID,
             commit_mode=exp.SIDECAR_COMMIT_MODE,
             flush_cache_on_commit=exp.SIDECAR_FLUSH_CACHE_ON_COMMIT,
+            # Base configs omit SIDECAR_RECONCILE_INTERVAL: 5.0s is stock behavior.
+            reconcile_interval=getattr(exp, "SIDECAR_RECONCILE_INTERVAL", 5.0),
             startup_timeout=SERVER_STARTUP_TIMEOUT,
         )
 
@@ -202,9 +204,13 @@ def claim_boot_pointer() -> None:
     checkpoint.claim_boot_pointer(store, RUN_ID)
 
 
-# ── Session-routing LB (cookbook/common/router.py) ─────────────────────────────
+# ── Session-routing LB ─────────────────────────────────────────────────────────
 # The router is two CPU Flash classes in this same app, so it deploys and dies with
 # the pool; the GPU class keeps ``Server``, rollout traffic enters through ``Router``.
+# OFFLINE_EVALS on the experiment config opts into the offline-evals router
+# (cookbook/standalone/offline_evals/): version-pinned placement plus the
+# registry-driven rollout control loop. Unset, the wiring is the stock
+# common-router pair below.
 router_image = router.build_router_image(
     EXPERIMENT,
     RUN_ID,
@@ -212,56 +218,148 @@ router_image = router.build_router_image(
 )
 session_routes = router.session_routes_dict(APP_NAME)
 
+if getattr(exp, "OFFLINE_EVALS", False):
+    from cookbook.standalone.offline_evals import eval_router, rollout_control
 
-@app.server(
-    image=router_image,
-    cpu=2,
-    memory=1024,
-    min_containers=modal_cfg.router_registry_min_containers,
-    routing_region=modal_cfg.routing_region,
-    include_source=False,
-    port=8000,
-    unauthenticated=True,
-)
-class RouterRegistry:
-    """Polls Server replicas' live queue depth; serves the snapshot at /loads."""
+    if STORE_DEPLOYMENT.extra_packages:
+        # The registry container reads the checkpoint store (rollout control loop).
+        router_image = router_image.pip_install(*STORE_DEPLOYMENT.extra_packages)
+    rollout_marks = rollout_control.rollout_control_dict(APP_NAME)
 
-    @modal.enter()
-    def enter(self) -> None:
-        router.serve_registry(self, app_name=APP_NAME, upstream_cls="Server")
+    @app.server(
+        image=router_image,
+        cpu=2,
+        memory=1024,
+        # Single-writer: the rollout control loop is correct only with exactly one
+        # registry container, so the registry is pinned to 1 regardless of config.
+        min_containers=1,
+        max_containers=1,
+        routing_region=modal_cfg.routing_region,
+        volumes=(
+            {str(STITCH_PATH): run_volume}
+            if STORE_DEPLOYMENT.backend == storage.MODAL_VOLUME
+            else {}
+        ),
+        secrets=STORE_SECRETS,
+        include_source=False,
+        port=8000,
+        unauthenticated=True,
+    )
+    class RouterRegistry:
+        """Polls Server replicas' server_info + queue depth; serves the snapshot at /loads.
 
-    @modal.exit()
-    def exit(self) -> None:
-        router.stop_server(self)
+        Also drives the rollout control loop (session liveness, pending-reconcile
+        marks, reconcile nudges) — correct only with a single registry container."""
 
+        @modal.enter()
+        def enter(self) -> None:
+            STORE_DEPLOYMENT.bootstrap_credentials()
+            store_config = STORE_DEPLOYMENT.hook_config(APP_NAME)
+            store = storage.create_store(
+                store_config["stitch_store_backend"],
+                local_root=RUN_DIR,
+                run_id=RUN_ID,
+                volume_name=exp.EXPERIMENT_VOLUME_NAME,
+                s3_root=store_config.get("stitch_s3_root"),
+                s3_endpoint_url=store_config.get("stitch_s3_endpoint_url"),
+            )
+            eval_router.serve_eval_registry(
+                self,
+                app_name=APP_NAME,
+                upstream_cls="Server",
+                session_routes=session_routes,
+                control=rollout_marks,
+                store=store,
+                session_ttl=getattr(
+                    exp, "SESSION_TTL_SECONDS", eval_router.DEFAULT_SESSION_TTL_SECONDS
+                ),
+            )
 
-@app.server(
-    image=router_image,
-    cpu=4,
-    memory=2048,
-    min_containers=modal_cfg.router_min_containers,
-    target_concurrency=modal_cfg.router_target_concurrency,
-    routing_region=modal_cfg.routing_region,
-    include_source=False,
-    port=8000,
-    unauthenticated=True,
-    exit_grace_period=30 * MINUTES,
-)
-class Router:
-    """Front door for rollout traffic: session-affinity routing across Server replicas,
-    with 503 eviction + retry, so a saturated replica sheds sessions instead of
-    attracting them."""
+        @modal.exit()
+        def exit(self) -> None:
+            router.stop_server(self)
 
-    @modal.enter()
-    def enter(self) -> None:
-        router.serve_router(
-            self,
-            registry_url=RouterRegistry.get_url(),
-            upstream_url=Server.get_url(),
-            session_routes=session_routes,
-            overload_threshold=ROLLOUT_CONCURRENCY,
-        )
+    @app.server(
+        image=router_image,
+        cpu=4,
+        memory=2048,
+        min_containers=modal_cfg.router_min_containers,
+        target_concurrency=modal_cfg.router_target_concurrency,
+        routing_region=modal_cfg.routing_region,
+        include_source=False,
+        port=8000,
+        unauthenticated=True,
+        exit_grace_period=30 * MINUTES,
+    )
+    class Router:
+        """Front door for rollout traffic: version-pinned, session-affinity routing
+        across Server replicas, with 503 eviction + retry, so a saturated replica
+        sheds sessions instead of attracting them."""
 
-    @modal.exit()
-    def exit(self) -> None:
-        router.stop_server(self)
+        @modal.enter()
+        def enter(self) -> None:
+            eval_router.serve_eval_router(
+                self,
+                registry_url=RouterRegistry.get_url(),
+                upstream_url=Server.get_url(),
+                session_routes=session_routes,
+                overload_threshold=ROLLOUT_CONCURRENCY,
+            )
+
+        @modal.exit()
+        def exit(self) -> None:
+            router.stop_server(self)
+
+else:
+
+    @app.server(
+        image=router_image,
+        cpu=2,
+        memory=1024,
+        min_containers=modal_cfg.router_registry_min_containers,
+        routing_region=modal_cfg.routing_region,
+        include_source=False,
+        port=8000,
+        unauthenticated=True,
+    )
+    class RouterRegistry:
+        """Polls Server replicas' live queue depth; serves the snapshot at /loads."""
+
+        @modal.enter()
+        def enter(self) -> None:
+            router.serve_registry(self, app_name=APP_NAME, upstream_cls="Server")
+
+        @modal.exit()
+        def exit(self) -> None:
+            router.stop_server(self)
+
+    @app.server(
+        image=router_image,
+        cpu=4,
+        memory=2048,
+        min_containers=modal_cfg.router_min_containers,
+        target_concurrency=modal_cfg.router_target_concurrency,
+        routing_region=modal_cfg.routing_region,
+        include_source=False,
+        port=8000,
+        unauthenticated=True,
+        exit_grace_period=30 * MINUTES,
+    )
+    class Router:
+        """Front door for rollout traffic: session-affinity routing across Server replicas,
+        with 503 eviction + retry, so a saturated replica sheds sessions instead of
+        attracting them."""
+
+        @modal.enter()
+        def enter(self) -> None:
+            router.serve_router(
+                self,
+                registry_url=RouterRegistry.get_url(),
+                upstream_url=Server.get_url(),
+                session_routes=session_routes,
+                overload_threshold=ROLLOUT_CONCURRENCY,
+            )
+
+        @modal.exit()
+        def exit(self) -> None:
+            router.stop_server(self)
