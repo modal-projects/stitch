@@ -540,9 +540,6 @@ def fabricate_delta_version(
     }
 
 
-
-
-
 def _default_volume_reloader() -> None:
     """Reload the run volume's view (same guard as ``materialize_version``)."""
     if STORE_DEPLOYMENT.backend == storage.MODAL_VOLUME:
