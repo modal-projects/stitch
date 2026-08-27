@@ -4,13 +4,18 @@ The pure dir-layout/copy/index unit behind the publisher app
 (``cookbook.standalone.offline_evals.publish_app``) and its spawned jobs.
 """
 
+import importlib
 import json
 import logging
+import os
 import shutil
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+EXPERIMENT = os.environ["EXPERIMENT_CONFIG"]
+exp = importlib.import_module(f"cookbook.standalone.configs.{EXPERIMENT}")
 
 
 def _updates_dir(run_dir: Path) -> Path:
@@ -35,10 +40,21 @@ def _delta_index_metadata(version_dir: Path) -> dict[str, Any] | None:
 
 
 def _target_is_valid(version_dir: Path, source_dir: Path) -> bool:
-    """True when ``version_dir`` is a complete materialization of ``source_dir``."""
+    """True when ``version_dir`` is a complete materialization of ``source_dir``.
+
+    Deltas are checked against their own weight_map: a full source's shard
+    superset would condemn every staged delta.
+    """
     index_path = version_dir / "model.safetensors.index.json"
     if not index_path.is_file():
         return False
+    if _delta_index_metadata(version_dir) is not None:
+        index = json.loads(index_path.read_text())
+        delta_shards = {str(f) for f in (index.get("weight_map") or {}).values()}
+        if not delta_shards:
+            return False
+        target_shards = {p.name for p in version_dir.glob("*.safetensors")}
+        return delta_shards <= target_shards
     source_shards = {p.name: p for p in source_dir.glob("*.safetensors")}
     target_shards = {p.name: p for p in version_dir.glob("*.safetensors")}
     if not source_shards.keys() <= target_shards.keys():
@@ -114,3 +130,41 @@ def _ensure_safetensors_index(model_dir: Path, version: int) -> None:
     }
     index_path.write_text(json.dumps(index, indent=2))
     logger.info("generated safetensors index for %s (version=%d)", model_dir, version)
+
+
+def _touched_delta_tensors(run_dir: Path, through_version: int) -> set[str]:
+    """Union of tensor names changed by staged delta versions 1..through_version.
+
+    A chained delta (base_version > 0) is generated against the BASE checkpoint's
+    bytes, which equal version-N bytes exactly for tensors no earlier delta
+    touched — so selection must exclude everything any earlier delta changed.
+    """
+    touched: set[str] = set()
+    for version in range(1, through_version + 1):
+        index_path = _version_dir(run_dir, version) / "model.safetensors.index.json"
+        if _delta_index_metadata(index_path.parent) is None:
+            continue
+        index = json.loads(index_path.read_text())
+        touched.update((index.get("weight_map") or {}).keys())
+    return touched
+
+
+def _delta_anchor_dir(run_dir: Path, base_version: int) -> Path:
+    """Raw-weight anchor for a delta on base_version.
+
+    v0 anchors at the config's base checkpoint. A staged FULL dir anchors at
+    itself. A staged DELTA dir holds XOR-encoded blobs, not raw weights, so the
+    anchor falls back to the base checkpoint and tensor selection excludes
+    everything earlier deltas touched (see _touched_delta_tensors).
+    """
+    if base_version > 0:
+        staged = _version_dir(run_dir, base_version)
+        if _delta_index_metadata(staged) is None:
+            return staged
+    anchor = getattr(exp, "BASE_CHECKPOINT_PATH", None)
+    if anchor is None:
+        raise ValueError(
+            f"config {EXPERIMENT!r} has no BASE_CHECKPOINT_PATH; cannot anchor "
+            f"a delta on base_version={base_version}"
+        )
+    return Path(anchor)

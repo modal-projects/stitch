@@ -117,6 +117,262 @@ def test_prepare_version_dir(tmp_path: Path) -> None:
     assert (target / "model.safetensors").stat().st_size == source_shard.stat().st_size
 
 
+# ── Delta-aware validity ─────────────────────────────────────────────────────
+
+
+def _make_delta_dir(
+    path: Path,
+    *,
+    version: int = 2,
+    base_version: int = 1,
+    shards: tuple[str, ...] = ("model-00001-of-00002.safetensors",),
+    index_shards: tuple[str, ...] = ("model-00001-of-00002.safetensors",),
+) -> Path:
+    """A staged DELTA dir: index metadata carries delta_encoding; weight_map lists
+    only the delta's own shards (a subset of any full checkpoint's shard set)."""
+    path.mkdir(parents=True, exist_ok=True)
+    for shard in shards:
+        _write_tiny_safetensors(path / shard)
+    (path / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {
+                "metadata": {
+                    "version": version,
+                    "base_version": base_version,
+                    "delta_encoding": "xor",
+                    "compression_format": "zstd",
+                    "checksum_format": "xxh3-128",
+                },
+                "weight_map": {f"w{i}": shard for i, shard in enumerate(index_shards)},
+            }
+        )
+    )
+    return path
+
+
+def test_target_is_valid_accepts_complete_delta(tmp_path: Path) -> None:
+    """A delta's weight_map is a subset of the full source; that must still count as valid."""
+    source = _make_source(
+        tmp_path / "source",
+        shards=("model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"),
+    )
+    target = _make_delta_dir(tmp_path / "weight_v000002")
+
+    assert publish_app._target_is_valid(target, source) is True
+    assert publish_app._prepare_version_dir(target, source) == "kept"
+
+
+def test_target_is_valid_rejects_partial_delta(tmp_path: Path) -> None:
+    """A delta missing one of its own shards is partial -> rmtree'd and recopied."""
+    source = _make_source(tmp_path / "source")
+    target = _make_delta_dir(
+        tmp_path / "weight_v000002",
+        shards=("model-00001-of-00002.safetensors",),
+        index_shards=(
+            "model-00001-of-00002.safetensors",
+            "model-00002-of-00002.safetensors",
+        ),
+    )
+
+    assert publish_app._target_is_valid(target, source) is False
+    assert publish_app._prepare_version_dir(target, source) == "copied"
+    assert not (target / "model-00001-of-00002.safetensors").exists()
+    assert (target / "model.safetensors").exists()
+
+
+# ── Synthetic-delta fabrication (real generator, tiny base) ──────────────────
+
+
+def _make_fp8_style_base(path: Path, tensor_names: tuple[str, ...]) -> Path:
+    """A tiny 'fp8-format' base checkpoint: one shard of zeroed F32 tensors plus
+    its HF index (the generator only needs raw bytes + an index)."""
+    import numpy as np
+    import safetensors.numpy
+
+    path.mkdir(parents=True, exist_ok=True)
+    tensors = {name: np.zeros(2048, dtype=np.float32) for name in tensor_names}
+    safetensors.numpy.save_file(tensors, str(path / "model-00001.safetensors"))
+    (path / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {
+                "metadata": {"version": 0},
+                "weight_map": {
+                    name: "model-00001.safetensors" for name in tensor_names
+                },
+            }
+        )
+    )
+    return path
+
+
+class _DeltaFakeStore:
+    """Just enough Store for stitch.publish.publish_version."""
+
+    def __init__(self) -> None:
+        self.pointer: VersionRef | None = None
+        self.published: list = []
+
+    def read_pointer(self) -> VersionRef | None:
+        return self.pointer
+
+    def publish(self, manifest: object, files_dir: str) -> None:
+        self.published.append(manifest)
+
+    def advance_pointer(self, ref: VersionRef) -> None:
+        self.pointer = ref
+
+    def compare_and_advance_pointer(
+        self, expected: VersionRef | None, ref: VersionRef
+    ) -> None:
+        assert self.pointer == expected
+        self.pointer = ref
+
+
+def _run_dir(tmp_path: Path) -> Path:
+    run_dir = tmp_path / "run"
+    (run_dir / "updates").mkdir(parents=True)
+    return run_dir
+
+
+def test_fabricate_delta_dir_produces_publishable_delta(tmp_path: Path) -> None:
+    """The real generator's output passes stitch's publish validation, and the
+    per-tensor xxh3-128 checksums match a manual XOR-decode of the base bytes."""
+    import numpy as np
+    import xxhash
+    import zstandard
+    from safetensors import safe_open
+
+    base = _make_fp8_style_base(
+        tmp_path / "base",
+        ("model.layers.0.mlp.weight", "model.layers.1.mlp.weight", "model.norm.weight"),
+    )
+    run_dir = _run_dir(tmp_path)
+
+    version_dir = publish_app.fabricate_delta_dir(
+        run_dir, 0, 1, 2, anchor_dir=base, density=0.5, seed=7
+    )
+
+    assert version_dir == run_dir / "updates" / "weight_v000001"
+    index = json.loads((version_dir / "model.safetensors.index.json").read_text())
+    meta = index["metadata"]
+    assert meta["version"] == 1
+    assert meta["base_version"] == 0
+    assert meta["delta_encoding"] == "xor"
+    assert meta["compression_format"] == "zstd"
+    assert meta["checksum_format"] == "xxh3-128"
+    assert 1 <= len(index["weight_map"]) <= 2
+    for shard in set(index["weight_map"].values()):
+        assert (version_dir / shard).is_file()
+
+    import stitch.publish
+
+    store = _DeltaFakeStore()
+    ref = stitch.publish.publish_version(store, None, str(version_dir), run_id="run")
+    assert ref == VersionRef("run", 1)
+    assert store.pointer == VersionRef("run", 1)
+    assert store.published[0].kind.value == "delta"
+
+    # Decode zstd/XOR and compare xxh3-128 to shard metadata.
+    base_bytes = (base / "model-00001.safetensors").read_bytes()
+    base_index = json.loads((base / "model.safetensors.index.json").read_text())
+    from tools.profiling._synthetic_delta import _safetensors_header
+
+    data_start, header = _safetensors_header(base / "model-00001.safetensors")
+    for shard_name in set(index["weight_map"].values()):
+        with safe_open(str(version_dir / shard_name), framework="numpy") as f:
+            checksums = f.metadata()
+            for name in index["weight_map"]:
+                if index["weight_map"][name] != shard_name:
+                    continue
+                begin, end = header[name]["data_offsets"]
+                raw = base_bytes[data_start + begin : data_start + end]
+                compressed = f.get_tensor(name).tobytes()
+                delta = (
+                    zstandard.ZstdDecompressor().decompressobj().decompress(compressed)
+                )
+                assert len(delta) == len(raw)
+                applied = np.bitwise_xor(
+                    np.frombuffer(raw, dtype=np.uint8),
+                    np.frombuffer(delta, dtype=np.uint8),
+                )
+                assert xxhash.xxh3_128(applied).hexdigest() == checksums[name]
+    assert base_index["metadata"]["version"] == 0  # anchor untouched
+
+
+def test_fabricate_delta_dir_chains_without_retouching_tensors(tmp_path: Path) -> None:
+    """A delta on a delta-staged base excludes tensors earlier deltas touched, so
+    the base checkpoint's bytes still match the chain's current bytes there."""
+    base = _make_fp8_style_base(
+        tmp_path / "base",
+        ("model.layers.0.mlp.weight", "model.layers.1.mlp.weight", "model.norm.weight"),
+    )
+    run_dir = _run_dir(tmp_path)
+
+    v1 = publish_app.fabricate_delta_dir(
+        run_dir, 0, 1, 1, anchor_dir=base, density=0.5, seed=1
+    )
+    v2 = publish_app.fabricate_delta_dir(
+        run_dir, 1, 2, 1, anchor_dir=base, density=0.5, seed=2
+    )
+
+    v1_index = json.loads((v1 / "model.safetensors.index.json").read_text())
+    v2_index = json.loads((v2 / "model.safetensors.index.json").read_text())
+    assert v2_index["metadata"]["version"] == 2
+    assert v2_index["metadata"]["base_version"] == 1
+    assert not set(v1_index["weight_map"]) & set(v2_index["weight_map"])
+
+    again = publish_app.fabricate_delta_dir(
+        run_dir, 1, 2, 1, anchor_dir=base, density=0.5, seed=2
+    )
+    assert again == v2
+
+
+def test_fabricate_delta_dir_excludes_embed_and_lm_head(tmp_path: Path) -> None:
+    """embed/lm_head-class tensors dominated target_bytes and compile scope; the
+    selector must skip them and still fill num_tensors from per-layer weights."""
+    base = _make_fp8_style_base(
+        tmp_path / "base",
+        (
+            "model.embed_tokens.weight",
+            "model.layers.0.mlp.down_proj.weight",
+            "model.layers.1.mlp.down_proj.weight",
+            "lm_head.weight",
+        ),
+    )
+    run_dir = _run_dir(tmp_path)
+
+    version_dir = publish_app.fabricate_delta_dir(
+        run_dir, 0, 1, 2, anchor_dir=base, density=0.5, seed=3
+    )
+
+    index = json.loads((version_dir / "model.safetensors.index.json").read_text())
+    assert set(index["weight_map"]) == {
+        "model.layers.0.mlp.down_proj.weight",
+        "model.layers.1.mlp.down_proj.weight",
+    }
+
+
+def test_delta_anchor_dir_resolution(tmp_path: Path) -> None:
+    """v0 and staged-FULL bases anchor at their own dirs; a staged-DELTA base
+    anchors at the config's base checkpoint (its bytes are XOR blobs, not raw)."""
+    run_dir = _run_dir(tmp_path)
+
+    assert publish_app._delta_anchor_dir(run_dir, 0) == Path(
+        publish_app.exp.BASE_CHECKPOINT_PATH
+    )
+
+    _make_delta_dir(run_dir / "updates" / "weight_v000001")
+    assert publish_app._delta_anchor_dir(run_dir, 1) == Path(
+        publish_app.exp.BASE_CHECKPOINT_PATH
+    )
+
+    full = _make_source(run_dir / "updates" / "weight_v000002")
+    assert publish_app._delta_anchor_dir(run_dir, 2) == full
+
+
+# ── Job spawn / polling fakes ────────────────────────────────────────────────
+
+
 class _FakeSpawn:
     """Stands in for the materialize_version Modal function's .spawn()."""
 
@@ -222,39 +478,6 @@ def _make_publish_source(tmp_path: Path) -> Path:
     source.mkdir(exist_ok=True)
     _write_tiny_safetensors(source / "model.safetensors")
     return source
-
-
-# ── cpu-mode FULL guard ──────────────────────────────────────────────────────
-
-
-def _make_delta_dir(
-    path: Path,
-    *,
-    version: int = 2,
-    base_version: int = 1,
-    shards: tuple[str, ...] = ("model-00001-of-00002.safetensors",),
-    index_shards: tuple[str, ...] = ("model-00001-of-00002.safetensors",),
-) -> Path:
-    """A staged DELTA dir: index metadata carries delta_encoding; weight_map lists
-    only the delta's own shards (a subset of any full checkpoint's shard set)."""
-    path.mkdir(parents=True, exist_ok=True)
-    for shard in shards:
-        _write_tiny_safetensors(path / shard)
-    (path / "model.safetensors.index.json").write_text(
-        json.dumps(
-            {
-                "metadata": {
-                    "version": version,
-                    "base_version": base_version,
-                    "delta_encoding": "xor",
-                    "compression_format": "zstd",
-                    "checksum_format": "xxh3-128",
-                },
-                "weight_map": {f"w{i}": shard for i, shard in enumerate(index_shards)},
-            }
-        )
-    )
-    return path
 
 
 def _patch_materialize_env(
@@ -529,6 +752,112 @@ def test_publisher_lifecycle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     assert store.calls == [], "/job never reloads the volume"
 
 
+def test_fabricate_walk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """fabricate -> fabricate_delta -> publish: spawn args, 400 guards, and
+    reload ordering."""
+    from fastapi.testclient import TestClient
+
+    fake_spawn = _FakeSpawn(job_id="fc-fab-1")
+    monkeypatch.setattr(publish_app, "materialize_version", fake_spawn)
+    server = _make_server(tmp_path)
+    from_dir = server.updates_dir / "weight_v000002"
+    from_dir.mkdir()
+    _write_tiny_safetensors(from_dir / "model.safetensors")
+    client = TestClient(server.build_app())
+    resp = client.post(
+        "/fabricate",
+        json={"run_id": publish_app.RUN_ID, "from_version": 2, "new_version": 4},
+    )
+    assert resp.status_code == 202
+    assert resp.json()["job_id"] == "fc-fab-1"
+    assert fake_spawn.calls == [
+        {
+            "run_id": publish_app.RUN_ID,
+            "version": 4,
+            "source": str(from_dir),
+            "publish": False,
+        }
+    ]
+
+    fake_spawn = _FakeSpawn(job_id="fc-delta-1")
+    monkeypatch.setattr(publish_app, "fabricate_delta_version", fake_spawn)
+    server = _make_server(tmp_path)
+    (server.updates_dir / "weight_v000001").mkdir()
+    client = TestClient(server.build_app())
+    resp = client.post(
+        "/fabricate_delta",
+        json={"run_id": publish_app.RUN_ID, "base_version": 1, "new_version": 2},
+    )
+    assert resp.status_code == 202
+    assert resp.json()["job_id"] == "fc-delta-1"
+    assert resp.json()["version"] == 2
+    assert resp.json()["base_version"] == 1
+    assert resp.json()["path"].endswith("weight_v000002")
+    assert fake_spawn.calls == [
+        {
+            "run_id": publish_app.RUN_ID,
+            "base_version": 1,
+            "new_version": 2,
+            "num_tensors": 4,
+        }
+    ]
+
+    client = TestClient(_make_server(tmp_path).build_app())
+    resp = client.post(
+        "/fabricate_delta",
+        json={"run_id": publish_app.RUN_ID, "base_version": 2, "new_version": 2},
+    )
+    assert resp.status_code == 400, "new_version must exceed base_version"
+    resp = client.post(
+        "/fabricate_delta",
+        json={"run_id": publish_app.RUN_ID, "base_version": 1, "new_version": 2},
+    )
+    assert resp.status_code == 400
+    assert "not staged" in resp.json()["detail"]
+    resp = client.post(
+        "/fabricate_delta",
+        json={
+            "run_id": publish_app.RUN_ID,
+            "base_version": 0,
+            "new_version": 1,
+            "num_tensors": 0,
+        },
+    )
+    assert resp.status_code == 400, "num_tensors must be positive"
+
+    # The reloader exposes a from_dir staged by another container.
+    monkeypatch.setattr(publish_app, "materialize_version", _FakeSpawn("fc-reload-fab"))
+    monkeypatch.setattr(
+        publish_app, "fabricate_delta_version", _FakeSpawn("fc-reload-delta")
+    )
+    server, store = _make_recording_server(
+        tmp_path, label="reload-fabricate", staged_on_reload=(2,)
+    )
+    client = TestClient(server.build_app())
+    resp = client.post(
+        "/fabricate",
+        json={"run_id": publish_app.RUN_ID, "from_version": 2, "new_version": 4},
+    )
+    assert resp.status_code == 202
+    assert store.calls == ["reload", "refresh"], (
+        "/fabricate reloads before checking the staged source"
+    )
+
+    # /fabricate_delta: reload makes the staged base visible before the 400 check.
+    server, store = _make_recording_server(
+        tmp_path, label="reload-fabricate-delta", staged_on_reload=(1,)
+    )
+    client = TestClient(server.build_app())
+    resp = client.post(
+        "/fabricate_delta",
+        json={"run_id": publish_app.RUN_ID, "base_version": 1, "new_version": 2},
+    )
+    assert resp.status_code == 202
+    assert store.calls == ["reload", "refresh"], (
+        "/fabricate_delta reloads before checking the staged base"
+    )
+
+
 def test_publisher_guards(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Foreign run_id rejected before spawn; volume reload/commit ordering;
     poll timeouts and errors keep the single-writer guard."""
@@ -545,6 +874,21 @@ def test_publisher_guards(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
     resp = _publish(client, 2, str(source), run_id="someone-elses-run")
     assert resp.status_code == 400
     assert "does not match" in resp.json()["detail"]
+
+    monkeypatch.setattr(publish_app, "fabricate_delta_version", fake_spawn)
+    for path, body in (
+        (
+            "/fabricate",
+            {"run_id": "someone-elses-run", "from_version": 1, "new_version": 2},
+        ),
+        (
+            "/fabricate_delta",
+            {"run_id": "someone-elses-run", "base_version": 1, "new_version": 2},
+        ),
+    ):
+        resp = client.post(path, json=body)
+        assert resp.status_code == 400, path
+        assert "does not match" in resp.json()["detail"], path
     assert fake_spawn.calls == []
 
     events: list[str] = []
