@@ -8,6 +8,7 @@ import json
 import logging
 import shutil
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +21,19 @@ def _version_dir(run_dir: Path, version: int) -> Path:
     return _updates_dir(run_dir) / f"weight_v{version:06d}"
 
 
+def _delta_index_metadata(version_dir: Path) -> dict[str, Any] | None:
+    """Index metadata when ``version_dir`` is a delta (``delta_encoding`` set), else None."""
+    index_path = version_dir / "model.safetensors.index.json"
+    if not index_path.is_file():
+        return None
+    try:
+        index = json.loads(index_path.read_text())
+    except json.JSONDecodeError:
+        return None
+    meta = index.get("metadata") or {}
+    return meta if meta.get("delta_encoding") else None
+
+
 def _target_is_valid(version_dir: Path, source_dir: Path) -> bool:
     """True when ``version_dir`` is a complete materialization of ``source_dir``."""
     index_path = version_dir / "model.safetensors.index.json"
@@ -27,7 +41,14 @@ def _target_is_valid(version_dir: Path, source_dir: Path) -> bool:
         return False
     source_shards = {p.name: p for p in source_dir.glob("*.safetensors")}
     target_shards = {p.name: p for p in version_dir.glob("*.safetensors")}
-    return source_shards.keys() <= target_shards.keys()
+    if not source_shards.keys() <= target_shards.keys():
+        return False
+    # Names alone are not enough: a container recycled mid-copy leaves a
+    # TRUNCATED shard with the right name. Compare sizes against the source.
+    return all(
+        target_shards[name].stat().st_size == shard.stat().st_size
+        for name, shard in source_shards.items()
+    )
 
 
 def _prepare_version_dir(version_dir: Path, source_dir: Path) -> str:
