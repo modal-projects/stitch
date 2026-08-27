@@ -32,6 +32,12 @@ logger = logging.getLogger(__name__)
 # are the primary end-of-session signal.
 DEFAULT_SESSION_TTL_SECONDS = 1800.0
 
+# Consolidation: a victim is marked only after the drain condition holds for
+# this many consecutive registry polls (hysteresis against blips).
+CONSOLIDATION_HYSTERESIS_POLLS = 5
+# Consolidate only when the old version's live sessions fit on the k-1
+# survivors with this safety margin below rollout_concurrency.
+CONSOLIDATION_SAFETY_FACTOR = 0.7
 # A mark is cleared only after this many consecutive polls where the replica
 # has reached the pointer (or left): a single /server_info blip must not
 # readmit a mid-reconcile replica.
@@ -42,6 +48,7 @@ RECONCILE_RENUDGE_POLLS = 10
 MAX_RECONCILE_NUDGES = 3
 
 KIND_RETIRE = "retire"  # zero-live replica catching up to the pointer
+KIND_CONSOLIDATE = "consolidate"  # drained old-version victim (one fleet-wide)
 
 _MARKS_KEY = "marks"
 
@@ -94,6 +101,57 @@ async def tombstone_session(session_routes: Any, session_id: str) -> None:
     await session_routes.put.aio(session_id, record)
 
 
+# ── consolidation ────────────────────────────────────────────────────────────
+
+
+def select_consolidation_victim(
+    containers: list[EvalContainerInfo],
+    live_counts: dict[str, int],
+    pointer_version: int,
+    rollout_concurrency: int,
+) -> tuple[int, str] | None:
+    """The consolidation candidate: ``(version, task_id)`` to drain, or None.
+
+    Oldest applied version V behind the pointer with k>=2 ready, unmarked
+    replicas holding live sessions. Drain when the live sessions at V fit on
+    the k-1 survivors under ``rollout_concurrency * CONSOLIDATION_SAFETY_FACTOR``
+    and every survivor's load is below ``rollout_concurrency``. Victim is
+    min(task_id).
+    """
+    by_version: dict[int, list[EvalContainerInfo]] = {}
+    for container in containers:
+        if (
+            container.applied_version is None
+            or container.draining
+            or not container.ready
+        ):
+            continue
+        if live_counts.get(container.task_id, 0) <= 0:
+            continue
+        by_version.setdefault(container.applied_version, []).append(container)
+
+    for version in sorted(by_version):
+        if version >= pointer_version:
+            continue  # at the pointer: consolidation destination, never a victim
+        group = by_version[version]
+        k = len(group)
+        if k < 2:
+            continue
+        victim = min(group, key=lambda c: c.task_id)
+        survivors = [c for c in group if c.task_id != victim.task_id]
+        total_live = sum(live_counts.get(c.task_id, 0) for c in group)
+        if total_live > (k - 1) * rollout_concurrency * CONSOLIDATION_SAFETY_FACTOR:
+            continue
+        if any(c.load_stale for c in survivors):
+            # A stale survivor load is unverifiable spare capacity — never
+            # approve a drain on a frozen (possibly zero) reading.
+            continue
+        if any(c.load >= rollout_concurrency for c in survivors):
+            continue
+        return version, victim.task_id
+    return None
+
+
 # ── the policy loop ──────────────────────────────────────────────────────────
 
 
@@ -107,12 +165,19 @@ class RolloutPolicy:
         session_routes: Any,
         control: Any,
         session_ttl: float,
+        rollout_concurrency: int | None,
         reconcile: Callable[[str], Awaitable[None]],
     ) -> None:
         self.session_routes = session_routes
         self.control = control
         self.session_ttl = session_ttl
+        # Engine overload threshold — the capacity unit of the consolidation
+        # condition. None disables consolidation (no victim is ever selected);
+        # the zero-live retire loop is always on.
+        self.rollout_concurrency = rollout_concurrency
         self._reconcile = reconcile
+        self._consolidation_pending: tuple[int, str] | None = None
+        self._consolidation_pending_polls = 0
         self._clear_polls: dict[str, int] = {}
         self._nudges: dict[str, dict[str, int]] = {}
         self._poll_index = 0
@@ -167,6 +232,34 @@ class RolloutPolicy:
                     )
         self._expiry_logged = expired
 
+    async def _repoint_sessions(
+        self,
+        sessions: dict[str, list[dict]],
+        victim_id: str,
+        survivor: EvalContainerInfo,
+        now: float,
+    ) -> None:
+        """Migrate the victim's live sessions onto the survivor: rewrite their
+        route entries so the next request lands there. Eager by design —
+        migrated stragglers re-prefill on their survivor."""
+        for session_id, record in sessions.items():
+            if not session_is_live(record, now, self.session_ttl):
+                continue
+            if record[0]["task_id"] != victim_id:
+                continue
+            for entry in record:
+                if entry["task_id"] == victim_id:
+                    entry["task_id"] = survivor.task_id
+                    entry["version"] = survivor.applied_version
+                    entry["last_seen"] = now
+            await self.session_routes.put.aio(session_id, record)
+            logger.info(
+                "rollout: re-pointed session %s from victim %s to survivor %s",
+                session_id,
+                victim_id,
+                survivor.task_id,
+            )
+
     async def update(
         self,
         containers: list[EvalContainerInfo],
@@ -176,10 +269,11 @@ class RolloutPolicy:
         """One control-loop pass over this poll's container snapshot.
 
         Annotates the snapshot (``live_sessions`` from the session records,
-        ``draining`` for marked replicas), marks stale zero-live replicas
-        pending-reconcile in the shared Dict, nudges marked replicas whose
-        active_requests drained to zero, and clears marks once applied_version
-        reaches the pointer (MARK_CLEAR_HYSTERESIS_POLLS consecutive polls)."""
+        ``draining`` for marked replicas), marks stale zero-live replicas and
+        at most one consolidation victim pending-reconcile in the shared Dict,
+        nudges marked replicas whose active_requests drained to zero, and
+        clears marks once applied_version reaches the pointer
+        (MARK_CLEAR_HYSTERESIS_POLLS consecutive polls)."""
         self._poll_index += 1
         if pointer_version is None:
             return  # no pointer read yet: nothing to reconcile toward
@@ -196,6 +290,51 @@ class RolloutPolicy:
             container.live_sessions = live.get(container.task_id, 0)
         by_id = {container.task_id: container for container in containers}
         changed = False
+
+        # Consolidation (opt-in): one fleet-wide victim at a time.
+        if self.rollout_concurrency is not None and not any(
+            mark.get("kind") == KIND_CONSOLIDATE for mark in marks.values()
+        ):
+            candidate = select_consolidation_victim(
+                containers, live, pointer_version, self.rollout_concurrency
+            )
+            if candidate is None:
+                self._consolidation_pending = None
+                self._consolidation_pending_polls = 0
+            else:
+                if candidate == self._consolidation_pending:
+                    self._consolidation_pending_polls += 1
+                else:
+                    self._consolidation_pending = candidate
+                    self._consolidation_pending_polls = 1
+                if self._consolidation_pending_polls >= CONSOLIDATION_HYSTERESIS_POLLS:
+                    version, victim_id = candidate
+                    marks[victim_id] = {
+                        "version": version,
+                        "kind": KIND_CONSOLIDATE,
+                        "marked_at": now,
+                    }
+                    changed = True
+                    self._consolidation_pending = None
+                    self._consolidation_pending_polls = 0
+                    survivor = min(
+                        (
+                            c
+                            for c in by_id.values()
+                            if c.applied_version == version and c.task_id != victim_id
+                        ),
+                        key=lambda c: c.load,
+                    )
+                    logger.info(
+                        "rollout: consolidating v%d: victim %s drains to %s",
+                        version,
+                        victim_id,
+                        survivor.task_id,
+                    )
+                    await self._repoint_sessions(sessions, victim_id, survivor, now)
+        else:
+            self._consolidation_pending = None
+            self._consolidation_pending_polls = 0
 
         # Retire: every stale replica with zero live sessions can catch up.
         for container in containers:

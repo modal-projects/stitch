@@ -1,6 +1,6 @@
-"""Rollout control loop: session liveness, tombstones/TTL, and the retire flip
-walk (mark, exclusion, nudge, clear) — all against in-memory fakes (no Modal,
-no cloud)."""
+"""Rollout control loop: session liveness, tombstones/TTL, the retire flip
+walk (mark, exclusion, nudge, clear), and consolidation arithmetic + migration
+— all against in-memory fakes (no Modal, no cloud)."""
 
 from __future__ import annotations
 
@@ -12,11 +12,14 @@ from cookbook.standalone.offline_evals.eval_router import (
     route_session,
 )
 from cookbook.standalone.offline_evals.rollout_control import (
+    CONSOLIDATION_HYSTERESIS_POLLS,
+    KIND_CONSOLIDATE,
     KIND_RETIRE,
     MARK_CLEAR_HYSTERESIS_POLLS,
     MAX_RECONCILE_NUDGES,
     RolloutPolicy,
     live_session_counts,
+    select_consolidation_victim,
     tombstone_session,
 )
 from cookbook.standalone.offline_evals.testing import _LocalDict
@@ -62,6 +65,7 @@ def _policy(
     *,
     session_routes: _LocalDict | None = None,
     control: _LocalDict | None = None,
+    concurrency: int | None = None,
     ttl: float = TTL,
 ) -> tuple[RolloutPolicy, _LocalDict, _LocalDict, list[str]]:
     session_routes = session_routes if session_routes is not None else _LocalDict()
@@ -75,6 +79,7 @@ def _policy(
         session_routes=session_routes,
         control=control,
         session_ttl=ttl,
+        rollout_concurrency=concurrency,
         reconcile=reconcile,
     )
     return policy, session_routes, control, calls
@@ -206,5 +211,129 @@ def test_retire_flip_walk(caplog) -> None:
         flips = [r for r in caplog.records if "without a" in r.message]
         assert len(flips) == 1 and flips[0].levelname == "ERROR"
         assert flips[0].args == ("ta-1", 2, 3)
+
+    asyncio.run(run())
+
+
+def test_consolidation_walk() -> None:
+    """Trigger arithmetic (drain bar, min-task_id victim, blockers, oldest
+    group) then the walk: disabled by default, hysteresis, persisted mark,
+    re-point migration, one-victim invariant, reconcile after drain, clear on
+    flip."""
+
+    def holders() -> list[EvalContainerInfo]:
+        return [_member("ta-0", applied=1), _member("ta-1", applied=1)]
+
+    # k=2, concurrency=10: the drain bar is (k-1) * 10 * 0.7 = 7 live sessions.
+    assert select_consolidation_victim(holders(), {"ta-0": 3, "ta-1": 4}, 2, 10) == (
+        1,
+        "ta-0",
+    )
+    assert select_consolidation_victim(holders(), {"ta-0": 3, "ta-1": 5}, 2, 10) is None
+    # Victim is min(task_id).
+    fleet = [_member("ta-b", applied=1), _member("ta-a", applied=1)]
+    assert select_consolidation_victim(fleet, {"ta-a": 1, "ta-b": 1}, 2, 10) == (
+        1,
+        "ta-a",
+    )
+    # A survivor at the overload bar, or with a stale load reading, blocks.
+    fleet = [_member("ta-0", applied=1), _member("ta-1", load=10, applied=1)]
+    assert select_consolidation_victim(fleet, {"ta-0": 1, "ta-1": 1}, 2, 10) is None
+    fleet = [_member("ta-0", applied=1), _member("ta-1", applied=1, load_stale=True)]
+    assert select_consolidation_victim(fleet, {"ta-0": 1, "ta-1": 1}, 2, 10) is None
+    # k=1 groups are skipped; a version at the pointer is never a victim;
+    # replicas with zero live sessions are retired, not consolidated.
+    assert select_consolidation_victim([_member("ta-0")], {"ta-0": 1}, 2, 10) is None
+    fleet = [_member("ta-0", applied=2), _member("ta-1", applied=2)]
+    assert select_consolidation_victim(fleet, {"ta-0": 1, "ta-1": 1}, 2, 10) is None
+    assert select_consolidation_victim(holders(), {"ta-0": 0, "ta-1": 3}, 2, 10) is None
+    # Oldest eligible version wins: v1 over-full, v2 (behind pointer 3) drains.
+    fleet = [
+        _member("ta-0", applied=1),
+        _member("ta-1", applied=1),
+        _member("ta-2", applied=2),
+        _member("ta-3", applied=2),
+    ]
+    live = {"ta-0": 5, "ta-1": 5, "ta-2": 1, "ta-3": 1}
+    assert select_consolidation_victim(fleet, live, 3, 10) == (2, "ta-2")
+
+    async def run() -> None:
+        sessions, control = _LocalDict(), _LocalDict()
+        # 6 live sessions at v1 (3+3), bar for k=2/concurrency=10 is 7.
+        for i, task_id in enumerate(["ta-0"] * 3 + ["ta-1"] * 3):
+            await sessions.put.aio(f"s{i}", _record(task_id))
+
+        def fleet(active: int = 3) -> list[EvalContainerInfo]:
+            # The victim carries in-flight requests until the drain phase, so
+            # the nudge provably waits for active_requests == 0.
+            return _fleet(
+                _member("ta-0", load=0, applied=1, active=active),
+                _member("ta-1", load=1, applied=1),
+                _member("ta-2", applied=2),
+            )
+
+        # Disabled by default: without rollout_concurrency the same over-full
+        # group is never marked (the zero-live retire loop is always on, but
+        # every member here holds live sessions).
+        disabled, _, _, disabled_calls = _policy(
+            session_routes=sessions, control=control
+        )
+        for _ in range(CONSOLIDATION_HYSTERESIS_POLLS + 1):
+            await disabled.update(fleet(), 2, NOW)
+        assert (await control.get.aio("marks", {})) == {}, (
+            "None disables consolidation; live-holding replicas are never marked"
+        )
+        assert disabled_calls == []
+
+        policy, _, _, calls = _policy(
+            session_routes=sessions, control=control, concurrency=10
+        )
+
+        for _ in range(CONSOLIDATION_HYSTERESIS_POLLS - 1):
+            current = fleet()
+            await policy.update(current, 2, NOW)
+            assert not any(c.draining for c in current), "marked before hysteresis"
+            assert (await control.get.aio("marks", {})) == {}
+        current = fleet()
+        await policy.update(current, 2, NOW)
+        marks = await control.get.aio("marks")
+        assert marks["ta-0"]["kind"] == KIND_CONSOLIDATE
+        assert current[0].draining
+        # Re-point: the victim's live sessions moved to the lowest-load survivor.
+        for i in range(3):
+            record = await sessions.get.aio(f"s{i}")
+            assert record[0]["task_id"] == "ta-1"
+            assert record[0]["version"] == 1
+        for i in range(3, 6):
+            assert (await sessions.get.aio(f"s{i}"))[0]["task_id"] == "ta-1"
+
+        # One-victim invariant: a second eligible group (ta-1+ta-3 at v1) is not
+        # touched while ta-0's consolidation mark stands.
+        await sessions.put.aio("s6", _record("ta-3"))
+        for _ in range(CONSOLIDATION_HYSTERESIS_POLLS + 1):
+            current = fleet() + [_member("ta-3", applied=1)]
+            await policy.update(current, 2, NOW)
+        assert list(await control.get.aio("marks")) == ["ta-0"]
+        assert calls == [], "in-flight requests gate the victim's nudge"
+
+        # Drained: the next poll nudges the victim.
+        current = fleet(active=0)
+        await policy.update(current, 2, NOW)
+        assert calls == ["ta-0:8000"]
+
+        # A restarted policy (fresh state, same Dicts) keeps driving the mark.
+        restarted, _, _, _ = _policy(
+            session_routes=sessions, control=control, concurrency=10
+        )
+        current = fleet()
+        await restarted.update(current, 2, NOW)
+        assert current[0].draining, "the persisted mark survives a registry restart"
+
+        # Flip clears the mark after the hysteresis.
+        for _ in range(MARK_CLEAR_HYSTERESIS_POLLS):
+            current = fleet()
+            current[0].applied_version = 2
+            await restarted.update(current, 2, NOW)
+        assert (await control.get.aio("marks")) == {}
 
     asyncio.run(run())

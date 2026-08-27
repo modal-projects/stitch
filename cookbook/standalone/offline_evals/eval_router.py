@@ -265,13 +265,17 @@ def serve_eval_registry(
     control: Any,
     store: Any,
     session_ttl: float = DEFAULT_SESSION_TTL_SECONDS,
+    rollout_concurrency: int | None = None,
 ) -> None:
     """Start the version-aware load registry on a ``RouterRegistry`` container
     (@modal.enter). Polls go through the upstream class's own URL, derived here
     so recipes only name the class. The registry also drives the rollout control
     loop (rollout_control): it reads the store's ``latest`` pointer each poll and
     reconciles stale replicas toward it. ``session_ttl`` bounds how long an idle
-    session record counts as live; explicit tombstones are the primary signal."""
+    session record counts as live; explicit tombstones are the primary signal.
+    ``rollout_concurrency`` is the engine's per-replica overload threshold and
+    the capacity unit of consolidation; the default ``None`` disables
+    consolidation."""
     registry = EvalRegistryApp(
         app_name=app_name,
         upstream_cls=upstream_cls,
@@ -280,6 +284,7 @@ def serve_eval_registry(
         control=control,
         store=store,
         session_ttl=session_ttl,
+        rollout_concurrency=rollout_concurrency,
     )
     registry.start()
     replica._router_server = registry
@@ -332,6 +337,7 @@ class EvalRegistryApp(_RegistryApp):
         control: Any,
         store: Any,
         session_ttl: float = DEFAULT_SESSION_TTL_SECONDS,
+        rollout_concurrency: int | None = None,
     ) -> None:
         super().__init__(
             app_name=app_name, upstream_cls=upstream_cls, upstream_url=upstream_url
@@ -344,6 +350,7 @@ class EvalRegistryApp(_RegistryApp):
             session_routes=session_routes,
             control=control,
             session_ttl=session_ttl,
+            rollout_concurrency=rollout_concurrency,
             reconcile=self._post_wake,
         )
 
