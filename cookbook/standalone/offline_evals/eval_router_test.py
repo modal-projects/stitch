@@ -10,14 +10,17 @@ from typing import Any
 
 import httpx
 
-from cookbook.common.router import RouteEntry, RouteEntryList
 from cookbook.standalone.offline_evals import eval_router
 from cookbook.standalone.offline_evals.eval_router import (
     EvalContainerInfo,
     EvalProxyApp,
     EvalRegistryApp,
+    EvalRouteEntry,
+    EvalRouteEntryList,
     route_session,
+    select_packed_container,
 )
+from cookbook.standalone.offline_evals.testing import _LocalDict
 
 
 class _SyncAsync:
@@ -43,8 +46,19 @@ class FakeRoutes:
 
 
 def _seeded(routes: FakeRoutes, session: str, entries: list[dict]) -> None:
-    routes.store[session] = RouteEntryList.dump_python(
-        [RouteEntry(**entry) for entry in entries], mode="json"
+    routes.store[session] = EvalRouteEntryList.dump_python(
+        [
+            EvalRouteEntry(
+                **{
+                    "version": None,
+                    "tombstoned": False,
+                    **entry,
+                    "last_seen": entry.get("last_seen", entry["last_sent"]),
+                }
+            )
+            for entry in entries
+        ],
+        mode="json",
     )
 
 
@@ -217,7 +231,12 @@ def test_registry_poll_walk(monkeypatch) -> None:
 
     def registry(client: object) -> EvalRegistryApp:
         app = EvalRegistryApp(
-            app_name="app", upstream_cls="Server", upstream_url="https://pool"
+            app_name="app",
+            upstream_cls="Server",
+            upstream_url="https://pool",
+            session_routes=_LocalDict(),
+            control=_LocalDict(),
+            store=None,
         )
         app.client = client
         return app
@@ -422,3 +441,49 @@ def test_forward_walk() -> None:
         )
 
     asyncio.run(run())
+
+
+def test_end_session_tombstones_idempotently() -> None:
+    """POST /sessions/{id}/end: 200 always, marks the record tombstoned, and a
+    tombstoned session re-pins clean on its next request."""
+
+    async def run() -> None:
+        proxy, app, _ = _proxy({"ta-s1": _versioned("ta-s1", 0, 2)})
+        assert (await _post(app, "s1", 2)).status_code == 200
+        assert proxy.session_routes.store["s1"][0]["task_id"] == "ta-s1"
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            for session in ("s1", "s1", "never-seen"):
+                end = await client.post(f"/sessions/{session}/end")
+                assert end.status_code == 200, "idempotent: 200 always"
+        record = proxy.session_routes.store["s1"]
+        assert all(entry["tombstoned"] for entry in record)
+
+        assert (await _post(app, "s1", 2)).status_code == 200
+        record = proxy.session_routes.store["s1"]
+        assert not record[0]["tombstoned"], "a reused session id starts clean"
+
+    asyncio.run(run())
+
+
+def test_select_packed_container_packs_live_holders() -> None:
+    candidates = [
+        _versioned("ta-0", 0, 1),
+        _versioned("ta-1", 3, 1),
+        _versioned("ta-2", 5, 1),
+    ]
+    candidates[1].live_sessions = 2
+    candidates[2].live_sessions = 1
+    picked = select_packed_container(candidates)
+    assert picked.task_id == "ta-1", "lowest load among live-session holders"
+    for candidate in candidates:
+        candidate.live_sessions = 0
+    assert select_packed_container(candidates).task_id == "ta-0", (
+        "no holders: lowest load overall"
+    )
+    candidates[0].load_stale = True
+    assert select_packed_container(candidates).task_id == "ta-1", (
+        "a stale (frozen) load reading never wins the pack"
+    )

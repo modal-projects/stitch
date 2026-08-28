@@ -40,6 +40,7 @@ def start_sidecar(
     boot_version: int,
     commit_mode: str,
     flush_cache_on_commit: bool = False,
+    reconcile_interval: float = 5.0,
     debug_requests: bool = False,
 ) -> subprocess.Popen:
     """Launch the versioned rollout proxy (the shared sidecar) beside sglang."""
@@ -64,6 +65,7 @@ def start_sidecar(
         store_options=store_options,
         commit_mode=commit_mode,
         flush_cache_on_commit=flush_cache_on_commit,
+        reconcile_interval=reconcile_interval,
         run_id=run_id,
         boot_version=boot_version,
         debug_requests=debug_requests,

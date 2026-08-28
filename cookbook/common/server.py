@@ -32,6 +32,7 @@ def serve_startup(
     run_id: str,
     commit_mode: str,
     flush_cache_on_commit: bool = False,
+    reconcile_interval: float = 5.0,
     startup_timeout: int,
 ) -> None:
     """Start sglang + the versioned-proxy sidecar on a Server replica (from ``@modal.enter``).
@@ -92,6 +93,7 @@ def serve_startup(
         boot_version=boot_version,
         commit_mode=commit_mode,
         flush_cache_on_commit=flush_cache_on_commit,
+        reconcile_interval=reconcile_interval,
     )
     # Modal admits the container when @enter returns. The sidecar owns readiness:
     # /health stays 503 through destination initialization and first catch-up.

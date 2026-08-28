@@ -23,6 +23,21 @@ def test_engine_only_app_has_no_trainer(monkeypatch) -> None:
     assert not hasattr(app, "Trainer")
 
 
+def test_offline_evals_gate_both_wiring_paths(monkeypatch) -> None:
+    _standalone_env(monkeypatch)
+    import cookbook.standalone.configs.glm5_2_fp8 as glm_config
+
+    app = importlib.import_module("cookbook.standalone.app")
+    # OFFLINE_EVALS unset on the config: the stock common-router wiring, no
+    # rollout-control state.
+    assert not hasattr(app, "rollout_marks"), "gate unset: stock wiring"
+
+    monkeypatch.setattr(glm_config, "OFFLINE_EVALS", True, raising=False)
+    sys.modules.pop("cookbook.standalone.app", None)
+    app = importlib.import_module("cookbook.standalone.app")
+    assert hasattr(app, "rollout_marks"), "gate set: eval router wiring"
+
+
 def test_rl_serving_contract(monkeypatch) -> None:
     _standalone_env(monkeypatch)
 
