@@ -249,7 +249,7 @@ if getattr(exp, "OFFLINE_EVALS", False):
         """Polls Server replicas' server_info + queue depth; serves the snapshot at /loads.
 
         Also drives the rollout control loop (session liveness, pending-reconcile
-        marks, reconcile nudges) — correct only with a single registry container."""
+        marks, consolidation) — correct only with a single registry container."""
 
         @modal.enter()
         def enter(self) -> None:
@@ -270,6 +270,7 @@ if getattr(exp, "OFFLINE_EVALS", False):
                 session_routes=session_routes,
                 control=rollout_marks,
                 store=store,
+                rollout_concurrency=ROLLOUT_CONCURRENCY,
                 session_ttl=getattr(
                     exp, "SESSION_TTL_SECONDS", eval_router.DEFAULT_SESSION_TTL_SECONDS
                 ),
