@@ -1,4 +1,5 @@
-"""Eval client: concurrent version-pinned sessions against the router.
+"""Eval client: concurrent version-pinned sessions against the router, with
+fabricate/publish at eval boundaries and overlap assertions at the end.
 
 The pin contract: one ``pinned_version`` per eval drives both the
 ``weight_version.exact_version`` request body field and the
@@ -42,6 +43,9 @@ DEFAULT_RETRY_AFTER_SECONDS = 1.0
 # Deadline arithmetic leaves sub-nanosecond float dust in the remaining budget
 # after a capped sleep; treat anything below a microsecond as exhausted.
 BUDGET_EPSILON_SECONDS = 1e-6
+FLEET_POLL_INTERVAL_SECONDS = 10.0
+JOB_POLL_INTERVAL_SECONDS = 10.0
+PUBLISH_TIMEOUT_SECONDS = 7200.0
 
 
 def session_409_backoff_seconds(attempt: int) -> float:
@@ -74,6 +78,8 @@ class EvalClient:
     def __init__(
         self,
         router_url: str,
+        publisher_url: str,
+        run_id: str,
         num_evals: int,
         eval_minutes: int,
         straggler_minutes: int,
@@ -82,10 +88,18 @@ class EvalClient:
         think_seconds: float,
         base_version: int,
         results_path: Path,
+        registry_url: str | None = None,
+        delta: bool = False,
+        fleet_poll_interval: float = FLEET_POLL_INTERVAL_SECONDS,
+        publish_timeout_seconds: float = PUBLISH_TIMEOUT_SECONDS,
+        job_poll_interval: float = JOB_POLL_INTERVAL_SECONDS,
         request_timeout: float = 420.0,
         session_409_budget_seconds: float | None = None,
     ):
         self.router_url = router_url.rstrip("/")
+        self.publisher_url = publisher_url.rstrip("/")
+        self.registry_url = registry_url.rstrip("/") if registry_url else None
+        self.run_id = run_id
         self.num_evals = num_evals
         self.eval_duration = eval_minutes * 60
         self.straggler_duration = straggler_minutes * 60
@@ -93,7 +107,11 @@ class EvalClient:
         self.num_stragglers = num_stragglers
         self.think_seconds = think_seconds
         self.base_version = base_version
+        self.delta = delta
         self.results_path = results_path
+        self.fleet_poll_interval = fleet_poll_interval
+        self.publish_timeout_seconds = publish_timeout_seconds
+        self.job_poll_interval = job_poll_interval
         # Straggler requests must survive a paused engine: a first cpu-mode delta
         # stage pauses generation for the full image compile (minutes).
         self.request_timeout = request_timeout
@@ -112,6 +130,12 @@ class EvalClient:
         self.stamp_violations: list[dict[str, Any]] = []
         self.eval_stats: dict[int, dict[str, Any]] = {}
         self.version_stats: dict[int, int] = {}
+        self.publish_accepted_at: dict[int, float] = {}
+        # Raw registry /loads snapshots; kept OUT of self.metrics so the metrics
+        # and assertion code (which iterates RequestMetrics only) never sees them.
+        self.fleet_snapshots: list[dict[str, Any]] = []
+        self._drained_task_ids: set[str] = set()
+        self.boundary_rollout: dict[int, dict[str, Any]] = {}
         self._eval_loop_completed = False
         self._results_file: TextIOWrapper | None = None
         self._results_finalized = False
@@ -137,6 +161,153 @@ class EvalClient:
 
     def print_event(self, event: str) -> None:
         print(f"[t+{self.elapsed_str()}] {event}")
+
+    async def _post_and_poll_job(
+        self,
+        session: aiohttp.ClientSession,
+        path: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """POST a publisher job (202 + job_id) and poll ``/job/{id}``.
+
+        A 200 no-op is immediate success.
+        """
+        deadline = time.time() + self.publish_timeout_seconds
+        while True:
+            try:
+                async with session.post(
+                    f"{self.publisher_url}{path}",
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=60),
+                ) as resp:
+                    data = await resp.json() if resp.status in (200, 202, 409) else {}
+                    if resp.status == 200 and data.get("status") == "no-op":
+                        return data
+                    if resp.status == 202:
+                        job_id = data.get("job_id")
+                        if not job_id:
+                            logger.error("%s response missing job_id", path)
+                            return None
+                        break
+                    logger.error("%s failed: %d %s", path, resp.status, data)
+                    return None
+            except Exception as exc:
+                logger.error("%s error: %r", path, exc)
+                return None
+
+        while True:
+            await asyncio.sleep(self.job_poll_interval)
+            # Check the deadline on every iteration, including after non-200
+            # responses, poll errors, and non-terminal statuses (e.g. "unknown")
+            # that `continue` below, so an outage can't loop forever.
+            if time.time() >= deadline:
+                logger.error(
+                    "job %s (%s) not done after %.0fs; giving up",
+                    job_id,
+                    path,
+                    self.publish_timeout_seconds,
+                )
+                return None
+            try:
+                async with session.get(
+                    f"{self.publisher_url}/job/{job_id}",
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as resp:
+                    if resp.status != 200:
+                        continue
+                    data = await resp.json()
+            except Exception:
+                continue
+            status = data.get("status")
+            if status == "success":
+                return data.get("result") or {}
+            if status == "failure":
+                logger.error("job %s (%s) failed: %s", job_id, path, data.get("error"))
+                return None
+            if time.time() >= deadline:
+                logger.error(
+                    "job %s (%s) still %s after %.0fs; giving up",
+                    job_id,
+                    path,
+                    status,
+                    self.publish_timeout_seconds,
+                )
+                return None
+
+    async def _pointer_at_least(
+        self, session: aiohttp.ClientSession, version: int
+    ) -> bool:
+        """True when /status's store pointer has advanced to `version`."""
+        try:
+            async with session.get(
+                f"{self.publisher_url}/status",
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
+                if resp.status != 200:
+                    logger.error("/status got status %d", resp.status)
+                    return False
+                data = await resp.json()
+        except Exception as exc:
+            logger.error("/status error: %r", exc)
+            return False
+        latest = data.get("latest_version")
+        return latest is not None and latest >= version
+
+    async def fabricate_and_publish(self, version: int) -> bool:
+        """Fabricate ``version`` then publish it. True only if the job succeeds
+        and ``/status`` shows the pointer at ``version``. ``--delta`` fabricates
+        a XOR delta on the current pin (version-1); otherwise copies the base.
+        """
+        async with aiohttp.ClientSession() as session:
+            if self.delta:
+                fab = await self._post_and_poll_job(
+                    session,
+                    "/fabricate_delta",
+                    {
+                        "run_id": self.run_id,
+                        "base_version": version - 1,
+                        "new_version": version,
+                    },
+                )
+            else:
+                fab = await self._post_and_poll_job(
+                    session,
+                    "/fabricate",
+                    {
+                        "run_id": self.run_id,
+                        "from_version": self.base_version,
+                        "new_version": version,
+                    },
+                )
+            if fab is None:
+                return False
+            model_dir = fab.get("path")
+            if not model_dir:
+                logger.error("fabricate v%d result missing path", version)
+                return False
+
+            pub = await self._post_and_poll_job(
+                session,
+                "/publish",
+                {
+                    "run_id": self.run_id,
+                    "version": version,
+                    "source": model_dir,
+                },
+            )
+            if pub is None:
+                return False
+
+            # The boundary is real only when the pointer actually moved.
+            if not await self._pointer_at_least(session, version):
+                logger.error(
+                    "publish v%d job succeeded but the store pointer has not advanced",
+                    version,
+                )
+                return False
+
+        logger.info("fabricated and published version %d", version)
+        return True
 
     async def _send_request(
         self, session: aiohttp.ClientSession, session_id: str, pinned_version: int
@@ -425,14 +596,27 @@ class EvalClient:
 
         The results JSONL is opened (truncated) up front and every record is
         flushed as it is produced, so an abort leaves a valid file with all
-        records so far; the finally block always appends a terminal summary
-        carrying an ``aborted`` flag.
+        records so far; the finally block always appends the boundary-rollout
+        records and a terminal summary carrying an ``aborted`` flag.
         """
         pending_stragglers: list[asyncio.Task] = []
         self._open_results_file()
+        fleet_task: asyncio.Task | None = (
+            asyncio.create_task(self.poll_fleet()) if self.registry_url else None
+        )
         try:
             for eval_num in range(1, self.num_evals + 1):
                 pinned_version = self.base_version + eval_num - 1
+
+                if eval_num > 1:
+                    ok = await self.fabricate_and_publish(pinned_version)
+                    if not ok:
+                        raise RuntimeError(
+                            f"fabricate/publish of version {pinned_version} failed; "
+                            f"aborting run before eval {eval_num}"
+                        )
+                    self.publish_accepted_at[eval_num] = time.time()
+                    self.print_event(f"checkpoint {pinned_version} published")
 
                 main_tasks, straggler_tasks, main_deadline = self._start_sessions(
                     eval_num, pinned_version
@@ -451,6 +635,7 @@ class EvalClient:
                 await asyncio.gather(*pending_stragglers)
 
             self._eval_loop_completed = True
+            self.verify_assertions()
 
         except Exception as exc:
             logger.error("eval run failed: %r", exc, exc_info=True)
@@ -462,7 +647,110 @@ class EvalClient:
                 self.compute_stats()
             except Exception:
                 logger.exception("compute_stats failed while finalizing results")
+            try:
+                self.compute_boundary_rollout()
+            except Exception:
+                logger.exception(
+                    "compute_boundary_rollout failed while finalizing results"
+                )
             self.write_results()
+            if fleet_task is not None:
+                fleet_task.cancel()
+                await asyncio.gather(fleet_task, return_exceptions=True)
+
+    async def poll_fleet(self) -> None:
+        """Poll the registry's /loads and append fleet_snapshot records.
+
+        Snapshots carry the per-replica applied_version/draining timeline; they are
+        stored separately from request metrics and merged into the results JSONL
+        at write time under the 'fleet_snapshot' record type.
+        """
+        assert self.registry_url is not None
+        async with aiohttp.ClientSession() as session:
+            while True:
+                try:
+                    async with session.get(
+                        f"{self.registry_url}/loads",
+                        timeout=aiohttp.ClientTimeout(total=10),
+                    ) as resp:
+                        if resp.status == 200:
+                            self._record_fleet_snapshot(await resp.json())
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    pass
+                await asyncio.sleep(self.fleet_poll_interval)
+
+    def _record_fleet_snapshot(self, loads: list[dict[str, Any]]) -> None:
+        """Append a fleet_snapshot record, plus a drain_event the first time each
+        container entry shows draining truthy (one record per task_id, ever)."""
+        now = time.time()
+        self.fleet_snapshots.append({"fleet_snapshot": loads, "timestamp": now})
+        self._emit_record(self.fleet_snapshots[-1])
+        for replica in loads:
+            task_id = replica.get("task_id")
+            if (
+                replica.get("draining")
+                and task_id is not None
+                and task_id not in self._drained_task_ids
+            ):
+                self._drained_task_ids.add(task_id)
+                self.fleet_snapshots.append(
+                    {
+                        "drain_event": {
+                            "task_id": task_id,
+                            "applied_version": replica.get("applied_version"),
+                            "live_sessions": replica.get("live_sessions"),
+                            "active_requests": replica.get("active_requests"),
+                        },
+                        "timestamp": now,
+                    }
+                )
+                self._emit_record(self.fleet_snapshots[-1])
+                self.print_event(
+                    f"container {task_id} draining "
+                    f"(applied={replica.get('applied_version')} "
+                    f"live_sessions={replica.get('live_sessions')} "
+                    f"active_requests={replica.get('active_requests')})"
+                )
+
+    def compute_boundary_rollout(self) -> None:
+        """Per boundary, the earliest fleet snapshot showing the new version applied.
+
+        Recorded, NOT asserted: when the overlap assertion fails this distinguishes
+        'fleet never rolled' from 'rolled but no traffic routed'. Snapshots are
+        appended in time order, so the first match is the earliest.
+        """
+        for next_eval in range(2, self.num_evals + 1):
+            new_version = self.base_version + next_eval - 1
+            first_applied_at: float | None = None
+            for snapshot in self.fleet_snapshots:
+                if "fleet_snapshot" not in snapshot:
+                    continue
+                if any(
+                    replica.get("applied_version") == new_version
+                    for replica in snapshot["fleet_snapshot"]
+                ):
+                    first_applied_at = snapshot["timestamp"]
+                    break
+            published_at = self.publish_accepted_at.get(next_eval)
+            first_new_version_200_at: float | None = None
+            if published_at is not None:
+                for m in self.metrics:
+                    if (
+                        m.status_code == 200
+                        and m.weight_version_start == new_version
+                        and m.timestamp >= published_at
+                    ):
+                        first_new_version_200_at = m.timestamp
+                        break
+            self.boundary_rollout[new_version] = {
+                "old_version": new_version - 1,
+                "new_version": new_version,
+                "publish_accepted_at": published_at,
+                "fleet_first_applied_at": first_applied_at,
+                "first_new_version_200_at": first_new_version_200_at,
+            }
 
     def compute_stats(self) -> None:
         per_eval: dict[int, dict[str, Any]] = {}
@@ -509,12 +797,83 @@ class EvalClient:
         logger.info("per-eval stats: %s", per_eval)
         logger.info("per-version stats: %s", per_version)
 
-    def write_results(self) -> None:
-        """Emit the terminal summary record, then print the stdout summary.
+    def verify_assertions(self) -> None:
+        """Verify pinning held on every 200 and both versions served at each boundary.
 
-        Request metrics and conflict gaps are already written incrementally as
-        they are produced (see run() and eval_session), so records appear in
-        arrival order rather than sorted by timestamp — incremental writes are
+        Raises AssertionError with full details if any check fails.
+        """
+        failures: list[str] = []
+
+        # 1) Every 200 response must carry BOTH version stamps, equal to the pin.
+        #    A None stamp on a 200 is a failure, not a skip.
+        for m in self.metrics:
+            if m.status_code != 200:
+                continue
+            if m.weight_version_start is None or m.weight_version_end is None:
+                failures.append(
+                    f"200 response missing version stamp: eval={m.eval_num} "
+                    f"session={m.session_id[:8]} req={m.request_num} "
+                    f"pinned={m.pinned_version} start={m.weight_version_start} "
+                    f"end={m.weight_version_end}"
+                )
+            elif (
+                m.weight_version_start != m.pinned_version
+                or m.weight_version_end != m.pinned_version
+            ):
+                failures.append(
+                    f"pin violated: eval={m.eval_num} session={m.session_id[:8]} "
+                    f"req={m.request_num} pinned={m.pinned_version} "
+                    f"served start={m.weight_version_start} end={m.weight_version_end}"
+                )
+
+        # Overlap window: >=1 success at N_k and >=1 at N_{k+1}.
+        for next_eval in range(2, self.num_evals + 1):
+            old_version = self.base_version + next_eval - 2
+            new_version = self.base_version + next_eval - 1
+            t0 = self.publish_accepted_at.get(next_eval)
+            if t0 is None:
+                failures.append(
+                    f"boundary v{old_version}->v{new_version}: no accepted publish "
+                    f"timestamp recorded for v{new_version}"
+                )
+                continue
+            t1 = t0 + self.straggler_duration
+            window_successes = [
+                m
+                for m in self.metrics
+                if m.status_code == 200 and t0 <= m.timestamp <= t1
+            ]
+            if not any(m.weight_version_start == old_version for m in window_successes):
+                failures.append(
+                    f"boundary v{old_version}->v{new_version}: no 200 served at "
+                    f"v{old_version} in overlap window [{t0:.3f}, {t1:.3f}] "
+                    f"({self.straggler_duration:.1f}s straggler window)"
+                )
+            if not any(m.weight_version_start == new_version for m in window_successes):
+                failures.append(
+                    f"boundary v{old_version}->v{new_version}: no 200 served at "
+                    f"v{new_version} in overlap window [{t0:.3f}, {t1:.3f}] "
+                    f"({self.straggler_duration:.1f}s straggler window)"
+                )
+
+        if failures:
+            details = "\n".join(f"  - {f}" for f in failures)
+            print(f"\n[SUMMARY] ASSERTIONS FAILED ({len(failures)}):\n{details}")
+            raise AssertionError(f"eval assertions FAILED:\n{details}")
+
+        logger.info(
+            "ASSERTIONS PASSED: every 200 served its pinned version (start and end), "
+            "and every boundary had both versions serving concurrently"
+        )
+
+    def write_results(self) -> None:
+        """Emit the boundary-rollout and terminal summary records, then print the
+        stdout summary.
+
+        Request metrics, fleet snapshots/drain events, and conflict gaps are
+        already written incrementally as they are produced (see run(),
+        eval_session, _record_fleet_snapshot), so records appear in arrival
+        order rather than sorted by timestamp — incremental writes are
         naturally chronological. When called without a preceding run() (e.g.
         tests), the in-memory records are flushed first so the file is complete.
         """
@@ -525,12 +884,21 @@ class EvalClient:
             self._open_results_file()
             for metric in self.metrics:
                 self._emit_record(asdict(metric))
+            for snapshot in self.fleet_snapshots:
+                self._emit_record(snapshot)
             for gap in self.conflict_gaps:
                 self._emit_record({"conflict_gap": gap, "timestamp": gap["ended_at"]})
             for violation in self.stamp_violations:
                 self._emit_record(
                     {"stamp_violation": violation, "timestamp": violation["timestamp"]}
                 )
+        for info in self.boundary_rollout.values():
+            self._emit_record(
+                {
+                    "boundary_rollout": info,
+                    "timestamp": info["publish_accepted_at"] or self.start_time,
+                }
+            )
         self._emit_record(
             {
                 "summary": {
@@ -576,11 +944,43 @@ class EvalClient:
                     f"{gap['duration_s']:.1f}s, {gap['attempts']} attempts, "
                     f"still {gap['status']} at budget end"
                 )
+        for new_version, info in sorted(self.boundary_rollout.items()):
+            prefix = f"  boundary v{info['old_version']}->v{new_version}:"
+            published_at = info["publish_accepted_at"]
+            for at, seen, missing in (
+                (
+                    info["fleet_first_applied_at"],
+                    f"v{new_version} first seen applied in fleet",
+                    f"fleet never showed v{new_version} applied (no fleet snapshot)",
+                ),
+                (
+                    info["first_new_version_200_at"],
+                    f"first v{new_version} 200",
+                    f"no 200 served at v{new_version} after publish accept",
+                ),
+            ):
+                if at is None:
+                    print(f"{prefix} {missing}")
+                    continue
+                delay = (
+                    f"{at - published_at:.1f}s after publish accept"
+                    if published_at is not None
+                    else "publish accept time unknown"
+                )
+                print(f"{prefix} {seen} at t+{at - self.start_time:.1f}s ({delay})")
 
 
 async def main() -> None:
     parser = argparse.ArgumentParser(description="Version-pinned eval client")
     parser.add_argument("--router-url", required=True, help="Router endpoint URL")
+    parser.add_argument("--publisher-url", required=True, help="Publisher endpoint URL")
+    parser.add_argument(
+        "--registry-url",
+        default=None,
+        help="Router-registry endpoint URL; if set, poll /loads every 10s and "
+        "record fleet_snapshot records (applied_version/draining timeline)",
+    )
+    parser.add_argument("--run-id", required=True, help="Stitch run ID")
     parser.add_argument("--evals", type=int, default=3, help="Number of evals")
     parser.add_argument(
         "--eval-minutes", type=float, default=20, help="Minutes per eval"
@@ -607,7 +1007,18 @@ async def main() -> None:
         "--base-version", type=int, default=1, help="Base version number"
     )
     parser.add_argument(
+        "--delta",
+        action="store_true",
+        help="Boundaries call /fabricate_delta (base = current pin), not /fabricate",
+    )
+    parser.add_argument(
         "--results", type=Path, default=Path("eval_results.jsonl"), help="Results file"
+    )
+    parser.add_argument(
+        "--publish-timeout-seconds",
+        type=float,
+        default=PUBLISH_TIMEOUT_SECONDS,
+        help="Max seconds to poll a fabricate/publish job before aborting",
     )
     parser.add_argument(
         "--request-timeout",
@@ -628,6 +1039,9 @@ async def main() -> None:
 
     client = EvalClient(
         router_url=args.router_url,
+        publisher_url=args.publisher_url,
+        registry_url=args.registry_url,
+        run_id=args.run_id,
         num_evals=args.evals,
         eval_minutes=args.eval_minutes,
         straggler_minutes=args.straggler_minutes,
@@ -635,7 +1049,9 @@ async def main() -> None:
         num_stragglers=args.stragglers,
         think_seconds=args.think_seconds,
         base_version=args.base_version,
+        delta=args.delta,
         results_path=args.results,
+        publish_timeout_seconds=args.publish_timeout_seconds,
         request_timeout=args.request_timeout,
         session_409_budget_seconds=args.session_409_budget_seconds,
     )

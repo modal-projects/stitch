@@ -1,6 +1,7 @@
-"""Unit tests for the eval client, with mocked HTTP and sub-second durations:
-pinned sessions, 409 backoff / 503 Retry-After retry accounting, conflict-gap
-records, per-response stamp assertions, and the session tombstone contract."""
+"""Unit tests for the eval client orchestration, with mocked HTTP and
+sub-second durations: overlapping evals, 409 backoff / 503 Retry-After
+retry accounting, conflict-gap records, per-response stamp assertions,
+the session tombstone contract, and boundary assertion behavior."""
 
 import asyncio
 import json
@@ -49,24 +50,114 @@ class _FakeSession:
 
 
 class _Harness:
-    """Fake Router. Chat completions succeed, stamped with the pin; session
-    tombstones are accepted and recorded."""
+    """Fake Router + Publisher. Chat completions succeed, stamped with the
+    pin; session tombstones are accepted and recorded.
+
+    Publisher endpoints are async: POST returns 202 {job_id}, GET /job/{id}
+    reports pending (job_pending_polls times) then success/failure, and
+    GET /status reports the store pointer from the published list.
+    """
 
     def __init__(
         self,
         conflicts_before_success: int = 0,
+        publish_ok: bool = True,
+        job_pending_polls: int = 0,
+        job_fails: bool = False,
+        job_never_completes: bool = False,
+        poll_non_200: bool = False,
         chat_responder: Callable[[dict], _FakeResponse] | None = None,
     ) -> None:
         self.conflicts_remaining = conflicts_before_success
+        self.publish_ok = publish_ok
+        self.job_pending_polls = job_pending_polls
+        self.job_fails = job_fails
+        self.job_never_completes = job_never_completes
+        self.poll_non_200 = poll_non_200
         # Optional full control over /v1/chat/completions responses (e.g. 409s
         # that end based on a fake clock rather than a fixed count).
         self.chat_responder = chat_responder
         self.ended_sessions: list[str] = []
 
+        self.fabricated: list[int] = []
+        self.delta_fabricated: list[dict] = []
+        self.published: list[int] = []
+        self.publish_bodies: list[dict] = []
+        self.jobs: dict[str, dict] = {}
+        self._job_seq = 0
+
+    def _new_job(self, result: dict) -> str:
+        self._job_seq += 1
+        job_id = f"fc-{self._job_seq}"
+        self.jobs[job_id] = {"result": result, "pending": self.job_pending_polls}
+        return job_id
+
     def handle_get(self, url: str) -> _FakeResponse:
+        if url.endswith("/loads"):
+            # Replicas report the latest published version (or the base).
+            applied = max(self.published) if self.published else 1
+            return _FakeResponse(
+                200,
+                [
+                    {
+                        "task_id": f"ta-{i}",
+                        "upstream": f"h{i}:8000",
+                        "load": 1,
+                        "load_stale": False,
+                        "ready": True,
+                        "applied_version": applied,
+                        "draining": False,
+                        "live_sessions": 0,
+                        "active_requests": 1,
+                    }
+                    for i in range(3)
+                ],
+            )
+        if "/job/" in url:
+            job_id = url.rsplit("/job/", 1)[1]
+            if self.poll_non_200:
+                return _FakeResponse(503, {})
+            job = self.jobs[job_id]
+            if self.job_never_completes or job["pending"] > 0:
+                job["pending"] -= 1
+                return _FakeResponse(200, {"job_id": job_id, "status": "pending"})
+            if self.job_fails:
+                return _FakeResponse(
+                    200, {"job_id": job_id, "status": "failure", "error": "boom"}
+                )
+            return _FakeResponse(
+                200,
+                {"job_id": job_id, "status": "success", "result": job["result"]},
+            )
+        if url.endswith("/status"):
+            latest = max(self.published) if self.published else None
+            return _FakeResponse(
+                200,
+                {"latest_version": latest, "staged_versions": sorted(self.published)},
+            )
         raise AssertionError(f"unexpected GET url: {url}")
 
     def handle(self, url: str, body: dict) -> _FakeResponse:
+        if url.endswith("/fabricate"):
+            self.fabricated.append(body["new_version"])
+            job_id = self._new_job({"path": f"/fake/weight_v{body['new_version']:06d}"})
+            return _FakeResponse(202, {"status": "accepted", "job_id": job_id})
+        if url.endswith("/fabricate_delta"):
+            self.delta_fabricated.append(
+                {
+                    "base_version": body["base_version"],
+                    "new_version": body["new_version"],
+                }
+            )
+            job_id = self._new_job({"path": f"/fake/weight_v{body['new_version']:06d}"})
+            return _FakeResponse(202, {"status": "accepted", "job_id": job_id})
+        if url.endswith("/publish"):
+            if not self.publish_ok:
+                return _FakeResponse(500, {"detail": "boom"})
+            self.publish_bodies.append(body)
+            self.published.append(body["version"])
+            job_id = self._new_job({"status": "published", "version": body["version"]})
+            return _FakeResponse(202, {"status": "accepted", "job_id": job_id})
         if url.endswith("/v1/chat/completions"):
             if self.chat_responder is not None:
                 return self.chat_responder(body)
@@ -98,6 +189,8 @@ def _make_client(
 ) -> ec.EvalClient:
     kwargs = dict(
         router_url="http://router",
+        publisher_url="http://publisher",
+        run_id="test-run",
         num_evals=num_evals,
         eval_minutes=0.005,  # 0.3s main phase
         straggler_minutes=0.01,  # 0.6s straggler window
@@ -106,6 +199,7 @@ def _make_client(
         think_seconds=0.01,
         base_version=1,
         results_path=tmp_path / "results.jsonl",
+        job_poll_interval=0.01,
     )
     kwargs.update(overrides)
     return ec.EvalClient(**kwargs)  # type: ignore[arg-type]
@@ -128,6 +222,10 @@ def _cli_construct(monkeypatch, extra_argv: list[str]) -> dict:
             "eval_client",
             "--router-url",
             "http://router",
+            "--publisher-url",
+            "http://publisher",
+            "--run-id",
+            "test-run",
             *extra_argv,
         ],
     )
@@ -135,11 +233,76 @@ def _cli_construct(monkeypatch, extra_argv: list[str]) -> dict:
     return constructed
 
 
-def test_eval_409_retry_and_all_straggler_main_phase(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """409s and retries are recorded per attempt; when every session is a
-    straggler the main phase is still time-based."""
+def test_eval_orchestration(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Overlap, abort-on-publish-failure, pending jobs, delta chain, retryable
+    409, and all-stragglers still last a full main phase."""
+    harness = _Harness()
+    _patch_http(monkeypatch, harness)
+    client = _make_client(tmp_path)
+    asyncio.run(client.run())
+    assert harness.published == [2]
+    eval1_ts = [m.timestamp for m in client.metrics if m.eval_num == 1]
+    eval2_ts = [m.timestamp for m in client.metrics if m.eval_num == 2]
+    assert eval1_ts and eval2_ts
+    assert min(eval2_ts) < max(eval1_ts), "eval 2 starts while eval 1 stragglers run"
+    t0 = client.publish_accepted_at[2]
+    window = [
+        m
+        for m in client.metrics
+        if m.status_code == 200 and t0 <= m.timestamp <= t0 + client.straggler_duration
+    ]
+    served = {m.weight_version_start for m in window}
+    assert {1, 2} <= served
+    assert client.results_path.exists()
+
+    for kwargs in (
+        {"publish_ok": False},
+        {"job_fails": True},
+        {"job_never_completes": True, "timeout": 0.05},
+        {"poll_non_200": True, "timeout": 0.05},
+    ):
+        timeout = kwargs.pop("timeout", None)
+        harness = _Harness(**kwargs)
+        _patch_http(monkeypatch, harness)
+        extra = {} if timeout is None else {"publish_timeout_seconds": timeout}
+        client = _make_client(tmp_path, **extra)
+        with pytest.raises(RuntimeError, match="aborting run before eval 2"):
+            asyncio.run(client.run())
+        assert all(m.eval_num == 1 for m in client.metrics), kwargs
+        if kwargs.get("publish_retryable_409s"):
+            assert harness.published == []
+
+    harness = _Harness(job_pending_polls=2)
+    _patch_http(monkeypatch, harness)
+    client = _make_client(tmp_path)
+    asyncio.run(client.run())
+    assert harness.published == [2]
+    assert client.publish_accepted_at[2] is not None
+
+    harness = _Harness()
+    _patch_http(monkeypatch, harness)
+    client = _make_client(tmp_path, num_evals=3, base_version=0, delta=True)
+    asyncio.run(client.run())
+    assert harness.delta_fabricated == [
+        {"base_version": 0, "new_version": 1},
+        {"base_version": 1, "new_version": 2},
+    ]
+    assert harness.fabricated == []
+    assert harness.published == [1, 2]
+    for body, version in zip(harness.publish_bodies, [1, 2], strict=True):
+        assert body["source"] == f"/fake/weight_v{version:06d}"
+        assert "delta" not in body
+    for next_eval in (2, 3):
+        t0 = client.publish_accepted_at[next_eval]
+        window = [
+            m
+            for m in client.metrics
+            if m.status_code == 200
+            and t0 <= m.timestamp <= t0 + client.straggler_duration
+        ]
+        served = {m.weight_version_start for m in window}
+        assert {next_eval - 2, next_eval - 1} <= served
+
     harness = _Harness(conflicts_before_success=1)
     _patch_http(monkeypatch, harness)
     client = _make_client(tmp_path, num_evals=1, num_sessions=1, num_stragglers=0)
@@ -192,6 +355,199 @@ def test_eval_timeouts_and_cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     assert constructed["request_timeout"] == 240.0
     constructed = _cli_construct(monkeypatch, [])
     assert constructed["request_timeout"] == 420.0
+
+
+def _metric(
+    ts: float,
+    eval_num: int,
+    pinned: int,
+    status: int = 200,
+    start: int | None = None,
+    end: int | None = None,
+) -> ec.RequestMetrics:
+    return ec.RequestMetrics(
+        timestamp=ts,
+        session_id="sess",
+        eval_num=eval_num,
+        pinned_version=pinned,
+        request_num=1,
+        status_code=status,
+        latency_ms=1.0,
+        weight_version_start=start,
+        weight_version_end=end,
+        is_retry=False,
+    )
+
+
+def test_eval_assertions(tmp_path: Path) -> None:
+    client = _make_client(tmp_path, num_evals=1)
+    client.metrics.append(_metric(time.time(), 1, 1, start=None, end=None))
+    with pytest.raises(AssertionError, match="missing version stamp"):
+        client.verify_assertions()
+
+    client = _make_client(tmp_path, num_evals=1)
+    client.metrics.append(_metric(time.time(), 1, 1, start=2, end=2))
+    with pytest.raises(AssertionError, match="pin violated"):
+        client.verify_assertions()
+
+    client = _make_client(tmp_path, num_evals=2)
+    t0 = time.time()
+    client.publish_accepted_at[2] = t0
+    client.metrics.append(_metric(t0 + 0.05, 2, 2, start=2, end=2))
+    with pytest.raises(AssertionError, match=r"no 200 served at v1"):
+        client.verify_assertions()
+
+    client = _make_client(tmp_path, num_evals=2)
+    t0 = time.time()
+    client.publish_accepted_at[2] = t0
+    client.metrics.append(_metric(t0 + 0.05, 1, 1, start=1, end=1))
+    with pytest.raises(AssertionError, match=r"no 200 served at v2"):
+        client.verify_assertions()
+
+    client = _make_client(tmp_path, num_evals=2)
+    t0 = time.time()
+    client.publish_accepted_at[2] = t0
+    client.metrics.append(_metric(t0 + 0.05, 1, 1, start=1, end=1))
+    client.metrics.append(_metric(t0 + 0.06, 2, 2, start=2, end=2))
+    client.verify_assertions()
+
+
+def test_eval_records(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Fleet snapshots, drain events, boundary rollout, and session deadlines."""
+    harness = _Harness()
+    _patch_http(monkeypatch, harness)
+    client = _make_client(
+        tmp_path,
+        registry_url="http://registry",
+        fleet_poll_interval=0.01,
+    )
+    asyncio.run(client.run())
+    assert client.fleet_snapshots, "poller must have recorded snapshots"
+    records = [
+        json.loads(line) for line in client.results_path.read_text().splitlines()
+    ]
+    snapshots = [r for r in records if "fleet_snapshot" in r]
+    metrics = [
+        r
+        for r in records
+        if "fleet_snapshot" not in r
+        and "boundary_rollout" not in r
+        and "drain_event" not in r
+        and "conflict_gap" not in r
+        and "summary" not in r
+    ]
+    assert snapshots, "results file must contain fleet_snapshot records"
+    assert all("timestamp" in s for s in snapshots)
+    assert len(metrics) == len(client.metrics)
+    assert sum(s["request_count"] for s in client.eval_stats.values()) == len(metrics)
+    # The terminal summary record closes out a completed run.
+    assert records[-1]["summary"]["aborted"] is False
+    assert records[-1]["summary"]["conflict_gaps"] == []
+    assert records[-1]["summary"]["eval_stats"]
+    # Boundary rollout is recorded, not asserted.
+    assert client.boundary_rollout[2]["fleet_first_applied_at"] is not None
+    boundary_records = [r for r in records if "boundary_rollout" in r]
+    assert (
+        boundary_records and boundary_records[0]["boundary_rollout"]["new_version"] == 2
+    )
+
+    client = _make_client(tmp_path, num_evals=2)
+    t0 = time.time()
+    client.publish_accepted_at[2] = t0
+    client.fleet_snapshots.append(
+        {
+            "fleet_snapshot": [
+                {
+                    "task_id": "ta-0",
+                    "upstream": "h0:8000",
+                    "load": 0,
+                    "applied_version": 1,
+                }
+            ],
+            "timestamp": t0 + 0.01,
+        }
+    )
+    client.compute_boundary_rollout()
+    assert client.boundary_rollout[2]["fleet_first_applied_at"] is None
+    assert client.boundary_rollout[2]["publish_accepted_at"] == t0
+
+    client.metrics.append(_metric(t0 - 0.5, 2, 2, start=2, end=2))
+    client.metrics.append(_metric(t0 + 0.05, 2, 1, start=1, end=1))
+    client.metrics.append(_metric(t0 + 0.10, 2, 2, start=2, end=2))
+    client.compute_boundary_rollout()
+    assert client.boundary_rollout[2]["first_new_version_200_at"] == pytest.approx(
+        t0 + 0.10
+    )
+
+    client = _make_client(tmp_path, num_evals=2)
+    t0 = time.time()
+    client.publish_accepted_at[2] = t0
+    client.metrics.append(_metric(t0 + 0.05, 2, 1, start=1, end=1))
+    client.compute_boundary_rollout()
+    assert client.boundary_rollout[2]["first_new_version_200_at"] is None
+
+    client = _make_client(tmp_path, registry_url="http://registry")
+
+    def loads(draining: bool) -> list[dict]:
+        entry: dict = {
+            "task_id": "ta-0",
+            "upstream": "h0:8000",
+            "load": 1,
+            "applied_version": 1,
+        }
+        if draining:
+            entry.update({"draining": True, "live_sessions": 2, "active_requests": 5})
+        return [entry]
+
+    client._record_fleet_snapshot(loads(draining=False))
+    client._record_fleet_snapshot(loads(draining=True))
+    client._record_fleet_snapshot(loads(draining=True))
+    events = [r for r in client.fleet_snapshots if "drain_event" in r]
+    assert len(events) == 1
+    assert events[0]["drain_event"] == {
+        "task_id": "ta-0",
+        "applied_version": 1,
+        "live_sessions": 2,
+        "active_requests": 5,
+    }
+    assert "timestamp" in events[0]
+    client.write_results()
+    records = [
+        json.loads(line) for line in client.results_path.read_text().splitlines()
+    ]
+    assert sum(1 for r in records if "drain_event" in r) == 1
+
+    # Straggler sessions run to main_deadline + straggler window; main-phase
+    # sessions stop at main_deadline.
+    client = _make_client(tmp_path, num_sessions=3, num_stragglers=2)
+    recorded: list[float] = []
+
+    async def fake_eval_session(
+        self: ec.EvalClient,
+        eval_num: int,
+        session_id: str,
+        pinned_version: int,
+        straggler_deadline: float,
+    ) -> None:
+        recorded.append(straggler_deadline)
+
+    monkeypatch.setattr(ec.EvalClient, "eval_session", fake_eval_session)
+
+    async def start() -> float:
+        main_tasks, straggler_tasks, main_deadline = client._start_sessions(1, 1)
+        assert len(straggler_tasks) == 2
+        await asyncio.gather(*main_tasks, *straggler_tasks)
+        return main_deadline
+
+    main_deadline = asyncio.run(start())
+    assert len(recorded) == 3
+    assert recorded[0] == pytest.approx(main_deadline + client.straggler_duration), (
+        "stragglers run to the end of the straggler window"
+    )
+    assert recorded[1] == pytest.approx(main_deadline + client.straggler_duration)
+    assert recorded[2] == pytest.approx(main_deadline), (
+        "main-phase sessions stop at the main-phase deadline"
+    )
 
 
 def _install_fake_clock(monkeypatch: pytest.MonkeyPatch, t0: float) -> list[float]:
@@ -463,7 +819,8 @@ def test_stamp_violation_recorded_per_response(
     harness = _Harness(chat_responder=chat_responder)
     _patch_http(monkeypatch, harness)
     client = _make_client(tmp_path, num_evals=1, num_sessions=1, num_stragglers=0)
-    asyncio.run(client.run())
+    with pytest.raises(AssertionError, match="pin violated"):
+        asyncio.run(client.run())
     assert client.stamp_violations, "every 200 was off the pin"
     assert all(v["pinned_version"] == 1 for v in client.stamp_violations)
     assert all(v["weight_version_start"] == 0 for v in client.stamp_violations)
@@ -474,3 +831,28 @@ def test_stamp_violation_recorded_per_response(
     assert len(violation_records) == len(client.stamp_violations)
     summary = next(r for r in records if "summary" in r)["summary"]
     assert len(summary["stamp_violations"]) == len(client.stamp_violations)
+
+
+def test_abort_preserves_records_and_summary(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A failed fabricate/publish aborts the run, but the JSONL keeps every
+    record produced so far plus a terminal summary with aborted=true."""
+    harness = _Harness(publish_ok=False)
+    _patch_http(monkeypatch, harness)
+    client = _make_client(tmp_path)
+    with pytest.raises(RuntimeError, match="aborting run before eval 2"):
+        asyncio.run(client.run())
+    assert client.results_path.exists()
+    records = [
+        json.loads(line) for line in client.results_path.read_text().splitlines()
+    ]
+    metric_records = [r for r in records if "status_code" in r]
+    assert metric_records, "eval-1 request metrics must survive the abort"
+    assert all(r["eval_num"] == 1 for r in metric_records)
+    assert len(metric_records) == len(client.metrics)
+    summary = records[-1]["summary"]
+    assert summary["aborted"] is True
+    assert summary["eval_stats"]
+    assert "version_stats" in summary
+    assert summary["conflict_gaps"] == []
