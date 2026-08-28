@@ -409,7 +409,9 @@ class _RegistryApp(_UvicornApp):
             await asyncio.gather(self.poller_task, return_exceptions=True)
             await self.client.aclose()
 
-        @fastapi_app.get("/loads", response_model=list[ContainerInfo])
+        # response_model=None: serialization follows the instances, so a registry
+        # subclass serving an extended container model keeps its fields.
+        @fastapi_app.get("/loads", response_model=None)
         async def loads() -> list[ContainerInfo]:
             return self.containers
 
@@ -440,6 +442,36 @@ class _ProxyApp(_UvicornApp):
             yield
         finally:
             container.load = max(0, container.load - 1)
+
+    async def select_container(
+        self, session_id: str | None, headers: dict[str, str]
+    ) -> ContainerInfo | None:
+        """Placement hook: the replica to pin this request to, or None.
+
+        Stock behavior routes session traffic (``modal-session-id`` present)
+        through ``route_session`` when the registry map is populated, and
+        leaves everything else unrouted. ``headers`` are the already-filtered
+        forwarding headers. Override for non-stock placement (e.g.
+        version-aware selection).
+        """
+        if session_id and self.containers:
+            return await route_session(
+                self.session_routes,
+                session_id,
+                self.containers,
+                self.overload_threshold,
+            )
+        return None
+
+    async def unrouted_response(
+        self, session_id: str | None, headers: dict[str, str]
+    ) -> Response | None:
+        """Unrouted hook: the short-circuit response when ``select_container``
+        returned None. Stock behavior returns None — the request falls through
+        to the Flash LB unpinned. Override to answer directly (e.g.
+        a retryable 409/503) instead of falling through.
+        """
+        return None
 
     async def get_containers(self) -> dict[str, ContainerInfo]:
         response = await self.client.get(f"{self.registry_url}/loads")
@@ -553,14 +585,12 @@ class _ProxyApp(_UvicornApp):
                 headers = filter_headers(dict(request.headers))
 
                 for attempt in range(MAX_SESSION_RETRIES + 1):
-                    container = None
-                    if session_id and self.containers:
-                        container = await route_session(
-                            self.session_routes,
-                            session_id,
-                            self.containers,
-                            self.overload_threshold,
-                        )
+                    container = await self.select_container(session_id, headers)
+                    if container is None:
+                        unrouted = await self.unrouted_response(session_id, headers)
+                        if unrouted is not None:
+                            return unrouted
+                    else:
                         headers["modal-flash-upstream"] = container.upstream
 
                     logger.info(
