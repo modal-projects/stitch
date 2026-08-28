@@ -1,4 +1,4 @@
-"""Single-writer publisher: ``/publish``, ``/job``, ``/status``.
+"""Single-writer publisher: ``/publish``, ``/fabricate``, ``/fabricate_delta``, ``/job``, ``/status``.
 
 Materialization is async (``.spawn`` a Modal function) because a synchronous
 multi-hundred-GB copy inside the FastAPI handler dies at Modal ingress
@@ -9,8 +9,11 @@ from the inference pool so it scales independently.
 from __future__ import annotations
 
 import importlib
+import json
 import logging
 import os
+import shutil
+import tempfile
 import threading
 from collections.abc import Callable
 from pathlib import Path
@@ -25,9 +28,12 @@ from pydantic import BaseModel
 from cookbook.common import storage
 from cookbook.common.constants import CHECKPOINTS_PATH, MINUTES, STITCH_PATH
 from cookbook.standalone.offline_evals.publish_materialize import (
+    _delta_anchor_dir,
     _delta_index_metadata,
     _ensure_safetensors_index,
     _prepare_version_dir,
+    _target_is_valid,
+    _touched_delta_tensors,
     _updates_dir,
     _version_dir,
 )
@@ -59,6 +65,9 @@ publisher_image = (
         "numpy",
         "safetensors>=0.4.0",
         "uvicorn",
+        # synthetic-delta generator (zstd, xxh3)
+        "xxhash",
+        "zstandard",
     )
     .env({"EXPERIMENT_CONFIG": EXPERIMENT, "RUN_ID": RUN_ID})
     .add_local_python_source("stitch")
@@ -93,6 +102,19 @@ class PublishRequest(BaseModel):
     version: int
     source: str  # local path to the model directory; full-vs-delta derives
     # from its index's `delta_encoding` key
+
+
+class FabricateRequest(BaseModel):
+    run_id: str
+    from_version: int
+    new_version: int
+
+
+class FabricateDeltaRequest(BaseModel):
+    run_id: str
+    base_version: int  # 0 = the run's base checkpoint; else a staged version
+    new_version: int
+    num_tensors: int = 4
 
 
 class StatusResponse(BaseModel):
@@ -140,8 +162,8 @@ def _require_own_run_id(run_id: str) -> None:
 def _is_already_published(store: Store, version: int) -> bool:
     """No-op check keyed on the store pointer, refreshed first for cross-host visibility.
 
-    Keyed on the pointer — NOT on version_dir existence — so a staged dir left
-    behind by a failed job never masks a publish that still needs to run.
+    Keyed on the pointer — NOT on version_dir existence — so the fabricate-then-publish
+    flow (where /fabricate creates the dir before /publish runs) still publishes.
     """
     store.refresh()
     pointer = store.read_pointer()
@@ -243,6 +265,166 @@ def _job_state(job_id: str) -> dict[str, Any]:
     return {"job_id": job_id, "status": "success", "result": result}
 
 
+# ── Synthetic-delta fabrication (cpu update mode) ────────────────────────────
+
+# Near-no-op perturbation: ~10 changed values per MiB of fp8 weights. The delta
+# must change at least one value overall (the generator refuses an empty delta),
+# but files and post-apply xxh3-128 checksums are real either way.
+DELTA_TENSOR_DENSITY = 1e-5
+
+
+def _is_embed_or_lm_head(name: str) -> bool:
+    """embed/lm_head-class tensors are never eligible for synthetic deltas."""
+    return "embed_tokens" in name or "lm_head" in name
+
+
+def _build_anchor_view(
+    anchor_dir: Path,
+    *,
+    excluded: set[str],
+    num_tensors: int,
+    spec: Any,
+    view_dir: Path,
+) -> dict[str, list[str]]:
+    """Symlink-view of ``anchor_dir`` exposing only tensors the delta may touch.
+
+    The generator encodes every tensor in the view's weight_map, so the view
+    is the first ``num_tensors`` classifiable, non-excluded names (shard then
+    name order). Only selected shards are symlinked (a few GLM tensors, not a
+    756GB scan). embed/lm_head are always excluded: they dominate compile scope.
+    """
+    from tools.profiling._synthetic_delta import _encoding_for, _safetensors_header
+
+    index = json.loads((anchor_dir / "model.safetensors.index.json").read_text())
+    weight_map = index.get("weight_map") or {}
+    names_by_shard: dict[str, list[str]] = {}
+    for name, filename in sorted(weight_map.items()):
+        names_by_shard.setdefault(filename, []).append(name)
+
+    selected: dict[str, list[str]] = {}
+    remaining = num_tensors
+    for filename in sorted(names_by_shard):
+        if remaining <= 0:
+            break
+        _, header = _safetensors_header(anchor_dir / filename)
+        for name in sorted(names_by_shard[filename]):
+            if name in excluded:
+                continue
+            if _is_embed_or_lm_head(name):
+                continue
+            try:
+                encoding = _encoding_for(
+                    name=name, dtype=header[name]["dtype"], spec=spec
+                )
+            except ValueError:
+                continue
+            if encoding is None:
+                continue  # immutable (e.g. static input_scale)
+            selected.setdefault(filename, []).append(name)
+            remaining -= 1
+            if remaining <= 0:
+                break
+    if not selected:
+        raise RuntimeError(
+            f"no eligible tensors left in {anchor_dir} "
+            f"({len(excluded)} excluded by earlier deltas)"
+        )
+
+    view_dir.mkdir(parents=True)
+    for filename in selected:
+        os.symlink(anchor_dir / filename, view_dir / filename)
+    filtered = {
+        "metadata": index.get("metadata") or {},
+        "weight_map": {
+            name: filename for filename, names in selected.items() for name in names
+        },
+    }
+    (view_dir / "model.safetensors.index.json").write_text(json.dumps(filtered))
+    return selected
+
+
+def fabricate_delta_dir(
+    run_dir: Path,
+    base_version: int,
+    new_version: int,
+    num_tensors: int,
+    *,
+    anchor_dir: Path | None = None,
+    density: float = DELTA_TENSOR_DENSITY,
+    seed: int | None = None,
+) -> Path:
+    """Write a XOR delta as ``updates/weight_v{new_version:06d}``; do not publish.
+
+    The generator always stamps version 1 / base 0; rewrite to the requested
+    pair. Idempotent for an existing valid dir of the same version+base.
+    """
+    from tools.profiling._synthetic_delta import (
+        SyntheticDeltaSpec,
+        write_standard_delta,
+    )
+
+    version_dir = _version_dir(run_dir, new_version)
+    if version_dir.exists():
+        meta = _delta_index_metadata(version_dir)
+        if (
+            meta is not None
+            and int(meta.get("version", -1)) == new_version
+            and int(meta.get("base_version", -1)) == base_version
+            and _target_is_valid(version_dir, version_dir)
+        ):
+            logger.info("delta dir %s already fabricated; keeping", version_dir)
+            return version_dir
+        logger.warning("replacing invalid/stale delta dir %s", version_dir)
+        shutil.rmtree(version_dir)
+
+    spec = SyntheticDeltaSpec(
+        checkpoint_format=getattr(exp, "DELTA_CHECKPOINT_FORMAT", "fp8"),
+        quantized_value_density=density,
+        high_precision_value_density=density,
+    )
+    anchor = (
+        Path(anchor_dir)
+        if anchor_dir is not None
+        else _delta_anchor_dir(run_dir, base_version)
+    )
+    excluded = _touched_delta_tensors(run_dir, base_version)
+
+    staging = Path(tempfile.mkdtemp(prefix=f"delta-v{new_version:06d}-"))
+    try:
+        view_dir = staging / "anchor-view"
+        selected = _build_anchor_view(
+            anchor,
+            excluded=excluded,
+            num_tensors=num_tensors,
+            spec=spec,
+            view_dir=view_dir,
+        )
+        write_standard_delta(
+            str(view_dir),
+            str(staging),
+            spec=spec,
+            seed=seed if seed is not None else new_version,
+        )
+        generated = staging / "weight_v000001"
+        index_path = generated / "model.safetensors.index.json"
+        data = json.loads(index_path.read_text())
+        data["metadata"]["version"] = new_version
+        data["metadata"]["base_version"] = base_version
+        index_path.write_text(json.dumps(data, indent=2))
+        version_dir.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(generated), str(version_dir))
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+    logger.info(
+        "fabricated delta %s (base=%d, tensors=%s)",
+        version_dir,
+        base_version,
+        sum(len(names) for names in selected.values()),
+    )
+    return version_dir
+
+
 @app.function(
     image=publisher_image,
     volumes=_run_volume_mounts(),
@@ -322,6 +504,45 @@ def materialize_version(
     return {"version": version, "path": str(version_dir), "published": publish}
 
 
+@app.function(
+    image=publisher_image,
+    volumes={
+        str(CHECKPOINTS_PATH): checkpoint_volume.read_only(),
+        **_run_volume_mounts(),
+    },
+    secrets=STORE_SECRETS,
+    # Streams 8MiB chunks of the few selected anchor tensors (shards are ~5.4GB);
+    # 4 cpu / 8GiB matches the materialize job and is ample for the generator's
+    # per-shard thread pool. max_containers=1 serializes with the HTTP 409 guard.
+    cpu=4,
+    memory=8192,
+    timeout=60 * MINUTES,
+    max_containers=1,
+)
+def fabricate_delta_version(
+    run_id: str, base_version: int, new_version: int, num_tensors: int
+) -> dict[str, Any]:
+    """Async delta-fabrication job spawned by /fabricate_delta.
+
+    Writes updates/weight_v{new_version:06d} as a real XOR delta on base_version
+    and stops — the pointer only moves when a later /publish runs for it.
+    """
+    version_dir = fabricate_delta_dir(RUN_DIR, base_version, new_version, num_tensors)
+    if STORE_DEPLOYMENT.backend == storage.MODAL_VOLUME:
+        # Make the new dir visible to the later /publish job's container.
+        run_volume.commit()
+    logger.info("fabricated delta version %d (base=%d)", new_version, base_version)
+    return {
+        "version": new_version,
+        "base_version": base_version,
+        "path": str(version_dir),
+        "published": False,
+    }
+
+
+
+
+
 def _default_volume_reloader() -> None:
     """Reload the run volume's view (same guard as ``materialize_version``)."""
     if STORE_DEPLOYMENT.backend == storage.MODAL_VOLUME:
@@ -353,7 +574,7 @@ class PublisherServer:
 
         The long-lived server container never reloads its volume view on its
         own; without this, dirs staged by spawned job containers are invisible
-        to /publish and /status.
+        to /publish, /fabricate, /fabricate_delta, and /status.
         """
         self._volume_reloader()
         self.store.refresh()
@@ -384,6 +605,30 @@ class PublisherServer:
         self._current_job_id = call.object_id
         logger.info(
             "spawned materialization job %s (version=%d)", call.object_id, version
+        )
+        return call.object_id
+
+    def _spawn_fabricate_delta(
+        self, *, run_id: str, base_version: int, new_version: int, num_tensors: int
+    ) -> str:
+        """Spawn the async delta-fabrication job; 409 while another job runs."""
+        if self._job_busy():
+            raise HTTPException(
+                status_code=409,
+                detail=f"materialization job {self._current_job_id} still running",
+            )
+        call = fabricate_delta_version.spawn(
+            run_id=run_id,
+            base_version=base_version,
+            new_version=new_version,
+            num_tensors=num_tensors,
+        )
+        self._current_job_id = call.object_id
+        logger.info(
+            "spawned delta-fabrication job %s (base=%d, version=%d)",
+            call.object_id,
+            base_version,
+            new_version,
         )
         return call.object_id
 
@@ -436,6 +681,86 @@ class PublisherServer:
                     "job_id": job_id,
                     "version": request.version,
                     "path": str(version_dir),
+                },
+            )
+
+        @fastapi_app.post("/fabricate")
+        async def fabricate(request: FabricateRequest) -> Any:
+            """Spawn a copy of an existing version dir with rewritten ``metadata.version``."""
+            self._refresh_volume_state()
+            _require_own_run_id(request.run_id)
+            from_dir = _version_dir(self.run_dir, request.from_version)
+            new_dir = _version_dir(self.run_dir, request.new_version)
+
+            if not from_dir.exists():
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"from_version {request.from_version} not found",
+                )
+
+            job_id = self._spawn_materialize(
+                run_id=request.run_id,
+                version=request.new_version,
+                source=str(from_dir),
+                publish=False,
+            )
+            return JSONResponse(
+                status_code=202,
+                content={
+                    "status": "accepted",
+                    "job_id": job_id,
+                    "version": request.new_version,
+                    "path": str(new_dir),
+                },
+            )
+
+        @fastapi_app.post("/fabricate_delta")
+        async def fabricate_delta(request: FabricateDeltaRequest) -> Any:
+            """Spawn a XOR delta on ``base_version``; the pointer moves only on a later /publish."""
+            self._refresh_volume_state()
+            _require_own_run_id(request.run_id)
+            if request.base_version < 0:
+                raise HTTPException(status_code=400, detail="base_version must be >= 0")
+            if request.new_version <= request.base_version:
+                raise HTTPException(
+                    status_code=400,
+                    detail="new_version must be greater than base_version",
+                )
+            if request.num_tensors < 1:
+                raise HTTPException(status_code=400, detail="num_tensors must be >= 1")
+            if (
+                request.base_version > 0
+                and not _version_dir(self.run_dir, request.base_version).exists()
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"base_version {request.base_version} not staged",
+                )
+            if request.base_version == 0:
+                try:
+                    anchor = _delta_anchor_dir(self.run_dir, 0)
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
+                if not anchor.exists():
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"base checkpoint not found: {anchor}",
+                    )
+
+            job_id = self._spawn_fabricate_delta(
+                run_id=request.run_id,
+                base_version=request.base_version,
+                new_version=request.new_version,
+                num_tensors=request.num_tensors,
+            )
+            return JSONResponse(
+                status_code=202,
+                content={
+                    "status": "accepted",
+                    "job_id": job_id,
+                    "version": request.new_version,
+                    "base_version": request.base_version,
+                    "path": str(_version_dir(self.run_dir, request.new_version)),
                 },
             )
 
