@@ -12,17 +12,20 @@ import importlib
 import logging
 import os
 import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import modal
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
+from modal import exception as modal_exc
 from pydantic import BaseModel
 
 from cookbook.common import storage
 from cookbook.common.constants import CHECKPOINTS_PATH, MINUTES, STITCH_PATH
 from cookbook.standalone.offline_evals.publish_materialize import (
+    _delta_index_metadata,
     _ensure_safetensors_index,
     _prepare_version_dir,
     _updates_dir,
@@ -88,7 +91,8 @@ def _run_volume_mounts() -> dict[str, modal.Volume]:
 class PublishRequest(BaseModel):
     run_id: str
     version: int
-    source: str  # local path to the model directory
+    source: str  # local path to the model directory; full-vs-delta derives
+    # from its index's `delta_encoding` key
 
 
 class StatusResponse(BaseModel):
@@ -98,6 +102,14 @@ class StatusResponse(BaseModel):
 
 def _build_store(run_id: str) -> Store:
     """Build the run's store exactly the way the pool does (same root and namespace)."""
+    if run_id != RUN_ID:
+        # A store for a foreign run shares this publisher's local root and S3
+        # namespace, so its pointer writes would land on the LIVE run — and a
+        # cross-run pointer move bypasses the rewind guard as a "reset".
+        raise ValueError(
+            f"refusing to build a store for run_id {run_id!r}; "
+            f"this publisher owns run {RUN_ID!r}"
+        )
     STORE_DEPLOYMENT.bootstrap_credentials()
     # Namespace on the POOL app name so the S3 root matches the pool's store.
     store_config = STORE_DEPLOYMENT.hook_config(POOL_APP_NAME)
@@ -111,6 +123,20 @@ def _build_store(run_id: str) -> Store:
     )
 
 
+def _require_own_run_id(run_id: str) -> None:
+    """Reject requests addressed at a foreign run (HTTP 400).
+
+    Every job spawned here writes THIS run's volume and pointer; a body run_id
+    that doesn't match the publisher's env RUN_ID would rewrite the live run's
+    pointer from a foreign request (and bypass the rewind guard as a reset).
+    """
+    if run_id != RUN_ID:
+        raise HTTPException(
+            status_code=400,
+            detail=f"run_id {run_id!r} does not match this publisher's run {RUN_ID!r}",
+        )
+
+
 def _is_already_published(store: Store, version: int) -> bool:
     """No-op check keyed on the store pointer, refreshed first for cross-host visibility.
 
@@ -122,25 +148,97 @@ def _is_already_published(store: Store, version: int) -> bool:
     return pointer is not None and pointer.version >= version
 
 
+def _reject_full_publish_in_cpu_mode(version_dir: Path, version: int) -> None:
+    """Refuse a FULL publish when the run is in cpu (delta-only) update mode.
+
+    cpu mode applies XOR deltas in place; a FULL publish wedges the run
+    (replicas ERROR-loop post-pointer). A dir is FULL when its index has no
+    ``delta_encoding`` — including a MISSING index (the materialize job's
+    ``_ensure_safetensors_index`` would generate a non-delta one). Shared by the
+    /publish handler (pre-spawn, on the source) and the materialize job
+    (post-index, pre-pointer) so the two checks cannot drift.
+    """
+    if getattr(exp, "SGLANG_DELTA_UPDATE_MODE", "disk") != "cpu":
+        return
+    if _delta_index_metadata(version_dir) is not None:
+        return
+    index_path = version_dir / "model.safetensors.index.json"
+    raise RuntimeError(
+        f"cpu update mode is delta-only: refusing to publish FULL version {version} "
+        f"(no delta_encoding in {index_path}); publish a delta or use a disk-mode run"
+    )
+
+
+def _reject_broken_delta_lineage(store: Store, version_dir: Path, version: int) -> None:
+    """Refuse a delta whose ``base_version`` is not the current store pointer.
+
+    The engine applies deltas as a strict chain and walks every intermediate
+    version — and cpu mode has no FULL catch-up — so one delta published on the
+    wrong base wedges every stage after it. The pointer is the only valid base
+    at publish time. Shared by the /publish handler (pre-spawn, on the source)
+    and the materialize job (pre-pointer) so the two checks cannot drift.
+    """
+    meta = _delta_index_metadata(version_dir)
+    if meta is None:
+        return  # FULL sources carry no lineage
+    store.refresh()
+    pointer = store.read_pointer()
+    pointer_version = pointer.version if pointer is not None else None
+    try:
+        base_version = int(meta.get("base_version"))
+    except (TypeError, ValueError):
+        base_version = None
+    if base_version is None or base_version != pointer_version:
+        raise RuntimeError(
+            f"delta version {version} declares base_version="
+            f"{meta.get('base_version')!r} but the store pointer is "
+            f"{pointer_version}; a delta must be based on the current pointer "
+            "(the chain is applied in order and a broken link cannot be "
+            "repaired in place)"
+        )
+
+
 def _function_call_from_id(job_id: str) -> modal.FunctionCall:
     """Look up a spawned job by id (module-level so tests can stub it)."""
     return modal.FunctionCall.from_id(job_id)
 
 
+# get() surfaces a REMOTE job failure as one of these modal wrappers, or as the
+# deserialized remote exception itself (an arbitrary non-modal class). Any OTHER
+# modal exception is a client-side query error (connection, auth, unknown call
+# id) — transient, not a job failure.
+_REMOTE_FAILURE_ERRORS = (
+    modal_exc.RemoteError,
+    modal_exc.ExecutionError,
+    modal_exc.InternalFailure,
+    modal_exc.FunctionTimeoutError,
+    modal_exc.UserCodeException,
+)
+
+
 def _job_state(job_id: str) -> dict[str, Any]:
     """Non-blocking poll of a spawned materialization job.
 
-    get(timeout=0) raises TimeoutError while the job is still running and
-    re-raises the remote exception when the job failed.
+    get(timeout=0) raises modal TimeoutError while the job is still running and
+    re-raises the remote exception when the job failed. Transient query errors
+    (lookup or poll) report 'unknown' — NOT 'failure' — so polling clients keep
+    polling a healthy job.
     """
     try:
         call = _function_call_from_id(job_id)
+    except Exception as exc:  # noqa: BLE001
+        return {"job_id": job_id, "status": "unknown", "error": repr(exc)}
+    try:
         result = call.get(timeout=0)
     # modal 1.5.4 raises *builtins* TimeoutError from get(timeout=0) while the
-    # spawn is still running.
-    except TimeoutError:
+    # spawn is still running; keep the modal class too in case that changes.
+    except (TimeoutError, modal_exc.TimeoutError):
         return {"job_id": job_id, "status": "pending"}
-    except Exception as exc:  # noqa: BLE001 — remote failure surfaces here
+    except _REMOTE_FAILURE_ERRORS as exc:
+        return {"job_id": job_id, "status": "failure", "error": repr(exc)}
+    except modal_exc.Error as exc:
+        return {"job_id": job_id, "status": "unknown", "error": repr(exc)}
+    except Exception as exc:  # noqa: BLE001 — deserialized remote exception
         return {"job_id": job_id, "status": "failure", "error": repr(exc)}
     return {"job_id": job_id, "status": "success", "result": result}
 
@@ -196,6 +294,10 @@ def materialize_version(
     """
     source_path = Path(source)
     version_dir = _version_dir(RUN_DIR, version)
+    if STORE_DEPLOYMENT.backend == storage.MODAL_VOLUME:
+        # See dirs staged by OTHER containers (e.g. a prior staging job)
+        # before deciding whether the target already exists or is valid.
+        run_volume.reload()
     if source_path.resolve() != version_dir.resolve():
         action = _prepare_version_dir(version_dir, source_path)
         logger.info(
@@ -205,10 +307,25 @@ def materialize_version(
     _ensure_safetensors_index(version_dir, version)
 
     if publish:
+        # Defense in depth: /publish checks the source pre-spawn, but a FULL dir
+        # here (e.g. the index generated above) or a stale base must never move
+        # the pointer.
+        _reject_full_publish_in_cpu_mode(version_dir, version)
+        if _delta_index_metadata(version_dir) is not None:
+            _reject_broken_delta_lineage(_build_store(run_id), version_dir, version)
         publish_version.local(run_id=run_id, model_dir=version_dir)
         logger.info("published version %d via stitch", version)
+    elif STORE_DEPLOYMENT.backend == storage.MODAL_VOLUME:
+        # Make the staged dir visible to the later /publish job's container.
+        run_volume.commit()
 
     return {"version": version, "path": str(version_dir), "published": publish}
+
+
+def _default_volume_reloader() -> None:
+    """Reload the run volume's view (same guard as ``materialize_version``)."""
+    if STORE_DEPLOYMENT.backend == storage.MODAL_VOLUME:
+        run_volume.reload()
 
 
 class PublisherServer:
@@ -220,20 +337,34 @@ class PublisherServer:
         store: Store,
         run_dir: Path,
         port: int = PUBLISHER_PORT,
+        volume_reloader: Callable[[], None] | None = None,
     ) -> None:
         self.store = store
         self.run_dir = run_dir
         self.updates_dir = _updates_dir(run_dir)
         self.port = port
+        self._volume_reloader = volume_reloader or _default_volume_reloader
         # In-memory single-writer guard. A Flash recycle resets it; the store
         # pointer's rewind guard is the durable backstop.
         self._current_job_id: str | None = None
+
+    def _refresh_volume_state(self) -> None:
+        """Reload the volume view and refresh the store BEFORE reading volume state.
+
+        The long-lived server container never reloads its volume view on its
+        own; without this, dirs staged by spawned job containers are invisible
+        to /publish and /status.
+        """
+        self._volume_reloader()
+        self.store.refresh()
 
     def _job_busy(self) -> bool:
         """True while a spawned job is still running."""
         if self._current_job_id is None:
             return False
-        if _job_state(self._current_job_id)["status"] == "pending":
+        # 'unknown' (transient poll/lookup error) keeps the guard: the job may
+        # still be running, and clearing the guard could admit a second writer.
+        if _job_state(self._current_job_id)["status"] in ("pending", "unknown"):
             return True
         self._current_job_id = None
         return False
@@ -262,6 +393,8 @@ class PublisherServer:
         @fastapi_app.post("/publish")
         async def publish(request: PublishRequest) -> Any:
             """Validate and spawn materialize+publish; 200 no-op if the pointer is already past ``version``."""
+            self._refresh_volume_state()
+            _require_own_run_id(request.run_id)
             version_dir = _version_dir(self.run_dir, request.version)
 
             # Pointer-keyed no-op: a fabricated dir must NOT mask publishing.
@@ -283,6 +416,12 @@ class PublisherServer:
                     status_code=400,
                     detail=f"source directory not found: {source_path}",
                 )
+
+            try:
+                _reject_full_publish_in_cpu_mode(source_path, request.version)
+                _reject_broken_delta_lineage(self.store, source_path, request.version)
+            except RuntimeError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
 
             job_id = self._spawn_materialize(
                 run_id=request.run_id,
@@ -309,10 +448,12 @@ class PublisherServer:
         async def status() -> StatusResponse:
             """GET /status
 
-            latest_version is the store POINTER; the on-disk dir listing is
-            exposed separately as staged_versions, so a partial dir left by a
-            recycled mid-copy container can never masquerade as latest.
+            latest_version is the store POINTER (refreshed first for cross-host
+            visibility); the on-disk dir listing is exposed separately as
+            staged_versions, so a partial dir left by a recycled mid-copy
+            container can never masquerade as latest.
             """
+            self._refresh_volume_state()
             pointer = self.store.read_pointer()
 
             staged: list[int] = []
