@@ -1,0 +1,20 @@
+diff --git a/megatron/core/dist_checkpointing/strategies/filesystem_async.py b/megatron/core/dist_checkpointing/strategies/filesystem_async.py
+--- a/megatron/core/dist_checkpointing/strategies/filesystem_async.py
++++ b/megatron/core/dist_checkpointing/strategies/filesystem_async.py
+@@ -8,4 +8,5 @@
+ import os
+ import pickle
+ import queue
++import threading
+ from functools import partial
+@@ -288,5 +289,9 @@
+                 p_list.append(
+-                    ctx.Process(
++                    # Forking write workers from an actor near its memory limit
++                    # fails persistently with EAGAIN (the page-table copy cannot
++                    # be charged); threads need no fork, and the buckets are
++                    # already staged host-memory copies the workers only read.
++                    threading.Thread(
+                         target=partial(FileSystemWriterAsync.write_preloaded_data, transform_list),
+                         kwargs=kwargs,
+                     )
