@@ -33,6 +33,12 @@ class Pool:
         appearing or disappearing between discovery and use is expected, not an error."""
         raise NotImplementedError
 
+    def replica_request(self, replica: str, path: str) -> tuple[str, dict[str, str]]:
+        """(url, headers) that reach one replica's sidecar endpoint. The default
+        addresses the replica's base URL directly; a pool whose replicas sit
+        behind an edge overrides this to route through it."""
+        return f"{replica.rstrip('/')}{path}", {}
+
     def wake(self, replicas: list[str], ref: VersionRef) -> None:
         """Nudge replicas to reconcile now. Optional — the default relies on their polling."""
 

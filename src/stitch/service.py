@@ -337,7 +337,10 @@ async def readiness(pool: Pool, *, timeout: float = 15.0) -> PoolState:
 
     async def probe(c: Any, url: str) -> ReplicaState:
         try:
-            resp = await c.get(f"{url.rstrip('/')}/server_info", timeout=timeout)
+            target, headers = await asyncio.to_thread(
+                pool.replica_request, url, "/server_info"
+            )
+            resp = await c.get(target, headers=headers, timeout=timeout)
             return ReplicaState.from_dict(resp.json())
         except Exception as exc:  # noqa: BLE001
             return ReplicaState(
