@@ -13,7 +13,7 @@ from cookbook.miles_disagg.resume import (
     resolve_resume_point,
     restore_boot_pointer,
     restore_resume_point,
-    validate_auto_resume_config,
+    validate_resumable_config,
     validate_resume_config,
 )
 
@@ -197,12 +197,12 @@ def test_resolve_resume_point_rejects_path_like_run_id() -> None:
         ("no_save_rng", True, "RNG checkpointing"),
     ],
 )
-def test_validate_auto_resume_config(field: str, value: object, message: str) -> None:
+def test_validate_resumable_config(field: str, value: object, message: str) -> None:
     cfg = _Config()
     setattr(cfg, field, value)
 
     with pytest.raises(ValueError, match=message):
-        validate_auto_resume_config(cfg)
+        validate_resumable_config(cfg)
 
 
 @pytest.mark.parametrize(
@@ -226,12 +226,6 @@ def test_validate_resume_requires_per_step_weight_updates() -> None:
 
     with pytest.raises(ValueError, match="update_weights_interval == 1"):
         validate_resume_config(cfg)
-
-
-def test_resume_point_json_round_trip() -> None:
-    point = ResumePoint(8, 7, "run", "/trainer", "/rollout")
-
-    assert ResumePoint.from_json(point.to_json()) == point
 
 
 def test_restore_resume_point_overwrites_trackers_but_preserves_updates() -> None:

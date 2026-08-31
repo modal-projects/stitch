@@ -106,9 +106,20 @@ ready. Repeating the command creates a separate run and checkpoint lineage.
 
 #### Resume a Miles run
 
-Use the same recipe and Modal environment as the source run. A resumable point
-is the latest saved Megatron checkpoint with a matching complete Hugging Face
-export. Resume it once with:
+Recovery is automatic: the Miles trainer runs under Modal retries, and every
+attempt re-derives its resume state from the run volume — the newest saved
+Megatron checkpoint whose Hugging Face export is complete and published. A
+preempted or crashed trainer resumes on its own, without a launcher attached
+and without redeploying the pool; replicas serving abandoned versions exit and
+their replacements boot from the restored checkpoint. If the checkpoint is
+v120, the run resumes at v120 and publishes a replacement v121 next. Resume
+requires the Modal Volume store, `update_weights_interval = 1`,
+`save_interval`, `save_hf`, and optimizer/RNG checkpointing — a fresh launch
+warns when its config is not resumable, and a fresh run becomes resumable
+after its first complete Megatron/Hugging Face checkpoint pair.
+
+For a run past its retry budget, or a manual takeover, spawn a successor
+trainer with the same recipe and Modal environment as the source run:
 
 ```bash
 export EXPERIMENT_CONFIG=your_config_name
@@ -118,25 +129,15 @@ uv run --extra modal python -m cookbook.miles_disagg.launch \
   --resume-from existing_run_id
 ```
 
-The launcher keeps the existing run ID, recreates its rollout deployment, and
-resets `latest` before replacement engines load the saved checkpoint. If the
-checkpoint is v120, the run resumes at v120 and publishes a replacement v121
-next. Resume currently requires the Modal Volume store and
-`update_weights_interval = 1`.
-
-Add automatic resume to a fresh or resumed launch with:
+This cancels the run's recorded trainer call and spawns a new one against the
+deployed pool, which resumes like any retry. The pool itself is never
+redeployed here; if it was stopped (or its infra must change first), deploy it
+explicitly under the same run ID and then resume:
 
 ```bash
-uv run --extra modal python -m cookbook.miles_disagg.launch \
-  --resume-from existing_run_id \
-  --auto-resume
+EXPERIMENT_CONFIG=your_config_name RUN_ID=existing_run_id \
+  uv run --extra modal modal deploy -m cookbook.miles_disagg.app
 ```
-
-`--auto-resume` stays attached to the trainer. An unexpected exit recreates the
-same run from its newest complete checkpoint and retries until the trainer
-returns normally. Stop it with Ctrl-C. It is off by default and requires
-`save_interval`, `save_hf`, and optimizer/RNG checkpointing. A fresh run becomes
-resumable after its first complete Megatron/Hugging Face checkpoint pair.
 
 With the Modal Volume store, complete Hugging Face checkpoints also accelerate
 elastic rollout startup. When a Miles recipe saves checkpoints and updates
