@@ -1,0 +1,15 @@
+diff --git a/miles/backends/megatron_utils/update_weight/update_weight_from_distributed/delta.py b/miles/backends/megatron_utils/update_weight/update_weight_from_distributed/delta.py
+index 42619b1..30c6eda 100644
+--- a/miles/backends/megatron_utils/update_weight/update_weight_from_distributed/delta.py
++++ b/miles/backends/megatron_utils/update_weight/update_weight_from_distributed/delta.py
+@@ -170,7 +170,9 @@ class UpdateWeightFromDiskDelta(DistBucketedWeightUpdateMixin):
+                 except KeyError as exc:
+                     raise ValueError(f"Trainer emitted unsupported dtype {tensor.dtype} for {name!r}") from exc
+                 if resumed_external:
+-                    baseline = tensor.detach().cpu().contiguous().view(torch.uint8).numpy().reshape(-1).copy()
++                    # Flatten before the byte view: a 0-dim tensor (a scalar
++                    # buffer) cannot dtype-view directly.
++                    baseline = tensor.detach().reshape(-1).cpu().contiguous().view(torch.uint8).numpy().copy()
+                 else:
+                     try:
+                         baseline = read_hf(
