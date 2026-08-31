@@ -54,10 +54,13 @@ from cookbook.miles_disagg.resume import (
     RESUME_POINT_ENV,
     ResumePoint,
     export_version,
+    prepare_attempt,
+    record_trainer_call,
     wait_for_restored_pointer,
 )
 from cookbook.miles_disagg.trainer_image import MEGATRON_PATH, MILES_ROOT
 from stitch.pools.modal_flash_lb_temp import ModalFlashLBPool
+from stitch.service import await_pool_ready
 from stitch.types import VersionRef
 
 EXPERIMENT = os.environ[
@@ -394,7 +397,12 @@ _MULTINODE = miles_cfg.n_train_nodes > 1
     ephemeral_disk=modal_cfg.trainer_ephemeral_disk_mib,
     timeout=24 * 60 * MINUTES,
     startup_timeout=20 * MINUTES,
-    scaledown_window=30 * MINUTES,
+    # Modal owns the retry loop; single-use containers make every attempt a
+    # complete fresh gang, so enter() reruns and Ray bootstraps clean.
+    retries=modal.Retries(
+        max_retries=10, initial_delay=10.0, backoff_coefficient=2.0, max_delay=60.0
+    ),
+    single_use_containers=True,
     include_source=False,
     **({"experimental_options": {"efa_enabled": True}} if _MULTINODE else {}),
 )
@@ -404,8 +412,7 @@ _MULTINODE = miles_cfg.n_train_nodes > 1
     else lambda c: c
 )
 class Trainer:
-    """miles actor cluster. Ray comes up once per container in enter(), so back-to-back
-    runs reuse it."""
+    """miles actor cluster, one gang per attempt."""
 
     @modal.enter()
     def start_ray(self) -> None:
@@ -415,6 +422,7 @@ class Trainer:
         rank, master_addr, my_ip = ray_cluster.get_modal_cluster_context(
             miles_cfg.n_train_nodes
         )
+        self.master_addr = master_addr
         process.apply_git_patches(
             list(getattr(exp, "MEGATRON_RUNTIME_PATCHES", [])),
             MEGATRON_PATH,
@@ -441,20 +449,31 @@ class Trainer:
         )
 
     @modal.method()
-    def train(self, payload: dict, resume_payload: str | None = None) -> None:
-        """Run one training job from a MilesConfig payload (see MilesConfig.to_payload)."""
+    def train(self, payload: dict) -> None:
+        """Run one training attempt from a MilesConfig payload (see MilesConfig.to_payload).
+
+        Reentrant, which is the point: the payload is attempt-invariant and each
+        attempt re-derives its resume state from the run volume, so a Modal retry
+        continues the run rather than replaying the first attempt's world. Resume
+        state needs the Modal Volume store; on other backends a retry past the
+        first publish fails its claim's rewind guard instead of relabeling
+        history.
+        """
         for volume in train_volumes.values():
             volume.reload()
 
-        resume_point = (
-            ResumePoint.from_json(resume_payload)
-            if resume_payload is not None
-            else None
-        )
         cfg = MilesConfig.from_payload(payload)
         launch.materialize_node_local_yaml(cfg, "te_precision_config_file")
         if self.rank != 0:
+            # Returning here would exit this container under its Ray node.
+            ray_cluster.hold_worker_node(self.master_addr, ray_port=RAY_PORT)
             return
+
+        resume_point = None
+        if STORE_DEPLOYMENT.backend == storage.MODAL_VOLUME:
+            resume_point = prepare_attempt(
+                run_volume, run_id=RUN_ID, save_hf=getattr(cfg, "save_hf", None)
+            )
 
         cfg.rollout_endpoint_url = ModalFlashLBPool(APP_NAME, "Server").gateway_url()
         if resume_point is not None:
@@ -496,6 +515,12 @@ class Trainer:
                 update_weight_disk_dir=cfg.update_weight_disk_dir, **custom_config
             ),
             boot_version=boot_version,
+        )
+        # After a restore, replicas ahead of the claimed pointer exit on its
+        # wake and are replaced, so the ready floor counts converged capacity.
+        await_pool_ready(
+            ModalFlashLBPool(APP_NAME, "Server"),
+            replica_floor=modal_cfg.rollout_min_containers,
         )
 
         resume_log = (
@@ -549,12 +574,11 @@ def _build_train_cmd(cfg: MilesConfig) -> str:
 # ── Entrypoints (preparation lives in a separate app: cookbook.miles_disagg.prep_app) ──
 def spawn_train() -> Any:
     """Spawn the trainer on this run's already-deployed pool (config ships as data, so config
-    edits run without a redeploy; infra changes still require one)."""
+    edits run without a redeploy; infra changes still require one). The recorded call
+    id is what a takeover cancels."""
     trainer = modal.Cls.from_name(APP_NAME, "Trainer")()
-    call = trainer.train.spawn(
-        miles_cfg.to_payload(),
-        os.environ.get(RESUME_POINT_ENV),
-    )
+    call = trainer.train.spawn(miles_cfg.to_payload())
+    record_trainer_call(run_volume, RUN_ID, call.object_id)
     print(f"Spawned train on {APP_NAME}: {call.object_id}")
     return call
 

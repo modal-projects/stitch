@@ -14,6 +14,7 @@ from cookbook.common.constants import STITCH_PATH
 from stitch.types import WEIGHT_PREFIX, VersionRef
 
 RESUME_POINT_ENV = "STITCH_RESUME_POINT"
+TRAINER_CALL_FILE = "trainer_call_id"
 
 
 class ResumePointNotFound(ValueError):
@@ -161,6 +162,57 @@ def _check_published_version(
     published = int((index.get("metadata") or {})["version"])
     if published != version:
         raise ValueError(f"{index_path} identifies v{published}, not v{version}")
+
+
+def prepare_attempt(
+    volume: Any, *, run_id: str, save_hf: str | None
+) -> ResumePoint | None:
+    """Restore and return one trainer attempt's resume point, or rewind to the
+    boot version and return None when the run has no complete pair yet.
+
+    Every attempt calls this with identical inputs: that is what makes the
+    first attempt, a retry, and a manual re-spawn one path.
+    """
+    try:
+        point = resolve_resume_point(volume, source_run_id=run_id, save_hf=save_hf)
+    except ResumePointNotFound:
+        restore_boot_pointer(volume, run_id)
+        return None
+    restore_resume_point(volume, point)
+    return point
+
+
+def restore_boot_pointer(volume: Any, run_id: str) -> None:
+    """Rewind ``latest`` to the boot version when a run has nothing to resume."""
+    pointer_path = f"{run_id}/latest"
+    try:
+        current = VersionRef.parse(
+            _read_volume_file(volume, pointer_path).decode().strip()
+        )
+    except FileNotFoundError:
+        return  # nothing claimed yet; the attempt's own claim writes v0
+    if current.run_id != run_id:
+        raise ValueError(f"latest belongs to run {current.run_id!r}, not {run_id!r}")
+    if current.version == 0:
+        return
+    with volume.batch_upload(force=True) as upload:
+        upload.put_file(BytesIO(VersionRef(run_id, 0).identity.encode()), pointer_path)
+
+
+def record_trainer_call(volume: Any, run_id: str, call_id: str) -> None:
+    """Record the run's active trainer call, so a takeover can cancel it."""
+    with volume.batch_upload(force=True) as upload:
+        upload.put_file(BytesIO(call_id.encode()), f"{run_id}/{TRAINER_CALL_FILE}")
+
+
+def read_trainer_call(volume: Any, run_id: str) -> str | None:
+    """Return the run's recorded trainer call id, or None before the first spawn."""
+    try:
+        return (
+            _read_volume_file(volume, f"{run_id}/{TRAINER_CALL_FILE}").decode().strip()
+        )
+    except FileNotFoundError:
+        return None
 
 
 def restore_resume_point(volume: Any, point: ResumePoint) -> VersionRef:

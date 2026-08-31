@@ -7,7 +7,11 @@ import pytest
 from cookbook.miles_disagg.resume import (
     ResumePoint,
     export_version,
+    prepare_attempt,
+    read_trainer_call,
+    record_trainer_call,
     resolve_resume_point,
+    restore_boot_pointer,
     restore_resume_point,
     validate_auto_resume_config,
     validate_resume_config,
@@ -264,6 +268,55 @@ def test_restore_resume_point_rejects_a_checkpoint_ahead_of_latest() -> None:
 
     with pytest.raises(ValueError, match="newer than latest"):
         restore_resume_point(volume, point)
+
+
+def test_prepare_attempt_restores_the_newest_pair() -> None:
+    volume = _Volume(
+        {
+            "old/latest": b"old/weight_v000012",
+            "old/checkpoints/latest_checkpointed_iteration.txt": b"7",
+            "old/checkpoints/iter_0000007/state": b"checkpoint",
+            "old/hf_checkpoints/weight_v000007/.complete": b"",
+            **_published(8),
+        }
+    )
+
+    point = prepare_attempt(volume, run_id="old", save_hf=_Config.save_hf)
+
+    assert point is not None and (point.version, point.iteration) == (8, 7)
+    assert volume.files["old/latest"] == b"old/weight_v000008"
+    assert volume.files["old/checkpoints/latest_checkpointed_iteration.txt"] == b"7"
+
+
+def test_prepare_attempt_restarts_from_scratch_before_the_first_pair() -> None:
+    volume = _Volume({"old/latest": b"old/weight_v000003"})
+
+    assert prepare_attempt(volume, run_id="old", save_hf=_Config.save_hf) is None
+    assert volume.files["old/latest"] == b"old/weight_v000000"
+
+
+def test_prepare_attempt_is_a_noop_on_a_fresh_run() -> None:
+    volume = _Volume({})
+
+    assert prepare_attempt(volume, run_id="old", save_hf=_Config.save_hf) is None
+    assert volume.files == {}
+
+
+def test_restore_boot_pointer_rejects_a_foreign_run() -> None:
+    volume = _Volume({"old/latest": b"other/weight_v000003"})
+
+    with pytest.raises(ValueError, match="belongs to run"):
+        restore_boot_pointer(volume, "old")
+
+
+def test_trainer_call_record_round_trip() -> None:
+    volume = _Volume({})
+
+    assert read_trainer_call(volume, "old") is None
+    record_trainer_call(volume, "old", "fc-123")
+    assert read_trainer_call(volume, "old") == "fc-123"
+    record_trainer_call(volume, "old", "fc-456")  # a newer spawn supersedes
+    assert read_trainer_call(volume, "old") == "fc-456"
 
 
 def test_engine_startup_waits_for_exact_restored_pointer() -> None:
