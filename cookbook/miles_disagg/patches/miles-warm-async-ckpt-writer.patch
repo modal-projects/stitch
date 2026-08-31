@@ -1,0 +1,25 @@
+diff --git a/miles/backends/megatron_utils/actor.py b/miles/backends/megatron_utils/actor.py
+index 9a4c965..ac759be 100644
+--- a/miles/backends/megatron_utils/actor.py
++++ b/miles/backends/megatron_utils/actor.py
+@@ -99,6 +99,20 @@ class MegatronTrainRayActor(TrainRayActor):
+     ) -> int | None:
+         monkey_patch_torch_dist()
+ 
++        # Megatron's async dist-checkpointing forks its write-results Manager on
++        # the first save; forking after the actor balloons (CPU-offloaded
++        # optimizer, staged save tensors) kills the child at bootstrap (EOFError
++        # from Manager.start). The queue is module-memoized, so create it now
++        # while the process is small and every save reuses it.
++        try:
++            from megatron.core.dist_checkpointing.strategies.filesystem_async import (
++                _get_write_results_queue,
++            )
++
++            _get_write_results_queue()
++        except Exception:  # noqa: BLE001 — best-effort; absent on older Megatron
++            pass
++
+         super().init(args, role, with_ref, with_opd_teacher=with_opd_teacher)
+ 
+         for m in all_replay_managers:

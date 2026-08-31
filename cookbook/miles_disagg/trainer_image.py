@@ -33,6 +33,8 @@ MILES_RUNTIME_PATCHES = (
     "/root/cookbook/miles_disagg/patches/miles-seed-baseline-scalars.patch",
     # single_turn generate honors an external rollout endpoint.
     "/root/cookbook/miles_disagg/patches/miles-single-turn-external-endpoint.patch",
+    # The async checkpoint writer's Manager forks before the actor balloons.
+    "/root/cookbook/miles_disagg/patches/miles-warm-async-ckpt-writer.patch",
 )
 # Source-only megatron.training must be on PYTHONPATH.
 MEGATRON_PATH = "/root/Megatron-LM"
