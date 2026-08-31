@@ -440,6 +440,17 @@ class Reconciler:
             return True
         if self.applied is None or pointer.run_id != self.applied.run_id:
             await self._switch_run(pointer.run_id)
+        if pointer.version < self.applied.version:
+            # A same-run rewind is a resume restore: every version above the
+            # pointer will be republished with different bytes under the same
+            # numbers, so this replica's applied suffix is unusable. Exit and
+            # let the pool replace it; the successor boots from the restored
+            # lineage.
+            raise UnrecoverableSidecarError(
+                f"pointer {pointer.identity} is behind applied "
+                f"{self.applied.identity}: the run was restored and this "
+                "replica's suffix is abandoned; exiting for replacement"
+            )
         if not self._behind(pointer):
             return True
 
