@@ -15,7 +15,6 @@ from cookbook.miles_disagg.resume import (
     restore_resume_point,
     validate_auto_resume_config,
     validate_resume_config,
-    wait_for_restored_pointer,
 )
 
 _INDEX = "model.safetensors.index.json"
@@ -320,32 +319,3 @@ def test_trainer_call_record_round_trip() -> None:
     assert read_trainer_call(volume, "old") == "fc-123"
     record_trainer_call(volume, "old", "fc-456")  # a newer spawn supersedes
     assert read_trainer_call(volume, "old") == "fc-456"
-
-
-def test_engine_startup_waits_for_exact_restored_pointer() -> None:
-    volume = _Volume({"run/latest": b"run/weight_v000008"})
-    point = ResumePoint(8, 7, "run", "/trainer", "/rollout")
-
-    restored = wait_for_restored_pointer(volume, point, timeout=1)
-
-    assert restored.identity == "run/weight_v000008"
-
-
-def test_engine_startup_does_not_accept_abandoned_suffix(monkeypatch) -> None:
-    volume = _Volume({"run/latest": b"run/weight_v000012"})
-    point = ResumePoint(8, 7, "run", "/trainer", "/rollout")
-    reloads = 0
-
-    def reload() -> None:
-        nonlocal reloads
-        reloads += 1
-        if reloads == 2:
-            volume.files["run/latest"] = b"run/weight_v000008"
-
-    volume.reload = reload
-    monkeypatch.setattr("cookbook.miles_disagg.resume.time.sleep", lambda _delay: None)
-
-    restored = wait_for_restored_pointer(volume, point, timeout=1)
-
-    assert restored.identity == "run/weight_v000008"
-    assert reloads == 2

@@ -51,12 +51,9 @@ from cookbook.common.constants import (
 from cookbook.miles_disagg import trainer_image
 from cookbook.miles_disagg.config import YAML_CONFIG_FIELDS, MilesConfig
 from cookbook.miles_disagg.resume import (
-    RESUME_POINT_ENV,
-    ResumePoint,
     export_version,
     prepare_attempt,
     record_trainer_call,
-    wait_for_restored_pointer,
 )
 from cookbook.miles_disagg.trainer_image import MEGATRON_PATH, MILES_ROOT
 from stitch.pools.modal_flash_lb_temp import ModalFlashLBPool
@@ -73,17 +70,6 @@ MILES_LOCAL_DIR = os.environ.get(
 exp = importlib.import_module(f"cookbook.miles_disagg.configs.{EXPERIMENT}")
 modal_cfg = exp.modal
 miles_cfg = exp.miles
-
-
-def _resume_point() -> ResumePoint | None:
-    if payload := os.environ.get(RESUME_POINT_ENV):
-        return ResumePoint.from_json(payload)
-    return None
-
-
-def _rollout_boot_checkpoint() -> str:
-    point = _resume_point()
-    return point.rollout_checkpoint if point is not None else miles_cfg.hf_checkpoint
 
 
 # Minted once for a run and retained across resume. The same identity scopes the
@@ -115,7 +101,6 @@ image = trainer_image.build_trainer_image(
     image_run_commands=getattr(exp, "TRAINER_IMAGE_RUN_COMMANDS", ()),
     extra_env=STORE_DEPLOYMENT.image_environment,
 )
-# Server containers re-import this module, so persist this attempt's resume point.
 server_image = serving_image.build_serving_image(
     hf_cache_path=str(HF_CACHE_PATH),
     experiment=EXPERIMENT,
@@ -123,7 +108,6 @@ server_image = serving_image.build_serving_image(
     extra_packages=STORE_DEPLOYMENT.extra_packages,
     extra_env={
         **(getattr(exp, "SGLANG_SERVER_ENV", None) or {}),
-        RESUME_POINT_ENV: os.environ.get(RESUME_POINT_ENV, ""),
         **STORE_DEPLOYMENT.image_environment,
     },
     runtime=getattr(exp, "SGLANG_RUNTIME", serving_image.DEFAULT_SGLANG_RUNTIME),
@@ -172,7 +156,7 @@ train_volumes = {
 app = modal.App(APP_NAME)
 
 SGLANG_SERVER_ARGS = {
-    "--served-model-name": _rollout_boot_checkpoint(),
+    "--served-model-name": miles_cfg.hf_checkpoint,
     **(
         {}
         if "--cuda-graph-config" in exp.SGLANG_SERVER_ARGS
@@ -225,19 +209,8 @@ class Server:
     def startup(self) -> None:
         STORE_DEPLOYMENT.bootstrap_credentials()
         store_config = STORE_DEPLOYMENT.hook_config(APP_NAME)
-        resume_point = _resume_point()
-        if resume_point is not None:
-            wait_for_restored_pointer(
-                run_volume,
-                resume_point,
-                timeout=SERVER_STARTUP_TIMEOUT,
-            )
-        model_name = (
-            resume_point.rollout_checkpoint
-            if resume_point is not None
-            else miles_cfg.hf_checkpoint
-        )
-        boot_version = resume_point.version if resume_point is not None else 0
+        model_name = miles_cfg.hf_checkpoint
+        boot_version = 0
         save_hf = getattr(miles_cfg, "save_hf", None)
         # TODO: support larger update intervals once saved checkpoints expose the
         # exact published weight version instead of only Miles' rollout ID.
@@ -253,7 +226,10 @@ class Server:
                 raise ValueError("save_hf must be a run-relative path")
 
             # Read complete HF exports and the published pointer from one Volume
-            # snapshot. A save ahead of latest is not eligible yet.
+            # snapshot. A save ahead of latest is not eligible yet — including
+            # the abandoned suffix of a resume whose restore has not landed;
+            # a replica that raced it exits on the restored pointer and is
+            # replaced.
             run_volume.reload()
             store = storage.create_store(
                 store_config["stitch_store_backend"],
@@ -278,7 +254,7 @@ class Server:
                     ):
                         continue
                     saved_version = export_version(saved_rollout_id)
-                    if boot_version <= saved_version <= latest.version:
+                    if saved_version <= latest.version:
                         checkpoints.append((saved_version, marker.parent))
                 if checkpoints:
                     saved_version, checkpoint = max(checkpoints)
