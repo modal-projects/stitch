@@ -3,7 +3,35 @@
 
 from __future__ import annotations
 
-from stitch.pools.modal_flash import _host, _normalize_url, _replica_urls
+from stitch.pools.base import Pool
+from stitch.pools.modal_flash import (
+    ModalFlashPool,
+    _host,
+    _normalize_url,
+    _replica_urls,
+)
+
+
+def test_replica_request_routes_through_the_pool_url() -> None:
+    pool = ModalFlashPool("app", "Server")
+    pool._upstream_url_cache = "https://pool.modal.run"
+
+    url, headers = pool.replica_request(
+        "https://h-ta-123.w.modal.host/", "/server_info"
+    )
+
+    assert url == "https://pool.modal.run/server_info"
+    assert headers == {"modal-flash-upstream": "h-ta-123.w.modal.host:443"}
+
+    _url, headers = pool.replica_request("https://h-ta-123.w.modal.host:8443", "/wake")
+    assert headers == {"modal-flash-upstream": "h-ta-123.w.modal.host:8443"}
+
+
+def test_base_pool_replica_request_is_direct() -> None:
+    url, headers = Pool().replica_request("https://replica:8000/", "/wake")
+
+    assert url == "https://replica:8000/wake"
+    assert headers == {}
 
 
 def test_replica_urls_filters_hostless_and_normalizes() -> None:

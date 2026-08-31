@@ -27,11 +27,27 @@ class ModalFlashPool(Pool):
     def __init__(self, app_name: str, cls_name: str) -> None:
         self.app_name = app_name
         self.cls_name = cls_name
+        self._upstream_url_cache: str | None = None
 
     def _server(self):
         import modal
 
         return modal.Server.from_name(self.app_name, self.cls_name)
+
+    def _upstream_url(self) -> str:
+        """The upstream class's own Flash URL, not an LB override. Stable for a
+        deployed app, so it is cached for the client's lifetime."""
+        if self._upstream_url_cache is None:
+            self._upstream_url_cache = self._require_gateway(self._server().get_url())
+        return self._upstream_url_cache
+
+    def replica_request(self, replica: str, path: str) -> tuple[str, dict[str, str]]:
+        # Direct container URLs sit behind relay auth, so a replica is addressed
+        # through the pool URL. The edge keys upstreams by host:port.
+        host = replica.split("://", 1)[-1].rstrip("/")
+        if ":" not in host:
+            host = f"{host}:443"
+        return f"{self._upstream_url()}{path}", {"modal-flash-upstream": host}
 
     def gateway_url(self) -> str:
         return self._require_gateway(self._server().get_url())
@@ -64,7 +80,8 @@ class ModalFlashPool(Pool):
 
             def wake_one(url: str) -> None:
                 try:
-                    client.post(f"{url}/wake").raise_for_status()
+                    target, headers = self.replica_request(url, "/wake")
+                    client.post(target, headers=headers).raise_for_status()
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         "failed to wake %s for %s: %s", url, ref.identity, exc
@@ -82,7 +99,10 @@ class ModalFlashPool(Pool):
 
             async def wake_one(url: str) -> None:
                 try:
-                    (await client.post(f"{url}/wake")).raise_for_status()
+                    target, headers = await asyncio.to_thread(
+                        self.replica_request, url, "/wake"
+                    )
+                    (await client.post(target, headers=headers)).raise_for_status()
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         "failed to wake %s for %s: %s", url, ref.identity, exc

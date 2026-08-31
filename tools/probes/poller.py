@@ -50,17 +50,23 @@ async def poll(
                     replicas = await asyncio.to_thread(pool.discover_replicas)
                     last_discover = time.time()
                 for row in await asyncio.gather(
-                    *(_probe(client, url) for url in replicas)
+                    *(_probe(client, pool, url) for url in replicas)
                 ):
                     f.write(json.dumps(row) + "\n")
                 f.flush()
                 await asyncio.sleep(interval)
 
 
-async def _probe(client: Any, url: str) -> dict[str, Any]:
+async def _probe(client: Any, pool: Any, url: str) -> dict[str, Any]:
     row: dict[str, Any] = {"t": time.time(), "replica": url}
     try:
-        row["info"] = (await client.get(f"{url.rstrip('/')}/server_info")).json()
+        if pool is not None:
+            target, headers = await asyncio.to_thread(
+                pool.replica_request, url, "/server_info"
+            )
+        else:
+            target, headers = f"{url.rstrip('/')}/server_info", {}
+        row["info"] = (await client.get(target, headers=headers)).json()
     except Exception as exc:  # noqa: BLE001 — an unreachable replica is itself a data point
         row["error"] = str(exc)[:200]
     return row
