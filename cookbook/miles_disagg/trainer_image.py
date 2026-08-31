@@ -31,6 +31,8 @@ MILES_RUNTIME_PATCHES = (
     "/root/cookbook/miles_disagg/patches/miles-stable-weight-versions.patch",
     # resumed_external baseline capture tolerates 0-dim tensors (qwen3moe).
     "/root/cookbook/miles_disagg/patches/miles-seed-baseline-scalars.patch",
+    # single_turn generate honors an external rollout endpoint.
+    "/root/cookbook/miles_disagg/patches/miles-single-turn-external-endpoint.patch",
 )
 # Source-only megatron.training must be on PYTHONPATH.
 MEGATRON_PATH = "/root/Megatron-LM"
