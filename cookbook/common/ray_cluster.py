@@ -86,6 +86,37 @@ def start_ray_head(my_ip: str, n_nodes: int, *, ray_port: int) -> None:
     raise RuntimeError(f"Timed out waiting for all {n_nodes} Ray nodes to join")
 
 
+def hold_worker_node(
+    master_addr: str,
+    *,
+    ray_port: int,
+    probe_interval: float = 15.0,
+    grace_probes: int = 4,
+) -> None:
+    """Hold a worker container while its Ray head is reachable.
+
+    Modal's clustered gangs deliver the caller's result from rank 0 alone, but a
+    worker that returns early exits its single-use container and takes its Ray
+    node with it — and a worker that outlives rank 0's success is not reaped
+    promptly (measured in tools/probes/gang_lifecycle_spike.py). Blocking until
+    the head's GCS port stops answering ties the worker's lifetime to the
+    attempt: when rank 0's container exits, the probe fails and the worker
+    returns so its own container can exit too.
+    """
+    misses = 0
+    while misses < grace_probes:
+        time.sleep(probe_interval)
+        try:
+            with socket.create_connection((master_addr, ray_port), timeout=5):
+                misses = 0
+        except OSError:
+            misses += 1
+    print(
+        f"Ray head {master_addr}:{ray_port} is gone; releasing this worker node",
+        flush=True,
+    )
+
+
 def start_ray_worker(my_ip: str, master_addr: str, *, ray_port: int) -> None:
     subprocess.run(
         [
