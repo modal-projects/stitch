@@ -57,3 +57,39 @@ def deploy_pool_and_spawn(run: Any) -> Any:
         replica_floor=run.modal_cfg.rollout_min_containers,
     )
     return run.spawn_train()
+
+
+def spawn_on_pool(run: Any) -> Any:
+    """Spawn a run's trainer on its already-deployed pool. This path never
+    deploys — a missing pool fails fast with the deploy command instead of
+    silently replacing a live one."""
+    from stitch.pools.modal_flash_lb_temp import ModalFlashLBPool
+    from stitch.service import await_pool_ready
+
+    if not pool_reachable(run):
+        raise SystemExit(
+            f"No deployed pool for {run.APP_NAME!r}. Deploy it first:\n"
+            f"  EXPERIMENT_CONFIG={os.environ.get('EXPERIMENT_CONFIG', '<experiment>')} "
+            f"RUN_ID={os.environ['RUN_ID']} "
+            f"uv run --extra modal modal deploy -m {run.__name__}"
+        )
+    await_pool_ready(
+        ModalFlashLBPool(run.APP_NAME, "Server"),
+        replica_floor=run.modal_cfg.rollout_min_containers,
+    )
+    return run.spawn_train()
+
+
+def pool_reachable(run: Any) -> bool:
+    """Whether the run's pool gateway resolves; a stopped or never-deployed app
+    does not. Only those two outcomes count as unreachable — an unexpected
+    error propagates rather than second-guess a live pool."""
+    from modal.exception import NotFoundError
+
+    from stitch.pools.modal_flash_lb_temp import ModalFlashLBPool
+
+    try:
+        ModalFlashLBPool(run.APP_NAME, "Server").gateway_url()
+    except (NotFoundError, RuntimeError):
+        return False
+    return True

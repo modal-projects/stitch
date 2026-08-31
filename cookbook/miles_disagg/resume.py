@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from io import BytesIO
 from pathlib import PurePosixPath
 from typing import Any
@@ -12,7 +12,6 @@ from typing import Any
 from cookbook.common.constants import STITCH_PATH
 from stitch.types import WEIGHT_PREFIX, VersionRef
 
-RESUME_POINT_ENV = "STITCH_RESUME_POINT"
 TRAINER_CALL_FILE = "trainer_call_id"
 
 
@@ -34,20 +33,6 @@ class ResumePoint:
     trainer_checkpoint: str
     rollout_checkpoint: str
 
-    def to_json(self) -> str:
-        return json.dumps(asdict(self), separators=(",", ":"), sort_keys=True)
-
-    @classmethod
-    def from_json(cls, value: str) -> ResumePoint:
-        data = json.loads(value)
-        return cls(
-            version=int(data["version"]),
-            iteration=int(data["iteration"]),
-            source_run_id=str(data["source_run_id"]),
-            trainer_checkpoint=str(data["trainer_checkpoint"]),
-            rollout_checkpoint=str(data["rollout_checkpoint"]),
-        )
-
 
 def export_version(iteration: int) -> int:
     """Return the published weight version of the export saved at ``iteration``.
@@ -60,15 +45,15 @@ def export_version(iteration: int) -> int:
     return iteration + 1
 
 
-def validate_auto_resume_config(cfg: Any) -> None:
-    """Require an explicit, resumable checkpoint policy before automatic resume."""
+def validate_resumable_config(cfg: Any) -> None:
+    """Require the checkpoint policy a trainer retry needs to resume a run."""
     validate_resume_config(cfg)
     if (interval := getattr(cfg, "save_interval", None)) is None or int(interval) <= 0:
-        raise ValueError("--auto-resume requires a positive save_interval")
+        raise ValueError("resume requires a positive save_interval")
     if getattr(cfg, "no_save_optim", False):
-        raise ValueError("--auto-resume requires optimizer checkpointing")
+        raise ValueError("resume requires optimizer checkpointing")
     if getattr(cfg, "no_save_rng", False):
-        raise ValueError("--auto-resume requires RNG checkpointing")
+        raise ValueError("resume requires RNG checkpointing")
 
 
 def validate_resume_config(cfg: Any) -> None:

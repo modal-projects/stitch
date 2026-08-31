@@ -567,7 +567,8 @@ def spawn_train() -> Any:
 @app.local_entrypoint()
 def launch_train() -> None:
     """Spawn training on a pool that's already up for this RUN. ``cookbook.miles_disagg.launch``
-    deploys + spawns in one command; use this only to re-spawn against a running pool."""
+    deploys + spawns in one command, and its ``--resume-from`` cancels the live trainer call
+    before re-spawning; this raw entrypoint does neither."""
     from modal.exception import NotFoundError
 
     try:
