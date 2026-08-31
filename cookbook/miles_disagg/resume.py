@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-import time
 from dataclasses import asdict, dataclass
 from io import BytesIO
 from pathlib import PurePosixPath
@@ -244,40 +243,6 @@ def restore_resume_point(volume: Any, point: ResumePoint) -> VersionRef:
             f"{point.source_run_id}/checkpoints/latest_checkpointed_iteration.txt",
         )
     return target
-
-
-def wait_for_restored_pointer(
-    volume: Any,
-    point: ResumePoint,
-    *,
-    timeout: float,
-) -> VersionRef:
-    """Block engine startup until the launcher has restored this run's pointer."""
-    target = VersionRef(point.source_run_id, point.version)
-    pointer_path = f"{point.source_run_id}/latest"
-    deadline = time.monotonic() + timeout
-    current = None
-    while time.monotonic() < deadline:
-        volume.reload()
-        try:
-            current = VersionRef.parse(
-                _read_volume_file(volume, pointer_path).decode().strip()
-            )
-        except FileNotFoundError:
-            current = None
-        if current == target:
-            return target
-        if current is not None and (
-            current.run_id != target.run_id or current.version < target.version
-        ):
-            raise ValueError(
-                f"cannot boot {target.identity!r} from {current.identity!r}"
-            )
-        time.sleep(1)
-    actual = current.identity if current is not None else "<unset>"
-    raise TimeoutError(
-        f"latest was not restored to {target.identity}; observed {actual}"
-    )
 
 
 def _validate_save_hf_template(value: str | None) -> str:
