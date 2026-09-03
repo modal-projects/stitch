@@ -84,15 +84,21 @@ def _cancel_recorded_trainer_call(run: Any) -> None:
     call = modal.FunctionCall.from_id(call_id)
     try:
         call.cancel(terminate_containers=True)
-    except Exception as exc:  # noqa: BLE001 — a long-gone call is fine
+        print(f"Cancelled trainer call {call_id}; waiting for it to stop", flush=True)
+    except Exception as exc:  # noqa: BLE001
+        # A live call refuses cancellation during a blip exactly as a long-gone
+        # one does, and only the settle check below tells them apart.
         print(f"note: could not cancel trainer call {call_id}: {exc}", flush=True)
-        return
-    print(f"Cancelled trainer call {call_id}; waiting for it to stop", flush=True)
     # A cancelled call yields no output through .get(); only the call graph
     # shows its inputs settling.
     deadline = time.monotonic() + _CANCEL_TIMEOUT
     while time.monotonic() < deadline:
-        if all(_input_settled(node) for node in call.get_call_graph()):
+        try:
+            graph = call.get_call_graph()
+        except Exception as exc:  # noqa: BLE001 — a forgotten call has stopped
+            print(f"note: trainer call {call_id} is gone ({exc})", flush=True)
+            return
+        if all(_input_settled(node) for node in graph):
             return
         time.sleep(10)
     raise SystemExit(

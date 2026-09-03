@@ -171,3 +171,49 @@ def test_cancel_is_a_noop_before_the_first_spawn(monkeypatch) -> None:
     monkeypatch.setattr(launch, "read_trainer_call", lambda _volume, _run_id: None)
 
     launch._cancel_recorded_trainer_call(run)  # nothing recorded: no cancel
+
+
+def test_cancel_failure_still_waits_for_the_call_to_settle(monkeypatch) -> None:
+    from modal.types import InputStatus
+
+    events: list[str] = []
+    graphs = iter(
+        [
+            [SimpleNamespace(status=InputStatus.PENDING, children=[])],
+            [SimpleNamespace(status=InputStatus.TERMINATED, children=[])],
+        ]
+    )
+
+    class _Call:
+        def cancel(self, *, terminate_containers: bool) -> None:
+            raise RuntimeError("control plane blip")
+
+        def get_call_graph(self):
+            events.append("graph")
+            return next(graphs)
+
+    run = SimpleNamespace(exp=SimpleNamespace(EXPERIMENT_VOLUME_NAME="runs"))
+    monkeypatch.setenv("RUN_ID", "old-run")
+    monkeypatch.setattr(launch.time, "sleep", lambda _s: None)
+    _patch_modal_call(monkeypatch, _Call())
+    monkeypatch.setattr(launch, "read_trainer_call", lambda _volume, _run_id: "fc-old")
+
+    launch._cancel_recorded_trainer_call(run)
+
+    assert events == ["graph", "graph"]
+
+
+def test_cancel_returns_once_the_call_is_forgotten(monkeypatch) -> None:
+    class _Call:
+        def cancel(self, *, terminate_containers: bool) -> None:
+            raise RuntimeError("no such call")
+
+        def get_call_graph(self):
+            raise RuntimeError("no such call")
+
+    run = SimpleNamespace(exp=SimpleNamespace(EXPERIMENT_VOLUME_NAME="runs"))
+    monkeypatch.setenv("RUN_ID", "old-run")
+    _patch_modal_call(monkeypatch, _Call())
+    monkeypatch.setattr(launch, "read_trainer_call", lambda _volume, _run_id: "fc-old")
+
+    launch._cancel_recorded_trainer_call(run)  # a forgotten call has stopped
