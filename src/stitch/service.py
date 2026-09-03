@@ -24,7 +24,7 @@ from stitch.engines.base import Engine
 from stitch.pools.base import Pool
 from stitch.stores.base import Store
 from stitch.sync import AdmissionGate, CommitMode, ConstraintUnmet, Reconciler
-from stitch.types import PoolState, ReplicaState, VersionConstraint
+from stitch.types import PoolState, ReplicaState, VersionConstraint, VersionRef
 from stitch.watchdog import (
     EngineWatchdog,
     SidecarWatchdog,
@@ -360,6 +360,7 @@ def await_pool_ready(
     replica_floor: int,
     timeout: float = 60 * 60,
     interval: float = 30.0,
+    latest: VersionRef | None = None,
 ) -> bool:
     """Block until the configured fraction of ``replica_floor`` reports routing readiness.
 
@@ -368,10 +369,24 @@ def await_pool_ready(
     for a large rollout launch. Once the floor is met, the gateway is checked as well so the
     trainer sees a working traffic path. Timeout is terminal so training never starts below the
     requested floor. This launch-script helper is synchronous, unlike :func:`readiness`.
+
+    ``latest`` is the pointer the caller has just claimed: a replica applied past it on
+    the same run is exiting for replacement, so it is not capacity even while its own
+    reconcile pass has yet to notice the rewind.
     """
     if replica_floor < 1:
         raise ValueError(f"replica_floor must be positive, got {replica_floor}")
     min_ready = ceil(POOL_READY_FRACTION * replica_floor)
+
+    def is_capacity(replica: ReplicaState) -> bool:
+        if (
+            latest is not None
+            and replica.applied is not None
+            and replica.applied.run_id == latest.run_id
+            and replica.applied.version > latest.version
+        ):
+            return False
+        return replica.ready
 
     async def wait() -> bool:
         import httpx
@@ -380,18 +395,18 @@ def await_pool_ready(
         last_counts: tuple[int, int] | None = None
         while time.monotonic() < deadline:
             state = await readiness(pool)
-            counts = (
-                sum(replica.ready for replica in state.replicas),
+            tally = (
+                sum(is_capacity(replica) for replica in state.replicas),
                 len(state.replicas),
             )
-            if counts != last_counts:
+            if tally != last_counts:
                 print(
-                    f"Rollout fleet readiness: {counts[0]}/{min_ready} required "
-                    f"({counts[1]} discovered)",
+                    f"Rollout fleet readiness: {tally[0]}/{min_ready} required "
+                    f"({tally[1]} discovered)",
                     flush=True,
                 )
-                last_counts = counts
-            if counts[0] >= min_ready:
+                last_counts = tally
+            if tally[0] >= min_ready:
                 try:
                     gateway = (await pool.gateway_url_async()).rstrip("/")
                     async with httpx.AsyncClient(trust_env=False) as client:

@@ -489,11 +489,11 @@ class Trainer:
             ),
             boot_version=boot_version,
         )
-        # After a restore, replicas ahead of the claimed pointer exit on its
-        # wake and are replaced, so the ready floor counts converged capacity.
+        # Replicas ahead of the claimed pointer are exiting, so they are not floor.
         await_pool_ready(
             ModalFlashLBPool(APP_NAME, "Server"),
             replica_floor=modal_cfg.rollout_min_containers,
+            latest=VersionRef(RUN_ID, boot_version),
         )
 
         resume_log = (
