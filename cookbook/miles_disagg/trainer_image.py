@@ -28,6 +28,7 @@ MILES_ROOT = "/root/miles"
 # the pin advances.
 MILES_RUNTIME_PATCHES = (
     "/root/cookbook/miles_disagg/patches/miles-stable-weight-versions.patch",
+    "/root/cookbook/miles_disagg/patches/miles-seed-baseline-scalars.patch",
 )
 # Source-only megatron.training must be on PYTHONPATH.
 MEGATRON_PATH = "/root/Megatron-LM"
