@@ -27,7 +27,6 @@ import shutil
 import subprocess
 import tempfile
 from datetime import UTC, datetime
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
@@ -51,7 +50,7 @@ from cookbook.common.constants import (
 from cookbook.miles_disagg import trainer_image
 from cookbook.miles_disagg.config import YAML_CONFIG_FIELDS, MilesConfig
 from cookbook.miles_disagg.resume import (
-    export_version,
+    newest_complete_export,
     prepare_attempt,
     record_trainer_call,
 )
@@ -209,54 +208,7 @@ class Server:
     def startup(self) -> None:
         STORE_DEPLOYMENT.bootstrap_credentials()
         store_config = STORE_DEPLOYMENT.hook_config(APP_NAME)
-        model_name = miles_cfg.hf_checkpoint
-        boot_version = 0
-        save_hf = getattr(miles_cfg, "save_hf", None)
-        # TODO: support larger update intervals once saved checkpoints expose the
-        # exact published weight version instead of only Miles' rollout ID.
-        update_every_step = getattr(miles_cfg, "update_weights_interval", 1) == 1
-        if (
-            STORE_DEPLOYMENT.backend == storage.MODAL_VOLUME
-            and save_hf
-            and getattr(miles_cfg, "save_interval", None) is not None
-            and update_every_step
-        ):
-            relative_path = Path(save_hf.format(rollout_id=0))
-            if relative_path.is_absolute() or ".." in relative_path.parts:
-                raise ValueError("save_hf must be a run-relative path")
-
-            # Read complete HF exports and the published pointer from one Volume
-            # snapshot. A save ahead of latest is not eligible yet.
-            run_volume.reload()
-            store = storage.create_store(
-                store_config["stitch_store_backend"],
-                local_root=RUN_DIR,
-                run_id=RUN_ID,
-                volume_name=exp.EXPERIMENT_VOLUME_NAME,
-            )
-            latest = store.read_pointer()
-            if latest is not None:
-                if latest.run_id != RUN_ID:
-                    raise ValueError(
-                        f"latest belongs to run {latest.run_id!r}, not {RUN_ID!r}"
-                    )
-                checkpoints = []
-                for marker in (RUN_DIR / relative_path.parent).glob("*/.complete"):
-                    try:
-                        saved_rollout_id = VersionRef.parse(marker.parent.name).version
-                    except ValueError:
-                        continue
-                    if marker.parent != RUN_DIR / save_hf.format(
-                        rollout_id=saved_rollout_id
-                    ):
-                        continue
-                    saved_version = export_version(saved_rollout_id)
-                    if saved_version <= latest.version:
-                        checkpoints.append((saved_version, marker.parent))
-                if checkpoints:
-                    saved_version, checkpoint = max(checkpoints)
-                    model_name = str(checkpoint)
-                    boot_version = saved_version
+        model_name, boot_version = _boot_checkpoint(store_config)
         server.serve_startup(
             self,
             model_name=model_name,
@@ -279,6 +231,39 @@ class Server:
     @modal.exit()
     def stop(self) -> None:
         server.serve_stop(self)
+
+
+def _boot_checkpoint(store_config: dict) -> tuple[str, int]:
+    """The checkpoint a replica boots and the version it serves it as: the run's
+    newest complete export at or below ``latest``, else the base checkpoint."""
+    # TODO: support larger update intervals once saved checkpoints expose the
+    # exact published weight version instead of only Miles' rollout ID.
+    if (
+        STORE_DEPLOYMENT.backend != storage.MODAL_VOLUME
+        or not (save_hf := getattr(miles_cfg, "save_hf", None))
+        or getattr(miles_cfg, "save_interval", None) is None
+        or getattr(miles_cfg, "update_weights_interval", 1) != 1
+    ):
+        return miles_cfg.hf_checkpoint, 0
+
+    # Read the exports and the pointer from one Volume snapshot; a save ahead of
+    # latest is not eligible yet.
+    run_volume.reload()
+    store = storage.create_store(
+        store_config["stitch_store_backend"],
+        local_root=RUN_DIR,
+        run_id=RUN_ID,
+        volume_name=exp.EXPERIMENT_VOLUME_NAME,
+    )
+    latest = store.read_pointer()
+    if latest is None:
+        return miles_cfg.hf_checkpoint, 0
+    if latest.run_id != RUN_ID:
+        raise ValueError(f"latest belongs to run {latest.run_id!r}, not {RUN_ID!r}")
+    export = newest_complete_export(
+        RUN_DIR, save_hf=save_hf, latest_version=latest.version
+    )
+    return (str(export[1]), export[0]) if export else (miles_cfg.hf_checkpoint, 0)
 
 
 # ── Session-routing LB (cookbook/common/router.py) ─────────────────────────────

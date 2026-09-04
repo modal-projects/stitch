@@ -7,6 +7,7 @@ import pytest
 from cookbook.miles_disagg.resume import (
     ResumePoint,
     export_version,
+    newest_complete_export,
     prepare_attempt,
     read_trainer_call,
     record_trainer_call,
@@ -310,3 +311,24 @@ def test_trainer_call_record_round_trip() -> None:
     assert read_trainer_call(volume, "old") == "fc-123"
     record_trainer_call(volume, "old", "fc-456")  # a newer spawn supersedes
     assert read_trainer_call(volume, "old") == "fc-456"
+
+
+def test_newest_complete_export_picks_the_newest_eligible(tmp_path) -> None:
+    for iteration in (7, 19, 39):
+        export = tmp_path / _Config.save_hf.format(rollout_id=iteration)
+        export.mkdir(parents=True)
+        (export / ".complete").touch()
+    (tmp_path / "hf_checkpoints/weight_v000059").mkdir()  # saved, not complete
+    (tmp_path / "hf_checkpoints/scratch").mkdir()  # not an export at all
+
+    # v40 (iteration 39) is published ahead of latest, so v20 is the boot point.
+    assert newest_complete_export(
+        tmp_path, save_hf=_Config.save_hf, latest_version=25
+    ) == (20, tmp_path / "hf_checkpoints/weight_v000019")
+
+
+def test_newest_complete_export_is_none_before_the_first_save(tmp_path) -> None:
+    assert (
+        newest_complete_export(tmp_path, save_hf=_Config.save_hf, latest_version=9)
+        is None
+    )

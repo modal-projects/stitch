@@ -6,7 +6,7 @@ import json
 import re
 from dataclasses import dataclass
 from io import BytesIO
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from cookbook.common.constants import STITCH_PATH
@@ -228,6 +228,29 @@ def restore_resume_point(volume: Any, point: ResumePoint) -> VersionRef:
             f"{point.source_run_id}/checkpoints/latest_checkpointed_iteration.txt",
         )
     return target
+
+
+def newest_complete_export(
+    run_dir: Path, *, save_hf: str, latest_version: int
+) -> tuple[int, Path] | None:
+    """The newest complete export at or below ``latest_version``, from a mounted
+    run directory — the checkpoint a booting replica should load.
+
+    Returns its published version and directory, or None before the first save.
+    """
+    exports = []
+    export_root = run_dir / PurePosixPath(_validate_save_hf_template(save_hf)).parent
+    for marker in export_root.glob("*/.complete"):
+        export = marker.parent
+        try:
+            iteration = VersionRef.parse(export.name).version
+        except ValueError:
+            continue
+        if export != run_dir / save_hf.format(rollout_id=iteration):
+            continue
+        if (version := export_version(iteration)) <= latest_version:
+            exports.append((version, export))
+    return max(exports) if exports else None
 
 
 def _validate_save_hf_template(value: str | None) -> str:
