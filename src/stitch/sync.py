@@ -440,6 +440,12 @@ class Reconciler:
             return True
         if self.applied is None or pointer.run_id != self.applied.run_id:
             await self._switch_run(pointer.run_id)
+        if pointer.version < self.applied.version:
+            raise UnrecoverableSidecarError(
+                f"pointer {pointer.identity} is behind applied "
+                f"{self.applied.identity}: the run was restored and this "
+                "replica's suffix is abandoned; exiting for replacement"
+            )
         if not self._behind(pointer):
             return True
 

@@ -6,13 +6,24 @@ import pytest
 
 from cookbook.miles_disagg.resume import (
     ResumePoint,
+    export_version,
+    newest_complete_export,
+    prepare_attempt,
+    read_trainer_call,
+    record_trainer_call,
     resolve_resume_point,
+    restore_boot_pointer,
     restore_resume_point,
-    saved_checkpoint_version,
-    validate_auto_resume_config,
+    validate_resumable_config,
     validate_resume_config,
-    wait_for_restored_pointer,
 )
+
+_INDEX = "model.safetensors.index.json"
+
+
+def _published(version: int) -> dict[str, bytes]:
+    name = f"old/updates/weight_v{version:06d}/{_INDEX}"
+    return {name: b'{"metadata": {"version": "%06d"}}' % version}
 
 
 class _Volume:
@@ -62,15 +73,9 @@ class _Config:
     no_save_optim = False
 
 
-@pytest.mark.parametrize(
-    ("rollout_id", "resumed", "version"),
-    [
-        (19, False, 20),
-        (120, True, 120),
-    ],
-)
-def test_saved_checkpoint_version(rollout_id: int, resumed: bool, version: int) -> None:
-    assert saved_checkpoint_version(rollout_id, resumed=resumed) == version
+@pytest.mark.parametrize(("iteration", "version"), [(0, 1), (19, 20), (119, 120)])
+def test_export_version(iteration: int, version: int) -> None:
+    assert export_version(iteration) == version
 
 
 def test_resolve_resume_point_pairs_megatron_and_hf_checkpoints() -> None:
@@ -79,13 +84,15 @@ def test_resolve_resume_point_pairs_megatron_and_hf_checkpoints() -> None:
             "old/checkpoints/latest_checkpointed_iteration.txt": b"119\n",
             "old/checkpoints/iter_0000119/state": b"checkpoint",
             "old/hf_checkpoints/weight_v000119/.complete": b"",
+            **_published(120),
         }
     )
 
     assert resolve_resume_point(
         volume, source_run_id="old", save_hf=_Config.save_hf
     ) == ResumePoint(
-        version=119,
+        version=120,
+        iteration=119,
         source_run_id="old",
         trainer_checkpoint="/stitch/old/checkpoints",
         rollout_checkpoint="/stitch/old/hf_checkpoints/weight_v000119",
@@ -99,17 +106,67 @@ def test_resolve_resume_point_falls_back_to_previous_complete_pair() -> None:
             "old/checkpoints/iter_0000099/state": b"checkpoint",
             "old/checkpoints/iter_0000119/state": b"checkpoint",
             "old/hf_checkpoints/weight_v000099/.complete": b"",
+            **_published(100),
         }
     )
 
     assert resolve_resume_point(
         volume, source_run_id="old", save_hf=_Config.save_hf
     ) == ResumePoint(
-        version=99,
+        version=100,
+        iteration=99,
         source_run_id="old",
         trainer_checkpoint="/stitch/old/checkpoints",
         rollout_checkpoint="/stitch/old/hf_checkpoints/weight_v000099",
     )
+
+
+def test_resolve_resume_point_requires_the_exports_publication() -> None:
+    # No publication for iteration 119: the resume point falls back to 99.
+    volume = _Volume(
+        {
+            "old/checkpoints/latest_checkpointed_iteration.txt": b"119\n",
+            "old/checkpoints/iter_0000099/state": b"checkpoint",
+            "old/checkpoints/iter_0000119/state": b"checkpoint",
+            "old/hf_checkpoints/weight_v000099/.complete": b"",
+            "old/hf_checkpoints/weight_v000119/.complete": b"",
+            **_published(100),
+        }
+    )
+
+    resolved = resolve_resume_point(
+        volume, source_run_id="old", save_hf=_Config.save_hf
+    )
+
+    assert (resolved.version, resolved.iteration) == (100, 99)
+
+
+def test_resolve_resume_point_rejects_a_mislabeled_publication() -> None:
+    volume = _Volume(
+        {
+            "old/checkpoints/latest_checkpointed_iteration.txt": b"119\n",
+            "old/checkpoints/iter_0000119/state": b"checkpoint",
+            "old/hf_checkpoints/weight_v000119/.complete": b"",
+            f"old/updates/weight_v000120/{_INDEX}": b'{"metadata": {"version": "0007"}}',
+        }
+    )
+
+    with pytest.raises(ValueError, match="identifies v7, not v120"):
+        resolve_resume_point(volume, source_run_id="old", save_hf=_Config.save_hf)
+
+
+def test_resolve_resume_point_skips_iteration_zero() -> None:
+    volume = _Volume(
+        {
+            "old/checkpoints/latest_checkpointed_iteration.txt": b"0\n",
+            "old/checkpoints/iter_0000000/state": b"checkpoint",
+            "old/hf_checkpoints/weight_v000000/.complete": b"",
+            **_published(1),
+        }
+    )
+
+    with pytest.raises(ValueError, match="no complete Megatron/HF checkpoint pair"):
+        resolve_resume_point(volume, source_run_id="old", save_hf=_Config.save_hf)
 
 
 def test_resolve_resume_point_requires_a_complete_checkpoint_pair() -> None:
@@ -141,12 +198,12 @@ def test_resolve_resume_point_rejects_path_like_run_id() -> None:
         ("no_save_rng", True, "RNG checkpointing"),
     ],
 )
-def test_validate_auto_resume_config(field: str, value: object, message: str) -> None:
+def test_validate_resumable_config(field: str, value: object, message: str) -> None:
     cfg = _Config()
     setattr(cfg, field, value)
 
     with pytest.raises(ValueError, match=message):
-        validate_auto_resume_config(cfg)
+        validate_resumable_config(cfg)
 
 
 @pytest.mark.parametrize(
@@ -172,12 +229,6 @@ def test_validate_resume_requires_per_step_weight_updates() -> None:
         validate_resume_config(cfg)
 
 
-def test_resume_point_json_round_trip() -> None:
-    point = ResumePoint(7, "run", "/trainer", "/rollout")
-
-    assert ResumePoint.from_json(point.to_json()) == point
-
-
 def test_restore_resume_point_overwrites_trackers_but_preserves_updates() -> None:
     volume = _Volume(
         {
@@ -186,48 +237,98 @@ def test_restore_resume_point_overwrites_trackers_but_preserves_updates() -> Non
             "run/updates/weight_v000009/old": b"preserved",
         }
     )
-    point = ResumePoint(8, "run", "/trainer", "/rollout")
+    point = ResumePoint(8, 7, "run", "/trainer", "/rollout")
 
     restored = restore_resume_point(volume, point)
 
     assert restored.identity == "run/weight_v000008"
     assert volume.files["run/latest"] == b"run/weight_v000008"
-    assert volume.files["run/checkpoints/latest_checkpointed_iteration.txt"] == b"8"
+    assert volume.files["run/checkpoints/latest_checkpointed_iteration.txt"] == b"7"
     assert volume.files["run/updates/weight_v000009/old"] == b"preserved"
 
 
-def test_restore_resume_point_rejects_a_checkpoint_ahead_of_latest() -> None:
+def test_restore_resume_point_completes_an_interrupted_publish() -> None:
+    # latest one behind the resume point: an interrupted publish, completed here.
     volume = _Volume({"run/latest": b"run/weight_v000007"})
-    point = ResumePoint(8, "run", "/trainer", "/rollout")
+    point = ResumePoint(8, 7, "run", "/trainer", "/rollout")
+
+    assert restore_resume_point(volume, point).identity == "run/weight_v000008"
+    assert volume.files["run/latest"] == b"run/weight_v000008"
+
+
+def test_restore_resume_point_rejects_a_checkpoint_ahead_of_latest() -> None:
+    volume = _Volume({"run/latest": b"run/weight_v000006"})
+    point = ResumePoint(8, 7, "run", "/trainer", "/rollout")
 
     with pytest.raises(ValueError, match="newer than latest"):
         restore_resume_point(volume, point)
 
 
-def test_engine_startup_waits_for_exact_restored_pointer() -> None:
-    volume = _Volume({"run/latest": b"run/weight_v000008"})
-    point = ResumePoint(8, "run", "/trainer", "/rollout")
+def test_prepare_attempt_restores_the_newest_pair() -> None:
+    volume = _Volume(
+        {
+            "old/latest": b"old/weight_v000012",
+            "old/checkpoints/latest_checkpointed_iteration.txt": b"7",
+            "old/checkpoints/iter_0000007/state": b"checkpoint",
+            "old/hf_checkpoints/weight_v000007/.complete": b"",
+            **_published(8),
+        }
+    )
 
-    restored = wait_for_restored_pointer(volume, point, timeout=1)
+    point = prepare_attempt(volume, run_id="old", save_hf=_Config.save_hf)
 
-    assert restored.identity == "run/weight_v000008"
+    assert point is not None and (point.version, point.iteration) == (8, 7)
+    assert volume.files["old/latest"] == b"old/weight_v000008"
+    assert volume.files["old/checkpoints/latest_checkpointed_iteration.txt"] == b"7"
 
 
-def test_engine_startup_does_not_accept_abandoned_suffix(monkeypatch) -> None:
-    volume = _Volume({"run/latest": b"run/weight_v000012"})
-    point = ResumePoint(8, "run", "/trainer", "/rollout")
-    reloads = 0
+def test_prepare_attempt_restarts_from_scratch_before_the_first_pair() -> None:
+    volume = _Volume({"old/latest": b"old/weight_v000003"})
 
-    def reload() -> None:
-        nonlocal reloads
-        reloads += 1
-        if reloads == 2:
-            volume.files["run/latest"] = b"run/weight_v000008"
+    assert prepare_attempt(volume, run_id="old", save_hf=_Config.save_hf) is None
+    assert volume.files["old/latest"] == b"old/weight_v000000"
 
-    volume.reload = reload
-    monkeypatch.setattr("cookbook.miles_disagg.resume.time.sleep", lambda _delay: None)
 
-    restored = wait_for_restored_pointer(volume, point, timeout=1)
+def test_prepare_attempt_is_a_noop_on_a_fresh_run() -> None:
+    volume = _Volume({})
 
-    assert restored.identity == "run/weight_v000008"
-    assert reloads == 2
+    assert prepare_attempt(volume, run_id="old", save_hf=_Config.save_hf) is None
+    assert volume.files == {}
+
+
+def test_restore_boot_pointer_rejects_a_foreign_run() -> None:
+    volume = _Volume({"old/latest": b"other/weight_v000003"})
+
+    with pytest.raises(ValueError, match="belongs to run"):
+        restore_boot_pointer(volume, "old")
+
+
+def test_trainer_call_record_round_trip() -> None:
+    volume = _Volume({})
+
+    assert read_trainer_call(volume, "old") is None
+    record_trainer_call(volume, "old", "fc-123")
+    assert read_trainer_call(volume, "old") == "fc-123"
+    record_trainer_call(volume, "old", "fc-456")  # a newer spawn supersedes
+    assert read_trainer_call(volume, "old") == "fc-456"
+
+
+def test_newest_complete_export_picks_the_newest_eligible(tmp_path) -> None:
+    for iteration in (7, 19, 39):
+        export = tmp_path / _Config.save_hf.format(rollout_id=iteration)
+        export.mkdir(parents=True)
+        (export / ".complete").touch()
+    (tmp_path / "hf_checkpoints/weight_v000059").mkdir()  # saved, not complete
+    (tmp_path / "hf_checkpoints/scratch").mkdir()  # not an export at all
+
+    # v40 (iteration 39) is published ahead of latest, so v20 is the boot point.
+    assert newest_complete_export(
+        tmp_path, save_hf=_Config.save_hf, latest_version=25
+    ) == (20, tmp_path / "hf_checkpoints/weight_v000019")
+
+
+def test_newest_complete_export_is_none_before_the_first_save(tmp_path) -> None:
+    assert (
+        newest_complete_export(tmp_path, save_hf=_Config.save_hf, latest_version=9)
+        is None
+    )
