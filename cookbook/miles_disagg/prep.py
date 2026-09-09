@@ -139,6 +139,7 @@ def prepare_checkpoints(
                 *carveouts,
             ],
             check=True,
+            env={**os.environ, **getattr(exp, "PREP_ENV", {})},
         )
 
     _staged(served_dir, _build_nvfp4)
@@ -200,7 +201,7 @@ def prepare_torch_dist(
         "raw",
         *shlex.split(exp.modal.torch_dist_convert_extra_args),
     ]
-    env = {**os.environ}
+    env = {**os.environ, **getattr(exp, "PREP_ENV", {})}
     if use_wrapper:
         env["SKIP_RELEASE_RENAME"] = "1"
     print(
