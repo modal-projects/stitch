@@ -33,6 +33,7 @@ MILES_RUNTIME_PATCHES = (
     "/root/cookbook/miles_disagg/patches/miles-disk-delta-hf-save.patch",
     "/root/cookbook/miles_disagg/patches/miles-hf-export-static-tensors.patch",
     "/root/cookbook/miles_disagg/patches/miles-local-checkpoints.patch",
+    "/root/cookbook/miles_disagg/patches/miles-session-startup.patch",
 )
 # Source-only megatron.training must be on PYTHONPATH.
 MEGATRON_PATH = "/root/Megatron-LM"

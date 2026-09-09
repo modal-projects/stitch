@@ -47,6 +47,7 @@ miles = deepcopy(base.miles)
 miles.actor_num_nodes = 32
 miles.global_batch_size = 512
 miles.rollout_batch_size = 64
+miles.session_server_startup_timeout_seconds = 600
 miles.hf_checkpoint = str(ROLLOUT_CHECKPOINT_PATH)
 miles.ref_load = str(TORCH_DIST_CHECKPOINT_PATH)
 miles.wandb_group = "glm5-3-nvfp4-swebench-pro"
