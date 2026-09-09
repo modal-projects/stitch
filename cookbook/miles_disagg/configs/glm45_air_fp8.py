@@ -79,6 +79,8 @@ class _Miles(MilesConfig):
     rollout_num_gpus_per_engine = 4
     rollout_endpoint_url = None  # filled at launch from the pool gateway
     use_miles_router = True
+    use_session_server = "v2"
+    custom_generate_function_path = "cookbook.miles_disagg.rollout.generate"
 
     custom_rollout_request_hook_path = (
         "cookbook.common.hooks.gated_rollout_request_hook"
