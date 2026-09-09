@@ -316,6 +316,47 @@ def test_await_pool_ready_waits_for_replica_threshold(monkeypatch) -> None:
     assert stitch_service.await_pool_ready(Pool(), replica_floor=4, interval=0)
 
 
+def test_await_pool_ready_excludes_replicas_ahead_of_latest(monkeypatch) -> None:
+    latest = VersionRef("run", 3)
+    stale = ReplicaState(ready=True, applied=VersionRef("run", 5))
+    replaced = ReplicaState(ready=True, applied=latest)
+    states = iter(
+        [
+            PoolState([stale, stale, ReplicaState()]),
+            PoolState([replaced, replaced, ReplicaState()]),
+        ]
+    )
+
+    async def pool_readiness(_pool):
+        return next(states)
+
+    async def no_sleep(_seconds):
+        pass
+
+    class Pool:
+        async def gateway_url_async(self):
+            return "http://gateway"
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            pass
+
+        async def get(self, _url, **_kwargs):
+            return SimpleNamespace(status_code=200)
+
+    monkeypatch.setattr(stitch_service, "readiness", pool_readiness)
+    monkeypatch.setattr(stitch_service.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: Client())
+
+    assert stitch_service.await_pool_ready(
+        Pool(), replica_floor=2, interval=0, latest=latest
+    )
+    assert next(states, None) is None  # the stale-but-ready fleet did not pass
+
+
 def test_await_pool_ready_fails_closed_below_threshold(monkeypatch) -> None:
     async def pool_readiness(_pool):
         return PoolState([ReplicaState(ready=True), ReplicaState()])

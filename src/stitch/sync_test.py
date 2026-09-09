@@ -12,7 +12,7 @@ from functools import partial
 import pytest
 
 from stitch.engines.base import Engine
-from stitch.errors import UnrecoverableEngineError
+from stitch.errors import UnrecoverableEngineError, UnrecoverableSidecarError
 from stitch.stores.base import Store
 from stitch.sync import ConstraintUnmet, Reconciler
 from stitch.types import (
@@ -974,6 +974,42 @@ def test_resumed_replica_applies_only_versions_after_saved_checkpoint() -> None:
         assert engine.staged == [VersionRef("resumed", 120)]
         assert engine.committed == [VersionRef("resumed", 120)]
         assert r.applied == VersionRef("resumed", 120)
+
+    _run(go())
+
+
+def test_pointer_rewind_is_terminal() -> None:
+    async def go() -> None:
+        r = Reconciler(
+            store=FakeStore(VersionRef("resumed", 3)),
+            engine=FakeEngine(),
+            run_id="resumed",
+            boot_version=5,
+            reconcile_interval=0,
+        )
+        await r.startup()
+        with pytest.raises(UnrecoverableSidecarError, match="restored"):
+            await r.wait_for_terminal_error()
+        assert not r.ready
+        await r.shutdown()
+
+    _run(go())
+
+
+def test_run_switch_below_foreign_boot_is_terminal() -> None:
+    # This replica's boot checkpoint is foreign to the new run's lineage.
+    async def go() -> None:
+        r = Reconciler(
+            store=FakeStore(VersionRef("successor", 2)),
+            engine=FakeEngine(),
+            run_id="resumed",
+            boot_version=5,
+            reconcile_interval=0,
+        )
+        await r.startup()
+        with pytest.raises(UnrecoverableSidecarError, match="restored"):
+            await r.wait_for_terminal_error()
+        await r.shutdown()
 
     _run(go())
 

@@ -86,6 +86,33 @@ def start_ray_head(my_ip: str, n_nodes: int, *, ray_port: int) -> None:
     raise RuntimeError(f"Timed out waiting for all {n_nodes} Ray nodes to join")
 
 
+def hold_worker_node(
+    master_addr: str,
+    *,
+    ray_port: int,
+    probe_interval: float = 15.0,
+    grace_probes: int = 4,
+) -> None:
+    """Block a worker while its Ray head answers.
+
+    A worker that returns exits its single-use container and takes its Ray node
+    with it, so a worker's lifetime has to be the whole attempt's. Returning
+    once the head has gone lets the container exit on its own instead.
+    """
+    misses = 0
+    while misses < grace_probes:
+        time.sleep(probe_interval)
+        try:
+            with socket.create_connection((master_addr, ray_port), timeout=5):
+                misses = 0
+        except OSError:
+            misses += 1
+    print(
+        f"Ray head {master_addr}:{ray_port} is gone; releasing this worker node",
+        flush=True,
+    )
+
+
 def start_ray_worker(my_ip: str, master_addr: str, *, ray_port: int) -> None:
     subprocess.run(
         [

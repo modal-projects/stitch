@@ -56,7 +56,8 @@ def smoke_flash_pool(
             print(f"Gateway completion: {data}")
             _check_completion(data, weight_version)
             for target in pool.discover_replicas():
-                info = _get_json(f"{target}/server_info", timeout=30)
+                url, headers = pool.replica_request(target, "/server_info")
+                info = _get_json(url, headers=headers, timeout=30)
                 print(f"{target} server_info={info}")
                 _check_version(_applied_version(info), weight_version, target)
             return
@@ -118,8 +119,9 @@ def _completion(model_name: str, expected: int | None = None) -> dict:
     return payload
 
 
-def _get_json(url: str, *, timeout: float) -> dict:
-    with urllib.request.urlopen(url, timeout=timeout) as resp:
+def _get_json(url: str, *, timeout: float, headers: dict | None = None) -> dict:
+    request = urllib.request.Request(url, headers=headers or {})
+    with urllib.request.urlopen(request, timeout=timeout) as resp:
         return json.load(resp)
 
 

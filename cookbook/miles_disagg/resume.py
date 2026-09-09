@@ -4,16 +4,15 @@ from __future__ import annotations
 
 import json
 import re
-import time
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from io import BytesIO
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from cookbook.common.constants import STITCH_PATH
-from stitch.types import VersionRef
+from stitch.types import WEIGHT_PREFIX, VersionRef
 
-RESUME_POINT_ENV = "STITCH_RESUME_POINT"
+TRAINER_CALL_FILE = "trainer_call_id"
 
 
 class ResumePointNotFound(ValueError):
@@ -22,46 +21,34 @@ class ResumePointNotFound(ValueError):
 
 @dataclass(frozen=True)
 class ResumePoint:
-    """One paired trainer/rollout checkpoint produced by a run."""
+    """One paired trainer/rollout checkpoint produced by a run: the export's
+    published ``version`` and the Megatron ``iteration`` that produced it."""
 
     version: int
+    iteration: int
     source_run_id: str
     trainer_checkpoint: str
     rollout_checkpoint: str
 
-    def to_json(self) -> str:
-        return json.dumps(asdict(self), separators=(",", ":"), sort_keys=True)
 
-    @classmethod
-    def from_json(cls, value: str) -> ResumePoint:
-        data = json.loads(value)
-        return cls(
-            version=int(data["version"]),
-            source_run_id=str(data["source_run_id"]),
-            trainer_checkpoint=str(data["trainer_checkpoint"]),
-            rollout_checkpoint=str(data["rollout_checkpoint"]),
-        )
+def export_version(iteration: int) -> int:
+    """The published weight version of the export saved at ``iteration``.
 
-
-def saved_checkpoint_version(rollout_id: int, *, resumed: bool) -> int:
-    """Return the Stitch version stored by a Miles ``save_hf`` checkpoint.
-
-    A fresh trainer starts rollout 0 from Stitch v0, so save N precedes the
-    publication of vN+1. A resumed trainer starts rollout N+1 from Stitch vN,
-    so subsequent save IDs and Stitch versions are equal.
+    A save at N precedes the publication of vN+1, and the runtime Miles patch
+    keeps a resumed counter there, so this holds for a run's whole lifetime.
     """
-    return rollout_id if resumed else rollout_id + 1
+    return iteration + 1
 
 
-def validate_auto_resume_config(cfg: Any) -> None:
-    """Require an explicit, resumable checkpoint policy before automatic resume."""
+def validate_resumable_config(cfg: Any) -> None:
+    """Require the checkpoint policy a trainer retry needs to resume a run."""
     validate_resume_config(cfg)
     if (interval := getattr(cfg, "save_interval", None)) is None or int(interval) <= 0:
-        raise ValueError("--auto-resume requires a positive save_interval")
+        raise ValueError("resume requires a positive save_interval")
     if getattr(cfg, "no_save_optim", False):
-        raise ValueError("--auto-resume requires optimizer checkpointing")
+        raise ValueError("resume requires optimizer checkpointing")
     if getattr(cfg, "no_save_rng", False):
-        raise ValueError("--auto-resume requires RNG checkpointing")
+        raise ValueError("resume requires RNG checkpointing")
 
 
 def validate_resume_config(cfg: Any) -> None:
@@ -96,42 +83,120 @@ def resolve_resume_point(
             f"run {source_run_id!r} has no saved Megatron checkpoint"
         ) from exc
     try:
-        tracked_version = int(tracker_value)
+        tracked_iteration = int(tracker_value)
     except ValueError as exc:
         raise ValueError(
             f"invalid checkpoint tracker {tracker}: {tracker_value!r}"
         ) from exc
-    if tracked_version < 0:
-        raise ValueError(f"invalid checkpoint version {tracked_version} in {tracker}")
+    if tracked_iteration < 0:
+        raise ValueError(
+            f"invalid checkpoint iteration {tracked_iteration} in {tracker}"
+        )
 
-    checkpoint_versions = []
+    iterations = []
     for entry in volume.iterdir(str(checkpoint_root), recursive=False):
         if match := re.fullmatch(r"iter_(\d+)", PurePosixPath(entry.path).name):
-            version = int(match.group(1))
-            if version <= tracked_version:
-                checkpoint_versions.append(version)
+            iteration = int(match.group(1))
+            # A fresh actor also reports iteration 0, so it never resumes.
+            if 0 < iteration <= tracked_iteration:
+                iterations.append(iteration)
 
     save_hf = _validate_save_hf_template(save_hf)
-    for version in sorted(checkpoint_versions, reverse=True):
-        relative_hf = save_hf.format(rollout_id=version)
+    for iteration in sorted(iterations, reverse=True):
+        relative_hf = save_hf.format(rollout_id=iteration)
         hf_root = run_root / relative_hf
         try:
             _read_volume_file(volume, str(hf_root / ".complete"))
         except FileNotFoundError:
             continue
+        # A crash between save and publish falls back one save interval.
+        try:
+            _check_published_version(
+                volume, run_root, version=export_version(iteration)
+            )
+        except FileNotFoundError:
+            continue
         break
     else:
         raise ResumePointNotFound(
-            f"run {source_run_id!r} has no complete Megatron/HF checkpoint pair at or "
-            f"before v{tracked_version}"
+            f"run {source_run_id!r} has no complete Megatron/HF checkpoint pair "
+            f"with a published export at or before iteration {tracked_iteration}"
         )
 
     return ResumePoint(
-        version=version,
+        version=export_version(iteration),
+        iteration=iteration,
         source_run_id=source_run_id,
         trainer_checkpoint=str(STITCH_PATH / checkpoint_root),
         rollout_checkpoint=str(STITCH_PATH / hf_root),
     )
+
+
+def _check_published_version(
+    volume: Any, run_root: PurePosixPath, *, version: int
+) -> None:
+    """Require ``updates/weight_vNNNNNN`` to exist and identify itself as ``version``."""
+    index_path = (
+        run_root
+        / "updates"
+        / f"{WEIGHT_PREFIX}{version:06d}"
+        / "model.safetensors.index.json"
+    )
+    index = json.loads(_read_volume_file(volume, str(index_path)))
+    published = int((index.get("metadata") or {})["version"])
+    if published != version:
+        raise ValueError(f"{index_path} identifies v{published}, not v{version}")
+
+
+def prepare_attempt(
+    volume: Any, *, run_id: str, save_hf: str | None
+) -> ResumePoint | None:
+    """Restore and return one trainer attempt's resume point, or rewind to the
+    boot version and return None when the run has no complete pair yet.
+
+    Every attempt calls this with identical inputs: that is what makes the
+    first attempt, a retry, and a manual re-spawn one path.
+    """
+    try:
+        point = resolve_resume_point(volume, source_run_id=run_id, save_hf=save_hf)
+    except ResumePointNotFound:
+        restore_boot_pointer(volume, run_id)
+        return None
+    restore_resume_point(volume, point)
+    return point
+
+
+def restore_boot_pointer(volume: Any, run_id: str) -> None:
+    """Rewind ``latest`` to the boot version when a run has nothing to resume."""
+    pointer_path = f"{run_id}/latest"
+    try:
+        current = VersionRef.parse(
+            _read_volume_file(volume, pointer_path).decode().strip()
+        )
+    except FileNotFoundError:
+        return  # nothing claimed yet; the attempt's own claim writes v0
+    if current.run_id != run_id:
+        raise ValueError(f"latest belongs to run {current.run_id!r}, not {run_id!r}")
+    if current.version == 0:
+        return
+    with volume.batch_upload(force=True) as upload:
+        upload.put_file(BytesIO(VersionRef(run_id, 0).identity.encode()), pointer_path)
+
+
+def record_trainer_call(volume: Any, run_id: str, call_id: str) -> None:
+    """Record the run's active trainer call, so a takeover can cancel it."""
+    with volume.batch_upload(force=True) as upload:
+        upload.put_file(BytesIO(call_id.encode()), f"{run_id}/{TRAINER_CALL_FILE}")
+
+
+def read_trainer_call(volume: Any, run_id: str) -> str | None:
+    """Return the run's recorded trainer call id, or None before the first spawn."""
+    try:
+        return (
+            _read_volume_file(volume, f"{run_id}/{TRAINER_CALL_FILE}").decode().strip()
+        )
+    except FileNotFoundError:
+        return None
 
 
 def restore_resume_point(volume: Any, point: ResumePoint) -> VersionRef:
@@ -150,7 +215,8 @@ def restore_resume_point(volume: Any, point: ResumePoint) -> VersionRef:
         raise ValueError(
             f"cannot restore {target.identity!r} from {current.identity!r}"
         )
-    if target.version > current.version:
+    # One ahead is a publish interrupted before its pointer advance.
+    if target.version > current.version + 1:
         raise ValueError(
             f"resume checkpoint v{target.version} is newer than latest v{current.version}"
         )
@@ -158,44 +224,33 @@ def restore_resume_point(volume: Any, point: ResumePoint) -> VersionRef:
     with volume.batch_upload(force=True) as upload:
         upload.put_file(BytesIO(target.identity.encode()), pointer_path)
         upload.put_file(
-            BytesIO(str(point.version).encode()),
+            BytesIO(str(point.iteration).encode()),
             f"{point.source_run_id}/checkpoints/latest_checkpointed_iteration.txt",
         )
     return target
 
 
-def wait_for_restored_pointer(
-    volume: Any,
-    point: ResumePoint,
-    *,
-    timeout: float,
-) -> VersionRef:
-    """Block engine startup until the launcher has restored this run's pointer."""
-    target = VersionRef(point.source_run_id, point.version)
-    pointer_path = f"{point.source_run_id}/latest"
-    deadline = time.monotonic() + timeout
-    current = None
-    while time.monotonic() < deadline:
-        volume.reload()
+def newest_complete_export(
+    run_dir: Path, *, save_hf: str, latest_version: int
+) -> tuple[int, Path] | None:
+    """The newest complete export at or below ``latest_version``, from a mounted
+    run directory — the checkpoint a booting replica should load.
+
+    Returns its published version and directory, or None before the first save.
+    """
+    exports = []
+    export_root = run_dir / PurePosixPath(_validate_save_hf_template(save_hf)).parent
+    for marker in export_root.glob("*/.complete"):
+        export = marker.parent
         try:
-            current = VersionRef.parse(
-                _read_volume_file(volume, pointer_path).decode().strip()
-            )
-        except FileNotFoundError:
-            current = None
-        if current == target:
-            return target
-        if current is not None and (
-            current.run_id != target.run_id or current.version < target.version
-        ):
-            raise ValueError(
-                f"cannot boot {target.identity!r} from {current.identity!r}"
-            )
-        time.sleep(1)
-    actual = current.identity if current is not None else "<unset>"
-    raise TimeoutError(
-        f"latest was not restored to {target.identity}; observed {actual}"
-    )
+            iteration = VersionRef.parse(export.name).version
+        except ValueError:
+            continue
+        if export != run_dir / save_hf.format(rollout_id=iteration):
+            continue
+        if (version := export_version(iteration)) <= latest_version:
+            exports.append((version, export))
+    return max(exports) if exports else None
 
 
 def _validate_save_hf_template(value: str | None) -> str:

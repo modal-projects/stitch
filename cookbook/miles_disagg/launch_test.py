@@ -1,270 +1,219 @@
 from __future__ import annotations
 
-import subprocess
 from types import SimpleNamespace
 
 import pytest
 
 from cookbook.common import launch as common_launch
 from cookbook.miles_disagg import launch
-from cookbook.miles_disagg.resume import (
-    RESUME_POINT_ENV,
-    ResumePoint,
-    ResumePointNotFound,
-)
 
 
-def test_supervised_attempt_preserves_run_id(monkeypatch) -> None:
-    captured = {}
-
-    def run(command, *, env, check):
-        captured.update(command=command, env=env, check=check)
-        return subprocess.CompletedProcess(command, 0)
-
-    monkeypatch.setattr(launch.subprocess, "run", run)
-    point = ResumePoint(9, "old", "/trainer", "/rollout")
-
-    launch._run_supervised_attempt(run_id="old", resume_point=point)
-
-    assert captured["env"]["RUN_ID"] == "old"
-    assert ResumePoint.from_json(captured["env"][RESUME_POINT_ENV]) == point
-    assert captured["command"][-1] == "--run-attempt"
-    assert captured["check"] is False
+def _resumable() -> SimpleNamespace:
+    return SimpleNamespace(
+        save_interval=20,
+        save_hf="hf_checkpoints/weight_v{rollout_id:06d}",
+    )
 
 
-def test_auto_resume_uses_checkpoint_from_failed_attempt(monkeypatch) -> None:
-    launches = []
-    point = ResumePoint(19, "first-re", "/trainer", "/rollout")
+def _launch(
+    monkeypatch,
+    *,
+    argv_resume_from: str | None,
+    miles: object | None = None,
+    pool_reachable: bool = False,
+) -> tuple[dict, list[str]]:
+    """Run launch.main() with the config and app modules stubbed out."""
+    spawned: dict = {}
+    prints: list[str] = []
+    exp = SimpleNamespace(miles=miles if miles is not None else _resumable())
+    run = SimpleNamespace(APP_NAME="app-run")
+
+    def import_module(name: str):
+        return exp if name.endswith(".configs.test") else run
+
+    def spawn(actual_run):
+        spawned["run"] = actual_run
+        spawned["run_id"] = launch.os.environ["RUN_ID"]
+        return SimpleNamespace(object_id="fc-1")
+
+    monkeypatch.setenv("EXPERIMENT_CONFIG", "test")
+    monkeypatch.setattr(launch.importlib, "import_module", import_module)
+    monkeypatch.setattr(common_launch, "deploy_pool_and_spawn", spawn)
+    monkeypatch.setattr(common_launch, "spawn_on_pool", spawn)
+    monkeypatch.setattr(common_launch, "pool_reachable", lambda _run: pool_reachable)
+    monkeypatch.setattr(
+        launch,
+        "_cancel_recorded_trainer_call",
+        lambda run: spawned.update(cancelled=True),
+    )
+    monkeypatch.setattr(
+        launch,
+        "_parser",
+        lambda: SimpleNamespace(
+            parse_args=lambda: SimpleNamespace(resume_from=argv_resume_from)
+        ),
+    )
+    monkeypatch.setattr(
+        "builtins.print",
+        lambda *args, **kwargs: prints.append(" ".join(map(str, args))),
+    )
+
+    launch.main()
+    return spawned, prints
+
+
+def test_fresh_launch_mints_a_run_id(monkeypatch) -> None:
     monkeypatch.delenv("RUN_ID", raising=False)
-    monkeypatch.setattr(launch.uuid, "uuid4", lambda: SimpleNamespace(hex="first-rest"))
-    monkeypatch.setattr(launch, "validate_auto_resume_config", lambda _cfg: None)
-    monkeypatch.setattr(launch, "_resume_point_for_run", lambda _exp, run_id: point)
+    monkeypatch.setattr(
+        launch.uuid, "uuid4", lambda: SimpleNamespace(hex="feedc0dedeadbeef")
+    )
 
-    def launch_attempt(**kwargs):
-        launches.append(kwargs)
-        return subprocess.CompletedProcess([], 1 if len(launches) == 1 else 0)
+    spawned, _prints = _launch(monkeypatch, argv_resume_from=None)
 
-    monkeypatch.setattr(launch, "_run_supervised_attempt", launch_attempt)
-
-    launch._run_auto_resume(SimpleNamespace(miles=object()), None)
-
-    assert launches == [
-        {"run_id": "first-re", "resume_point": None},
-        {"run_id": "first-re", "resume_point": point},
-    ]
+    assert spawned["run_id"] == "feedc0de"
+    assert spawned["run"].APP_NAME == "app-run"
+    assert "cancelled" not in spawned
 
 
-def test_auto_resume_starts_from_requested_checkpoint(monkeypatch) -> None:
-    point = ResumePoint(9, "old", "/trainer", "/rollout")
-    launches = []
-    monkeypatch.setattr(launch.uuid, "uuid4", lambda: SimpleNamespace(hex="new"))
-    monkeypatch.setattr(launch, "validate_auto_resume_config", lambda _cfg: None)
-    monkeypatch.setattr(launch, "_resume_point_for_run", lambda _exp, _run_id: point)
-
-    def launch_attempt(**kwargs):
-        launches.append(kwargs)
-        return subprocess.CompletedProcess([], 0)
-
-    monkeypatch.setattr(launch, "_run_supervised_attempt", launch_attempt)
-
-    launch._run_auto_resume(SimpleNamespace(miles=object()), "old")
-
-    assert launches == [{"run_id": "old", "resume_point": point}]
-
-
-def test_auto_resume_honors_explicit_run_id(monkeypatch) -> None:
-    launches = []
+def test_fresh_launch_honors_explicit_run_id(monkeypatch) -> None:
     monkeypatch.setenv("RUN_ID", "hero-run")
-    monkeypatch.setattr(launch, "validate_auto_resume_config", lambda _cfg: None)
-    monkeypatch.setattr(
-        launch,
-        "_run_supervised_attempt",
-        lambda **kwargs: launches.append(kwargs) or subprocess.CompletedProcess([], 0),
-    )
 
-    launch._run_auto_resume(SimpleNamespace(miles=object()), None)
+    spawned, _prints = _launch(monkeypatch, argv_resume_from=None)
 
-    assert launches == [{"run_id": "hero-run", "resume_point": None}]
+    assert spawned["run_id"] == "hero-run"
 
 
-def test_set_attempt_env_uses_one_resume_payload() -> None:
-    env = {"STITCH_UNUSED": "value"}
-    point = ResumePoint(9, "old", "/trainer", "/rollout")
-
-    launch._set_attempt_env(env, run_id="old", resume_point=point)
-
-    assert env == {
-        "STITCH_UNUSED": "value",
-        "RUN_ID": "old",
-        RESUME_POINT_ENV: point.to_json(),
-    }
-
-
-def test_set_attempt_env_clears_a_stale_resume_point() -> None:
-    env = {RESUME_POINT_ENV: "stale"}
-
-    launch._set_attempt_env(env, run_id="fresh", resume_point=None)
-
-    assert env == {"RUN_ID": "fresh"}
-
-
-def test_set_attempt_env_rejects_cross_run_resume() -> None:
-    point = ResumePoint(9, "old", "/trainer", "/rollout")
-
-    with pytest.raises(ValueError, match="belongs to run"):
-        launch._set_attempt_env({}, run_id="new", resume_point=point)
-
-
-def test_manual_launch_runs_directly_without_attempt_subprocess(monkeypatch) -> None:
-    exp = SimpleNamespace(miles=object())
-    point = ResumePoint(9, "old", "/trainer", "/rollout")
-    configured = {}
-    ran = []
-    monkeypatch.setattr(
-        launch,
-        "_parser",
-        lambda: SimpleNamespace(
-            parse_args=lambda: SimpleNamespace(
-                run_attempt=False,
-                auto_resume=False,
-                resume_from="old",
-            )
-        ),
-    )
-    monkeypatch.setenv("EXPERIMENT_CONFIG", "test")
-    monkeypatch.setattr(launch.importlib, "import_module", lambda _name: exp)
-    monkeypatch.setattr(launch, "validate_resume_config", lambda _cfg: None)
-    monkeypatch.setattr(launch, "_resume_point_for_run", lambda _exp, _run_id: point)
-    monkeypatch.setattr(
-        launch,
-        "_set_attempt_env",
-        lambda _env, **kwargs: configured.update(kwargs),
-    )
-    monkeypatch.setattr(
-        launch, "_run_attempt", lambda *, supervise: ran.append(supervise)
-    )
-    monkeypatch.setattr(
-        launch.uuid, "uuid4", lambda: SimpleNamespace(hex="newrunid-rest")
-    )
-
-    launch.main()
-
-    assert configured == {"run_id": "old", "resume_point": point}
-    assert ran == [False]
-
-
-def test_fresh_manual_launch_honors_explicit_run_id(monkeypatch) -> None:
-    configured = {}
-    monkeypatch.setattr(
-        launch,
-        "_parser",
-        lambda: SimpleNamespace(
-            parse_args=lambda: SimpleNamespace(
-                run_attempt=False,
-                auto_resume=False,
-                resume_from=None,
-            )
-        ),
-    )
-    monkeypatch.setenv("EXPERIMENT_CONFIG", "test")
+def test_fresh_launch_refuses_to_roll_over_a_live_pool(monkeypatch) -> None:
     monkeypatch.setenv("RUN_ID", "hero-run")
-    monkeypatch.setattr(
-        launch.importlib,
-        "import_module",
-        lambda _name: SimpleNamespace(miles=object()),
-    )
-    monkeypatch.setattr(
-        launch,
-        "_set_attempt_env",
-        lambda _env, **kwargs: configured.update(kwargs),
-    )
-    monkeypatch.setattr(launch, "_run_attempt", lambda *, supervise: None)
 
-    launch.main()
-
-    assert configured == {"run_id": "hero-run", "resume_point": None}
+    with pytest.raises(SystemExit, match="resume it with --resume-from"):
+        _launch(monkeypatch, argv_resume_from=None, pool_reachable=True)
 
 
-def test_supervised_attempt_leaves_pool_deployed_when_trainer_fails(
+def test_resume_cancels_the_recorded_call_and_reuses_the_run_id(monkeypatch) -> None:
+    monkeypatch.delenv("RUN_ID", raising=False)
+
+    spawned, _prints = _launch(monkeypatch, argv_resume_from="old-run")
+
+    assert spawned["run_id"] == "old-run"
+    assert spawned["cancelled"] is True
+
+
+def test_resume_requires_a_resumable_config(monkeypatch) -> None:
+    with pytest.raises(ValueError, match="requires save_hf"):
+        _launch(
+            monkeypatch,
+            argv_resume_from="old-run",
+            miles=SimpleNamespace(save_interval=20, save_hf=None),
+        )
+
+
+def test_fresh_launch_warns_but_proceeds_without_a_resumable_config(
     monkeypatch,
 ) -> None:
-    run = SimpleNamespace(APP_NAME="app")
-    monkeypatch.setattr(launch.importlib, "import_module", lambda _name: run)
-    monkeypatch.delenv(RESUME_POINT_ENV, raising=False)
+    monkeypatch.setenv("RUN_ID", "smoke")
 
-    def fail(_run):
-        raise RuntimeError("not ready")
-
-    monkeypatch.setattr(common_launch, "deploy_pool_and_spawn", fail)
-
-    with pytest.raises(RuntimeError, match="not ready"):
-        launch._run_attempt(supervise=True)
-
-
-def test_resume_restores_pointer_before_pool_readiness(monkeypatch) -> None:
-    events = []
-    point = ResumePoint(9, "run", "/trainer", "/rollout")
-    volume = object()
-    run = SimpleNamespace(
-        APP_NAME="app-run",
-        modal_cfg=SimpleNamespace(rollout_min_containers=2),
-        exp=SimpleNamespace(EXPERIMENT_VOLUME_NAME="runs"),
-        app=SimpleNamespace(
-            deploy=lambda *, strategy: events.append(("deploy", strategy))
-        ),
-        spawn_train=lambda: events.append(("spawn",)) or object(),
-    )
-    monkeypatch.setenv("RUN_ID", "run")
-    monkeypatch.setenv(RESUME_POINT_ENV, point.to_json())
-    monkeypatch.setattr(launch.importlib, "import_module", lambda _name: run)
-    monkeypatch.setattr(
-        launch.modal.Volume, "from_name", lambda *_args, **_kwargs: volume
-    )
-    monkeypatch.setattr(
-        launch,
-        "restore_resume_point",
-        lambda actual_volume, actual_point: (
-            events.append(("restore", actual_volume, actual_point))
-            or SimpleNamespace(identity="run/weight_v000009")
-        ),
+    spawned, prints = _launch(
+        monkeypatch,
+        argv_resume_from=None,
+        miles=SimpleNamespace(save_interval=None, save_hf=None),
     )
 
-    import stitch.service
+    assert spawned["run_id"] == "smoke"
+    assert any("not resumable" in line for line in prints)
+
+
+def _patch_modal_call(monkeypatch, call: object) -> None:
+    import modal
 
     monkeypatch.setattr(
-        stitch.service,
-        "await_pool_ready",
-        lambda _pool, **_kwargs: events.append(("ready",)),
+        modal.Volume, "from_name", classmethod(lambda *_args, **_kwargs: object())
+    )
+    monkeypatch.setattr(
+        modal.FunctionCall, "from_id", classmethod(lambda *_args, **_kwargs: call)
     )
 
-    launch._run_attempt(supervise=False)
 
-    assert events == [
-        ("deploy", "recreate"),
-        ("restore", volume, point),
-        ("ready",),
-        ("spawn",),
-    ]
+def test_cancel_waits_until_the_call_settles(monkeypatch) -> None:
+    from modal.types import InputStatus
+
+    events: list[str] = []
+    graphs = iter(
+        [
+            [SimpleNamespace(status=InputStatus.PENDING, children=[])],
+            [SimpleNamespace(status=InputStatus.FAILURE, children=[])],
+        ]
+    )
+
+    class _Call:
+        def cancel(self, *, terminate_containers: bool) -> None:
+            events.append(f"cancel(terminate={terminate_containers})")
+
+        def get_call_graph(self):
+            events.append("graph")
+            return next(graphs)
+
+    run = SimpleNamespace(exp=SimpleNamespace(EXPERIMENT_VOLUME_NAME="runs"))
+    monkeypatch.setenv("RUN_ID", "old-run")
+    monkeypatch.setattr(launch.time, "sleep", lambda _s: None)
+    _patch_modal_call(monkeypatch, _Call())
+    monkeypatch.setattr(launch, "read_trainer_call", lambda _volume, _run_id: "fc-old")
+
+    launch._cancel_recorded_trainer_call(run)
+
+    assert events == ["cancel(terminate=True)", "graph", "graph"]
 
 
-def test_auto_resume_reuses_previous_checkpoint_when_attempt_has_no_new_checkpoint(
-    monkeypatch,
-) -> None:
-    previous = ResumePoint(9, "old", "/trainer", "/rollout")
+def test_cancel_is_a_noop_before_the_first_spawn(monkeypatch) -> None:
+    run = SimpleNamespace(exp=SimpleNamespace(EXPERIMENT_VOLUME_NAME="runs"))
+    monkeypatch.setenv("RUN_ID", "old-run")
+    _patch_modal_call(monkeypatch, None)
+    monkeypatch.setattr(launch, "read_trainer_call", lambda _volume, _run_id: None)
 
-    def missing(_exp, _run_id):
-        raise ResumePointNotFound("no checkpoint")
-
-    monkeypatch.setattr(launch, "_resume_point_for_run", missing)
-
-    assert launch._resume_point_after_failure(object(), "failed", previous) == previous
+    launch._cancel_recorded_trainer_call(run)  # nothing recorded: no cancel
 
 
-def test_auto_resume_requires_a_checkpoint_before_first_retry(monkeypatch) -> None:
-    def missing(_exp, _run_id):
-        raise ResumePointNotFound("no checkpoint")
+def test_cancel_failure_still_waits_for_the_call_to_settle(monkeypatch) -> None:
+    from modal.types import InputStatus
 
-    monkeypatch.setattr(launch, "_resume_point_for_run", missing)
+    events: list[str] = []
+    graphs = iter(
+        [
+            [SimpleNamespace(status=InputStatus.PENDING, children=[])],
+            [SimpleNamespace(status=InputStatus.TERMINATED, children=[])],
+        ]
+    )
 
-    with pytest.raises(ValueError, match="no checkpoint"):
-        launch._resume_point_after_failure(object(), "failed", None)
+    class _Call:
+        def cancel(self, *, terminate_containers: bool) -> None:
+            raise RuntimeError("control plane blip")
+
+        def get_call_graph(self):
+            events.append("graph")
+            return next(graphs)
+
+    run = SimpleNamespace(exp=SimpleNamespace(EXPERIMENT_VOLUME_NAME="runs"))
+    monkeypatch.setenv("RUN_ID", "old-run")
+    monkeypatch.setattr(launch.time, "sleep", lambda _s: None)
+    _patch_modal_call(monkeypatch, _Call())
+    monkeypatch.setattr(launch, "read_trainer_call", lambda _volume, _run_id: "fc-old")
+
+    launch._cancel_recorded_trainer_call(run)
+
+    assert events == ["graph", "graph"]
+
+
+def test_cancel_returns_once_the_call_is_forgotten(monkeypatch) -> None:
+    class _Call:
+        def cancel(self, *, terminate_containers: bool) -> None:
+            raise RuntimeError("no such call")
+
+        def get_call_graph(self):
+            raise RuntimeError("no such call")
+
+    run = SimpleNamespace(exp=SimpleNamespace(EXPERIMENT_VOLUME_NAME="runs"))
+    monkeypatch.setenv("RUN_ID", "old-run")
+    _patch_modal_call(monkeypatch, _Call())
+    monkeypatch.setattr(launch, "read_trainer_call", lambda _volume, _run_id: "fc-old")
+
+    launch._cancel_recorded_trainer_call(run)  # a forgotten call has stopped
