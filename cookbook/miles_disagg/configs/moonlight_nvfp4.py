@@ -78,6 +78,8 @@ class _Miles(MilesConfig):
     )
     rollout_endpoint_url = None
     use_miles_router = True
+    use_session_server = "v2"
+    custom_generate_function_path = "cookbook.miles_disagg.rollout.generate"
 
     # Staleness gate; the knobs ride in custom_config_path (read by the hook, not miles core).
     custom_rollout_request_hook_path = (

@@ -1,0 +1,12 @@
+--- a/miles/rollout/inference_rollout/inference_rollout_train.py
++++ b/miles/rollout/inference_rollout/inference_rollout_train.py
+@@ -27,7 +27,8 @@
+     assert not state.aborted
+     state.aborted = True
+ 
+-    urls = await get_worker_urls(args)
++    # External endpoints have no managed worker registry.
++    urls = [] if args.rollout_endpoint_url else await get_worker_urls(args)
+     logger.info(f"Abort request for {urls}")
+     await asyncio.gather(*[post(f"{url}/abort_request", {"abort_all": True}) for url in urls])
+ 
