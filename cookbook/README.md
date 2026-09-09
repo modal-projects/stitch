@@ -111,8 +111,10 @@ ready. Repeating the command creates a separate run and checkpoint lineage.
 #### Resume a Miles run
 
 Recovery is automatic: the Miles trainer runs under Modal retries, and every
-attempt re-derives its resume state from the run volume — the newest saved
-Megatron checkpoint whose Hugging Face export is complete and published. A
+attempt selects the newest durable Megatron/Hugging Face checkpoint pair with a
+published weight version. Full snapshots use local disk and a separate checkpoint
+Volume; see [checkpoint persistence](miles_disagg/CHECKPOINTING.md) for capacity
+settings and durability semantics. A
 preempted or crashed trainer resumes on its own, without a launcher attached
 and without redeploying the pool; replicas serving abandoned versions exit and
 their replacements boot from the restored checkpoint. If the checkpoint is

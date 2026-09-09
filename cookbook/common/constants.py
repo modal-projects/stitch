@@ -9,6 +9,7 @@ HF_CACHE_PATH = Path("/root/.cache/huggingface")
 CHECKPOINTS_PATH = Path("/checkpoints")
 DATA_PATH = Path("/data")
 STITCH_PATH = Path("/stitch")
+TRAINING_CHECKPOINTS_PATH = Path("/training-checkpoints")
 DRAFT_PATH = Path("/draft")
 SGLANG_CACHE_PATH = (
     "/root/.cache/sglang"  # sglang kernel/JIT cache; survives cold starts

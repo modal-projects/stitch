@@ -1,0 +1,14 @@
+--- a/miles/backends/megatron_utils/hf_export.py
++++ b/miles/backends/megatron_utils/hf_export.py
+@@ -135,7 +135,10 @@
+         if should_log:
+             logger.info(f"Saving model in HuggingFace format to {path}")
+ 
+-        if args.megatron_to_hf_mode == "raw" and not is_lora_model(model):
++        if not is_lora_model(model) and (
++            args.megatron_to_hf_mode == "raw"
++            or getattr(args, "update_weight_transfer_mode", None) == "disk-delta"
++        ):
+             # LoRA keeps the bridge (adapter merging).
+             hf_config = load_hf_config(args.hf_checkpoint)
+             export_hf_model_direct(

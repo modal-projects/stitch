@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -8,6 +9,7 @@ from cookbook.miles_disagg.resume import (
     ResumePoint,
     export_version,
     newest_complete_export,
+    newest_persisted_export,
     prepare_attempt,
     read_trainer_call,
     record_trainer_call,
@@ -332,3 +334,136 @@ def test_newest_complete_export_is_none_before_the_first_save(tmp_path) -> None:
         newest_complete_export(tmp_path, save_hf=_Config.save_hf, latest_version=9)
         is None
     )
+
+
+def _staged_manifest(iteration=19, attempt="attempt"):
+    root = f"old/attempts/{attempt}/snapshots/{iteration:07d}"
+    return {
+        "schema_version": 1,
+        "run_id": "old",
+        "attempt_id": attempt,
+        "iteration": iteration,
+        "version": iteration + 1,
+        "completed_at_ns": iteration,
+        "checkpoint_root": f"{root}/checkpoints",
+        "hf_directory": f"{root}/hf_checkpoints/weight_v{iteration:06d}",
+    }
+
+
+def test_staged_resume_ignores_partial_uploads_and_requires_matching_publication():
+    checkpoint_volume = _Volume(
+        {
+            "old/attempts/partial/snapshots/0000039/hf_checkpoints/weight_v000039/.complete": b"",
+            "old/completed/0000019-attempt.json": json.dumps(
+                _staged_manifest()
+            ).encode(),
+            "old/completed/0000029-attempt.json": json.dumps(
+                _staged_manifest(29)
+            ).encode(),
+        }
+    )
+    run_volume = _Volume({**_published(20), "old/latest": b"old/weight_v000025"})
+    point = prepare_attempt(
+        run_volume,
+        run_id="old",
+        save_hf=_Config.save_hf,
+        checkpoint_volume=checkpoint_volume,
+    )
+    assert point.staged
+    assert point.iteration == 19
+    assert (
+        point.trainer_checkpoint
+        == "/training-checkpoints/old/attempts/attempt/snapshots/0000019/checkpoints"
+    )
+    assert point.rollout_checkpoint.endswith("/hf_checkpoints/weight_v000019")
+    assert run_volume.files["old/latest"] == b"old/weight_v000020"
+    assert "old/checkpoints/latest_checkpointed_iteration.txt" not in run_volume.files
+
+
+def test_staged_resume_falls_back_to_legacy_checkpoint_before_first_upload():
+    volume = _Volume(
+        {
+            "old/checkpoints/latest_checkpointed_iteration.txt": b"19",
+            "old/checkpoints/iter_0000019/state": b"state",
+            "old/hf_checkpoints/weight_v000019/.complete": b"",
+            **_published(20),
+        }
+    )
+    point = resolve_resume_point(
+        volume,
+        source_run_id="old",
+        save_hf=_Config.save_hf,
+        checkpoint_volume=_Volume({}),
+    )
+    assert not point.staged
+    assert point.version == 20
+
+
+def test_fresh_run_handles_modal_missing_completed_directory():
+    from modal.exception import NotFoundError
+
+    class EmptyCheckpointVolume:
+        def iterdir(self, *args, **kwargs):
+            raise NotFoundError('path "/old/completed" does not exist')
+
+    assert (
+        prepare_attempt(
+            _Volume({}),
+            run_id="old",
+            save_hf=_Config.save_hf,
+            checkpoint_volume=EmptyCheckpointVolume(),
+        )
+        is None
+    )
+
+
+def test_boot_selects_persisted_manifest_at_or_below_served_version(tmp_path):
+    run_dir = tmp_path / "old"
+    completed = run_dir / "completed"
+    completed.mkdir(parents=True)
+    for iteration in (19, 29):
+        (completed / f"{iteration:07d}-attempt.json").write_text(
+            json.dumps(_staged_manifest(iteration))
+        )
+    version, path = newest_persisted_export(run_dir, latest_version=25)
+    assert version == 20
+    assert path == tmp_path / _staged_manifest()["hf_directory"]
+
+
+def test_staged_manifest_cannot_redirect_loader_outside_snapshot(tmp_path):
+    run_dir = tmp_path / "old"
+    (run_dir / "completed").mkdir(parents=True)
+    manifest = {**_staged_manifest(), "hf_directory": "old/../../another-run"}
+    (run_dir / "completed/0000019-attempt.json").write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="relative path"):
+        newest_persisted_export(run_dir, latest_version=20)
+
+
+@pytest.mark.parametrize("staged_iteration,expected", [(19, 29), (39, 39)])
+def test_resume_selects_newest_published_checkpoint_across_both_volumes(
+    staged_iteration, expected
+):
+    run_volume = _Volume(
+        {
+            "old/checkpoints/latest_checkpointed_iteration.txt": b"29",
+            "old/checkpoints/iter_0000029/state": b"state",
+            "old/hf_checkpoints/weight_v000029/.complete": b"",
+            **_published(30),
+            **_published(staged_iteration + 1),
+        }
+    )
+    checkpoint_volume = _Volume(
+        {
+            f"old/completed/{staged_iteration:07d}-attempt.json": json.dumps(
+                _staged_manifest(staged_iteration)
+            ).encode(),
+        }
+    )
+    point = resolve_resume_point(
+        run_volume,
+        source_run_id="old",
+        save_hf=_Config.save_hf,
+        checkpoint_volume=checkpoint_volume,
+    )
+    assert point.iteration == expected
+    assert point.staged == (expected == staged_iteration)
