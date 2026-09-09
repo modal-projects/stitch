@@ -1,0 +1,15 @@
+--- a/miles/backends/megatron_utils/update_weight/update_weight_from_distributed/delta.py
++++ b/miles/backends/megatron_utils/update_weight/update_weight_from_distributed/delta.py
+@@ -359,6 +359,12 @@
+         in self._delta with their checksums. The GPU->CPU gather is pipelined into a compute pool:
+         each bucket callback copies one tensor at a time to a pinned buffer and submits it; pool
+         workers diff and compress in parallel (each is a few big GIL-releasing numpy/zstd calls)."""
++        # Every rank joins before source ranks create files on their mounts.
++        if path := getattr(self.args, "custom_update_weight_pre_write_path", None):
++            from miles.utils.misc import load_function
++
++            load_function(path)(self.args, self.delta_dir)
++
+         self._version_dir = os.path.join(self.delta_dir, f"weight_v{self.weight_version:06d}")
+         if self._is_source:
+             os.makedirs(self._version_dir, exist_ok=True)

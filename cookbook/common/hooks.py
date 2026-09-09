@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import time
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -54,6 +55,27 @@ def sample_affinity_key(sample: Any) -> str | None:
 
 
 # ── publish ────────────────────────────────────────────────────────────────────
+def refresh_before_update(args: Any, update_dir: str) -> None:
+    """Refresh every host before any rank creates or writes a weight version.
+
+    All ranks must call this after prior writes have been committed and closed.
+    A framework may have replaced the updates directory on rank 0; other mounts
+    must load that directory before writing children into it.
+    """
+    del update_dir
+    error = None
+    if process.dist_is_container_leader():
+        try:
+            _store(args).refresh()
+        except Exception:  # noqa: BLE001
+            error = f"rank {process.dist_rank()}:\n{traceback.format_exc()}"
+    errors = [
+        error for error in process.dist_all_gather_object(error) if error is not None
+    ]
+    if errors:
+        raise RuntimeError("weight store refresh failed:\n" + "\n".join(errors))
+
+
 def commit_and_wake(args: Any, published_dir: str, rollout_engines: Any = None) -> None:
     """Publish one framework-written disk update and wake rollout replicas.
 

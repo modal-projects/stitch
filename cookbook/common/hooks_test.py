@@ -297,6 +297,51 @@ def test_commit_and_wake_baseline_is_noop() -> None:
         assert pool.woke == []
 
 
+@pytest.mark.parametrize("leader", [False, True])
+def test_refresh_before_update_waits_for_all_hosts(monkeypatch, leader) -> None:
+    events = []
+    monkeypatch.setattr(hooks.process, "dist_is_container_leader", lambda: leader)
+    monkeypatch.setattr(
+        hooks,
+        "_store",
+        lambda args: SimpleNamespace(refresh=lambda: events.append("refresh")),
+    )
+
+    def gather(error):
+        assert error is None
+        events.append("all hosts refreshed")
+        return [None, None]
+
+    monkeypatch.setattr(hooks.process, "dist_all_gather_object", gather)
+
+    hooks.refresh_before_update(SimpleNamespace(), "/run/updates")
+
+    assert events == (["refresh"] if leader else []) + ["all hosts refreshed"]
+
+
+@pytest.mark.parametrize("leader", [False, True])
+def test_refresh_failure_stops_writers_on_every_rank(monkeypatch, leader) -> None:
+    monkeypatch.setattr(hooks.process, "dist_is_container_leader", lambda: leader)
+    monkeypatch.setattr(hooks.process, "dist_rank", lambda: 2 if leader else 3)
+
+    def refresh():
+        raise OSError("mount reload failed")
+
+    monkeypatch.setattr(hooks, "_store", lambda args: SimpleNamespace(refresh=refresh))
+
+    def gather(error):
+        if leader:
+            assert "rank 2:" in error and "mount reload failed" in error
+        else:
+            assert error is None
+        return [None, "rank 2: mount reload failed"]
+
+    monkeypatch.setattr(hooks.process, "dist_all_gather_object", gather)
+
+    with pytest.raises(RuntimeError, match="weight store refresh failed"):
+        hooks.refresh_before_update(SimpleNamespace(), "/run/updates")
+
+
 def test_commit_and_wake_does_not_mutate_an_already_published_version() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)

@@ -406,6 +406,7 @@ class Trainer:
             **(cfg.custom_config_path or {}),
             **STORE_DEPLOYMENT.hook_config(APP_NAME),
             **checkpoint_config,
+            "custom_update_weight_pre_write_path": "cookbook.common.hooks.refresh_before_update",
             "experiment_volume_name": exp.EXPERIMENT_VOLUME_NAME,
             "rollout_modal_flash_app_name": APP_NAME,
             "rollout_modal_flash_server_cls_name": "Server",
