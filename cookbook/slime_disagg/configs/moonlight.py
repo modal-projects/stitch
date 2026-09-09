@@ -134,6 +134,8 @@ class _Slime(SlimeConfig):
     # R3 (arxiv 2510.11370): replay the rollout engine's expert routing in the train forward.
     use_rollout_routing_replay = True
 
+    environment = {"CUDA_DEVICE_MAX_CONNECTIONS": "1"}
+
     def prepare_data(self) -> None:
         from datasets import load_dataset
 
