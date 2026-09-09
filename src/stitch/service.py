@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 VERSIONED_ROUTES = ("generate", "v1/chat/completions", "v1/completions")
 
-# Temporary launch threshold; tune as we collect fleet startup and throughput data.
+# Default startup capacity when no explicit readiness threshold is supplied.
 POOL_READY_FRACTION = 0.75
 
 # Hop-by-hop / rewritten headers the proxy never forwards upstream.
@@ -358,11 +358,12 @@ def await_pool_ready(
     pool: Pool,
     *,
     replica_floor: int,
+    min_ready: int | None = None,
     timeout: float = 60 * 60,
     interval: float = 30.0,
     latest: VersionRef | None = None,
 ) -> bool:
-    """Block until the configured fraction of ``replica_floor`` reports routing readiness.
+    """Wait for ``min_ready`` replicas, defaulting to 75% of ``replica_floor``.
 
     Readiness is counted from each replica's ``/server_info`` rather than inferred from the
     pool gateway: one healthy replica makes a gateway probe succeed, but is not enough capacity
@@ -376,7 +377,10 @@ def await_pool_ready(
     """
     if replica_floor < 1:
         raise ValueError(f"replica_floor must be positive, got {replica_floor}")
-    min_ready = ceil(POOL_READY_FRACTION * replica_floor)
+    if min_ready is None:
+        min_ready = ceil(POOL_READY_FRACTION * replica_floor)
+    if min_ready < 1:
+        raise ValueError(f"min_ready must be positive, got {min_ready}")
 
     def is_capacity(replica: ReplicaState) -> bool:
         if (

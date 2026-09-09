@@ -38,6 +38,11 @@ def _parser() -> argparse.ArgumentParser:
         metavar="RUN_ID",
         help="reuse RUN_ID; its trainer resumes from the newest complete checkpoint pair",
     )
+    parser.add_argument(
+        "--skip-rollout-ready-check",
+        action="store_true",
+        help="skip rollout readiness waits in both the launcher and trainer",
+    )
     return parser
 
 
@@ -53,7 +58,9 @@ def main() -> None:
         os.environ["RUN_ID"] = args.resume_from
         run = importlib.import_module("cookbook.miles_disagg.app")
         _cancel_recorded_trainer_call(run)
-        call = launch.spawn_on_pool(run)
+        call = launch.spawn_on_pool(
+            run, skip_rollout_ready_check=args.skip_rollout_ready_check
+        )
     else:
         explicit = os.environ.get("RUN_ID")
         os.environ["RUN_ID"] = explicit or uuid.uuid4().hex[:8]
@@ -65,7 +72,9 @@ def main() -> None:
                 f"resume it with --resume-from {explicit}, or stop it first: "
                 f"modal app stop {run.APP_NAME}"
             )
-        call = launch.deploy_pool_and_spawn(run)
+        call = launch.deploy_pool_and_spawn(
+            run, skip_rollout_ready_check=args.skip_rollout_ready_check
+        )
     print(
         f"run {os.environ['RUN_ID']} up on {run.APP_NAME}; trainer call {call.object_id} "
         f"retries and resumes on its own — stop the run with: modal app stop {run.APP_NAME}"

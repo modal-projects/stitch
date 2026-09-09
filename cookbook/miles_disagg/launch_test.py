@@ -21,6 +21,7 @@ def _launch(
     argv_resume_from: str | None,
     miles: object | None = None,
     pool_reachable: bool = False,
+    skip_rollout_ready_check: bool = False,
 ) -> tuple[dict, list[str]]:
     """Run launch.main() with the config and app modules stubbed out."""
     spawned: dict = {}
@@ -31,9 +32,10 @@ def _launch(
     def import_module(name: str):
         return exp if name.endswith(".configs.test") else run
 
-    def spawn(actual_run):
+    def spawn(actual_run, **kwargs):
         spawned["run"] = actual_run
         spawned["run_id"] = launch.os.environ["RUN_ID"]
+        spawned.update(kwargs)
         return SimpleNamespace(object_id="fc-1")
 
     monkeypatch.setenv("EXPERIMENT_CONFIG", "test")
@@ -50,7 +52,10 @@ def _launch(
         launch,
         "_parser",
         lambda: SimpleNamespace(
-            parse_args=lambda: SimpleNamespace(resume_from=argv_resume_from)
+            parse_args=lambda: SimpleNamespace(
+                resume_from=argv_resume_from,
+                skip_rollout_ready_check=skip_rollout_ready_check,
+            )
         ),
     )
     monkeypatch.setattr(
@@ -106,6 +111,22 @@ def test_resume_requires_a_resumable_config(monkeypatch) -> None:
             argv_resume_from="old-run",
             miles=SimpleNamespace(save_interval=20, save_hf=None),
         )
+
+
+def test_parser_accepts_rollout_readiness_bypass() -> None:
+    args = launch._parser().parse_args(["--skip-rollout-ready-check"])
+    assert args.skip_rollout_ready_check is True
+    assert launch._parser().parse_args([]).skip_rollout_ready_check is False
+
+
+@pytest.mark.parametrize("resume_from", [None, "old-run"])
+def test_launch_forwards_rollout_readiness_bypass(monkeypatch, resume_from) -> None:
+    spawned, _prints = _launch(
+        monkeypatch,
+        argv_resume_from=resume_from,
+        skip_rollout_ready_check=True,
+    )
+    assert spawned["skip_rollout_ready_check"] is True
 
 
 def test_fresh_launch_warns_but_proceeds_without_a_resumable_config(

@@ -58,7 +58,6 @@ from cookbook.miles_disagg.resume import (
 )
 from cookbook.miles_disagg.trainer_image import MEGATRON_PATH, MILES_ROOT
 from stitch.pools.modal_flash import ModalFlashPool
-from stitch.service import await_pool_ready
 from stitch.types import VersionRef
 
 EXPERIMENT = os.environ[
@@ -145,7 +144,6 @@ draft_volume = (
     modal.Volume.from_name(
         modal_cfg.draft_volume,
         environment_name=modal_cfg.draft_volume_env,
-        version=2,
     )
     if modal_cfg.draft_volume
     else None
@@ -433,10 +431,11 @@ class Trainer:
             boot_version=boot_version,
         )
         # Replicas ahead of the claimed pointer are exiting, so they are not floor.
-        await_pool_ready(
-            ModalFlashPool(APP_NAME, "Server"),
-            replica_floor=modal_cfg.rollout_min_containers,
+        launch.await_rollout_ready(
+            APP_NAME,
+            modal_cfg,
             latest=VersionRef(RUN_ID, boot_version),
+            skip=payload.get("skip_rollout_ready_check", False),
         )
 
         resume_log = (
@@ -488,26 +487,28 @@ def _build_train_cmd(cfg: MilesConfig) -> str:
 
 
 # ── Entrypoints (preparation lives in a separate app: cookbook.miles_disagg.prep_app) ──
-def spawn_train() -> Any:
+def spawn_train(*, skip_rollout_ready_check: bool = False) -> Any:
     """Spawn the trainer on this run's already-deployed pool (config ships as data, so config
     edits run without a redeploy; infra changes still require one). The recorded call
     id is what a takeover cancels."""
     trainer = modal.Cls.from_name(APP_NAME, "Trainer")()
-    call = trainer.train.spawn(miles_cfg.to_payload())
+    payload = miles_cfg.to_payload()
+    payload["skip_rollout_ready_check"] = skip_rollout_ready_check
+    call = trainer.train.spawn(payload)
     record_trainer_call(run_volume, RUN_ID, call.object_id)
     print(f"Spawned train on {APP_NAME}: {call.object_id}")
     return call
 
 
 @app.local_entrypoint()
-def launch_train() -> None:
+def launch_train(skip_rollout_ready_check: bool = False) -> None:
     """Spawn training on a pool that's already up for this RUN. ``cookbook.miles_disagg.launch``
     deploys + spawns in one command, and its ``--resume-from`` cancels the live trainer call
     before re-spawning; this raw entrypoint does neither."""
     from modal.exception import NotFoundError
 
     try:
-        spawn_train()
+        spawn_train(skip_rollout_ready_check=skip_rollout_ready_check)
     except NotFoundError:
         raise SystemExit(
             f"App {APP_NAME!r} is not deployed. Launch a fresh run with:\n"

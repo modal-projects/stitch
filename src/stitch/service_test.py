@@ -267,7 +267,11 @@ def test_metrics_bypasses_weight_admission_before_first_pointer(monkeypatch):
     asyncio.run(go())
 
 
-def test_await_pool_ready_waits_for_replica_threshold(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    "threshold",
+    [{"replica_floor": 4}, {"replica_floor": 32, "min_ready": 3}],
+)
+def test_await_pool_ready_waits_for_replica_threshold(monkeypatch, threshold) -> None:
     states = iter(
         [
             PoolState(
@@ -313,7 +317,16 @@ def test_await_pool_ready_waits_for_replica_threshold(monkeypatch) -> None:
     monkeypatch.setattr(stitch_service.asyncio, "sleep", no_sleep)
     monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: Client())
 
-    assert stitch_service.await_pool_ready(Pool(), replica_floor=4, interval=0)
+    assert stitch_service.await_pool_ready(Pool(), **threshold, interval=0)
+    assert next(states, None) is None
+
+
+@pytest.mark.parametrize("min_ready", [0, -1])
+def test_await_pool_ready_rejects_nonpositive_min_ready(min_ready) -> None:
+    with pytest.raises(ValueError, match="min_ready must be positive"):
+        stitch_service.await_pool_ready(
+            object(), replica_floor=32, min_ready=min_ready
+        )
 
 
 def test_await_pool_ready_excludes_replicas_ahead_of_latest(monkeypatch) -> None:
@@ -352,7 +365,7 @@ def test_await_pool_ready_excludes_replicas_ahead_of_latest(monkeypatch) -> None
     monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: Client())
 
     assert stitch_service.await_pool_ready(
-        Pool(), replica_floor=2, interval=0, latest=latest
+        Pool(), replica_floor=32, min_ready=2, interval=0, latest=latest
     )
     assert next(states, None) is None  # the stale-but-ready fleet did not pass
 

@@ -2,7 +2,7 @@
 
 from copy import deepcopy
 
-from cookbook.common.constants import CHECKPOINTS_PATH
+from cookbook.common.constants import CHECKPOINTS_PATH, DRAFT_PATH
 from cookbook.miles_disagg.configs import glm5_2_nvfp4 as base
 
 APP_NAME = "stitch-glm5-3-nvfp4"
@@ -13,8 +13,11 @@ BF16_CHECKPOINT_PATH = CHECKPOINTS_PATH / "glm5-3-bf16"
 ROLLOUT_CHECKPOINT_PATH = CHECKPOINTS_PATH / "glm5-3-nvfp4"
 TORCH_DIST_CHECKPOINT_PATH = CHECKPOINTS_PATH / "glm5-3-torch-dist"
 
-DFLASH_VOLUME = base.DFLASH_VOLUME
-DFLASH_CHECKPOINT_PATH = base.DFLASH_CHECKPOINT_PATH
+DFLASH_VOLUME = "dflash_data"
+DFLASH_CHECKPOINT_PATH = (
+    DRAFT_PATH
+    / "train/glm53_nvfp4_6l_swa_k3taps_rope2m_32x/trainer-0/draft-step-22500"
+)
 DFLASH_SERVER_ARGS = {
     **base.DFLASH_SERVER_ARGS,
     "--speculative-draft-model-path": str(DFLASH_CHECKPOINT_PATH),
@@ -36,8 +39,14 @@ TRAINER_IMAGE_RUN_COMMANDS = base.TRAINER_IMAGE_RUN_COMMANDS
 PREP_ENV = dict(base.PREP_ENV)
 
 modal = deepcopy(base.modal)
+modal.rollout_min_containers = 16
+modal.rollout_min_ready = 12
 modal.draft_volume = DFLASH_VOLUME
+modal.draft_volume_env = "glm-bringup"
 miles = deepcopy(base.miles)
+miles.actor_num_nodes = 32
+miles.global_batch_size = 512
+miles.rollout_batch_size = 64
 miles.hf_checkpoint = str(ROLLOUT_CHECKPOINT_PATH)
 miles.ref_load = str(TORCH_DIST_CHECKPOINT_PATH)
 miles.wandb_group = "glm5-3-nvfp4-swebench-pro"

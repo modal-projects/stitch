@@ -5,6 +5,9 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from cookbook.common.config import ModalConfig
+from stitch.types import VersionRef
+
 
 def resolve_config(
     cfg: Any,
@@ -46,13 +49,13 @@ def materialize_node_local_yaml(
         setattr(cfg, field, path)
 
 
-def deploy_pool_and_spawn(run: Any) -> Any:
+def deploy_pool_and_spawn(run: Any, *, skip_rollout_ready_check: bool = False) -> Any:
     """Deploy a run's pool, wait for its floor, then spawn its trainer."""
     run.app.deploy()
-    return _await_floor_and_spawn(run)
+    return _await_floor_and_spawn(run, skip_rollout_ready_check=skip_rollout_ready_check)
 
 
-def spawn_on_pool(run: Any) -> Any:
+def spawn_on_pool(run: Any, *, skip_rollout_ready_check: bool = False) -> Any:
     """Spawn a run's trainer on its already-deployed pool. Never deploys: a
     missing pool fails fast with the deploy command rather than silently
     replace a live one."""
@@ -63,17 +66,38 @@ def spawn_on_pool(run: Any) -> Any:
             f"RUN_ID={os.environ['RUN_ID']} "
             f"uv run --extra modal modal deploy -m {run.__name__}"
         )
-    return _await_floor_and_spawn(run)
+    return _await_floor_and_spawn(run, skip_rollout_ready_check=skip_rollout_ready_check)
 
 
-def _await_floor_and_spawn(run: Any) -> Any:
+def await_rollout_ready(
+    app_name: str,
+    config: ModalConfig,
+    *,
+    latest: VersionRef | None = None,
+    skip: bool = False,
+) -> None:
+    """Apply the same readiness policy before spawning and inside the trainer."""
+    if skip:
+        print(f"Skipping rollout readiness check for {app_name}", flush=True)
+        return
+
     from stitch.pools.modal_flash import ModalFlashPool
     from stitch.service import await_pool_ready
 
     await_pool_ready(
-        ModalFlashPool(run.APP_NAME, "Server"),
-        replica_floor=run.modal_cfg.rollout_min_containers,
+        ModalFlashPool(app_name, "Server"),
+        replica_floor=config.rollout_min_containers,
+        min_ready=config.rollout_min_ready,
+        latest=latest,
     )
+
+
+def _await_floor_and_spawn(run: Any, *, skip_rollout_ready_check: bool) -> Any:
+    await_rollout_ready(
+        run.APP_NAME, run.modal_cfg, skip=skip_rollout_ready_check
+    )
+    if skip_rollout_ready_check:
+        return run.spawn_train(skip_rollout_ready_check=True)
     return run.spawn_train()
 
 
