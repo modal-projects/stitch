@@ -60,10 +60,12 @@ class _Slime(SlimeConfig):
     custom_rollout_request_hook_path = (
         "cookbook.common.hooks.gated_rollout_request_hook"
     )
-    rollout_request_weight_version_mode = "min"
-    rollout_request_weight_version_lag = 1
-    rollout_request_retry_attempts = 240
-    rollout_request_retry_sleep = 1.0
+    custom_config_path = {
+        "rollout_request_weight_version_mode": "min",
+        "rollout_request_weight_version_lag": 1,
+        "rollout_request_retry_attempts": 240,
+        "rollout_request_retry_sleep": 1.0,
+    }
 
     async_mode = True
     update_weights_interval = 1
