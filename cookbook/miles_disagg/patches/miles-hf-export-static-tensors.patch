@@ -1,0 +1,40 @@
+--- a/miles/backends/megatron_utils/hf_export.py
++++ b/miles/backends/megatron_utils/hf_export.py
+@@ -35,6 +35,29 @@
+     """Tokenizer/config files worth copying into an export — not weights, and not the
+     base checkpoint's weight index, which would clobber the one the export writes."""
+     return path.is_file() and path.suffix not in HF_WEIGHT_SUFFIXES and not path.name.endswith(".index.json")
++
++
++def _copy_source_static_tensors(base_checkpoint: Path, path: Path, weight_map: dict[str, str]) -> int:
++    """Preserve fixed calibration and rotary buffers omitted by Megatron."""
++    index_path = base_checkpoint / "model.safetensors.index.json"
++    if not index_path.exists():
++        return 0
++    source_map = json.loads(index_path.read_text())["weight_map"]
++    by_shard: dict[str, list[str]] = {}
++    for name, shard in source_map.items():
++        if name.endswith((".input_scale", ".rotary_emb.inv_freq")) and name not in weight_map:
++            by_shard.setdefault(shard, []).append(name)
++    tensors = {}
++    for shard, names in by_shard.items():
++        with safetensors.safe_open(base_checkpoint / shard, framework="pt", device="cpu") as source:
++            for name in names:
++                tensors[name] = source.get_tensor(name).contiguous()
++    if not tensors:
++        return 0
++    shard_name = "model-static.safetensors"
++    safetensors.torch.save_file(tensors, path / shard_name)
++    weight_map.update({name: shard_name for name in tensors})
++    return sum(t.numel() * t.element_size() for t in tensors.values())
+ 
+ 
+ def export_hf_model_direct(
+@@ -82,6 +105,7 @@
+             assert weight_map, f"HF export to {path} produced no weights"
+             base_checkpoint = Path(args.hf_checkpoint)
+             if base_checkpoint.is_dir():
++                total_size += _copy_source_static_tensors(base_checkpoint, path, weight_map)
+                 for meta_file in base_checkpoint.iterdir():
+                     if _is_hf_metadata_file(meta_file):
+                         shutil.copy2(meta_file, path / meta_file.name)

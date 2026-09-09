@@ -21,6 +21,8 @@ ROLLOUT_CHECKPOINT_PATH = CHECKPOINTS_PATH / "moonlight-nvfp4"
 SIDECAR_COMMIT_MODE = "in_place"
 SIDECAR_FLUSH_CACHE_ON_COMMIT = False
 SGLANG_DELTA_UPDATE_MODE = "cpu"
+# Fusion shares weight storage across otherwise independent CPU compilation groups.
+SGLANG_SERVER_ENV = {"SGLANG_ENABLE_NVFP4_GEMM_SWIGLU_FUSION": "0"}
 # R3 routing-replay needs the dropless Megatron dispatch fix at startup.
 MEGATRON_RUNTIME_PATCHES = [
     "/root/cookbook/miles_disagg/patches/megatron-r3-dispatch.patch",
@@ -38,6 +40,7 @@ SGLANG_SERVER_ARGS = {
     "--enable-cpu-weight-cache": "",
     "--weight-loader-drop-cache-after-load": "",
     "--attention-backend": "tokenspeed_mla",
+    "--moe-runner-backend": "flashinfer_cutlass",
     "--kv-cache-dtype": "fp8_e4m3",  # tokenspeed_mla requires this
     "--context-length": "8192",  # Moonlight's max_position_embeddings
     "--mem-fraction-static": "0.8",
@@ -59,7 +62,7 @@ modal = ModalConfig(
 
 class _Miles(MilesConfig):
     # Arch comes from the model script; do NOT inline arch attrs here.
-    megatron_model_type = "moonlight"
+    megatron_model_type = "/root/cookbook/miles_disagg/models/moonlight"
 
     hf_checkpoint = str(ROLLOUT_CHECKPOINT_PATH)
     ref_load = str(BF16_CHECKPOINT_PATH)
@@ -98,6 +101,33 @@ class _Miles(MilesConfig):
     # NVFP4 QAT (native Megatron FP4; Blackwell + TE >= 2.7.0.dev0).
     fp4_format = "e2m1"
     fp4_param_gather = False  # True crashes Megatron DDP (TE NVFP4Tensor params)
+
+    te_precision_config_file = {
+        "configs": {
+            "nvfp4": {
+                "transformer_engine_config_type": "TEQuantizationParams",
+                "training_recipe": {"fp4_quantization_recipe": "nvfp4"},
+            },
+            "bf16": {
+                "transformer_engine_config_type": "TEQuantizationParams",
+                "training_recipe": {},
+            },
+        },
+        "matchers": {
+            "moe_nvfp4": {
+                "type": "glob",
+                "enabled": True,
+                "pattern": "*.mlp.*experts.linear_fc[12]",
+                "config": "nvfp4",
+            },
+            "default_bf16": {
+                "type": "glob",
+                "enabled": True,
+                "pattern": "*",
+                "config": "bf16",
+            },
+        },
+    }
 
     update_weight_transfer_mode = "disk-delta"
     update_weight_delta_encoding = "xor"
@@ -139,6 +169,7 @@ class _Miles(MilesConfig):
     recompute_granularity = "full"
     recompute_method = "uniform"
     recompute_num_layers = 1
+    attention_backend = "flash"
     attention_dropout = 0.0
     hidden_dropout = 0.0
     accumulate_allreduce_grads_in_fp32 = True
