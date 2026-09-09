@@ -1,0 +1,139 @@
+diff --git a/miles/backends/megatron_utils/actor.py b/miles/backends/megatron_utils/actor.py
+--- a/miles/backends/megatron_utils/actor.py
++++ b/miles/backends/megatron_utils/actor.py
+@@ -24,6 +24,8 @@
+ from miles.utils.ft_utils.indep_dp import IndepDPInfo
+ from miles.utils.hf_config import load_hf_config
+ from miles.utils.memory_utils import clear_memory, print_memory
++from miles.backends.megatron_utils.checkpoint_persistence import CheckpointPersistence
++from miles.utils.misc import load_function
+ from miles.utils.multi_lora import is_multi_lora_enabled
+ from miles.utils.processing_utils import load_tokenizer
+ from miles.utils.ray_utils import Box
+@@ -694,8 +696,30 @@
+             for name in cleanup_names - loaded_names:
+                 ray.get(get_multi_lora_controller().free_slot.remote(name))
+ 
++    def _get_checkpoint_persistence(self) -> CheckpointPersistence | None:
++        path = getattr(self.args, "custom_checkpoint_persistence_path", None)
++        if not path:
++            return None
++        if not hasattr(self, "_checkpoint_persistence"):
++            self._checkpoint_persistence = load_function(path)(self.args)
++        return self._checkpoint_persistence
++
+     @timer
+     def save_model(self, rollout_id: int, force_sync: bool = False) -> None:
++        persistence = self._get_checkpoint_persistence()
++        if persistence and not persistence.prepare(rollout_id, force_sync=force_sync):
++            return
++        self._save_model(rollout_id, force_sync)
++        if persistence:
++            persistence.persist(rollout_id)
++            if force_sync:
++                persistence.wait()
++
++    def finish_checkpoint_persistence(self) -> None:
++        if persistence := self._get_checkpoint_persistence():
++            persistence.wait()
++
++    def _save_model(self, rollout_id: int, force_sync: bool = False) -> None:
+         self._heartbeat.bump()
+         if self.args.debug_rollout_only:
+             return
+diff --git a/miles/backends/megatron_utils/checkpoint_persistence.py b/miles/backends/megatron_utils/checkpoint_persistence.py
+new file mode 100644
+--- /dev/null
++++ b/miles/backends/megatron_utils/checkpoint_persistence.py
+@@ -0,0 +1,23 @@
++from typing import Protocol
++
++
++class CheckpointPersistence(Protocol):
++    """Persistence for synchronous, rank-local checkpoint snapshots.
++
++    Miles calls every method on all actor ranks in the same order. Implementations
++    coordinate admission and failures across ranks and retain snapshot files until
++    durable. Periodic saves may be skipped; forced saves and normal shutdown wait
++    for durability. Abrupt process loss may discard pending snapshots.
++    """
++
++    def prepare(self, iteration: int, *, force_sync: bool) -> bool:
++        """Prepare local paths and agree to save; forced saves must wait for capacity."""
++        ...
++
++    def persist(self, iteration: int) -> None:
++        """Accept the closed model, optimizer, and sampler files for background persistence."""
++        ...
++
++    def wait(self) -> None:
++        """Wait for all accepted snapshots to become durable, propagating failures."""
++        ...
+diff --git a/miles/ray/actor_group.py b/miles/ray/actor_group.py
+--- a/miles/ray/actor_group.py
++++ b/miles/ray/actor_group.py
+@@ -112,6 +112,9 @@
+         """Save actor model"""
+         await self._broadcast("save_model", rollout_id, force_sync=force_sync)
+ 
++    async def finish_checkpoint_persistence(self):
++        await self._broadcast("finish_checkpoint_persistence")
++
+     async def export_hf(self, rollout_id: int, path: str):
+         """Export current weights as an HF checkpoint (collective across all ranks)."""
+         await self._broadcast("export_hf", rollout_id, path)
+diff --git a/train.py b/train.py
+--- a/train.py
++++ b/train.py
+@@ -84,11 +84,14 @@
+             if args.use_critic and args.offload_train:
+                 await model.offload()
+ 
++        if getattr(args, "custom_checkpoint_persistence_path", None):
++            await rollout_manager.save.remote(rollout_id)
+         if (not args.use_critic) or (rollout_id >= args.num_critic_only_steps):
+             await save_training_model(actor_model)
+         if args.use_critic:
+             await save_training_model(critic_model)
+-        await rollout_manager.save.remote(rollout_id)
++        if not getattr(args, "custom_checkpoint_persistence_path", None):
++            await rollout_manager.save.remote(rollout_id)
+ 
+     # train loop.
+     # note that for async training, one can change the position of the sync operation(ray.get).
+@@ -147,6 +150,8 @@
+             )
+             break
+ 
++    if getattr(args, "custom_checkpoint_persistence_path", None):
++        await actor_model.finish_checkpoint_persistence()
+     await rollout_manager.dispose.remote()
+ 
+ 
+diff --git a/train_async.py b/train_async.py
+--- a/train_async.py
++++ b/train_async.py
+@@ -118,10 +118,13 @@
+             rollout_id, args.save_interval, num_rollout_per_epoch, args.num_rollout
+         ):
+             force_sync = external_save or rollout_id == args.num_rollout - 1
++            if getattr(args, "custom_checkpoint_persistence_path", None):
++                await rollout_manager.save.remote(rollout_id)
+             await save_training_model(actor_model, rollout_id, force_sync)
+             if args.use_critic:
+                 await save_training_model(critic_model, rollout_id, force_sync)
+-            await rollout_manager.save.remote(rollout_id)
++            if not getattr(args, "custom_checkpoint_persistence_path", None):
++                await rollout_manager.save.remote(rollout_id)
+             if external_save:
+                 os.remove(args.save_trigger_sentinel)
+ 
+@@ -148,6 +151,8 @@
+             break
+ 
+     await eval_dispatcher.drain()
++    if getattr(args, "custom_checkpoint_persistence_path", None):
++        await actor_model.finish_checkpoint_persistence()
+     await rollout_manager.dispose.remote()
+ 
+ 

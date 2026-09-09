@@ -9,7 +9,8 @@ from io import BytesIO
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from cookbook.common.constants import STITCH_PATH
+from cookbook.common.constants import STITCH_PATH, TRAINING_CHECKPOINTS_PATH
+from cookbook.miles_disagg.checkpoint import relative_path
 from stitch.types import WEIGHT_PREFIX, VersionRef
 
 TRAINER_CALL_FILE = "trainer_call_id"
@@ -29,6 +30,7 @@ class ResumePoint:
     source_run_id: str
     trainer_checkpoint: str
     rollout_checkpoint: str
+    staged: bool = False
 
 
 def export_version(iteration: int) -> int:
@@ -68,11 +70,31 @@ def resolve_resume_point(
     *,
     source_run_id: str,
     save_hf: str | None,
+    checkpoint_volume: Any = None,
 ) -> ResumePoint:
     """Resolve the newest complete Megatron/HF checkpoint pair for a run."""
     if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", source_run_id) is None:
         raise ValueError(f"invalid resume run id: {source_run_id!r}")
 
+    point = (
+        _resolve_staged_resume_point(volume, checkpoint_volume, source_run_id)
+        if checkpoint_volume is not None
+        else None
+    )
+    try:
+        legacy = _resolve_legacy_resume_point(volume, source_run_id, save_hf)
+    except ResumePointNotFound:
+        if point is not None:
+            return point
+        raise
+    if point is not None and point.iteration >= legacy.iteration:
+        return point
+    return legacy
+
+
+def _resolve_legacy_resume_point(
+    volume: Any, source_run_id: str, save_hf: str | None
+) -> ResumePoint:
     run_root = PurePosixPath(source_run_id)
     checkpoint_root = run_root / "checkpoints"
     tracker = checkpoint_root / "latest_checkpointed_iteration.txt"
@@ -149,7 +171,7 @@ def _check_published_version(
 
 
 def prepare_attempt(
-    volume: Any, *, run_id: str, save_hf: str | None
+    volume: Any, *, run_id: str, save_hf: str | None, checkpoint_volume: Any = None
 ) -> ResumePoint | None:
     """Restore and return one trainer attempt's resume point, or rewind to the
     boot version and return None when the run has no complete pair yet.
@@ -158,7 +180,12 @@ def prepare_attempt(
     first attempt, a retry, and a manual re-spawn one path.
     """
     try:
-        point = resolve_resume_point(volume, source_run_id=run_id, save_hf=save_hf)
+        point = resolve_resume_point(
+            volume,
+            source_run_id=run_id,
+            save_hf=save_hf,
+            checkpoint_volume=checkpoint_volume,
+        )
     except ResumePointNotFound:
         restore_boot_pointer(volume, run_id)
         return None
@@ -223,11 +250,94 @@ def restore_resume_point(volume: Any, point: ResumePoint) -> VersionRef:
 
     with volume.batch_upload(force=True) as upload:
         upload.put_file(BytesIO(target.identity.encode()), pointer_path)
-        upload.put_file(
-            BytesIO(str(point.iteration).encode()),
-            f"{point.source_run_id}/checkpoints/latest_checkpointed_iteration.txt",
-        )
+        if not point.staged:
+            upload.put_file(
+                BytesIO(str(point.iteration).encode()),
+                f"{point.source_run_id}/checkpoints/latest_checkpointed_iteration.txt",
+            )
     return target
+
+
+def _validate_checkpoint_manifest(manifest: dict, run_id: str) -> None:
+    """Validate the immutable checkpoint address before giving it to a loader."""
+    iteration = manifest["iteration"]
+    attempt = manifest["attempt_id"]
+    if manifest["schema_version"] != 1 or manifest["run_id"] != run_id:
+        raise ValueError("checkpoint manifest schema or run identity mismatch")
+    if (
+        not isinstance(iteration, int)
+        or iteration < 0
+        or manifest["version"] != export_version(iteration)
+    ):
+        raise ValueError("checkpoint manifest iteration/version mismatch")
+    if "/" in relative_path(attempt):
+        raise ValueError("invalid checkpoint attempt ID")
+    root = f"{run_id}/attempts/{attempt}/snapshots/{iteration:07d}"
+    if manifest["checkpoint_root"] != f"{root}/checkpoints":
+        raise ValueError("checkpoint manifest points outside its snapshot")
+    if hf := manifest["hf_directory"]:
+        if not relative_path(hf).startswith(root + "/"):
+            raise ValueError("HF checkpoint points outside its snapshot")
+
+
+def _resolve_staged_resume_point(
+    run_volume: Any, checkpoint_volume: Any, run_id: str
+) -> ResumePoint | None:
+    from modal.exception import NotFoundError
+
+    try:
+        entries = list(
+            checkpoint_volume.iterdir(f"{run_id}/completed", recursive=False)
+        )
+    except (FileNotFoundError, NotFoundError):
+        return None
+    manifests = []
+    for entry in entries:
+        if PurePosixPath(entry.path).suffix != ".json":
+            continue
+        manifest = json.loads(_read_volume_file(checkpoint_volume, entry.path))
+        _validate_checkpoint_manifest(manifest, run_id)
+        if manifest["iteration"] > 0 and manifest["hf_directory"]:
+            manifests.append(manifest)
+    manifests.sort(
+        key=lambda item: (item["iteration"], item["completed_at_ns"]), reverse=True
+    )
+    for manifest in manifests:
+        try:
+            _check_published_version(
+                run_volume, PurePosixPath(run_id), version=manifest["version"]
+            )
+        except FileNotFoundError:
+            continue
+        return ResumePoint(
+            version=manifest["version"],
+            iteration=manifest["iteration"],
+            source_run_id=run_id,
+            trainer_checkpoint=str(
+                TRAINING_CHECKPOINTS_PATH / manifest["checkpoint_root"]
+            ),
+            rollout_checkpoint=str(
+                TRAINING_CHECKPOINTS_PATH / manifest["hf_directory"]
+            ),
+            staged=True,
+        )
+    return None
+
+
+def newest_persisted_export(
+    run_dir: Path, *, latest_version: int
+) -> tuple[int, Path] | None:
+    """Select a fully committed checkpoint from one snapshot of the mounted Volume."""
+    manifests = []
+    for path in (run_dir / "completed").glob("*.json"):
+        manifest = json.loads(path.read_text())
+        _validate_checkpoint_manifest(manifest, run_dir.name)
+        if manifest["hf_directory"] and manifest["version"] <= latest_version:
+            manifests.append(manifest)
+    if not manifests:
+        return None
+    latest = max(manifests, key=lambda item: (item["version"], item["completed_at_ns"]))
+    return latest["version"], run_dir.parent / latest["hf_directory"]
 
 
 def newest_complete_export(

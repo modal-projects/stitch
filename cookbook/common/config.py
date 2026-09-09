@@ -43,6 +43,9 @@ class ModalConfig:
     torch_dist_convert_extra_args: str = ""
     torch_dist_prep_ephemeral_disk_mib: int | None = None
     trainer_ephemeral_disk_mib: int | None = None
+    checkpoint_upload_mib_per_second: int = 256
+    checkpoint_min_free_disk_mib: int = 65_536
+    checkpoint_upload_timeout_seconds: int = 6 * 60 * 60
 
     def __init__(self, **kwargs: Any) -> None:
         for k, v in kwargs.items():

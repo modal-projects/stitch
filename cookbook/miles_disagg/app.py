@@ -46,11 +46,13 @@ from cookbook.common.constants import (
     SGLANG_CACHE_PATH,
     SIDECAR_PORT,
     STITCH_PATH,
+    TRAINING_CHECKPOINTS_PATH,
 )
-from cookbook.miles_disagg import trainer_image
+from cookbook.miles_disagg import checkpoint_hooks, trainer_image
 from cookbook.miles_disagg.config import YAML_CONFIG_FIELDS, MilesConfig
 from cookbook.miles_disagg.resume import (
     newest_complete_export,
+    newest_persisted_export,
     prepare_attempt,
     record_trainer_call,
 )
@@ -76,6 +78,7 @@ miles_cfg = exp.miles
 RUN_ID = os.environ["RUN_ID"]
 APP_NAME = f"{exp.APP_NAME}-{RUN_ID}"
 RUN_DIR = STITCH_PATH / RUN_ID
+TRAINING_CHECKPOINT_DIR = TRAINING_CHECKPOINTS_PATH / RUN_ID
 STORE_DEPLOYMENT = storage.StoreDeployment.from_environment()
 UPDATES_DIR = STORE_DEPLOYMENT.updates_dir(RUN_DIR)
 STORE_SECRETS = STORE_DEPLOYMENT.modal_secrets()
@@ -132,6 +135,9 @@ run_volume = modal.Volume.from_name(
     create_if_missing=True,
     version=2,
 )
+training_checkpoint_volume = modal.Volume.from_name(
+    f"{exp.EXPERIMENT_VOLUME_NAME}-checkpoints", create_if_missing=True, version=2
+)
 sglang_cache_volume = modal.Volume.from_name(
     "sglang-cache", create_if_missing=True, version=2
 )  # survives cold starts
@@ -150,6 +156,7 @@ train_volumes = {
     str(CHECKPOINTS_PATH): checkpoint_volume,
     str(DATA_PATH): data_volume,
     str(STITCH_PATH): run_volume,
+    str(TRAINING_CHECKPOINTS_PATH): training_checkpoint_volume,
 }
 
 app = modal.App(APP_NAME)
@@ -177,6 +184,7 @@ SGLANG_SERVER_ARGS = {
     volumes={
         str(HF_CACHE_PATH): hf_cache_volume,
         str(CHECKPOINTS_PATH): checkpoint_volume,
+        str(TRAINING_CHECKPOINTS_PATH): training_checkpoint_volume.read_only(),
         **(
             {str(STITCH_PATH): run_volume}
             if STORE_DEPLOYMENT.backend == storage.MODAL_VOLUME
@@ -246,8 +254,9 @@ def _boot_checkpoint(store_config: dict) -> tuple[str, int]:
     ):
         return miles_cfg.hf_checkpoint, 0
 
-    # Read the exports and the pointer from one Volume snapshot; a save ahead of
-    # latest is not eligible yet.
+    # Read the served version first, then the separate checkpoint Volume. A
+    # newer checkpoint may finish uploading meanwhile; the version bound keeps
+    # it ineligible until its corresponding delta has been published.
     run_volume.reload()
     store = storage.create_store(
         store_config["stitch_store_backend"],
@@ -260,9 +269,15 @@ def _boot_checkpoint(store_config: dict) -> tuple[str, int]:
         return miles_cfg.hf_checkpoint, 0
     if latest.run_id != RUN_ID:
         raise ValueError(f"latest belongs to run {latest.run_id!r}, not {RUN_ID!r}")
-    export = newest_complete_export(
+    training_checkpoint_volume.reload()
+    export = newest_persisted_export(
+        TRAINING_CHECKPOINT_DIR, latest_version=latest.version
+    )
+    legacy_export = newest_complete_export(
         RUN_DIR, save_hf=save_hf, latest_version=latest.version
     )
+    if legacy_export is not None and (export is None or legacy_export[0] > export[0]):
+        export = legacy_export
     return (str(export[1]), export[0]) if export else (miles_cfg.hf_checkpoint, 0)
 
 
@@ -430,7 +445,10 @@ class Trainer:
         resume_point = None
         if STORE_DEPLOYMENT.backend == storage.MODAL_VOLUME:
             resume_point = prepare_attempt(
-                run_volume, run_id=RUN_ID, save_hf=getattr(cfg, "save_hf", None)
+                run_volume,
+                run_id=RUN_ID,
+                save_hf=getattr(cfg, "save_hf", None),
+                checkpoint_volume=training_checkpoint_volume,
             )
 
         cfg.rollout_endpoint_url = ModalFlashLBPool(APP_NAME, "Server").gateway_url()
@@ -440,16 +458,20 @@ class Trainer:
             cfg.exit_on_missing_checkpoint = True
         # Miles requires this CLI argument; the deployment owns its run-scoped value.
         cfg.update_weight_disk_dir = str(UPDATES_DIR)
-        if getattr(cfg, "save_interval", None) is None:
-            cfg.save = cfg.save_hf = None
-        else:
-            cfg.save = str(RUN_DIR / "checkpoints")
-            if save_hf := getattr(cfg, "save_hf", None):
-                cfg.save_hf = str(RUN_DIR / save_hf)
+        checkpoint_config = checkpoint_hooks.configure_checkpointing(
+            cfg,
+            run_id=RUN_ID,
+            attempt_id=uuid4().hex,
+            volume_name=f"{exp.EXPERIMENT_VOLUME_NAME}-checkpoints",
+            upload_mib_per_second=modal_cfg.checkpoint_upload_mib_per_second,
+            min_free_disk_mib=modal_cfg.checkpoint_min_free_disk_mib,
+            timeout_seconds=modal_cfg.checkpoint_upload_timeout_seconds,
+        )
         # miles setattr's every key onto args for the hooks.
         custom_config = {
             **(cfg.custom_config_path or {}),
             **STORE_DEPLOYMENT.hook_config(APP_NAME),
+            **checkpoint_config,
             "experiment_volume_name": exp.EXPERIMENT_VOLUME_NAME,
             "rollout_modal_flash_app_name": APP_NAME,
             "rollout_modal_flash_server_cls_name": "Server",
