@@ -6,8 +6,12 @@ model, trainer, rollout fleet, data, and weight-update policy; the shared
 infrastructure handles preparation, isolated runs, and pool lifecycle.
 `standalone` deploys the same rollout pool without a trainer: an external
 trainer or harness publishes weight updates through the configured checkpoint
-store and sends rollout traffic through the pool's session router. Its launcher
+store and sends rollout traffic directly to the pool's Modal Server. Its launcher
 claims the run's boot pointer at v0 before the pool enters rotation.
+
+Every rollout `Server` enables `experimental_options={"kv_aware_routing": True}`.
+Modal handles KV-aware routing. Rollout clients use
+`ModalFlashPool(app_name, "Server")`.
 
 ## Common workflow
 

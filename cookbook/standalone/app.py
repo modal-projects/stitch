@@ -1,9 +1,9 @@
 """Standalone rollout serving on the stitch core — the pool without a trainer.
 
 ``EXPERIMENT_CONFIG`` selects a config module under ``cookbook.standalone``. The Server
-(sglang + stitch sidecar) and the session-routing LB are the complete deployment: weight
-publications arrive from an external trainer or harness through the configured checkpoint
-store, and rollout traffic enters through ``Router``.
+(sglang + stitch sidecar) receives rollout traffic through Modal's KV-aware routing.
+Weight publications arrive from an external trainer or harness through the configured
+checkpoint store.
 
 Prepare the served base once first (a separate app, so prep never spins up the rollout
 Server floor — see ``cookbook.standalone.prep_app``), then launch a pool with one command —
@@ -19,8 +19,8 @@ import os
 
 import modal
 
-from cookbook.common import router, serving_image, storage
 from cookbook.common import server as common_server
+from cookbook.common import serving_image, storage
 from cookbook.common.constants import (
     CHECKPOINTS_PATH,
     DRAFT_PATH,
@@ -130,6 +130,7 @@ SGLANG_SERVER_ARGS = {
     include_source=False,
     port=SIDECAR_PORT,
     routing_region=modal_cfg.routing_region,
+    experimental_options={"kv_aware_routing": True},
     unauthenticated=True,
     exit_grace_period=60 * MINUTES,
     startup_timeout=SERVER_STARTUP_TIMEOUT,
@@ -200,68 +201,3 @@ def claim_boot_pointer() -> None:
         s3_endpoint_url=store_config.get("stitch_s3_endpoint_url"),
     )
     checkpoint.claim_boot_pointer(store, RUN_ID)
-
-
-# ── Session-routing LB (cookbook/common/router.py) ─────────────────────────────
-# The router is two CPU Flash classes in this same app, so it deploys and dies with
-# the pool; the GPU class keeps ``Server``, rollout traffic enters through ``Router``.
-router_image = router.build_router_image(
-    EXPERIMENT,
-    RUN_ID,
-    extra_env=STORE_DEPLOYMENT.image_environment,
-)
-session_routes = router.session_routes_dict(APP_NAME)
-
-
-@app.server(
-    image=router_image,
-    cpu=2,
-    memory=1024,
-    min_containers=modal_cfg.router_registry_min_containers,
-    routing_region=modal_cfg.routing_region,
-    include_source=False,
-    port=8000,
-    unauthenticated=True,
-)
-class RouterRegistry:
-    """Polls Server replicas' live queue depth; serves the snapshot at /loads."""
-
-    @modal.enter()
-    def enter(self) -> None:
-        router.serve_registry(self, app_name=APP_NAME, upstream_cls="Server")
-
-    @modal.exit()
-    def exit(self) -> None:
-        router.stop_server(self)
-
-
-@app.server(
-    image=router_image,
-    cpu=4,
-    memory=2048,
-    min_containers=modal_cfg.router_min_containers,
-    target_concurrency=modal_cfg.router_target_concurrency,
-    routing_region=modal_cfg.routing_region,
-    include_source=False,
-    port=8000,
-    unauthenticated=True,
-    exit_grace_period=30 * MINUTES,
-)
-class Router:
-    """Front door for rollout traffic: session-affinity routing across Server replicas,
-    with 503 eviction + retry, so a saturated replica sheds sessions instead of
-    attracting them."""
-
-    @modal.enter()
-    def enter(self) -> None:
-        router.serve_router(
-            self,
-            registry_url=RouterRegistry.get_url(),
-            upstream_url=Server.get_url(),
-            session_routes=session_routes,
-            overload_threshold=ROLLOUT_CONCURRENCY,
-        )
-
-    @modal.exit()
-    def exit(self) -> None:
-        router.stop_server(self)

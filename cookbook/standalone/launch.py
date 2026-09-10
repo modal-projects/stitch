@@ -38,7 +38,7 @@ def main() -> None:
         args.run_id or os.environ.get("RUN_ID") or uuid.uuid4().hex[:8]
     )
 
-    from stitch.pools.modal_flash_lb_temp import ModalFlashLBPool
+    from stitch.pools.modal_flash import ModalFlashPool
     from stitch.service import await_pool_ready
 
     run = importlib.import_module("cookbook.standalone.app")
@@ -50,14 +50,13 @@ def main() -> None:
     # The default checkpoint store is only accessible where its Volume is
     # mounted, so claim through the deployed app before waiting for replicas.
     modal.Function.from_name(run.APP_NAME, CLAIM_FUNCTION_NAME).remote()
-    pool = ModalFlashLBPool(run.APP_NAME, "Server")
+    pool = ModalFlashPool(run.APP_NAME, "Server")
     if not await_pool_ready(pool, replica_floor=run.modal_cfg.rollout_min_containers):
         print(f"Pool {run.APP_NAME} did not reach its replica floor", flush=True)
         sys.exit(1)
     print(f"Pool ready: run_id={run.RUN_ID}")
     print(f"  publications: {run.RUN_DIR}/updates on {run.exp.EXPERIMENT_VOLUME_NAME}")
     print(f"  pool gateway: {pool.gateway_url()}")
-    print(f"  rollout traffic: {run.Router.get_url()}")
 
 
 if __name__ == "__main__":
