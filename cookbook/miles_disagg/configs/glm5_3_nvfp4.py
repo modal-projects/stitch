@@ -47,9 +47,8 @@ miles = deepcopy(base.miles)
 miles.actor_num_nodes = 32
 miles.global_batch_size = 512
 miles.rollout_batch_size = 64
-miles.async_max_concurrent_samples = (
-    modal.rollout_min_containers * base.ROLLOUT_INPUTS_PER_ENGINE
-)
+# Tool execution and verification keep a substantial share of agents off inference.
+miles.async_max_concurrent_samples = 384
 miles.sglang_server_concurrency = miles.async_max_concurrent_samples
 miles.session_server_startup_timeout_seconds = 600
 miles.hf_checkpoint = str(ROLLOUT_CHECKPOINT_PATH)
