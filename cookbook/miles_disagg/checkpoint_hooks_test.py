@@ -41,7 +41,6 @@ def test_async_serialization_cannot_publish_an_unfinished_local_snapshot():
         )
 
 
-
 def test_final_drain_keeps_collective_participants_polling(monkeypatch):
     """A host must not wait on network I/O while its peers enter a collective."""
     from unittest.mock import Mock, PropertyMock
@@ -59,3 +58,84 @@ def test_final_drain_keeps_collective_participants_polling(monkeypatch):
     monkeypatch.setattr(checkpoint_hooks.time, "sleep", lambda seconds: None)
     session.wait()
     assert states == [(1, None), (0, None)]
+
+
+def priority_session():
+    from cookbook.miles_disagg.checkpoint_priority import CheckpointIO
+
+    session = checkpoint_hooks.CheckpointSession.__new__(
+        checkpoint_hooks.CheckpointSession
+    )
+    session.args = SimpleNamespace(
+        stitch_checkpoint_delta_quiesce_seconds=0.1,
+        stitch_checkpoint_delta_serving_seconds=1,
+        stitch_checkpoint_delta_min_ready=1,
+        run_id="run",
+        rollout_modal_flash_app_name="app",
+    )
+    session.rank = 0
+    session.uploader = SimpleNamespace(io=CheckpointIO())
+    session._serving_token = None
+    session.gather = lambda value: [value]
+    return session
+
+
+def test_failed_delta_releases_checkpoint_priority():
+    import time
+
+    session = priority_session()
+    with pytest.raises(OSError, match="delta publish failed"):
+        with session.prioritize_update(1):
+            with pytest.raises(TimeoutError):
+                with session.uploader.io.operation(time.monotonic() + 0.01):
+                    pytest.fail("checkpoint I/O overlapped delta encoding")
+            raise OSError("delta publish failed")
+    with session.uploader.io.operation(time.monotonic() + 1):
+        pass
+
+
+def test_published_delta_transfers_lease_without_waiting_for_serving(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        checkpoint_hooks, "watch_serving", lambda *args, **kwargs: calls.append(args)
+    )
+    session = priority_session()
+    with session.prioritize_update(1):
+        assert not calls
+    assert session.uploader.io.held(session._serving_token)
+    first = session._serving_token
+    with session.prioritize_update(2):
+        assert not session.uploader.io.held(first)
+    assert session.uploader.io.held(session._serving_token)
+    assert len(calls) == 2
+    session.uploader.io.resume(session._serving_token)
+
+
+def test_monitor_start_failure_does_not_strand_other_training_ranks(monkeypatch):
+    import time
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("cannot start monitor thread")
+
+    monkeypatch.setattr(checkpoint_hooks, "watch_serving", fail)
+    session = priority_session()
+    with session.prioritize_update(1):
+        pass
+    with session.uploader.io.operation(time.monotonic() + 1):
+        pass
+
+
+def test_busy_checkpoint_call_cannot_delay_delta_past_quiescence_limit(
+    monkeypatch, caplog
+):
+    import time
+
+    monkeypatch.setattr(checkpoint_hooks, "watch_serving", lambda *args, **kwargs: None)
+    session = priority_session()
+    session.args.stitch_checkpoint_delta_quiesce_seconds = 0.01
+    started = time.monotonic()
+    with session.uploader.io.operation(started + 2):
+        with session.prioritize_update(1):
+            assert "delta_quiesce_timeout" in caplog.text
+            assert time.monotonic() - started < 1
+    session.uploader.io.resume(session._serving_token)

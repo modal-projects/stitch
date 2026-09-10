@@ -11,12 +11,15 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import shutil
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
+
+from cookbook.miles_disagg.checkpoint_priority import CheckpointIO
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +120,7 @@ class CheckpointUploader:
     ):
         if bytes_per_second < 0 or timeout_seconds <= 0 or poll_seconds <= 0:
             raise ValueError("invalid checkpoint upload limits")
+        self.io = CheckpointIO()
         self.mount = mount
         self.volume = volume
         self.bytes_per_second = bytes_per_second
@@ -187,29 +191,45 @@ class CheckpointUploader:
         reported = started
         files = {}
         try:
-            for source in upload.files():
+            with self.io.operation(deadline):
+                sources = upload.files()
+            for source in sources:
                 name = source.relative_to(upload.local_root).as_posix()
                 destination = self.mount / upload.root / name
-                destination.parent.mkdir(parents=True, exist_ok=True)
                 checksum = hashlib.sha256()
                 size = 0
-                with source.open("rb") as reader, destination.open("wb") as writer:
-                    while True:
+                with self.io.operation(deadline):
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    reader = source.open("rb")
+                    try:
+                        writer = destination.open("wb", buffering=0)
+                    except BaseException:
+                        reader.close()
+                        raise
+                try:
+                    finished = False
+                    while not finished:
                         chunk_started = time.monotonic()
-                        chunk = reader.read(4 * 1024**2)
-                        if not chunk:
-                            break
-                        writer.write(chunk)
-                        checksum.update(chunk)
-                        copied += len(chunk)
-                        size += len(chunk)
+                        window_bytes = 0
+                        with self.io.operation(deadline):
+                            # Bound dirty data before acknowledging a priority pause.
+                            # fsync cannot preempt an already-running Volume operation.
+                            for _ in range(16):
+                                chunk = reader.read(4 * 1024**2)
+                                if not chunk:
+                                    finished = True
+                                    break
+                                if writer.write(chunk) != len(chunk):
+                                    raise OSError("short checkpoint write")
+                                checksum.update(chunk)
+                                window_bytes += len(chunk)
+                            if window_bytes:
+                                os.fsync(writer.fileno())
+                        copied += window_bytes
+                        size += window_bytes
                         now = time.monotonic()
-                        if now > deadline:
-                            raise TimeoutError(
-                                "checkpoint copy exceeded upload deadline"
-                            )
                         if self.bytes_per_second:
-                            delay = len(chunk) / self.bytes_per_second - (
+                            delay = window_bytes / self.bytes_per_second - (
                                 now - chunk_started
                             )
                             if delay > 0:
@@ -222,8 +242,12 @@ class CheckpointUploader:
                                 age_seconds=now - started,
                             )
                             reported = now
+                finally:
+                    reader.close()
+                    writer.close()
                 files[name] = {"size": size, "sha256": checksum.hexdigest()}
-            self.volume.commit()
+            with self.io.operation(deadline):
+                self.volume.commit()
             receipt = {
                 "iteration": upload.iteration,
                 "attempt_id": upload.attempt_id,
@@ -232,25 +256,31 @@ class CheckpointUploader:
                 "files": files,
                 "required_files": list(upload.required_files),
             }
-            self._write_json(upload.receipt_path(upload.host_rank), receipt)
-            self.volume.commit()
+            with self.io.operation(deadline):
+                self._write_json(upload.receipt_path(upload.host_rank), receipt)
+                self.volume.commit()
             self._event("host_committed", upload, bytes=copied)
             if upload.host_rank == upload.host_ranks[0]:
                 self._complete(upload, deadline)
-            while self._read_json(upload.manifest_path) is None:
+            while self._read_json_when_idle(upload.manifest_path, deadline) is None:
                 self._wait(deadline)
-            shutil.rmtree(upload.local_root / upload.checkpoint_directory)
-            if upload.hf_directory:
-                shutil.rmtree(
-                    upload.local_root / upload.hf_directory, ignore_errors=True
-                )
-            (upload.local_root / upload.rollout_file).unlink(missing_ok=True)
+            with self.io.operation(deadline):
+                shutil.rmtree(upload.local_root / upload.checkpoint_directory)
+                if upload.hf_directory:
+                    shutil.rmtree(
+                        upload.local_root / upload.hf_directory, ignore_errors=True
+                    )
+                (upload.local_root / upload.rollout_file).unlink(missing_ok=True)
             self._event(
                 "durable", upload, bytes=copied, seconds=time.monotonic() - started
             )
         except Exception:
             self._event("failed", upload, retained_local_root=str(upload.local_root))
             raise
+
+    def _read_json_when_idle(self, path: str, deadline: float) -> dict | None:
+        with self.io.operation(deadline):
+            return self._read_json(path)
 
     def _wait(self, deadline: float) -> None:
         if time.monotonic() >= deadline:
@@ -262,7 +292,9 @@ class CheckpointUploader:
         while len(receipts) != len(upload.host_ranks):
             for rank in upload.host_ranks:
                 if rank not in receipts:
-                    receipt = self._read_json(upload.receipt_path(rank))
+                    receipt = self._read_json_when_idle(
+                        upload.receipt_path(rank), deadline
+                    )
                     if receipt is not None:
                         if (
                             receipt["iteration"],
@@ -296,30 +328,32 @@ class CheckpointUploader:
             raise ValueError(
                 f"checkpoint is missing referenced files: {sorted(missing)}"
             )
-        root = self.mount / upload.root
-        # These are compatibility metadata for Megatron/HF loaders. The manifest
-        # below is the sole publication boundary used by cookbook discovery.
-        if upload.hf_directory:
-            (root / upload.hf_directory / ".complete").touch()
-        tracker = root / "checkpoints/latest_checkpointed_iteration.txt"
-        tracker.parent.mkdir(parents=True, exist_ok=True)
-        tracker.write_text(str(upload.iteration))
-        self.volume.commit()
-        self._write_json(
-            upload.manifest_path,
-            {
-                "schema_version": 1,
-                "run_id": upload.run_id,
-                "completed_at_ns": time.time_ns(),
-                "attempt_id": upload.attempt_id,
-                "iteration": upload.iteration,
-                "version": upload.iteration + 1,
-                "host_ranks": list(upload.host_ranks),
-                "checkpoint_root": f"{upload.root}/checkpoints",
-                "hf_directory": f"{upload.root}/{upload.hf_directory}"
-                if upload.hf_directory
-                else None,
-                "files": files,
-            },
-        )
-        self.volume.commit()
+        with self.io.operation(deadline):
+            root = self.mount / upload.root
+            # These are compatibility metadata for Megatron/HF loaders. The manifest
+            # below is the sole publication boundary used by cookbook discovery.
+            if upload.hf_directory:
+                (root / upload.hf_directory / ".complete").touch()
+            tracker = root / "checkpoints/latest_checkpointed_iteration.txt"
+            tracker.parent.mkdir(parents=True, exist_ok=True)
+            tracker.write_text(str(upload.iteration))
+            self.volume.commit()
+        with self.io.operation(deadline):
+            self._write_json(
+                upload.manifest_path,
+                {
+                    "schema_version": 1,
+                    "run_id": upload.run_id,
+                    "completed_at_ns": time.time_ns(),
+                    "attempt_id": upload.attempt_id,
+                    "iteration": upload.iteration,
+                    "version": upload.iteration + 1,
+                    "host_ranks": list(upload.host_ranks),
+                    "checkpoint_root": f"{upload.root}/checkpoints",
+                    "hf_directory": f"{upload.root}/{upload.hf_directory}"
+                    if upload.hf_directory
+                    else None,
+                    "files": files,
+                },
+            )
+            self.volume.commit()

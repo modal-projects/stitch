@@ -150,7 +150,6 @@ def test_only_one_snapshot_is_accepted_at_a_time(tmp_path):
         worker.close()
 
 
-
 def test_missing_shard_receipt_prevents_completion(tmp_path):
     from dataclasses import replace
 
@@ -179,4 +178,47 @@ def test_completed_upload_releases_capacity_for_the_next_snapshot(tmp_path):
             assert worker.has_capacity
             assert upload.manifest_path in volume.durable
     finally:
+        worker.close()
+
+
+def test_delta_priority_stops_checkpoint_writes_until_released(tmp_path):
+    worker, volume = uploader(tmp_path, 0, {})
+    upload = make_upload(tmp_path, 0, hosts=(0,))
+    token = None
+    try:
+        token = worker.io.pause()
+        worker.submit(upload)
+        time.sleep(0.05)
+        assert worker.io.quiescent
+        assert not list(volume.mount.rglob("*.distcp"))
+        assert not volume.commit_started.is_set()
+        worker.io.resume(token)
+        token = None
+        wait_for_upload(worker)
+        assert upload.manifest_path in volume.durable
+    finally:
+        if token is not None:
+            worker.io.resume(token)
+        worker.close()
+
+
+def test_pause_does_not_claim_an_inflight_commit_has_stopped(tmp_path):
+    worker, volume = uploader(tmp_path, 0, {})
+    volume.allow_commit.clear()
+    token = None
+    try:
+        worker.submit(make_upload(tmp_path, 0, hosts=(0,)))
+        assert volume.commit_started.wait(2)
+        token = worker.io.pause()
+        assert not worker.io.quiescent
+        volume.allow_commit.set()
+        deadline = time.monotonic() + 2
+        while not worker.io.quiescent:
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        assert not any("/receipts/" in path for path in volume.durable)
+    finally:
+        volume.allow_commit.set()
+        if token is not None:
+            worker.io.resume(token)
         worker.close()

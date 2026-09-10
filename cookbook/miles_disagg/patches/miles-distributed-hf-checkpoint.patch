@@ -1,0 +1,78 @@
+--- a/miles/backends/megatron_utils/hf_export.py
++++ b/miles/backends/megatron_utils/hf_export.py
+@@ -4,7 +4,7 @@
+ weight updater's machinery), so export coverage always matches weight-sync
+ coverage; ``save_hf_model`` picks between it and the Megatron-Bridge exporter
+ (LoRA needs the bridge for adapter merging) and writes a ``.complete`` marker.
+-Everything here is collective: all ranks must call it, global rank 0 writes.
++Everything here is collective: all ranks must call it; rank 0 writes metadata.
+ """
+ 
+ import json
+@@ -73,33 +73,27 @@
+ 
+     Same conversion machinery as the weight updater, so export coverage matches
+     weight-sync coverage (the bridge silently exports zero weights for specs it has
+-    no mapping for, e.g. qwen3.5). Collective — all ranks must call it; rank 0 writes.
++    no mapping for, e.g. qwen3.5). Collective — all ranks must call it.
+     """
++    from cookbook.miles_disagg.checkpoint_hf import write_shards, writer_ranks
++    from miles.utils.distributed_utils import get_gloo_group
++
+     path = Path(path)
+-    is_writer = torch.distributed.get_rank() == 0
+-    if is_writer:
+-        path.mkdir(parents=True, exist_ok=True)
+-        # A stale marker from an earlier run would vouch for this run's half-written shards.
+-        (path / HF_EXPORT_COMPLETE_MARKER).unlink(missing_ok=True)
++    rank = torch.distributed.get_rank()
++    is_writer = rank == 0
++
++    def gather(value):
++        values = [None] * torch.distributed.get_world_size()
++        torch.distributed.all_gather_object(values, value, group=get_gloo_group())
++        return values
+ 
+     iterator = HfWeightIteratorDirect(args, model, model_name=model_name, quantization_config=quantization_config)
+-
+-    weight_map: dict[str, str] = {}
+-    total_size = 0
+-    shard_index = 0
+-    for hf_named_tensors in iterator.get_hf_weight_chunks(megatron_local_weights):
+-        if not is_writer:
+-            continue
+-        shard_index += 1
+-        shard_name = f"model-{shard_index:05d}.safetensors"
+-        shard_tensors = {}
+-        for name, tensor in hf_named_tensors:
+-            shard_tensors[name] = tensor.detach().to("cpu").contiguous()
+-            weight_map[name] = shard_name
+-            total_size += shard_tensors[name].numel() * shard_tensors[name].element_size()
+-        safetensors.torch.save_file(shard_tensors, path / shard_name)
+-        del shard_tensors
+-
++    weight_map, total_size, writer_bytes = write_shards(
++        iterator.get_hf_weight_chunks(megatron_local_weights), path,
++        rank=rank, writers=writer_ranks(args, path), gather=gather,
++        save=safetensors.torch.save_file,
++    )
++    error = None
+     try:
+         if is_writer:
+             assert weight_map, f"HF export to {path} produced no weights"
+@@ -113,9 +107,12 @@
+                 logger.warning(f"hf_checkpoint {args.hf_checkpoint} is not a local dir; metadata not copied to {path}")
+             index = {"metadata": {"total_size": total_size}, "weight_map": weight_map}
+             (path / "model.safetensors.index.json").write_text(json.dumps(index, indent=2))
+-    finally:
+-        # In a finally: rank 0 is the only rank that can fail above.
+-        torch.distributed.barrier()
++            logger.info("HF_EXPORT %s", json.dumps(dict(total_size=total_size, writer_bytes=writer_bytes)))
++    except Exception as exc:
++        error = f"rank {rank}: {type(exc).__name__}: {exc}"
++    errors = [message for message in gather(error) if message]
++    if errors:
++        raise RuntimeError("HF export metadata failed:\n" + "\n".join(errors))
+ 
+ 
+ @cache

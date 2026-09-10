@@ -44,3 +44,28 @@ def test_delta_refresh_failure_prevents_file_creation(
 
     assert calls == [(updater.args, str(updates))]
     assert not updates.exists()
+
+
+def test_runtime_patch_stack_can_be_rechecked_without_changing_sources(tmp_path):
+    import re
+    from pathlib import Path
+
+    import miles
+
+    from cookbook.common.process import apply_git_patches
+    from cookbook.miles_disagg.trainer_image import MILES_RUNTIME_PATCHES
+
+    root = Path(miles.__file__).resolve().parent.parent
+    paths = {
+        path
+        for patch in MILES_RUNTIME_PATCHES
+        for path in re.findall(r"^\+\+\+ b/(.+)$", Path(patch).read_text(), re.MULTILINE)
+    }
+    original = {path: (root / path).read_bytes() for path in paths}
+    for path, data in original.items():
+        destination = tmp_path / path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(data)
+    apply_git_patches(list(MILES_RUNTIME_PATCHES), str(tmp_path), "Miles patches")
+    apply_git_patches(list(MILES_RUNTIME_PATCHES), str(tmp_path), "Miles patches")
+    assert {path: (tmp_path / path).read_bytes() for path in paths} == original

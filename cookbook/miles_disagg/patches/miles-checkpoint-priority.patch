@@ -1,0 +1,59 @@
+--- a/miles/backends/megatron_utils/actor.py
++++ b/miles/backends/megatron_utils/actor.py
+@@ -832,7 +832,13 @@
+ 
+         with torch_memory_saver.disable() if self.args.offload_train else nullcontext():
+             print_memory("before update_weights")
+-            self.weight_updater.update_weights()
++            persistence = getattr(self, "_checkpoint_persistence", None)
++            priority = (
++                persistence.prioritize_update(self.weight_updater.weight_version + 1)
++                if persistence else nullcontext()
++            )
++            with priority:
++                self.weight_updater.update_weights()
+             print_memory("after update_weights")
+             if dist.get_rank() == 0:
+                 ray.get(self.rollout_manager.set_weight_version.remote(self.weight_updater.weight_version))
+--- a/miles/backends/megatron_utils/update_weight/update_weight_from_distributed/delta.py
++++ b/miles/backends/megatron_utils/update_weight/update_weight_from_distributed/delta.py
+@@ -5,6 +5,7 @@
+ import os
+ import queue
+ import shutil
++import time
+ from argparse import Namespace
+ from collections import deque
+ from collections.abc import Callable, Mapping, Sequence
+@@ -135,10 +136,15 @@
+ 
+         self.weight_version += 1
+         self._publish()
++        started = time.monotonic()
+         if self._publish_only:
+             self._announce_version()
+         else:
+             self._reload_engines()
++        if dist.get_rank() == 0:
++            logger.info("DELTA_PHASE %s", json.dumps(dict(
++                version=self.weight_version, phase="publish_and_notify", seconds=time.monotonic() - started,
++            )))
+         self._record_metrics()
+ 
+     def _capture_baseline(self) -> None:
+@@ -238,8 +244,15 @@
+ 
+     def _publish(self) -> None:
+         """Encode this version's changed tensors (source ranks), then write it as a canonical HF dir."""
++        started = time.monotonic()
+         self._encode_delta()
++        encoded = time.monotonic()
+         self._write_delta_files()
++        if dist.get_rank() == 0:
++            logger.info("DELTA_PHASE %s", json.dumps(dict(
++                version=self.weight_version, phase="encode_and_write",
++                encode_seconds=encoded - started, write_seconds=time.monotonic() - encoded,
++            )))
+ 
+     def _drop_duplicate_names(self, group, world: int, rank: int) -> None:
+         """A parameter Megatron replicates across PP stages — the word embedding on the last stage

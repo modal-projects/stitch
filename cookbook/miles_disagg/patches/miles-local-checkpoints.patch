@@ -45,7 +45,8 @@ diff --git a/miles/backends/megatron_utils/checkpoint_persistence.py b/miles/bac
 new file mode 100644
 --- /dev/null
 +++ b/miles/backends/megatron_utils/checkpoint_persistence.py
-@@ -0,0 +1,23 @@
+@@ -0,0 +1,28 @@
++from contextlib import AbstractContextManager
 +from typing import Protocol
 +
 +
@@ -68,6 +69,10 @@ new file mode 100644
 +
 +    def wait(self) -> None:
 +        """Wait for all accepted snapshots to become durable, propagating failures."""
++        ...
++
++    def prioritize_update(self, version: int) -> AbstractContextManager[None]:
++        """Defer background checkpoint I/O while publishing and applying live weights."""
 +        ...
 diff --git a/miles/ray/actor_group.py b/miles/ray/actor_group.py
 --- a/miles/ray/actor_group.py
