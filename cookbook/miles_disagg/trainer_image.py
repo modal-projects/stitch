@@ -34,6 +34,7 @@ MILES_RUNTIME_PATCHES = (
     "/root/cookbook/miles_disagg/patches/miles-hf-export-static-tensors.patch",
     "/root/cookbook/miles_disagg/patches/miles-local-checkpoints.patch",
     "/root/cookbook/miles_disagg/patches/miles-session-startup.patch",
+    "/root/cookbook/miles_disagg/patches/miles-session-queue-retry.patch",
     "/root/cookbook/miles_disagg/patches/miles-delta-pre-write.patch",
     "/root/cookbook/miles_disagg/patches/miles-checkpoint-priority.patch",
     "/root/cookbook/miles_disagg/patches/miles-distributed-hf-checkpoint.patch",

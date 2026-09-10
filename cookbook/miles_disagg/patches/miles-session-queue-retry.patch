@@ -1,0 +1,35 @@
+--- a/miles/rollout/session/server.py
++++ b/miles/rollout/session/server.py
+@@ -29,6 +29,23 @@
+ def _transport_error_is_safe_to_retry(exc: httpx.TransportError) -> bool:
+     """Whether httpx failed before a stateful request could reach the server."""
+     return isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout))
++
++
++def _response_is_safe_to_retry(response: httpx.Response) -> bool:
++    if response.status_code in (409, 429):
++        return True
++    if response.status_code != 503:
++        return False
++    try:
++        body = response.json()
++    except ValueError:
++        return False
++    if not isinstance(body, dict):
++        return False
++    error = body.get("error")
++    message = error.get("message") if isinstance(error, dict) else body.get("detail")
++    # SGLang rejects this request before generation, so its session can be retried.
++    return message == "The request queue is full."
+ 
+ 
+ class SessionServer:
+@@ -102,7 +119,7 @@
+                 # before generation. A generic 5xx may be returned after the
+                 # stateful request was dispatched, so replaying it could
+                 # advance the same session twice.
+-                retryable = response.status_code in (409, 429)
++                retryable = _response_is_safe_to_retry(response)
+                 if not retryable or attempt + 1 == max_retries:
+                     break
+                 await response.aread()
