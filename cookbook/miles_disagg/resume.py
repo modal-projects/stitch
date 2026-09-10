@@ -187,9 +187,14 @@ def prepare_attempt(
             checkpoint_volume=checkpoint_volume,
         )
     except ResumePointNotFound:
+        point = None
+    if point is None:
         restore_boot_pointer(volume, run_id)
-        return None
-    restore_resume_point(volume, point)
+    else:
+        restore_resume_point(volume, point)
+    # API uploads do not refresh the mounted pointer or legacy Megatron tracker.
+    # The subsequent claim and checkpoint loader read those mounted files.
+    volume.reload()
     return point
 
 

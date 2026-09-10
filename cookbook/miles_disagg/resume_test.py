@@ -467,3 +467,53 @@ def test_resume_selects_newest_published_checkpoint_across_both_volumes(
     )
     assert point.iteration == expected
     assert point.staged == (expected == staged_iteration)
+
+
+@pytest.mark.parametrize("checkpoint_kind", ["staged", "legacy", "boot"])
+def test_prepare_attempt_refreshes_mounted_state_before_claim(
+    tmp_path, checkpoint_kind
+):
+    from stitch.publish import claim_run
+    from stitch.stores.modal_volume import ModalVolumeStore
+
+    class MountedVolume(_Volume):
+        def reload(self):
+            for name, value in self.files.items():
+                path = tmp_path / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(value)
+
+    files = {"old/latest": b"old/weight_v000042"}
+    checkpoint_volume = _Volume({})
+    if checkpoint_kind == "staged":
+        files.update(_published(30))
+        checkpoint_volume.files["old/completed/0000029-attempt.json"] = json.dumps(
+            _staged_manifest(29)
+        ).encode()
+    elif checkpoint_kind == "legacy":
+        files.update(
+            {
+                "old/checkpoints/latest_checkpointed_iteration.txt": b"39",
+                "old/checkpoints/iter_0000029/state": b"state",
+                "old/hf_checkpoints/weight_v000029/.complete": b"",
+                **_published(30),
+            }
+        )
+    volume = MountedVolume(files)
+    volume.reload()
+    store = ModalVolumeStore(tmp_path / "old", run_id="old")
+    assert store.read_pointer().version == 42
+
+    point = prepare_attempt(
+        volume,
+        run_id="old",
+        save_hf=_Config.save_hf,
+        checkpoint_volume=checkpoint_volume,
+    )
+    boot_version = point.version if point else 0
+    claim_run(store, None, "old", boot_version=boot_version)
+    assert store.read_pointer().version == boot_version
+    if checkpoint_kind == "legacy":
+        assert (
+            tmp_path / "old/checkpoints/latest_checkpointed_iteration.txt"
+        ).read_text() == "29"
