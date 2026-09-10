@@ -67,11 +67,11 @@ def spawn_on_pool(run: Any) -> Any:
 
 
 def _await_floor_and_spawn(run: Any) -> Any:
-    from stitch.pools.modal_flash_lb_temp import ModalFlashLBPool
+    from stitch.pools.modal_flash import ModalFlashPool
     from stitch.service import await_pool_ready
 
     await_pool_ready(
-        ModalFlashLBPool(run.APP_NAME, "Server"),
+        ModalFlashPool(run.APP_NAME, "Server"),
         replica_floor=run.modal_cfg.rollout_min_containers,
     )
     return run.spawn_train()
@@ -82,10 +82,10 @@ def pool_reachable(run: Any) -> bool:
     app counts as unreachable; anything else propagates."""
     from modal.exception import NotFoundError
 
-    from stitch.pools.modal_flash_lb_temp import ModalFlashLBPool
+    from stitch.pools.modal_flash import ModalFlashPool
 
     try:
-        ModalFlashLBPool(run.APP_NAME, "Server").gateway_url()
+        ModalFlashPool(run.APP_NAME, "Server").gateway_url()
     except (NotFoundError, RuntimeError):
         return False
     return True

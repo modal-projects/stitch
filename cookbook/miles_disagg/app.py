@@ -34,7 +34,7 @@ from uuid import uuid4
 import modal
 import modal.experimental
 
-from cookbook.common import launch, ray_cluster, router, server, serving_image, storage
+from cookbook.common import launch, ray_cluster, server, serving_image, storage
 from cookbook.common.constants import (
     CHECKPOINTS_PATH,
     DATA_PATH,
@@ -55,7 +55,7 @@ from cookbook.miles_disagg.resume import (
     record_trainer_call,
 )
 from cookbook.miles_disagg.trainer_image import MEGATRON_PATH, MILES_ROOT
-from stitch.pools.modal_flash_lb_temp import ModalFlashLBPool
+from stitch.pools.modal_flash import ModalFlashPool
 from stitch.service import await_pool_ready
 from stitch.types import VersionRef
 
@@ -199,6 +199,7 @@ SGLANG_SERVER_ARGS = {
     include_source=False,
     port=SIDECAR_PORT,
     routing_region=modal_cfg.routing_region,
+    experimental_options={"kv_aware_routing": True},
     unauthenticated=True,
     exit_grace_period=60 * MINUTES,
     startup_timeout=SERVER_STARTUP_TIMEOUT,
@@ -264,71 +265,6 @@ def _boot_checkpoint(store_config: dict) -> tuple[str, int]:
         RUN_DIR, save_hf=save_hf, latest_version=latest.version
     )
     return (str(export[1]), export[0]) if export else (miles_cfg.hf_checkpoint, 0)
-
-
-# ── Session-routing LB (cookbook/common/router.py) ─────────────────────────────
-# The router is two CPU Flash classes in this same app, so it deploys and dies with
-# the pool; the GPU class keeps ``Server``, rollout traffic enters through ``Router``.
-router_image = router.build_router_image(
-    EXPERIMENT,
-    RUN_ID,
-    extra_env=STORE_DEPLOYMENT.image_environment,
-)
-session_routes = router.session_routes_dict(APP_NAME)
-
-
-@app.server(
-    image=router_image,
-    cpu=2,
-    memory=1024,
-    min_containers=modal_cfg.router_registry_min_containers,
-    routing_region=modal_cfg.routing_region,
-    include_source=False,
-    port=8000,
-    unauthenticated=True,
-)
-class RouterRegistry:
-    """Polls Server replicas' live queue depth; serves the snapshot at /loads."""
-
-    @modal.enter()
-    def enter(self) -> None:
-        router.serve_registry(self, app_name=APP_NAME, upstream_cls="Server")
-
-    @modal.exit()
-    def exit(self) -> None:
-        router.stop_server(self)
-
-
-@app.server(
-    image=router_image,
-    cpu=4,
-    memory=2048,
-    min_containers=modal_cfg.router_min_containers,
-    target_concurrency=modal_cfg.router_target_concurrency,
-    routing_region=modal_cfg.routing_region,
-    include_source=False,
-    port=8000,
-    unauthenticated=True,
-    exit_grace_period=30 * MINUTES,
-)
-class Router:
-    """Front door for rollout traffic: session-affinity routing across Server replicas,
-    with 503 eviction + retry, so a saturated replica sheds sessions instead of
-    attracting them."""
-
-    @modal.enter()
-    def enter(self) -> None:
-        router.serve_router(
-            self,
-            registry_url=RouterRegistry.get_url(),
-            upstream_url=Server.get_url(),
-            session_routes=session_routes,
-            overload_threshold=ROLLOUT_CONCURRENCY,
-        )
-
-    @modal.exit()
-    def exit(self) -> None:
-        router.stop_server(self)
 
 
 # ── Trainer (miles on Ray) ────────────────────────────────────────────────────
@@ -433,7 +369,7 @@ class Trainer:
                 run_volume, run_id=RUN_ID, save_hf=getattr(cfg, "save_hf", None)
             )
 
-        cfg.rollout_endpoint_url = ModalFlashLBPool(APP_NAME, "Server").gateway_url()
+        cfg.rollout_endpoint_url = ModalFlashPool(APP_NAME, "Server").gateway_url()
         if resume_point is not None:
             cfg.load = resume_point.trainer_checkpoint
             cfg.hf_checkpoint = resume_point.rollout_checkpoint
@@ -476,7 +412,7 @@ class Trainer:
         )
         # Replicas ahead of the claimed pointer are exiting, so they are not floor.
         await_pool_ready(
-            ModalFlashLBPool(APP_NAME, "Server"),
+            ModalFlashPool(APP_NAME, "Server"),
             replica_floor=modal_cfg.rollout_min_containers,
             latest=VersionRef(RUN_ID, boot_version),
         )

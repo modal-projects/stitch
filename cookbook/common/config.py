@@ -31,11 +31,6 @@ class ModalConfig:
     # containers instead of packing requests until KV saturates.
     rollout_target_inputs: int | None = None
     routing_region: str = "us-east"
-    # Session-routing LB deployed alongside the pool (cookbook/common/router.py):
-    # registry replica floor, proxy replica floor, and the proxy's autoscale target.
-    router_registry_min_containers: int = 2
-    router_min_containers: int = 2
-    router_target_concurrency: int = 50
     rollout_ephemeral_disk_mib: int | None = None
     rollout_memory_mib: tuple[int, int] | None = None
     torch_dist_prep_nodes: int = 2

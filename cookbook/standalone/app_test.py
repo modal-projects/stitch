@@ -18,8 +18,6 @@ def test_engine_only_app_has_no_trainer(monkeypatch) -> None:
 
     assert app.APP_NAME == "stitch-standalone-glm5-2-fp8-run-42"
     assert hasattr(app, "Server")
-    assert hasattr(app, "RouterRegistry")
-    assert hasattr(app, "Router")
     assert not hasattr(app, "Trainer")
 
 
@@ -48,8 +46,7 @@ def test_tp4_variant_keeps_the_rl_contract(monkeypatch) -> None:
 
     assert app.APP_NAME == "stitch-standalone-glm5-2-fp8-tp4-run-42"
     assert app.exp.ROLLOUT_GPUS_PER_ENGINE == 4
-    # Engine admission stops at the benchmarked 16-user KV ceiling; the
-    # router targets the comfortable 12.
+    # Engine admission leaves headroom above Modal's autoscaling target.
     assert app.SGLANG_SERVER_ARGS["--max-running-requests"] == "16"
     assert app.ROLLOUT_CONCURRENCY == 12
     assert app.SGLANG_SERVER_ARGS["--speculative-dflash-block-size"] == "8"

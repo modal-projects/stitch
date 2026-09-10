@@ -4,7 +4,7 @@ Denser sibling of ``glm5_2_fp8``: TP4 engines with BF16 target KV. One engine
 holds 552,704 KV tokens. On the pinned agentic mix, 12 concurrent users peaked
 at 475 output tok/s with 72% active-KV occupancy and 1.48s p50 latency; 16 users
 reached 95% active KV and throughput collapsed. Engine admission therefore
-stops at 16 while the router targets the measured sweet spot of 12.
+stops at 16 while Modal's autoscaler targets 12.
 """
 
 from __future__ import annotations

@@ -19,8 +19,7 @@ SIDECAR_PORT = 8000  # the container's public port
 SGLANG_PORT = 8001  # the private sglang server behind the sidecar
 RAY_PORT = 6379
 
-# Modal's native sticky-routing header. The same session ID is also used by the
-# cookbook router when selecting a rollout replica.
+# Stable trajectory affinity for Modal's native routing.
 MODAL_SESSION_ID_HEADER = "Modal-Session-ID"
 
 # Timeouts.

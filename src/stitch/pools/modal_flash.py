@@ -35,8 +35,7 @@ class ModalFlashPool(Pool):
         return modal.Server.from_name(self.app_name, self.cls_name)
 
     def _upstream_url(self) -> str:
-        """The upstream class's own Flash URL, not an LB override. Stable for a
-        deployed app, so it is cached for the client's lifetime."""
+        """Cache the deployed Server URL for replica-directed requests."""
         if self._upstream_url_cache is None:
             self._upstream_url_cache = self._require_gateway(self._server().get_url())
         return self._upstream_url_cache
