@@ -82,6 +82,10 @@ def prepare_checkpoints(
         else:
             _copy_tree("bf16 masters", src, out)
         _strip_stale_quant_config(os.path.join(out, "config.json"))
+        if getattr(exp, "UNPACK_FUSED_EXPERTS", False):
+            from cookbook.miles_disagg.unpack_experts import unpack_fused_experts
+
+            unpack_fused_experts(out)
 
     if is_int4 or getattr(exp, "MATERIALIZE_BF16_MASTERS", True):
         _staged(materialized_bf16_dir, _build_bf16)

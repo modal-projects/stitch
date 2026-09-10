@@ -1,0 +1,57 @@
+--- a/miles/backends/megatron_utils/megatron_to_hf/__init__.py
++++ b/miles/backends/megatron_utils/megatron_to_hf/__init__.py
+@@ -1,3 +1,5 @@
++from miles.backends.megatron_utils.megatron_to_hf.checkpoint_schema import _restore_checkpoint_dtype
++
+ from .deepseekv3 import convert_deepseekv3_to_hf
+ from .deepseekv4 import convert_deepseekv4_to_hf
+ from .glm4 import convert_glm4_to_hf
+@@ -24,7 +26,10 @@
+ def convert_to_hf(args, model_name, name, param, quantization_config=None):
+     param = remove_padding(name, param, args.vocab_size)
+ 
+-    converted_named_tensors = _convert_to_hf_core(args, model_name, name, param)
++    converted_named_tensors = [
++        (hf_name, _restore_checkpoint_dtype(args, hf_name, weight))
++        for hf_name, weight in _convert_to_hf_core(args, model_name, name, param)
++    ]
+ 
+     return quantize_params(args, name, converted_named_tensors, quantization_config)
+ 
+--- /dev/null
++++ b/miles/backends/megatron_utils/megatron_to_hf/checkpoint_schema.py
+@@ -0,0 +1,34 @@
++"""Preserve checkpoint storage dtypes for parameters kept in FP32 by Megatron."""
++
++import json
++from functools import lru_cache
++from pathlib import Path
++
++import torch
++from safetensors import safe_open
++
++
++def _restore_checkpoint_dtype(args, name, param):
++    if (
++        getattr(args, "update_weight_transfer_mode", None) != "disk-delta"
++        or not name.endswith((".e_score_correction_bias", ".linear_attn.A_log"))
++    ):
++        return param
++    dtype = _checkpoint_dtypes(args.hf_checkpoint).get(name)
++    return param.to(dtype) if dtype is not None else param
++
++
++@lru_cache(maxsize=8)
++def _checkpoint_dtypes(checkpoint):
++    root = Path(checkpoint)
++    index = root / "model.safetensors.index.json"
++    if not index.exists():
++        return {}
++    names = json.loads(index.read_text())["weight_map"]
++    dtypes = {"BF16": torch.bfloat16, "F16": torch.float16, "F32": torch.float32}
++    result = {}
++    for name, shard in names.items():
++        if name.endswith((".e_score_correction_bias", ".linear_attn.A_log")):
++            with safe_open(root / shard, framework="pt") as source:
++                result[name] = dtypes[source.get_slice(name).get_dtype()]
++    return result

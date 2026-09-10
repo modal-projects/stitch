@@ -185,6 +185,48 @@ EXPERIMENT_CONFIG=your_config_name RUN_ID=your_run_id \
 Modal rolls replicas to the new configuration without changing the run's
 checkpoint lineage.
 
+## Qwen3.6 SWE-bench Pro training
+
+[`qwen3_6_35b_a3b_swebench_pro.py`](miles_disagg/configs/qwen3_6_35b_a3b_swebench_pro.py)
+runs fully asynchronous GRPO on SWE-bench Pro, using a pinned
+`Qwen/Qwen3.6-35B-A3B` BF16 checkpoint.
+
+| Component | Configuration |
+| --- | --- |
+| Trainer | 2 nodes × 8 B300 GPUs |
+| Rollouts | 16 warm replicas × 1 B200-or-better GPU; autoscale without a cap |
+| Training | 500 batches; 32 prompts × 8 samples = 256 trajectories per batch |
+| Checkpoints | Every 20 batches and at the end of training |
+| Concurrency | 256 agent episodes; up to two completed batches buffered |
+| Episode limits | 256 agent steps, 2 hours, 64K total tokens |
+| Per-response limit | 8,192 tokens |
+
+Preparation exposes fused experts individually without changing their weight
+bytes, matching Miles' checkpoint-delta export layout.
+
+After creating the shared secrets, run each preparation command to completion
+before launching:
+
+```bash
+export EXPERIMENT_CONFIG=qwen3_6_35b_a3b_swebench_pro
+export MODAL_ENVIRONMENT=your_environment
+
+uv run --extra modal modal run -e "$MODAL_ENVIRONMENT" \
+  -m cookbook.miles_disagg.prep_app::prepare_checkpoints
+uv run --extra modal modal run -e "$MODAL_ENVIRONMENT" \
+  -m cookbook.miles_disagg.prep_app::prepare_torch_dist
+uv run --extra modal modal run -e "$MODAL_ENVIRONMENT" \
+  -m cookbook.miles_disagg.prep_app::prepare_dataset
+uv run --extra modal python -m cookbook.miles_disagg.launch
+```
+
+The trainer stops after 500 batches. Stop its deployed app when finished
+to release the rollout fleet:
+
+```bash
+uv run --extra modal modal app stop -e "$MODAL_ENVIRONMENT" "$APP_NAME"
+```
+
 ## GLM-4.7 Flash example
 
 `glm47_flash_swebench_pro` is a complete example of the workflow above. It runs
