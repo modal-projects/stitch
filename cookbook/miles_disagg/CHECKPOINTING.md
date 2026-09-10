@@ -15,12 +15,11 @@ An active filesystem call or Volume commit cannot be preempted: the trainer
 waits up to `checkpoint_delta_quiesce_seconds`, logs any busy hosts, and proceeds
 with new checkpoint operations still paused.
 
-After publication, background monitors retain that priority until every discovered
-replica is ready on the published version or a newer version of the same run,
-with at least `rollout_min_ready` ready (default: 75% of the container floor).
-This serving wait does not block training. A failed update releases its lease; serving waits expire after
-`checkpoint_delta_serving_seconds`, even if discovery is stuck. A newer update
-replaces the previous serving wait without admitting checkpoint I/O between them.
+Checkpoint I/O resumes in a `finally` block when the synchronous weight
+publication call returns or raises. The call includes delta encoding, file
+writes, durable publication, the pointer update, and the existing wake
+notification. Replica download and application proceed independently; checkpoint
+persistence does not query or wait for serving readiness.
 
 ## Capacity
 
@@ -36,7 +35,6 @@ drain; local payloads remain available after upload failure.
 | `checkpoint_min_free_disk_mib` | `65536` | Free-space reserve checked before a snapshot. |
 | `checkpoint_upload_timeout_seconds` | `21600` | Deadline checked while copying and waiting for host receipts. |
 | `checkpoint_delta_quiesce_seconds` | `5` | Maximum wait for an active checkpoint I/O call before delta encoding. |
-| `checkpoint_delta_serving_seconds` | `300` | Maximum background hold after delta publication. |
 
 Size `trainer_ephemeral_disk_mib` for a local snapshot, the Volume write cache,
 and runtime scratch. For staged raw HF exports, host leaders own shards assigned
@@ -47,11 +45,11 @@ outside the staging root keep a single writer. The reserve check does not estima
 buffers also require host memory. If persistence is slower than the save cadence,
 skipped saves increase the recovery interval.
 
-`CHECKPOINT` events report quiescence, serving completion or timeout, and normal
-copy progress. `DELTA_PHASE` records rank-zero encode, file-write, and
-publish/notify durations; write time includes collective waits. `HF_EXPORT`
-reports total tensor bytes and generated shard bytes assigned to each writer. The upload deadline
-includes time paused for deltas; sustained update traffic can delay durability.
+`CHECKPOINT` events report quiescence or its timeout, and normal copy progress.
+`DELTA_PHASE` records rank-zero encode, file-write, and publish/notify durations;
+write time includes collective waits. `HF_EXPORT` reports total tensor bytes and
+generated shard bytes assigned to each writer. The upload deadline includes time
+paused for delta publication; sustained publishing can delay durability.
 
 ## Durability and recovery
 

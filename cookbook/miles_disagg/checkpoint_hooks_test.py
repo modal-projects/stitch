@@ -68,14 +68,9 @@ def priority_session():
     )
     session.args = SimpleNamespace(
         stitch_checkpoint_delta_quiesce_seconds=0.1,
-        stitch_checkpoint_delta_serving_seconds=1,
-        stitch_checkpoint_delta_min_ready=1,
-        run_id="run",
-        rollout_modal_flash_app_name="app",
     )
     session.rank = 0
     session.uploader = SimpleNamespace(io=CheckpointIO())
-    session._serving_token = None
     session.gather = lambda value: [value]
     return session
 
@@ -94,43 +89,9 @@ def test_failed_delta_releases_checkpoint_priority():
         pass
 
 
-def test_published_delta_transfers_lease_without_waiting_for_serving(monkeypatch):
-    calls = []
-    monkeypatch.setattr(
-        checkpoint_hooks, "watch_serving", lambda *args, **kwargs: calls.append(args)
-    )
-    session = priority_session()
-    with session.prioritize_update(1):
-        assert not calls
-    assert session.uploader.io.held(session._serving_token)
-    first = session._serving_token
-    with session.prioritize_update(2):
-        assert not session.uploader.io.held(first)
-    assert session.uploader.io.held(session._serving_token)
-    assert len(calls) == 2
-    session.uploader.io.resume(session._serving_token)
-
-
-def test_monitor_start_failure_does_not_strand_other_training_ranks(monkeypatch):
+def test_busy_checkpoint_call_cannot_delay_delta_past_quiescence_limit(caplog):
     import time
 
-    def fail(*args, **kwargs):
-        raise RuntimeError("cannot start monitor thread")
-
-    monkeypatch.setattr(checkpoint_hooks, "watch_serving", fail)
-    session = priority_session()
-    with session.prioritize_update(1):
-        pass
-    with session.uploader.io.operation(time.monotonic() + 1):
-        pass
-
-
-def test_busy_checkpoint_call_cannot_delay_delta_past_quiescence_limit(
-    monkeypatch, caplog
-):
-    import time
-
-    monkeypatch.setattr(checkpoint_hooks, "watch_serving", lambda *args, **kwargs: None)
     session = priority_session()
     session.args.stitch_checkpoint_delta_quiesce_seconds = 0.01
     started = time.monotonic()
@@ -138,4 +99,25 @@ def test_busy_checkpoint_call_cannot_delay_delta_past_quiescence_limit(
         with session.prioritize_update(1):
             assert "delta_quiesce_timeout" in caplog.text
             assert time.monotonic() - started < 1
-    session.uploader.io.resume(session._serving_token)
+
+
+def test_checkpoint_io_resumes_at_publish_return_without_serving_queries(monkeypatch):
+    import time
+
+    from cookbook.common import hooks
+
+    queries = []
+
+    def pool(*args, **kwargs):
+        queries.append(True)
+        raise AssertionError("checkpoint scheduling must not access the serving pool")
+
+    monkeypatch.setattr(hooks, "_pool", pool)
+    session = priority_session()
+    with session.prioritize_update(1):
+        with pytest.raises(TimeoutError):
+            with session.uploader.io.operation(time.monotonic() + 0.01):
+                pytest.fail("checkpoint I/O overlapped publication")
+    with session.uploader.io.operation(time.monotonic() + 0.05):
+        pass
+    assert not queries

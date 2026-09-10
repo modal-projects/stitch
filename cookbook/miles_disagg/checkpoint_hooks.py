@@ -19,7 +19,6 @@ from typing import Any, Callable
 
 from cookbook.common.constants import TRAINING_CHECKPOINTS_PATH
 from cookbook.miles_disagg.checkpoint import CheckpointUpload, CheckpointUploader
-from cookbook.miles_disagg.checkpoint_priority import watch_serving
 
 logger = logging.getLogger(__name__)
 
@@ -34,8 +33,6 @@ def configure_checkpointing(
     min_free_disk_mib: int = 65536,
     timeout_seconds: int = 21600,
     delta_quiesce_seconds: float = 5,
-    delta_serving_seconds: float = 300,
-    delta_min_ready: int = 1,
 ) -> dict:
     """Set launcher-owned local paths; return configuration for Miles hooks."""
     if getattr(cfg, "save_interval", None) is None:
@@ -53,7 +50,7 @@ def configure_checkpointing(
         )
     if upload_mib_per_second < 0 or min_free_disk_mib < 0 or timeout_seconds <= 0:
         raise ValueError("invalid checkpoint staging limits")
-    if delta_quiesce_seconds < 0 or delta_serving_seconds <= 0 or delta_min_ready < 1:
+    if delta_quiesce_seconds < 0:
         raise ValueError("invalid checkpoint delta priority limits")
     from cookbook.miles_disagg.checkpoint import relative_path
 
@@ -78,8 +75,6 @@ def configure_checkpointing(
         "stitch_checkpoint_min_free_disk_mib": min_free_disk_mib,
         "stitch_checkpoint_timeout_seconds": timeout_seconds,
         "stitch_checkpoint_delta_quiesce_seconds": delta_quiesce_seconds,
-        "stitch_checkpoint_delta_serving_seconds": delta_serving_seconds,
-        "stitch_checkpoint_delta_min_ready": delta_min_ready,
     }
 
 
@@ -103,7 +98,6 @@ class CheckpointSession:
             i for i, value in enumerate(hosts) if value not in hosts[:i]
         )
         args.stitch_checkpoint_host_ranks = self.host_ranks
-        self._serving_token = None
         self.uploader = None
         if self.rank in self.host_ranks:
             import modal
@@ -117,7 +111,7 @@ class CheckpointSession:
 
     @contextmanager
     def prioritize_update(self, version: int):
-        """Quiesce checkpoint I/O before encoding; resume after serving, asynchronously."""
+        """Defer checkpoint I/O for the duration of the weight publication call."""
         token = None
         started = time.monotonic()
         try:
@@ -126,10 +120,6 @@ class CheckpointSession:
                 nonlocal token
                 if self.uploader:
                     token = self.uploader.io.pause()
-                    # Acquire the new lease before releasing an older serving wait.
-                    if self._serving_token is not None:
-                        self.uploader.io.resume(self._serving_token)
-                        self._serving_token = None
 
             self.collectively(pause)
             deadline = started + self.args.stitch_checkpoint_delta_quiesce_seconds
@@ -160,28 +150,6 @@ class CheckpointSession:
                     break
                 time.sleep(0.05)
             yield
-            if self.uploader:
-                try:
-                    from cookbook.common.hooks import _pool
-                    from stitch.types import VersionRef
-
-                    watch_serving(
-                        self.uploader.io,
-                        token,
-                        _pool(self.args),
-                        VersionRef(self.args.run_id, version),
-                        host_rank=self.rank,
-                        min_ready=self.args.stitch_checkpoint_delta_min_ready,
-                        timeout=self.args.stitch_checkpoint_delta_serving_seconds,
-                    )
-                    self._serving_token = token
-                    token = None
-                except Exception:
-                    logger.exception(
-                        "Could not monitor delta %s on host rank %s; resuming checkpoint I/O",
-                        version,
-                        self.rank,
-                    )
         finally:
             if token is not None:
                 self.uploader.io.resume(token)

@@ -44,7 +44,6 @@ class ModalConfig:
     checkpoint_min_free_disk_mib: int = 65_536
     checkpoint_upload_timeout_seconds: int = 6 * 60 * 60
     checkpoint_delta_quiesce_seconds: float = 5
-    checkpoint_delta_serving_seconds: float = 300
 
     def __init__(self, **kwargs: Any) -> None:
         for k, v in kwargs.items():

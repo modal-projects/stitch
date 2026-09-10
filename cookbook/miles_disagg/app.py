@@ -27,7 +27,6 @@ import shutil
 import subprocess
 import tempfile
 from datetime import UTC, datetime
-from math import ceil
 from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
@@ -59,7 +58,6 @@ from cookbook.miles_disagg.resume import (
 )
 from cookbook.miles_disagg.trainer_image import MEGATRON_PATH, MILES_ROOT
 from stitch.pools.modal_flash import ModalFlashPool
-from stitch.service import POOL_READY_FRACTION
 from stitch.types import VersionRef
 
 EXPERIMENT = os.environ[
@@ -403,12 +401,6 @@ class Trainer:
             min_free_disk_mib=modal_cfg.checkpoint_min_free_disk_mib,
             timeout_seconds=modal_cfg.checkpoint_upload_timeout_seconds,
             delta_quiesce_seconds=modal_cfg.checkpoint_delta_quiesce_seconds,
-            delta_serving_seconds=modal_cfg.checkpoint_delta_serving_seconds,
-            delta_min_ready=(
-                modal_cfg.rollout_min_ready
-                if modal_cfg.rollout_min_ready is not None
-                else ceil(POOL_READY_FRACTION * modal_cfg.rollout_min_containers)
-            ),
         )
         # miles setattr's every key onto args for the hooks.
         custom_config = {

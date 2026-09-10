@@ -72,7 +72,7 @@ new file mode 100644
 +        ...
 +
 +    def prioritize_update(self, version: int) -> AbstractContextManager[None]:
-+        """Defer background checkpoint I/O while publishing and applying live weights."""
++        """Defer background checkpoint I/O until the weight publication call returns."""
 +        ...
 diff --git a/miles/ray/actor_group.py b/miles/ray/actor_group.py
 --- a/miles/ray/actor_group.py
