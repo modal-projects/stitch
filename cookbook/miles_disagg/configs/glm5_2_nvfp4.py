@@ -27,6 +27,7 @@ TRAINER_IMAGE_RUN_COMMANDS = (
 )
 MEGATRON_RUNTIME_PATCHES = [
     "/root/cookbook/miles_disagg/patches/megatron-hdo-dp-reshardable-step.patch",
+    "/root/cookbook/miles_disagg/patches/megatron-dp-reshardable-padding.patch",
     "/root/cookbook/miles_disagg/patches/megatron-r3-dispatch.patch",
 ]
 

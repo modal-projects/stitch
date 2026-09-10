@@ -1,0 +1,12 @@
+diff --git a/megatron/core/optimizer/distrib_optimizer.py b/megatron/core/optimizer/distrib_optimizer.py
+--- a/megatron/core/optimizer/distrib_optimizer.py
++++ b/megatron/core/optimizer/distrib_optimizer.py
+@@ -1852,5 +1852,8 @@
+                     for src_tensors, (model_param, param_range_map) in zip(
+                         bucket_state, gbuf_range_map["param_map"].items()
+                     ):
++                        # Padding describes checkpoint layout, not optimizer state.
++                        src_tensors = {k: v for k, v in src_tensors.items() if k != 'padding'}
++
+                         # Main param & optimizer states.
+                         self._set_main_param_and_optimizer_states(model_param, src_tensors)
