@@ -267,6 +267,7 @@ class Trainer:
         # Slime requires this CLI argument; the deployment owns its run-scoped value.
         cfg.update_weight_disk_dir = str(UPDATES_DIR)
         hook_knobs = {
+            **(getattr(cfg, "custom_config_path", None) or {}),
             **STORE_DEPLOYMENT.hook_config(APP_NAME),
             "experiment_volume_name": exp.EXPERIMENT_VOLUME_NAME,
             "rollout_modal_flash_app_name": APP_NAME,
