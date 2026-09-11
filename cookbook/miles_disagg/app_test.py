@@ -4,13 +4,27 @@ import importlib
 import sys
 from types import SimpleNamespace
 
+import modal
 import pytest
 
 from cookbook.miles_disagg.config import MilesConfig
 
 
 @pytest.fixture
-def app_module(monkeypatch):
+def server_options(monkeypatch):
+    observed = {}
+    decorate = modal.App.server
+
+    def capture(self, *args, **kwargs):
+        observed.update(kwargs)
+        return decorate(self, *args, **kwargs)
+
+    monkeypatch.setattr(modal.App, "server", capture)
+    return observed
+
+
+@pytest.fixture
+def app_module(monkeypatch, server_options):
     monkeypatch.setenv("EXPERIMENT_CONFIG", "glm5_3_nvfp4")
     monkeypatch.setenv("RUN_ID", "run-42")
     monkeypatch.delenv("STITCH_STORE_BACKEND", raising=False)
@@ -22,6 +36,16 @@ def app_module(monkeypatch):
         sys.modules.pop(name, None)
         if previous is not None:
             sys.modules[name] = previous
+
+
+def test_glm53_limits_admission_at_modal_router(app_module, server_options):
+    assert server_options["experimental_options"] == {
+        "kv_aware_routing": True,
+        "max_concurrency": 24,
+    }
+    assert server_options["target_concurrency"] == 16
+    assert app_module.SGLANG_SERVER_ARGS["--max-running-requests"] == "24"
+    assert "--max-queued-requests" not in app_module.SGLANG_SERVER_ARGS
 
 
 @pytest.mark.parametrize("skip", [False, True])

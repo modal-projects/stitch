@@ -23,6 +23,7 @@ DFLASH_SERVER_ARGS = {
     "--speculative-draft-model-path": str(DFLASH_CHECKPOINT_PATH),
 }
 SGLANG_SERVER_ARGS = {**base.SGLANG_SERVER_ARGS, **DFLASH_SERVER_ARGS}
+SGLANG_SERVER_ARGS.pop("--max-queued-requests")
 SGLANG_SERVER_ENV = dict(base.SGLANG_SERVER_ENV)
 SGLANG_DELTA_UPDATE_MODE = base.SGLANG_DELTA_UPDATE_MODE
 SIDECAR_COMMIT_MODE = base.SIDECAR_COMMIT_MODE
@@ -41,6 +42,7 @@ PREP_ENV = dict(base.PREP_ENV)
 modal = deepcopy(base.modal)
 modal.rollout_min_containers = 16
 modal.rollout_min_ready = 12
+modal.rollout_max_inputs = base.ROLLOUT_MAX_RUNNING_REQUESTS
 modal.draft_volume = DFLASH_VOLUME
 modal.draft_volume_env = "glm-bringup"
 miles = deepcopy(base.miles)

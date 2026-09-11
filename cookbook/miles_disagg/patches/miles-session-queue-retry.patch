@@ -1,6 +1,6 @@
 --- a/miles/rollout/session/server.py
 +++ b/miles/rollout/session/server.py
-@@ -29,6 +29,23 @@
+@@ -29,6 +29,26 @@
  def _transport_error_is_safe_to_retry(exc: httpx.TransportError) -> bool:
      """Whether httpx failed before a stateful request could reach the server."""
      return isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout))
@@ -11,6 +11,9 @@
 +        return True
 +    if response.status_code != 503:
 +        return False
++    # Modal rejects capacity overflow before dispatching it to a container.
++    if response.text.strip() == "Server is at capacity":
++        return True
 +    try:
 +        body = response.json()
 +    except ValueError:
@@ -24,7 +27,7 @@
  
  
  class SessionServer:
-@@ -102,7 +119,7 @@
+@@ -102,7 +122,7 @@
                  # before generation. A generic 5xx may be returned after the
                  # stateful request was dispatched, so replaying it could
                  # advance the same session twice.

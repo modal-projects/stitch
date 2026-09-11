@@ -32,6 +32,8 @@ class ModalConfig:
     # Flash autoscaler target: keep well below sglang engine concurrency so Flash adds
     # containers instead of packing requests until KV saturates.
     rollout_target_inputs: int | None = None
+    # Hard per-container admission limit enforced by the Modal router.
+    rollout_max_inputs: int | None = None
     routing_region: str = "us-east"
     rollout_ephemeral_disk_mib: int | None = None
     rollout_memory_mib: tuple[int, int] | None = None

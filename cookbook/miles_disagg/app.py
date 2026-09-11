@@ -205,7 +205,14 @@ SGLANG_SERVER_ARGS = {
     include_source=False,
     port=SIDECAR_PORT,
     routing_region=modal_cfg.routing_region,
-    experimental_options={"kv_aware_routing": True},
+    experimental_options={
+        "kv_aware_routing": True,
+        **(
+            {"max_concurrency": modal_cfg.rollout_max_inputs}
+            if modal_cfg.rollout_max_inputs is not None
+            else {}
+        ),
+    },
     unauthenticated=True,
     exit_grace_period=60 * MINUTES,
     startup_timeout=SERVER_STARTUP_TIMEOUT,

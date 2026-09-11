@@ -22,6 +22,8 @@ pytestmark = pytest.mark.skipif(
     [
         (409, {"error": "stale weights"}, True),
         (429, {"error": "rate limited"}, True),
+        (503, "Server is at capacity", True),
+        (502, "Server is at capacity", False),
         (503, {"error": {"message": "The request queue is full."}}, True),
         (503, {"detail": "The request queue is full."}, True),
         (503, {"error": {"message": "backend disconnected"}}, False),
@@ -57,7 +59,10 @@ def test_admission_retry_preserves_request_and_hook_budget(monkeypatch, status, 
         sleep.assert_not_awaited()
 
 
-def test_queue_full_stops_at_configured_attempt_limit(monkeypatch):
+@pytest.mark.parametrize(
+    "body", ["Server is at capacity", {"error": {"message": "The request queue is full."}}]
+)
+def test_admission_rejection_stops_at_configured_attempt_limit(monkeypatch, body):
     from miles.rollout.session import server as session_server
 
     requests = []
@@ -66,7 +71,8 @@ def test_queue_full_stops_at_configured_attempt_limit(monkeypatch):
 
     def respond(request):
         requests.append(request)
-        return httpx.Response(503, json={"error": {"message": "The request queue is full."}})
+        content = body if isinstance(body, str) else json.dumps(body)
+        return httpx.Response(503, text=content)
 
     result = asyncio.run(_proxy(session_server, respond, attempts=3))
 
