@@ -328,6 +328,19 @@ class Trainer:
             "Miles patch",
         )
         self.rank = rank
+        # Every rank's Megatron reads the tracker this rewrites, so the restore has to
+        # land before the first reload of the mount in train(); a clustered method call
+        # starts only after every container's enter returns. Resolved here, not from the
+        # payload, so it cannot disagree with the Server's boot-checkpoint search.
+        self.resume_point = (
+            prepare_attempt(
+                run_volume,
+                run_id=RUN_ID,
+                save_hf=getattr(miles_cfg, "save_hf", None),
+            )
+            if self.rank == 0 and STORE_DEPLOYMENT.backend == storage.MODAL_VOLUME
+            else None
+        )
         process.start_host_mem_monitor()  # per-node host-RAM trace
         ray_cluster.start_ray_node(
             rank,
@@ -353,6 +366,7 @@ class Trainer:
         first publish fails its claim's rewind guard instead of relabeling
         history.
         """
+        # Makes rank 0's enter-time resume restore visible to this rank.
         for volume in train_volumes.values():
             volume.reload()
 
@@ -363,11 +377,7 @@ class Trainer:
             ray_cluster.hold_worker_node(self.master_addr, ray_port=RAY_PORT)
             return
 
-        resume_point = None
-        if STORE_DEPLOYMENT.backend == storage.MODAL_VOLUME:
-            resume_point = prepare_attempt(
-                run_volume, run_id=RUN_ID, save_hf=getattr(cfg, "save_hf", None)
-            )
+        resume_point = self.resume_point
 
         cfg.rollout_endpoint_url = ModalFlashPool(APP_NAME, "Server").gateway_url()
         if resume_point is not None:
