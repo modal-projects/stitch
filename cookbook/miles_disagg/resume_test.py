@@ -296,6 +296,44 @@ def test_prepare_attempt_is_a_noop_on_a_fresh_run() -> None:
     assert volume.files == {}
 
 
+@pytest.mark.parametrize("resumable", [True, False])
+def test_prepare_attempt_refreshes_the_mount_before_the_claim(
+    tmp_path, resumable
+) -> None:
+    """The restore writes through the Volume API; a mount sees those writes only
+    after a reload, and the claim that follows reads the mount."""
+    from stitch.publish import claim_run
+    from stitch.stores.modal_volume import ModalVolumeStore
+
+    class MountedVolume(_Volume):
+        def reload(self) -> None:
+            for name, value in self.files.items():
+                path = tmp_path / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(value)
+
+    files: dict[str, bytes] = {"old/latest": b"old/weight_v000042"}
+    if resumable:
+        files.update(
+            {
+                "old/checkpoints/latest_checkpointed_iteration.txt": b"39",
+                "old/checkpoints/iter_0000029/state": b"checkpoint",
+                "old/hf_checkpoints/weight_v000029/.complete": b"",
+                **_published(30),
+            }
+        )
+    volume = MountedVolume(files)
+    volume.reload()
+    store = ModalVolumeStore(tmp_path / "old", run_id="old")
+    assert store.read_pointer().version == 42
+
+    point = prepare_attempt(volume, run_id="old", save_hf=_Config.save_hf)
+    boot_version = point.version if point is not None else 0
+    claim_run(store, None, "old", boot_version=boot_version)
+
+    assert store.read_pointer().version == boot_version
+
+
 def test_restore_boot_pointer_rejects_a_foreign_run() -> None:
     volume = _Volume({"old/latest": b"other/weight_v000003"})
 
