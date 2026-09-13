@@ -54,10 +54,12 @@ class _Slime(SlimeConfig):
     custom_rollout_request_hook_path = (
         "cookbook.common.hooks.gated_rollout_request_hook"
     )
-    rollout_request_weight_version_mode = "exact"
-    rollout_request_weight_version_lag = 0
-    rollout_request_retry_attempts = 240
-    rollout_request_retry_sleep = 1.0
+    custom_config_path = {
+        "rollout_request_weight_version_mode": "exact",
+        "rollout_request_weight_version_lag": 0,
+        "rollout_request_retry_attempts": 240,
+        "rollout_request_retry_sleep": 1.0,
+    }
 
     # disk-delta publish-only: slime writes weight_v{N}/ + `latest`; the hook commits and wakes the pool.
     update_weight_mode = "delta"
