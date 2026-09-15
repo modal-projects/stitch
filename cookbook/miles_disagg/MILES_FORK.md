@@ -6,12 +6,12 @@ image. [`trainer_image.py`](trainer_image.py) defines the shared default:
 ```python
 MILES_IMAGE_TAG = "radixark/miles:dev-202607290235"
 MILES_REPO_URL = "https://github.com/modal-projects/miles.git"
-MILES_REPO_REF = "778a13786471777f81c587557f68cdf03903059a"
+MILES_REPO_REF = "13fa3952ffe682955806cef8e9343b9d7d891af8"
 ```
 
-The pin is `modal-projects/miles:stitch-miles-fully-async-swe`. It contains a
-Miles fully-async stack based on upstream main at `5330aadc0`, followed by the
-Stitch external-fleet integration.
+The pin belongs to `modal-projects/miles:stitch-miles-fully-async-swe`. The fork
+contains a Miles fully-async stack based on upstream main at `5330aadc0`,
+followed by the Stitch external-fleet integration.
 
 ## Miles fully-async stack
 
@@ -41,14 +41,17 @@ These commits are useful independently of Stitch:
 | `073e537f3` | Read current speculative-decoding counters in metrics. |
 | `d598798c5` | Adapt NVFP4 rollout checkpoints for Qwen3.6. |
 | `2da7d0955` | Validate canonical disk-delta tensor layouts. |
+| `e917930bc` | Buffer distributed HF export and overlap shard writes with Megatron checkpoint saves. |
+| `6bb57f7eb` | Restore CPU test isolation, rollout fixtures, and Megatron tokenizer compatibility. |
+| `360090909` | Format the maintained Miles stack. |
 
 ## Stitch integration
 
 | Commit | Responsibility |
 | --- | --- |
-| `1863e4553` | Route fully-async generation through an external fleet with version constraints and finite timeouts. |
-| `edf959965` | Publish disk deltas without Miles-managed rollout-engine handles. |
-| `778a13786` | Overlap external weight updates with active rollout. |
+| `4313a589c` | Route fully-async generation through an external fleet with version constraints and finite timeouts. |
+| `9f96381eb` | Publish disk deltas without Miles-managed rollout-engine handles. |
+| `13fa3952f` | Overlap external weight updates with active rollout. |
 
 The dated image supplies Megatron-LM, TransformerEngine, CUDA, and other
 compiled dependencies. Miles is installed over it with `--no-deps`, so the

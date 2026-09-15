@@ -21,7 +21,7 @@ from cookbook.common import trainer_image as common_trainer_image
 # a moved mutable tag, so `latest` silently serves whatever was first pulled.
 MILES_IMAGE_TAG = "radixark/miles:dev-202607290235"
 MILES_REPO_URL = "https://github.com/modal-projects/miles.git"
-MILES_REPO_REF = "778a13786471777f81c587557f68cdf03903059a"
+MILES_REPO_REF = "13fa3952ffe682955806cef8e9343b9d7d891af8"
 
 MILES_ROOT = "/root/miles"
 # Applied at container start, after any dev overlay; each moves to the fork when
