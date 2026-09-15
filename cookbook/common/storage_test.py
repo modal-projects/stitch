@@ -115,3 +115,28 @@ def test_s3_trainer_updates_are_node_local() -> None:
     assert StoreDeployment(S3, "stitch-s3").updates_dir(run_dir) == Path(
         "/tmp/stitch-publications/run-a/updates"
     )
+
+
+def test_volume_replica_reads_the_reloaded_mount_while_trainer_reads_durable_metadata(
+    tmp_path,
+):
+    from types import SimpleNamespace
+
+    from cookbook.common import hooks
+
+    replica = create_store(
+        MODAL_VOLUME,
+        local_root=tmp_path / "run-a",
+        run_id="run-a",
+        volume_name="weights",
+    )
+    trainer = hooks._store(
+        SimpleNamespace(
+            update_weight_disk_dir=str(tmp_path / "run-a/updates"),
+            run_id="run-a",
+            experiment_volume_name="weights",
+        )
+    )
+
+    assert replica.volume_path is None
+    assert str(trainer.volume_path) == "run-a"

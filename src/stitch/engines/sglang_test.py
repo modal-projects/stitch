@@ -370,3 +370,12 @@ if __name__ == "__main__":
         t()
         print(f"  ok  {t.__name__}")
     print(f"sglang engine harness: {len(tests)} PASS")
+
+
+def test_weight_session_routes_cannot_bypass_the_sidecar() -> None:
+    engine = SGLangEngine("http://engine", "/base", "/ckpt")
+    assert {
+        "begin_weight_update",
+        "end_weight_update",
+        "pull_weights",
+    } <= engine.blocked_routes()

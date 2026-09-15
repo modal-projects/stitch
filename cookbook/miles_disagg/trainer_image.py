@@ -45,8 +45,11 @@ def build_trainer_image(
     hf_cache_path: str,
     experiment: str,
     run_id: str | None = None,
+    miles_image_tag: str = MILES_IMAGE_TAG,
     miles_repo_ref: str = MILES_REPO_REF,
     miles_local: str | None = None,
+    miles_patches: tuple[Path, ...] = (),
+    package_patches: tuple[Path, ...] = (),
     extra_pip_packages: tuple[str, ...] = (),
     image_run_commands: tuple[str, ...] = (),
     extra_env: Mapping[str, str] | None = None,
@@ -56,7 +59,7 @@ def build_trainer_image(
     trainer-side delta encoder's codecs. stitch + the cookbook package are mounted so the
     trainer, Ray actors, and the sidecar subprocess resolve their imports."""
     image = (
-        modal.Image.from_registry(MILES_IMAGE_TAG)
+        modal.Image.from_registry(miles_image_tag)
         .entrypoint([])
         # TransformerEngine 2.17 declares this dependency, but the dated Miles
         # image installs its TE wheels with --no-deps.
@@ -81,6 +84,17 @@ def build_trainer_image(
         image = image.pip_install(*extra_pip_packages)
     if image_run_commands:
         image = image.run_commands(*image_run_commands)
+    for patch in miles_patches:
+        remote_path = f"/tmp/{patch.name}"
+        image = image.add_local_file(str(patch), remote_path, copy=True).run_commands(
+            f"git -C {MILES_ROOT} apply {remote_path}"
+        )
+    for patch in package_patches:
+        remote_path = f"/tmp/{patch.name}"
+        image = image.add_local_file(str(patch), remote_path, copy=True).run_commands(
+            'cd "$(python3 -c \'import sysconfig; print(sysconfig.get_paths()["purelib"])\')"'
+            f" && git apply {remote_path}"
+        )
     image = common_trainer_image.add_common_layers(
         image,
         experiment=experiment,

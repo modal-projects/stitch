@@ -57,6 +57,12 @@ The dated image supplies Megatron-LM, TransformerEngine, CUDA, and other
 compiled dependencies. Miles is installed over it with `--no-deps`, so the
 image and Miles revision must remain compatible.
 
+The [GLM-5.3-Flash recipe](configs/glm5_3_flash_nvfp4.py) selects its own immutable
+image and Miles revision, including [Miles #7](https://github.com/modal-projects/miles/pull/7).
+Its model overlay is applied before the cookbook runtime patches. Miles owns
+native checkpoint completion and session transport; the cookbook owns Volume
+durability and provider-specific retry policy.
+
 ## Responsibilities
 
 Miles owns trainer-side state:

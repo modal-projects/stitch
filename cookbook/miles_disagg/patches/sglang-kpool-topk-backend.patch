@@ -1,0 +1,227 @@
+diff --git a/python/sglang/srt/layers/attention/dsa/dsa_indexer_kpool.py b/python/sglang/srt/layers/attention/dsa/dsa_indexer_kpool.py
+--- a/python/sglang/srt/layers/attention/dsa/dsa_indexer_kpool.py
++++ b/python/sglang/srt/layers/attention/dsa/dsa_indexer_kpool.py
+@@ -13,7 +13,10 @@
+     BaseIndexerMetadata,
+     rotate_activation,
+ )
+-from sglang.srt.layers.attention.dsa.dsa_topk_backend import TopkTransformMethod
++from sglang.srt.layers.attention.dsa.dsa_topk_backend import (
++    DSATopKBackend,
++    TopkTransformMethod,
++)
+ from sglang.srt.layers.layernorm import LayerNorm
+ from sglang.srt.layers.utils import MultiPlatformOp
+ from sglang.srt.utils import add_prefix, ceil_align, is_cuda, is_hip, is_npu
+@@ -780,6 +783,7 @@
+             group_lengths=pool_lens,
+             pool_size=self.index_kpool,
+             topk=self.index_topk,
++            topk_backend=DSATopKBackend(get_server_args().dsa_topk_backend),
+             page_table=page_table,
+             topk_offsets=topk_offsets,
+             seq_lens=seq_lens,
+diff --git a/python/sglang/srt/layers/attention/dsa/kpool_fp8_index.py b/python/sglang/srt/layers/attention/dsa/kpool_fp8_index.py
+--- a/python/sglang/srt/layers/attention/dsa/kpool_fp8_index.py
++++ b/python/sglang/srt/layers/attention/dsa/kpool_fp8_index.py
+@@ -3,6 +3,8 @@
+ import torch
+ import triton
+ import triton.language as tl
++
++from sglang.srt.layers.attention.dsa.dsa_topk_backend import DSATopKBackend
+ 
+ BLOCK_SIZE_K = 64
+ INDEX_HEAD_DIM = 128
+@@ -564,15 +566,16 @@
+     out_rows: int | None = None,
+     page_table_row_index: torch.Tensor | None = None,
+     return_raw_indices: bool = False,
++    topk_backend: DSATopKBackend = DSATopKBackend.SGL_KERNEL,
+ ):
+     """Select full-pool groups, expand to tokens, and optionally append tail.
+ 
+     With ``return_raw_indices=True``, returns ``(result, raw)`` where ``raw``
+     is the same selection expanded to sequence-relative token positions
+     (no page-table/ragged remap), same width and -1 padding as ``result``.
+-    Both outputs come from a single top-k selection so race-dependent radix
+-    ties stay consistent between them; the raw side feeds the rollout
+-    indexer-topk capturer (R3 replay).
++    Both outputs share one selection and use CUDA int32 with -1 padding.
++    Non-SGL backends honor their configured tie policy and emit groups in
++    ascending token order, including during CUDA graph replay.
+     """
+     assert logits.ndim == 2
+     assert group_lengths.ndim == 1
+@@ -581,6 +584,7 @@
+     assert topk % pool_size == 0
+     assert out_rows is None or out_rows >= logits.shape[0]
+     assert page_table_row_index is None or page_table is not None
++    assert page_table is None or topk_offsets is None
+ 
+     _, cols = logits.shape
+     group_topk = history_group_budget_for_topk(topk, pool_size)
+@@ -608,6 +612,37 @@
+         )
+         padded[: t.shape[0]] = t
+         return padded
++
++    if not topk_backend.is_sgl_kernel():
++        selected = topk_backend.topk_func(
++            logits, group_lengths, group_topk, row_starts=row_starts
++        )
++        # A fixed group order keeps attention accumulation independent of top-k order.
++        sentinel = torch.iinfo(selected.dtype).max
++        selected = selected.masked_fill(selected < 0, sentinel).sort(dim=-1).values
++        valid = selected != sentinel
++        selected = selected.masked_fill(~valid, -1)
++        raw = expand_pooled_groups_to_topk(selected, valid, topk, pool_size)
++        if seq_lens is not None:
++            raw = append_kpool_tail_to_topk(raw, seq_lens, group_lengths, pool_size)
++        result = raw
++        if page_table is not None:
++            rows = page_table_row_index
++            if rows is None:
++                rows = torch.arange(logits.shape[0], device=logits.device)
++            # Map only selected tokens; compact tables need no per-query expansion.
++            tokens = raw.clamp(min=0, max=page_table.shape[1] - 1).long()
++            result = page_table[rows[:, None], tokens]
++            result = result.masked_fill(raw < 0, -1).to(torch.int32)
++        elif topk_offsets is not None:
++            result = (
++                (raw + topk_offsets.reshape(-1, 1))
++                .masked_fill(raw < 0, -1)
++                .to(torch.int32)
++            )
++        if return_raw_indices:
++            return _pad_rows(result), _pad_rows(raw)
++        return _pad_rows(result)
+ 
+     if group_topk in (128, 160, 192, 224, 256, 512):
+         from sglang.kernels.ops.moe.kpool_topk_transform import (
+diff --git a/python/sglang/srt/layers/attention/dsa/kpool_fp8_index_test.py b/python/sglang/srt/layers/attention/dsa/kpool_fp8_index_test.py
+new file mode 100644
+--- /dev/null
++++ b/python/sglang/srt/layers/attention/dsa/kpool_fp8_index_test.py
+@@ -0,0 +1,121 @@
++import pytest
++
++
++@pytest.fixture(scope="module")
++def runtime():
++    torch = pytest.importorskip("torch")
++    pytest.importorskip("sglang")
++    if not torch.cuda.is_available():
++        pytest.skip("KPOOL selection requires CUDA")
++    pytest.importorskip("flashinfer")
++    from sglang.srt.layers.attention.dsa.dsa_topk_backend import DSATopKBackend
++    from sglang.srt.layers.attention.dsa.kpool_fp8_index import (
++        topk_from_pooled_history_logits,
++    )
++
++    return torch, DSATopKBackend, topk_from_pooled_history_logits
++
++
++@pytest.mark.parametrize(
++    "tokens,pattern",
++    [
++        (3, "ties"),
++        (2048, "ties"),
++        (2049, "unique"),
++        (2052, "unique"),
++        (8193, "ties"),
++        (32769, "narrow_unique"),
++    ],
++)
++@pytest.mark.parametrize("mapping", ["raw", "ragged", "paged"])
++def test_configured_topk_matches_reference_and_cuda_graph(
++    runtime, monkeypatch, tokens, pattern, mapping
++):
++    torch, DSATopKBackend, topk_from_pooled_history_logits = runtime
++    monkeypatch.setenv("SGLANG_DSA_TOPK_FLASHINFER_DETERMINISTIC", "1")
++    monkeypatch.setenv("SGLANG_DSA_TOPK_FLASHINFER_TIE_BREAK", "large")
++    sequences = [tokens, min(tokens, 2052), min(tokens, 2049), min(tokens, 3)]
++    lengths = [length // 4 for length in sequences]
++    starts = [0, 1, 2, 3]
++    logits = torch.full((4, max(lengths) + 4), 10000.0, dtype=torch.float32)
++    reference = []
++    generator = torch.Generator().manual_seed(514)
++    for row, count in enumerate(lengths):
++        scores = torch.randperm(count, generator=generator).float()
++        if pattern == "ties":
++            scores.fill_(1)
++        elif pattern == "narrow_unique":
++            scores = 1 + scores * 2**-23
++        logits[row, starts[row] : starts[row] + count] = scores
++        selected = sorted(
++            range(count), key=lambda i: (float(scores[i]), i), reverse=True
++        )[:512]
++        raw = [4 * group + offset for group in sorted(selected) for offset in range(4)]
++        raw.extend(range(4 * count, sequences[row]))
++        reference.append(raw + [-1] * (2051 - len(raw)))
++    reference.append([-1] * 2051)
++    reference = torch.tensor(reference, dtype=torch.int32, device="cuda")
++    logits = logits.cuda()
++    lengths = torch.tensor(lengths, dtype=torch.int32, device="cuda")
++    kwargs = dict(
++        seq_lens=torch.tensor(sequences, dtype=torch.int32, device="cuda"),
++        row_starts=torch.tensor(starts, dtype=torch.int32, device="cuda"),
++        out_rows=5,
++        return_raw_indices=True,
++        topk_backend=DSATopKBackend.FLASHINFER,
++    )
++    expected = reference.clone()
++    if mapping == "ragged":
++        offsets = (
++            torch.arange(4, device="cuda", dtype=torch.int32)[:, None] * 100000 + 17
++        )
++        kwargs["topk_offsets"] = offsets
++        expected[:4] = (reference[:4] + offsets).masked_fill(reference[:4] < 0, -1)
++    elif mapping == "paged":
++        table = torch.arange(tokens, device="cuda", dtype=torch.int32).flip(0)
++        kwargs["page_table"] = torch.stack((table, table + 100000))
++        rows = torch.tensor([0, 1, 0, 1], device="cuda", dtype=torch.int32)
++        kwargs["page_table_row_index"] = rows
++        expected[:4] = (
++            tokens - 1 - reference[:4] + rows[:, None] * 100000
++        ).masked_fill(reference[:4] < 0, -1)
++
++    def select():
++        return topk_from_pooled_history_logits(logits, lengths, 4, 2048, **kwargs)
++
++    for _ in range(8):
++        actual, raw = select()
++        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
++        torch.testing.assert_close(raw, reference, rtol=0, atol=0)
++    stream = torch.cuda.Stream()
++    stream.wait_stream(torch.cuda.current_stream())
++    with torch.cuda.stream(stream):
++        select()
++    torch.cuda.current_stream().wait_stream(stream)
++    graph = torch.cuda.CUDAGraph()
++    with torch.cuda.graph(graph):
++        actual, raw = select()
++    for _ in range(3):
++        graph.replay()
++        torch.cuda.synchronize()
++        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
++        torch.testing.assert_close(raw, reference, rtol=0, atol=0)
++
++
++def test_default_backend_keeps_complete_history_and_tail(runtime):
++    torch, _, topk_from_pooled_history_logits = runtime
++    logits = torch.randn(1, 512, device="cuda", dtype=torch.float32)
++    actual = topk_from_pooled_history_logits(
++        logits,
++        torch.tensor([512], device="cuda", dtype=torch.int32),
++        4,
++        2048,
++        seq_lens=torch.tensor([2049], device="cuda", dtype=torch.int32),
++    )
++    expected = torch.cat(
++        (
++            torch.arange(2049, device="cuda", dtype=torch.int32),
++            torch.full((2,), -1, device="cuda", dtype=torch.int32),
++        )
++    )[None]
++    torch.testing.assert_close(actual, expected, rtol=0, atol=0)

@@ -1,0 +1,35 @@
+diff --git a/fla/ops/kda/chunk_intra_token_parallel.py b/fla/ops/kda/chunk_intra_token_parallel.py
+--- a/fla/ops/kda/chunk_intra_token_parallel.py
++++ b/fla/ops/kda/chunk_intra_token_parallel.py
+@@ -35,6 +35,7 @@
+     T,
+     H: tl.constexpr,
+     K: tl.constexpr,
++    BK: tl.constexpr,
+     BT: tl.constexpr,
+     BC: tl.constexpr,
+     BH: tl.constexpr,
+@@ -80,7 +81,6 @@
+     Akk += bos * H*BC
+     beta += bos * H
+ 
+-    BK: tl.constexpr = triton.next_power_of_2(K)
+     o_h = tl.arange(0, BH)
+     o_k = tl.arange(0, BK)
+     m_h = (i_hg * BH + o_h) < H
+@@ -148,6 +148,7 @@
+     N = len(cu_seqlens) - 1 if cu_seqlens is not None else B
+     BT = chunk_size
+     BC = sub_chunk_size
++    BK = triton.next_power_of_2(K)
+ 
+     def grid(meta): return (B * T, triton.cdiv(H, meta['BH']))
+     chunk_kda_fwd_kernel_intra_token_parallel[grid](
+@@ -163,6 +164,7 @@
+         T=T,
+         H=H,
+         K=K,
++        BK=BK,
+         BT=BT,
+         BC=BC,
+     )

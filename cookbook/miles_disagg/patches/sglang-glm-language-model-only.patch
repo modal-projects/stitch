@@ -1,0 +1,320 @@
+diff --git a/python/sglang/srt/configs/model_config.py b/python/sglang/srt/configs/model_config.py
+--- a/python/sglang/srt/configs/model_config.py
++++ b/python/sglang/srt/configs/model_config.py
+@@ -409,7 +409,9 @@
+         rope_scaling = getattr(self.hf_text_config, "rope_parameters", None) or getattr(
+             self.hf_text_config, "rope_scaling", {}
+         )
+-        self.is_lm_only = getattr(self.hf_config, "language_model_only", False)
++        self.is_lm_only = language_model_only or getattr(
++            self.hf_config, "language_model_only", False
++        )
+         self.model_is_mrope = (
+             not self.is_lm_only
+             and rope_scaling is not None
+diff --git a/python/sglang/srt/configs/model_config_test.py b/python/sglang/srt/configs/model_config_test.py
+new file mode 100644
+--- /dev/null
++++ b/python/sglang/srt/configs/model_config_test.py
+@@ -0,0 +1,41 @@
++import pytest
++from sglang.srt.configs import model_config
++from transformers import LlamaConfig, PretrainedConfig
++
++
++@pytest.mark.parametrize(
++    "cli_only,checkpoint_only,epd,expected_only",
++    [
++        (False, False, False, False),
++        (True, False, False, True),
++        (False, True, False, True),
++        (False, False, True, False),
++    ],
++)
++def test_language_mode_metadata(
++    monkeypatch, tmp_path, cli_only, checkpoint_only, epd, expected_only
++):
++    hf_config = PretrainedConfig(
++        architectures=["Glm5NextForConditionalGeneration"],
++        language_model_only=checkpoint_only,
++    )
++    hf_config.text_config = LlamaConfig()
++    hf_config.vision_config = PretrainedConfig()
++    monkeypatch.setattr(model_config, "get_config", lambda *a, **k: hf_config)
++    monkeypatch.setattr(model_config, "get_generation_config", lambda *a, **k: None)
++    for method in (
++        "_derive_context_length",
++        "_derive_model_shapes",
++        "_derive_hybrid_model",
++    ):
++        monkeypatch.setattr(model_config.ModelConfig, method, lambda *a, **k: None)
++
++    result = model_config.ModelConfig(
++        str(tmp_path), language_model_only=cli_only, language_only=epd
++    )
++
++    assert result.is_lm_only is expected_only
++    assert result.is_multimodal is not expected_only
++    assert result.is_image_understandable_model is not expected_only
++    assert result.hf_config.language_model_only is expected_only
++    assert result.hf_config.language_only is epd
+diff --git a/python/sglang/srt/managers/tokenizer_manager_test.py b/python/sglang/srt/managers/tokenizer_manager_test.py
+new file mode 100644
+--- /dev/null
++++ b/python/sglang/srt/managers/tokenizer_manager_test.py
+@@ -0,0 +1,59 @@
++import asyncio
++from types import SimpleNamespace
++from unittest.mock import Mock
++
++import pytest
++from sglang.srt.managers import tokenizer_manager
++
++
++def test_standalone_language_model_does_not_start_encoder_disaggregation(monkeypatch):
++    monkeypatch.setattr(
++        tokenizer_manager,
++        "get_disagg",
++        lambda: SimpleNamespace(disaggregation_mode="null"),
++    )
++    create_receiver = Mock(side_effect=AssertionError("encoder receiver constructed"))
++    monkeypatch.setattr(tokenizer_manager, "create_mm_receiver", create_receiver)
++    manager = SimpleNamespace(
++        server_args=SimpleNamespace(language_only=False, language_model_only=True)
++    )
++
++    tokenizer_manager.TokenizerManager.init_disaggregation(
++        manager, start_pd_bootstrap_service=False
++    )
++
++    assert manager.encoder_bootstrap_server is None
++    create_receiver.assert_not_called()
++
++
++@pytest.mark.parametrize("multimodal", [False, True])
++def test_standalone_language_model_accepts_tokens_and_rejects_multimodal(multimodal):
++    request = SimpleNamespace(
++        text=None,
++        input_embeds=None,
++        input_ids=[3, 5, 8],
++        contains_mm_input=lambda: multimodal,
++    )
++    create = Mock(return_value="tokenized")
++    validate = Mock()
++    manager = SimpleNamespace(
++        server_args=SimpleNamespace(language_model_only=True),
++        model_config=SimpleNamespace(
++            hf_config=SimpleNamespace(
++                architectures=["Glm5NextForConditionalGeneration"]
++            )
++        ),
++        mm_processor=None,
++        _validate_one_request=validate,
++        _create_tokenized_object=create,
++    )
++    call = tokenizer_manager.TokenizerManager._tokenize_one_request(manager, request)
++
++    if multimodal:
++        with pytest.raises(ValueError, match="Multimodal inputs are not supported"):
++            asyncio.run(call)
++        create.assert_not_called()
++    else:
++        assert asyncio.run(call) == "tokenized"
++        validate.assert_called_once_with(request, [3, 5, 8])
++        create.assert_called_once_with(request, None, [3, 5, 8], None, None, None)
+diff --git a/python/sglang/srt/models/glm5_next.py b/python/sglang/srt/models/glm5_next.py
+--- a/python/sglang/srt/models/glm5_next.py
++++ b/python/sglang/srt/models/glm5_next.py
+@@ -1238,7 +1238,10 @@
+         self.mm_config = config
+         text_config = config.text_config
+         self.encoder_only = bool(getattr(config, "encoder_only", False))
+-        self.language_only = bool(getattr(config, "language_only", False))
++        self.language_only = bool(
++            getattr(config, "language_only", False)
++            or getattr(config, "language_model_only", False)
++        )
+ 
+         self.fuse_qkv_a_proj = (
+             not self.encoder_only
+diff --git a/python/sglang/srt/models/glm5_next_test.py b/python/sglang/srt/models/glm5_next_test.py
+new file mode 100644
+--- /dev/null
++++ b/python/sglang/srt/models/glm5_next_test.py
+@@ -0,0 +1,109 @@
++from types import SimpleNamespace
++from unittest.mock import Mock
++
++import pytest
++import torch
++from sglang.srt.models import glm5_next as glm
++
++
++class _LanguageModel(torch.nn.Module):
++    def __init__(self, *args, **kwargs):
++        super().__init__()
++        self.embed_tokens = torch.nn.Embedding(8, 4)
++        self.layers = []
++
++
++@pytest.mark.parametrize(
++    "language_only,language_model_only,encoder_only",
++    [
++        (False, False, False),
++        (True, False, False),
++        (False, True, False),
++        (False, False, True),
++    ],
++)
++def test_language_modes_construct_and_load_matching_components(
++    monkeypatch, language_only, language_model_only, encoder_only
++):
++    config = SimpleNamespace(
++        language_only=language_only,
++        language_model_only=language_model_only,
++        encoder_only=encoder_only,
++        text_config=SimpleNamespace(
++            q_lora_rank=None,
++            tie_word_embeddings=False,
++            vocab_size=8,
++            hidden_size=4,
++            mhc=False,
++            rope_scaling={},
++            n_routed_experts=2,
++            num_hidden_layers=45,
++            num_nextn_predict_layers=1,
++        ),
++        vision_config=SimpleNamespace(),
++    )
++    visual = Mock(return_value=torch.nn.Identity())
++    monkeypatch.setattr(glm, "Glm5NextModel", _LanguageModel)
++    monkeypatch.setattr(glm, "Glm5NextVisionModel", visual)
++    monkeypatch.setattr(glm, "LogitsProcessor", lambda *a, **k: torch.nn.Identity())
++    monkeypatch.setattr(glm, "ParallelLMHead", lambda *a, **k: torch.nn.Identity())
++    monkeypatch.setattr(glm, "get_parallel", lambda: SimpleNamespace(tp_size=1))
++    monkeypatch.setattr(
++        glm, "get_pp_group", lambda: SimpleNamespace(is_last_rank=True, world_size=1)
++    )
++    monkeypatch.setattr(
++        glm,
++        "get_attn_tp_context",
++        lambda: SimpleNamespace(init_context=lambda *a, **k: None),
++    )
++    monkeypatch.setattr(glm, "is_deepseek_dsa", lambda *a: False)
++    monkeypatch.setattr(glm, "is_dsa_enable_prefill_cp", lambda: False)
++    monkeypatch.setattr(glm, "is_prefill_context_parallel_enabled", lambda: False)
++    monkeypatch.setattr(
++        glm,
++        "get_server_args",
++        lambda: SimpleNamespace(mm_enable_dp_encoder=False, enable_dp_lm_head=False),
++    )
++    monkeypatch.setattr(
++        glm.Glm5NextForConditionalGeneration,
++        "determine_num_fused_shared_experts",
++        lambda *a: None,
++    )
++    monkeypatch.setattr(
++        glm.vision_utils, "update_vit_attn_dummy_heads_config", lambda *a: None
++    )
++    monkeypatch.setattr(
++        glm.vision_utils, "pad_vit_attn_dummy_heads", lambda config, name, value: value
++    )
++    monkeypatch.setattr(
++        glm.DeepseekV2WeightLoaderMixin, "post_load_weights", lambda *a, **k: None
++    )
++
++    model = glm.Glm5NextForConditionalGeneration(config)
++    text_only = language_only or language_model_only
++    assert (model.visual is None) is text_only
++    assert visual.call_count == (0 if text_only else 1)
++    assert (model.model is None) is encoder_only
++    if not encoder_only:
++        assert "model.embed_tokens.weight" in dict(model.named_parameters())
++
++    text = SimpleNamespace(weight_loader=Mock())
++    vision = SimpleNamespace(weight_loader=Mock())
++    mtp = SimpleNamespace(weight_loader=Mock())
++    parameters = {
++        "model.embed_tokens.weight": text,
++        "visual.blocks.0.mlp.down_proj.weight": vision,
++        "model.layers.45.input_layernorm.weight": mtp,
++    }
++    monkeypatch.setattr(model, "named_parameters", lambda: parameters.items())
++    value = torch.ones(1)
++    model.load_weights(
++        [
++            ("model.language_model.embed_tokens.weight", value),
++            ("model.visual.blocks.0.mlp.down_proj.weight", value),
++            ("model.language_model.layers.45.input_layernorm.weight", value),
++        ]
++    )
++    assert text.weight_loader.call_count == (0 if encoder_only else 1)
++    assert vision.weight_loader.call_count == (0 if text_only else 1)
++    mtp.weight_loader.assert_not_called()
+diff --git a/python/sglang/srt/server_args.py b/python/sglang/srt/server_args.py
+--- a/python/sglang/srt/server_args.py
++++ b/python/sglang/srt/server_args.py
+@@ -7709,7 +7709,10 @@
+         except Exception:
+             return False
+ 
+-    LANGUAGE_MODEL_ONLY_ARCHITECTURES = ("MuseGlimmerForConditionalGeneration",)
++    LANGUAGE_MODEL_ONLY_ARCHITECTURES = (
++        "MuseGlimmerForConditionalGeneration",
++        "Glm5NextForConditionalGeneration",
++    )
+ 
+     def _handle_language_model_only(self):
+         if not self.language_model_only:
+diff --git a/python/sglang/srt/server_args_test.py b/python/sglang/srt/server_args_test.py
+new file mode 100644
+--- /dev/null
++++ b/python/sglang/srt/server_args_test.py
+@@ -0,0 +1,47 @@
++from types import SimpleNamespace
++
++import pytest
++from sglang.srt.server_args import ServerArgs
++
++
++@pytest.mark.parametrize(
++    "architecture",
++    ["Glm5NextForConditionalGeneration", "MuseGlimmerForConditionalGeneration"],
++)
++def test_language_model_only_accepts_supported_architecture(architecture):
++    args = _language_model_args(architecture)
++    ServerArgs._handle_language_model_only(args)
++
++
++@pytest.mark.parametrize(
++    "conflict", ["encoder_only", "language_only", "mm_enable_dp_encoder"]
++)
++def test_language_model_only_rejects_encoder_modes(conflict):
++    args = _language_model_args("Glm5NextForConditionalGeneration")
++    setattr(args, conflict, True)
++    with pytest.raises(ValueError, match="cannot be combined"):
++        ServerArgs._handle_language_model_only(args)
++
++
++def test_language_model_only_still_rejects_unsupported_architecture():
++    args = _language_model_args("UnsupportedForConditionalGeneration")
++    with pytest.raises(ValueError, match="does not support"):
++        ServerArgs._handle_language_model_only(args)
++    args.language_model_only = False
++    ServerArgs._handle_language_model_only(args)
++
++
++def _language_model_args(architecture):
++    return SimpleNamespace(
++        language_model_only=True,
++        language_only=False,
++        encoder_only=False,
++        enable_prefix_mm_cache=False,
++        enable_broadcast_mm_inputs_process=False,
++        mm_enable_dp_encoder=False,
++        disaggregation_mode="null",
++        LANGUAGE_MODEL_ONLY_ARCHITECTURES=ServerArgs.LANGUAGE_MODEL_ONLY_ARCHITECTURES,
++        get_model_config=lambda: SimpleNamespace(
++            hf_config=SimpleNamespace(architectures=[architecture])
++        ),
++    )

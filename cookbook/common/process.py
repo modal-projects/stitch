@@ -41,6 +41,7 @@ def start_sidecar(
     commit_mode: str,
     flush_cache_on_commit: bool = False,
     debug_requests: bool = False,
+    watchdog_failure_threshold: int = 3,
 ) -> subprocess.Popen:
     """Launch the versioned rollout proxy (the shared sidecar) beside sglang."""
     # Empty settings normalize to unset: only set options reach the factory.
@@ -67,6 +68,7 @@ def start_sidecar(
         run_id=run_id,
         boot_version=boot_version,
         debug_requests=debug_requests,
+        watchdog_failure_threshold=watchdog_failure_threshold,
     )
     cmd = [
         "python3",

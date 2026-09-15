@@ -144,6 +144,7 @@ def create_store(
     local_root: str | Path,
     run_id: str,
     volume_name: str | None = None,
+    volume_path: str | None = None,
     s3_root: str | None = None,
     s3_endpoint_url: str | None = None,
 ) -> Store:
@@ -154,7 +155,12 @@ def create_store(
     ``local_root``/``run_id`` plus the launch's ``--store-opt`` pairs.
     """
     if backend == MODAL_VOLUME:
-        return ModalVolumeStore(local_root, volume_name=volume_name, run_id=run_id)
+        return ModalVolumeStore(
+            local_root,
+            volume_name=volume_name,
+            volume_path=volume_path,
+            run_id=run_id,
+        )
     if backend == S3:
         if not s3_root:
             raise ValueError("s3_root is required for the S3 store")

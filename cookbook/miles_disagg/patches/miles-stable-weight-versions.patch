@@ -2,7 +2,7 @@ diff --git a/miles/backends/megatron_utils/actor.py b/miles/backends/megatron_ut
 index 9a4c9650..980446e6 100644
 --- a/miles/backends/megatron_utils/actor.py
 +++ b/miles/backends/megatron_utils/actor.py
-@@ -276,10 +276,12 @@ class MegatronTrainRayActor(TrainRayActor):
+@@ -276,10 +276,13 @@ class MegatronTrainRayActor(TrainRayActor):
  
                  update_weight_cls = UpdateWeightFromDiskDelta
                  if getattr(args, "rollout_endpoint_url", None):
@@ -10,11 +10,12 @@ index 9a4c9650..980446e6 100644
 -                    # checkpoint iteration. Continue that service-owned version
 -                    # namespace; the next delta publication increments it.
 -                    update_weight_kwargs["initial_weight_version"] = max(0, loaded_rollout_id)
-+                    # The opaque fleet boots a loaded checkpoint under the version
-+                    # it was published as: iteration + 1. A fresh actor reports
-+                    # iteration 0 and starts the namespace at 0.
++                    # A fresh model and the first saved update both load
++                    # iteration 0; the deployment supplies that boot version.
 +                    update_weight_kwargs["initial_weight_version"] = (
-+                        loaded_rollout_id + 1 if loaded_rollout_id > 0 else 0
++                        loaded_rollout_id + 1
++                        if loaded_rollout_id > 0
++                        else getattr(args, "rollout_initial_weight_version", 0)
 +                    )
              else:
                  # Mooncake loads its RDMA shared libraries at import time.

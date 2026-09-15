@@ -1,0 +1,112 @@
+diff --git a/megatron/core/dist_checkpointing/dict_utils.py b/megatron/core/dist_checkpointing/dict_utils.py
+--- a/megatron/core/dist_checkpointing/dict_utils.py
++++ b/megatron/core/dist_checkpointing/dict_utils.py
+@@ -241,6 +241,42 @@
+     return x1
+ 
+ 
++def merge_local_nonpersistent_values(
++    persistent: Union[dict, list, U], local: Union[dict, list, U]
++) -> Union[dict, list, U]:
++    """Overlay locally reconstructed values onto loaded persistent state.
++
++    ``LocalNonpersistentObject`` declares that the value supplied by the load
++    template is authoritative. This also applies when a value that is local in
++    the current schema was persisted by an older checkpoint. In that case the
++    local container shape is authoritative, while unrelated persistent values
++    in overlapping dictionaries are preserved.
++    """
++    if isinstance(persistent, dict) and isinstance(local, dict):
++        for key, local_value in local.items():
++            if key in persistent:
++                persistent[key] = merge_local_nonpersistent_values(
++                    persistent[key], local_value
++                )
++            else:
++                persistent[key] = local_value
++        return persistent
++
++    if isinstance(persistent, list) and isinstance(local, list):
++        common_length = min(len(persistent), len(local))
++        for index in range(common_length):
++            persistent[index] = merge_local_nonpersistent_values(
++                persistent[index], local[index]
++            )
++        if len(persistent) > len(local):
++            del persistent[len(local) :]
++        elif len(persistent) < len(local):
++            persistent.extend(local[len(persistent) :])
++        return persistent
++
++    return local
++
++
+ def map_reduce(
+     xs: Iterable,
+     key_fn: Callable = lambda x: x,
+diff --git a/megatron/core/dist_checkpointing/serialization.py b/megatron/core/dist_checkpointing/serialization.py
+--- a/megatron/core/dist_checkpointing/serialization.py
++++ b/megatron/core/dist_checkpointing/serialization.py
+@@ -20,7 +20,7 @@
+ 
+ from . import ShardedTensor
+ from .core import CheckpointingConfig, save_config
+-from .dict_utils import merge
++from .dict_utils import merge, merge_local_nonpersistent_values
+ from .mapping import (
+     CommonStateDict,
+     ShardedObject,
+@@ -131,7 +131,7 @@
+     # torch_dist checkpoint (current format) or in a legacy common.pt. Loading it up front
+     # is also required to determine `async_strategy` for the sharded load below.
+     common_state_dict = load_common_state_dict(checkpoint_dir)
+-    merge(common_state_dict, nonpersistent_state_dict)
++    merge_local_nonpersistent_values(common_state_dict, nonpersistent_state_dict)
+ 
+     # At this point we are only dealing with ShardedBase objects
+     sharded_state_dict, _ = extract_sharded_base(sharded_state_dict)
+diff --git a/megatron/core/optimizer/distrib_optimizer.py b/megatron/core/optimizer/distrib_optimizer.py
+--- a/megatron/core/optimizer/distrib_optimizer.py
++++ b/megatron/core/optimizer/distrib_optimizer.py
+@@ -1087,7 +1087,7 @@
+             if len(steps) != 0:
+                 assert len(steps) == 1, f"steps: {steps}"
+                 step = torch.tensor(steps[0], dtype=torch.float32, device="cpu")
+-                for v in self.optimizer.state.values():
++                for v in state_dict_state.values():
+                     v["step"] = step.detach().clone()
+ 
+         # Optimizer.
+@@ -1272,6 +1272,8 @@
+                 if not isinstance(v, torch.Tensor):
+                     continue
+                 if isinstance(self.optimizer, HybridDeviceOptimizer):
++                    if k == "step":
++                        continue
+                     if k == "param":
+                         k = "master_param"
+                     self.optimizer.state[sharded_model_param][k] = v
+@@ -1294,6 +1296,8 @@
+             # run under no_grad.
+             with torch.no_grad():
+                 for key in dst_tensors:
++                    if isinstance(self.optimizer, HybridDeviceOptimizer) and key == "step":
++                        continue
+                     if not isinstance(tensors[key], torch.Tensor):
+                         continue
+                     dst_tensors[key].copy_(tensors[key])
+@@ -1979,6 +1983,14 @@
+                     # The global ckpt tensors must be fully covered.
+                     # We add extra empty padding if necessary
+                     assert bucket_state, 'empty bucket encountered'
++
++                    # HybridDeviceOptimizer keeps a scalar step in every parameter state.
++                    # The canonical optimizer step is already checkpointed in param_groups,
++                    # so reconstruct per-parameter steps locally instead of treating this
++                    # DP-rank-dependent bucket structure as common checkpoint state.
++                    for tensors in bucket_state:
++                        if 'step' in tensors:
++                            tensors['step'] = LocalNonpersistentObject(tensors['step'])
+ 
+                     # Insert padding between parameter tensors to ensure full coverage as needed.
+                     all_pad_tensors = {}

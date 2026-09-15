@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import threading
 import time
@@ -34,9 +35,10 @@ def apply_prep_environment(exp) -> None:
 
 def _bf16_masters(exp, source_snapshot: str) -> str:
     """Resolve the immutable BF16 source used by both checkpoint converters."""
-    if _is_int4(source_snapshot) or getattr(
-        exp, "MATERIALIZE_BF16_MASTERS", True
-    ):
+    if _source_quantization(source_snapshot) in {
+        "compressed-tensors",
+        "fp8",
+    } or getattr(exp, "MATERIALIZE_BF16_MASTERS", True):
         return str(exp.BF16_CHECKPOINT_PATH)
     return source_snapshot
 
@@ -50,7 +52,7 @@ def prepare_checkpoints(
 ) -> None:
     """Build the bf16 masters (trainer arch source) + the served base on a GPU.
 
-    masters (bf16): a quantized source (Kimi INT4) is dequantized; a bf16 source IS the
+    masters (bf16): an INT4 or FP8 source is dequantized; a bf16 source IS the
     masters. served base: bf16 = masters; a published ROLLOUT_SOURCE_MODEL is copied
     directly; otherwise NVFP4 is built with Miles' TE-direct quantizer over the masters.
     """
@@ -63,10 +65,10 @@ def prepare_checkpoints(
     tools = f"{MILES_ROOT}/tools"
 
     src = source_snapshot
-    is_int4 = _is_int4(src)  # read the source's quant scheme, not its repo name
+    quantization = _source_quantization(src)
 
     def _build_bf16(out: str) -> None:
-        if is_int4:
+        if quantization == "compressed-tensors":
             print("dequantizing INT4 source -> bf16 masters (GPU)...", flush=True)
             subprocess.run(
                 [
@@ -79,6 +81,20 @@ def prepare_checkpoints(
                 ],
                 check=True,
             )
+        elif quantization == "fp8":
+            print("dequantizing FP8 source -> bf16 masters (GPU)...", flush=True)
+            subprocess.run(
+                [
+                    "python",
+                    f"{tools}/fp8_cast_bf16.py",
+                    "--input-fp8-hf-path",
+                    src,
+                    "--output-bf16-hf-path",
+                    out,
+                ],
+                check=True,
+            )
+            _copy_fp8_metadata(src, out)
         else:
             _copy_tree("bf16 masters", src, out)
         _strip_stale_quant_config(os.path.join(out, "config.json"))
@@ -87,7 +103,9 @@ def prepare_checkpoints(
 
             unpack_fused_experts(out)
 
-    if is_int4 or getattr(exp, "MATERIALIZE_BF16_MASTERS", True):
+    if quantization in {"compressed-tensors", "fp8"} or getattr(
+        exp, "MATERIALIZE_BF16_MASTERS", True
+    ):
         _staged(materialized_bf16_dir, _build_bf16)
         bf16_dir = materialized_bf16_dir
     else:
@@ -269,6 +287,20 @@ def _copy_tree(label: str, src: str, dst: str) -> None:
     print(f"copied {label}: {total_gb:.0f} GB", flush=True)
 
 
+def _copy_fp8_metadata(src: str, dst: str) -> None:
+    """Dereference HF cache metadata without replacing the converted weight index."""
+    for path in Path(src).iterdir():
+        if not path.is_file() or path.name.endswith(
+            (".safetensors", ".safetensors.index.json")
+        ):
+            continue
+        target = Path(dst) / path.name
+        # The upstream converter preserves relative links into the HF blob cache.
+        if target.is_symlink():
+            target.unlink()
+        shutil.copyfile(path, target)
+
+
 def _staged(final_dir: str, build, *, resume: bool = False) -> None:
     """Build into a .partial sibling and atomically rename, so an interrupted step never
     leaves a half-built dir the reuse check mistakes for complete."""
@@ -299,10 +331,10 @@ def _strip_stale_quant_config(config_path: str) -> None:
         print(f"stripped stale quantization_config from {config_path}")
 
 
-def _is_int4(model_dir: str) -> bool:
+def _source_quantization(model_dir: str) -> str | None:
     cfg_path = os.path.join(model_dir, "config.json")
     if not os.path.exists(cfg_path):
-        return False
+        return None
     with open(cfg_path) as f:
         cfg = json.load(f) or {}
     # VLMs (Kimi K2.x) nest the quant config under text_config.
@@ -311,4 +343,6 @@ def _is_int4(model_dir: str) -> bool:
         or cfg.get("quantization_config")
         or {}
     )
-    return qc.get("quant_method") == "compressed-tensors"
+    if qc.get("quant_method") == "fp8" and qc.get("weight_block_size") != [128, 128]:
+        raise ValueError("FP8 preparation requires 128x128 block-scaled weights")
+    return qc.get("quant_method")

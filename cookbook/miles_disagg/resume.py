@@ -9,10 +9,13 @@ from io import BytesIO
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from modal.exception import NotFoundError
+
 from cookbook.common.constants import STITCH_PATH
 from stitch.types import WEIGHT_PREFIX, VersionRef
 
 TRAINER_CALL_FILE = "trainer_call_id"
+CHECKPOINT_COMPLETE_MARKER = ".stitch-complete"
 
 
 class ResumePointNotFound(ValueError):
@@ -68,12 +71,28 @@ def resolve_resume_point(
     *,
     source_run_id: str,
     save_hf: str | None,
+    require_durable: bool = False,
 ) -> ResumePoint:
     """Resolve the newest complete Megatron/HF checkpoint pair for a run."""
     if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", source_run_id) is None:
         raise ValueError(f"invalid resume run id: {source_run_id!r}")
 
     run_root = PurePosixPath(source_run_id)
+    latest_version = None
+    if require_durable:
+        try:
+            latest = VersionRef.parse(
+                _read_volume_file(volume, str(run_root / "latest")).decode().strip()
+            )
+        except FileNotFoundError as exc:
+            raise ResumePointNotFound(
+                f"run {source_run_id!r} has no published version"
+            ) from exc
+        if latest.run_id != source_run_id:
+            raise ValueError(
+                f"latest belongs to run {latest.run_id!r}, not {source_run_id!r}"
+            )
+        latest_version = latest.version
     checkpoint_root = run_root / "checkpoints"
     tracker = checkpoint_root / "latest_checkpointed_iteration.txt"
     try:
@@ -97,12 +116,25 @@ def resolve_resume_point(
     for entry in volume.iterdir(str(checkpoint_root), recursive=False):
         if match := re.fullmatch(r"iter_(\d+)", PurePosixPath(entry.path).name):
             iteration = int(match.group(1))
-            # A fresh actor also reports iteration 0, so it never resumes.
-            if 0 < iteration <= tracked_iteration:
+            if iteration <= tracked_iteration:
                 iterations.append(iteration)
 
     save_hf = _validate_save_hf_template(save_hf)
     for iteration in sorted(iterations, reverse=True):
+        if latest_version is not None and export_version(iteration) > latest_version:
+            continue
+        if require_durable:
+            try:
+                _read_volume_file(
+                    volume,
+                    str(
+                        checkpoint_root
+                        / f"iter_{iteration:07d}"
+                        / CHECKPOINT_COMPLETE_MARKER
+                    ),
+                )
+            except FileNotFoundError:
+                continue
         relative_hf = save_hf.format(rollout_id=iteration)
         hf_root = run_root / relative_hf
         try:
@@ -149,7 +181,7 @@ def _check_published_version(
 
 
 def prepare_attempt(
-    volume: Any, *, run_id: str, save_hf: str | None
+    volume: Any, *, run_id: str, save_hf: str | None, require_durable: bool = False
 ) -> ResumePoint | None:
     """Restore and return one trainer attempt's resume point, or rewind to the
     boot version and return None when the run has no complete pair yet.
@@ -158,17 +190,41 @@ def prepare_attempt(
     first attempt, a retry, and a manual re-spawn one path.
     """
     try:
-        point = resolve_resume_point(volume, source_run_id=run_id, save_hf=save_hf)
+        point = resolve_resume_point(
+            volume,
+            source_run_id=run_id,
+            save_hf=save_hf,
+            require_durable=require_durable,
+        )
     except ResumePointNotFound:
         point = None
     if point is None:
         restore_boot_pointer(volume, run_id)
     else:
         restore_resume_point(volume, point)
+    if require_durable:
+        # Replayed saves must not inherit completion from the abandoned attempt.
+        _invalidate_future_checkpoints(volume, run_id, point.iteration if point else -1)
     # API uploads do not refresh the mounted pointer or Megatron tracker.
     # The subsequent claim and checkpoint loader read those mounted files.
     volume.reload()
     return point
+
+
+def _invalidate_future_checkpoints(volume: Any, run_id: str, iteration: int) -> None:
+    try:
+        entries = list(volume.iterdir(f"{run_id}/checkpoints", recursive=False))
+    except (FileNotFoundError, NotFoundError):
+        return
+    for entry in entries:
+        path = PurePosixPath(entry.path)
+        if (match := re.fullmatch(r"iter_(\d+)", path.name)) and int(
+            match.group(1)
+        ) > iteration:
+            try:
+                volume.remove_file(str(path / CHECKPOINT_COMPLETE_MARKER))
+            except FileNotFoundError:
+                pass
 
 
 def restore_boot_pointer(volume: Any, run_id: str) -> None:
@@ -236,7 +292,7 @@ def restore_resume_point(volume: Any, point: ResumePoint) -> VersionRef:
 
 
 def newest_complete_export(
-    run_dir: Path, *, save_hf: str, latest_version: int
+    run_dir: Path, *, save_hf: str, latest_version: int, require_durable: bool = False
 ) -> tuple[int, Path] | None:
     """The newest complete export at or below ``latest_version``, from a mounted
     run directory — the checkpoint a booting replica should load.
@@ -252,6 +308,16 @@ def newest_complete_export(
         except ValueError:
             continue
         if export != run_dir / save_hf.format(rollout_id=iteration):
+            continue
+        if (
+            require_durable
+            and not (
+                run_dir
+                / "checkpoints"
+                / f"iter_{iteration:07d}"
+                / CHECKPOINT_COMPLETE_MARKER
+            ).is_file()
+        ):
             continue
         if (version := export_version(iteration)) <= latest_version:
             exports.append((version, export))

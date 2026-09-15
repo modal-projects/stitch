@@ -26,10 +26,13 @@ class ModalConfig:
     draft_volume: str | None = None
     draft_volume_env: str | None = None
     rollout_min_containers: int = 2
+    rollout_min_ready: int | None = None
     rollout_max_containers: int | None = None
     # Flash autoscaler target: keep well below sglang engine concurrency so Flash adds
     # containers instead of packing requests until KV saturates.
     rollout_target_inputs: int | None = None
+    rollout_max_inputs: int | None = None
+    rollout_clustered: bool = False
     routing_region: str = "us-east"
     rollout_ephemeral_disk_mib: int | None = None
     rollout_memory_mib: tuple[int, int] | None = None

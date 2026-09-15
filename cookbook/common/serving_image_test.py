@@ -7,8 +7,11 @@ class _Image:
     def __init__(self) -> None:
         self.commands: list[str] = []
 
-    def run_commands(self, command: str) -> _Image:
-        self.commands.append(command)
+    def run_commands(self, *commands: str) -> _Image:
+        self.commands.extend(commands)
+        return self
+
+    def entrypoint(self, _command: list[str]) -> _Image:
         return self
 
     def pip_install(self, *_packages: str) -> _Image:
@@ -37,6 +40,7 @@ def test_build_serving_image_uses_selected_runtime(monkeypatch) -> None:
         repository="https://example.com/sglang.git",
         branch="model-release",
         commit="0123456789abcdef",
+        image_run_commands=("install compatible kernels",),
     )
 
     serving_image.build_serving_image(
@@ -46,7 +50,8 @@ def test_build_serving_image_uses_selected_runtime(monkeypatch) -> None:
     )
 
     assert selected_image == [runtime.image]
-    source_overlay = image.commands[0]
+    assert image.commands[0] == runtime.image_run_commands[0]
+    source_overlay = image.commands[1]
     assert runtime.repository in source_overlay
     assert runtime.branch in source_overlay
     assert runtime.commit in source_overlay

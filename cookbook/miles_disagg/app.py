@@ -48,6 +48,7 @@ from cookbook.common.constants import (
     STITCH_PATH,
 )
 from cookbook.miles_disagg import trainer_image
+from cookbook.miles_disagg.checkpoint_hooks import COMPLETION_HOOK
 from cookbook.miles_disagg.config import YAML_CONFIG_FIELDS, MilesConfig
 from cookbook.miles_disagg.resume import (
     newest_complete_export,
@@ -56,7 +57,6 @@ from cookbook.miles_disagg.resume import (
 )
 from cookbook.miles_disagg.trainer_image import MEGATRON_PATH, MILES_ROOT
 from stitch.pools.modal_flash import ModalFlashPool
-from stitch.service import await_pool_ready
 from stitch.types import VersionRef
 
 EXPERIMENT = os.environ[
@@ -77,6 +77,11 @@ RUN_ID = os.environ["RUN_ID"]
 APP_NAME = f"{exp.APP_NAME}-{RUN_ID}"
 RUN_DIR = STITCH_PATH / RUN_ID
 STORE_DEPLOYMENT = storage.StoreDeployment.from_environment()
+REQUIRE_DURABLE_CHECKPOINTS = (
+    getattr(miles_cfg, "custom_checkpoint_completed_hook_path", None) == COMPLETION_HOOK
+)
+if REQUIRE_DURABLE_CHECKPOINTS and STORE_DEPLOYMENT.backend != storage.MODAL_VOLUME:
+    raise ValueError("The checkpoint completion hook requires Modal Volume storage")
 UPDATES_DIR = STORE_DEPLOYMENT.updates_dir(RUN_DIR)
 STORE_SECRETS = STORE_DEPLOYMENT.modal_secrets()
 
@@ -92,6 +97,9 @@ image = trainer_image.build_trainer_image(
     experiment=EXPERIMENT,
     run_id=RUN_ID,
     miles_repo_ref=getattr(exp, "MILES_REPO_REF", trainer_image.MILES_REPO_REF),
+    miles_image_tag=getattr(exp, "MILES_IMAGE_TAG", trainer_image.MILES_IMAGE_TAG),
+    miles_patches=getattr(exp, "MILES_IMAGE_PATCHES", ()),
+    package_patches=getattr(exp, "TRAINER_PACKAGE_PATCHES", ()),
     miles_local=MILES_LOCAL_DIR,
     extra_pip_packages=(
         *getattr(exp, "TRAINER_EXTRA_PIP_PACKAGES", ()),
@@ -199,11 +207,19 @@ SGLANG_SERVER_ARGS = {
     include_source=False,
     port=SIDECAR_PORT,
     routing_region=modal_cfg.routing_region,
-    experimental_options={"kv_aware_routing": True},
+    experimental_options={
+        "kv_aware_routing": True,
+        **(
+            {"max_concurrency": modal_cfg.rollout_max_inputs}
+            if modal_cfg.rollout_max_inputs is not None
+            else {}
+        ),
+    },
     unauthenticated=True,
     exit_grace_period=60 * MINUTES,
     startup_timeout=SERVER_STARTUP_TIMEOUT,
 )
+@(modal.experimental.clustered(size=1) if modal_cfg.rollout_clustered else lambda c: c)
 class Server:
     @modal.enter()
     def startup(self) -> None:
@@ -227,6 +243,9 @@ class Server:
             run_id=RUN_ID,
             flush_cache_on_commit=exp.SIDECAR_FLUSH_CACHE_ON_COMMIT,
             startup_timeout=SERVER_STARTUP_TIMEOUT,
+            watchdog_failure_threshold=getattr(
+                exp, "SIDECAR_WATCHDOG_FAILURE_THRESHOLD", 3
+            ),
         )
 
     @modal.exit()
@@ -262,7 +281,10 @@ def _boot_checkpoint(store_config: dict) -> tuple[str, int]:
     if latest.run_id != RUN_ID:
         raise ValueError(f"latest belongs to run {latest.run_id!r}, not {RUN_ID!r}")
     export = newest_complete_export(
-        RUN_DIR, save_hf=save_hf, latest_version=latest.version
+        RUN_DIR,
+        save_hf=save_hf,
+        latest_version=latest.version,
+        require_durable=REQUIRE_DURABLE_CHECKPOINTS,
     )
     return (str(export[1]), export[0]) if export else (miles_cfg.hf_checkpoint, 0)
 
@@ -323,7 +345,11 @@ class Trainer:
             "Megatron patch",
         )
         process.apply_git_patches(
-            list(trainer_image.MILES_RUNTIME_PATCHES),
+            list(
+                getattr(
+                    exp, "MILES_RUNTIME_PATCHES", trainer_image.MILES_RUNTIME_PATCHES
+                )
+            ),
             MILES_ROOT,
             "Miles patch",
         )
@@ -337,6 +363,7 @@ class Trainer:
                 run_volume,
                 run_id=RUN_ID,
                 save_hf=getattr(miles_cfg, "save_hf", None),
+                require_durable=REQUIRE_DURABLE_CHECKPOINTS,
             )
             if self.rank == 0 and STORE_DEPLOYMENT.backend == storage.MODAL_VOLUME
             else None
@@ -356,7 +383,7 @@ class Trainer:
         )
 
     @modal.method()
-    def train(self, payload: dict) -> None:
+    def train(self, payload: dict, *, skip_rollout_ready_check: bool = False) -> None:
         """Run one training attempt from a MilesConfig payload (see MilesConfig.to_payload).
 
         Reentrant, which is the point: the payload is attempt-invariant and each
@@ -378,6 +405,7 @@ class Trainer:
             return
 
         resume_point = self.resume_point
+        boot_version = resume_point.version if resume_point is not None else 0
 
         cfg.rollout_endpoint_url = ModalFlashPool(APP_NAME, "Server").gateway_url()
         if resume_point is not None:
@@ -399,6 +427,7 @@ class Trainer:
             "experiment_volume_name": exp.EXPERIMENT_VOLUME_NAME,
             "rollout_modal_flash_app_name": APP_NAME,
             "rollout_modal_flash_server_cls_name": "Server",
+            "rollout_initial_weight_version": boot_version,
             "run_id": RUN_ID,
         }
         cfg.custom_config_path = custom_config
@@ -413,7 +442,6 @@ class Trainer:
         # Claim the version already served by the pool before Miles publishes.
         from cookbook.common import hooks
 
-        boot_version = resume_point.version if resume_point is not None else 0
         hooks.claim_pool(
             SimpleNamespace(
                 update_weight_disk_dir=cfg.update_weight_disk_dir, **custom_config
@@ -421,10 +449,11 @@ class Trainer:
             boot_version=boot_version,
         )
         # Replicas ahead of the claimed pointer are exiting, so they are not floor.
-        await_pool_ready(
-            ModalFlashPool(APP_NAME, "Server"),
-            replica_floor=modal_cfg.rollout_min_containers,
+        launch.await_rollout_ready(
+            APP_NAME,
+            modal_cfg,
             latest=VersionRef(RUN_ID, boot_version),
+            skip=skip_rollout_ready_check,
         )
 
         resume_log = (
@@ -476,26 +505,28 @@ def _build_train_cmd(cfg: MilesConfig) -> str:
 
 
 # ── Entrypoints (preparation lives in a separate app: cookbook.miles_disagg.prep_app) ──
-def spawn_train() -> Any:
+def spawn_train(*, skip_rollout_ready_check: bool = False) -> Any:
     """Spawn the trainer on this run's already-deployed pool (config ships as data, so config
     edits run without a redeploy; infra changes still require one). The recorded call
     id is what a takeover cancels."""
     trainer = modal.Cls.from_name(APP_NAME, "Trainer")()
-    call = trainer.train.spawn(miles_cfg.to_payload())
+    call = trainer.train.spawn(
+        miles_cfg.to_payload(), skip_rollout_ready_check=skip_rollout_ready_check
+    )
     record_trainer_call(run_volume, RUN_ID, call.object_id)
     print(f"Spawned train on {APP_NAME}: {call.object_id}")
     return call
 
 
 @app.local_entrypoint()
-def launch_train() -> None:
+def launch_train(skip_rollout_ready_check: bool = False) -> None:
     """Spawn training on a pool that's already up for this RUN. ``cookbook.miles_disagg.launch``
     deploys + spawns in one command, and its ``--resume-from`` cancels the live trainer call
     before re-spawning; this raw entrypoint does neither."""
     from modal.exception import NotFoundError
 
     try:
-        spawn_train()
+        spawn_train(skip_rollout_ready_check=skip_rollout_ready_check)
     except NotFoundError:
         raise SystemExit(
             f"App {APP_NAME!r} is not deployed. Launch a fresh run with:\n"

@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+from modal.exception import NotFoundError
 
 from cookbook.miles_disagg.resume import (
     ResumePoint,
@@ -38,6 +39,12 @@ class _Volume:
 
     def reload(self) -> None:
         pass
+
+    def remove_file(self, path: str) -> None:
+        try:
+            del self.files[path]
+        except KeyError as exc:
+            raise FileNotFoundError(path) from exc
 
     def iterdir(self, path: str, *, recursive: bool):
         assert recursive is False
@@ -99,6 +106,96 @@ def test_resolve_resume_point_pairs_megatron_and_hf_checkpoints() -> None:
     )
 
 
+def test_durable_resume_rejects_an_export_before_peer_commits_finish():
+    files = {
+        "old/latest": b"old/weight_v000120",
+        "old/checkpoints/latest_checkpointed_iteration.txt": b"119",
+        "old/checkpoints/iter_0000099/state": b"checkpoint",
+        "old/checkpoints/iter_0000119/state": b"unfinished peer checkpoint",
+        "old/checkpoints/iter_0000099/.stitch-complete": b"",
+        "old/hf_checkpoints/weight_v000099/.complete": b"",
+        "old/hf_checkpoints/weight_v000119/.complete": b"",
+        **_published(100),
+        **_published(120),
+    }
+    point = resolve_resume_point(
+        _Volume(files),
+        source_run_id="old",
+        save_hf=_Config.save_hf,
+        require_durable=True,
+    )
+    assert point.iteration == 99
+
+
+def test_durable_resume_ignores_a_stale_future_delta_index():
+    volume = _Volume(
+        {
+            "old/latest": b"old/weight_v000119",
+            "old/checkpoints/latest_checkpointed_iteration.txt": b"119",
+            "old/checkpoints/iter_0000099/.stitch-complete": b"",
+            "old/checkpoints/iter_0000119/.stitch-complete": b"",
+            "old/hf_checkpoints/weight_v000099/.complete": b"",
+            "old/hf_checkpoints/weight_v000119/.complete": b"",
+            **_published(100),
+            **_published(120),
+        }
+    )
+    point = resolve_resume_point(
+        volume, source_run_id="old", save_hf=_Config.save_hf, require_durable=True
+    )
+    assert point.iteration == 99
+    prepare_attempt(volume, run_id="old", save_hf=_Config.save_hf, require_durable=True)
+    assert "old/checkpoints/iter_0000119/.stitch-complete" not in volume.files
+    assert "old/checkpoints/iter_0000099/.stitch-complete" in volume.files
+
+
+def test_fresh_attempt_invalidates_all_unpublished_completion_markers():
+    volume = _Volume(
+        {
+            "old/latest": b"old/weight_v000000",
+            "old/checkpoints/latest_checkpointed_iteration.txt": b"0",
+            "old/checkpoints/iter_0000000/.stitch-complete": b"",
+        }
+    )
+    assert (
+        prepare_attempt(
+            volume, run_id="old", save_hf=_Config.save_hf, require_durable=True
+        )
+        is None
+    )
+    assert "old/checkpoints/iter_0000000/.stitch-complete" not in volume.files
+
+
+@pytest.mark.parametrize("error_type", [FileNotFoundError, NotFoundError])
+def test_durable_fresh_attempt_without_checkpoint_directory(error_type):
+    class EmptyVolume(_Volume):
+        def iterdir(self, path, *, recursive):
+            raise error_type(path)
+
+    assert (
+        prepare_attempt(
+            EmptyVolume({}),
+            run_id="new",
+            save_hf=_Config.save_hf,
+            require_durable=True,
+        )
+        is None
+    )
+
+
+def test_boot_export_requires_durable_native_pair_when_enabled(tmp_path):
+    for iteration in (9, 19):
+        root = tmp_path / f"hf_checkpoints/weight_v{iteration:06d}"
+        root.mkdir(parents=True)
+        (root / ".complete").touch()
+    checkpoint = tmp_path / "checkpoints/iter_0000009"
+    checkpoint.mkdir(parents=True)
+    (checkpoint / ".stitch-complete").touch()
+    assert newest_complete_export(
+        tmp_path, save_hf=_Config.save_hf, latest_version=20, require_durable=True
+    ) == (10, tmp_path / "hf_checkpoints/weight_v000009")
+
+
 def test_resolve_resume_point_falls_back_to_previous_complete_pair() -> None:
     volume = _Volume(
         {
@@ -155,18 +252,32 @@ def test_resolve_resume_point_rejects_a_mislabeled_publication() -> None:
         resolve_resume_point(volume, source_run_id="old", save_hf=_Config.save_hf)
 
 
-def test_resolve_resume_point_skips_iteration_zero() -> None:
+@pytest.mark.parametrize("require_durable", [False, True])
+def test_resolve_resume_point_recovers_the_first_saved_update(require_durable) -> None:
     volume = _Volume(
         {
+            "old/latest": b"old/weight_v000002",
             "old/checkpoints/latest_checkpointed_iteration.txt": b"0\n",
-            "old/checkpoints/iter_0000000/state": b"checkpoint",
+            "old/checkpoints/iter_0000000/.stitch-complete": b"",
+            "old/checkpoints/iter_0000001/state": b"unfinished checkpoint",
             "old/hf_checkpoints/weight_v000000/.complete": b"",
+            "old/hf_checkpoints/weight_v000001/.complete": b"",
             **_published(1),
+            **_published(2),
         }
     )
 
-    with pytest.raises(ValueError, match="no complete Megatron/HF checkpoint pair"):
-        resolve_resume_point(volume, source_run_id="old", save_hf=_Config.save_hf)
+    point = prepare_attempt(
+        volume,
+        run_id="old",
+        save_hf=_Config.save_hf,
+        require_durable=require_durable,
+    )
+
+    assert point is not None
+    assert (point.iteration, point.version) == (0, 1)
+    assert volume.files["old/latest"] == b"old/weight_v000001"
+    assert "old/checkpoints/iter_0000000/.stitch-complete" in volume.files
 
 
 def test_resolve_resume_point_requires_a_complete_checkpoint_pair() -> None:

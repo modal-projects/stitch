@@ -8,6 +8,7 @@ that owns the distributed publish protocol.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from pathlib import Path
@@ -117,14 +118,36 @@ async def gated_rollout_request_hook(
     request["retry_sleep"] = float(
         getattr(args, "rollout_request_retry_sleep", request.get("retry_sleep", 1.0))
     )
+    request["retry_response"] = retry_rejected_request
+
+
+def retry_rejected_request(response: Any) -> bool:
+    """Retry only explicit admission rejection, before stateful generation starts."""
+    if response.status_code in (409, 429):
+        return True
+    if response.status_code != 503:
+        return False
+    if response.text.strip() == "Server is at capacity":
+        return True
+    try:
+        body = response.json()
+    except ValueError:
+        return False
+    if not isinstance(body, dict):
+        return False
+    error = body.get("error")
+    message = error.get("message") if isinstance(error, dict) else None
+    return (
+        message == "The request queue is full."
+        or body.get("detail") == "The request queue is full."
+    )
 
 
 class _CachedPointer:
     """TTL-cached ``latest`` version from the trainer's configured store.
 
-    The publisher and request hooks share one store client. Refreshing here can
-    disrupt a Volume publisher that is still writing, while S3 needs no refresh;
-    cross-host refresh belongs to rollout-replica reconciliation.
+    Metadata reads run off the request loop and share one refresh per TTL.
+    They never reload the trainer mount, which may have open checkpoint files.
     """
 
     def __init__(self) -> None:
@@ -132,28 +155,29 @@ class _CachedPointer:
         self._at = -1e9
         self._store: Store | None = None
         self._store_key: tuple[str | None, ...] | None = None
+        self._lock = asyncio.Lock()
 
     async def get(self, args: Any, ttl: float = 2.0) -> int:
-        store = self._store
-        store_key = _store_key(args)
-        if store is None or self._store_key != store_key:
-            store = self._store = _store(args)
-            self._store_key = store_key
-            self._version = 0
-            self._at = -1e9
-        now = time.monotonic()
-        if now - self._at >= ttl:
-            try:
-                pointer = store.read_pointer()
-                self._version = pointer.version if pointer else 0
-            except Exception:  # noqa: BLE001
-                logger.warning(
-                    "gate: could not read latest; using cached %s",
-                    self._version,
-                    exc_info=True,
-                )
-            self._at = time.monotonic()
-        return self._version
+        async with self._lock:
+            store = self._store
+            store_key = _store_key(args)
+            if store is None or self._store_key != store_key:
+                store = self._store = _store(args)
+                self._store_key = store_key
+                self._version = 0
+                self._at = -1e9
+            if time.monotonic() - self._at >= ttl:
+                try:
+                    pointer = await asyncio.to_thread(store.read_pointer)
+                    self._version = pointer.version if pointer else 0
+                except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "gate: could not read latest; using cached %s",
+                        self._version,
+                        exc_info=True,
+                    )
+                self._at = time.monotonic()
+            return self._version
 
 
 _latest = _CachedPointer()
@@ -161,11 +185,13 @@ _latest = _CachedPointer()
 
 # ── args → run coordinates ───────────────────────────────────────────────────────
 def _store(args: Any) -> Store:
+    volume_name = getattr(args, "experiment_volume_name", None) or None
     return storage.create_store(
         str(getattr(args, "stitch_store_backend", storage.MODAL_VOLUME)),
         local_root=_transport_root(args),
         run_id=_run_id(args),
-        volume_name=getattr(args, "experiment_volume_name", None) or None,
+        volume_name=volume_name,
+        volume_path=_run_id(args) if volume_name else None,
         s3_root=getattr(args, "stitch_s3_root", None) or None,
         s3_endpoint_url=getattr(args, "stitch_s3_endpoint_url", None) or None,
     )

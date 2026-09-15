@@ -1,0 +1,63 @@
+diff --git a/python/sglang/srt/utils/patch_torch.py b/python/sglang/srt/utils/patch_torch.py
+--- a/python/sglang/srt/utils/patch_torch.py
++++ b/python/sglang/srt/utils/patch_torch.py
+@@ -78,6 +78,7 @@ def _reduce_tensor_modified(*args, **kwargs):
+ 
+ 
+ def _rebuild_cuda_tensor_modified(*args):
++    monkey_patch_torch_reductions()
+     args = _modify_tuple(args, _REDUCE_TENSOR_ARG_DEVICE_INDEX, _device_from_maybe_uuid)
+     return reductions._rebuild_cuda_tensor_original(*args)
+ 
+diff --git a/python/sglang/srt/utils/patch_torch_test.py b/python/sglang/srt/utils/patch_torch_test.py
+new file mode 100644
+--- /dev/null
++++ b/python/sglang/srt/utils/patch_torch_test.py
+@@ -0,0 +1,47 @@
++import multiprocessing
++import pickle
++
++
++def _receive_cuda_tensor(connection):
++    from torch.multiprocessing import reductions
++
++    assert not hasattr(reductions, "_rebuild_cuda_tensor_original")
++    reductions.rebuild_cuda_tensor = lambda *args: args
++    try:
++        connection.send((pickle.loads(connection.recv_bytes()), None))
++    except Exception as exc:
++        connection.send((None, repr(exc)))
++    finally:
++        connection.close()
++
++
++class _CudaPayload:
++    def __reduce__(self):
++        from sglang.srt.utils.patch_torch import _rebuild_cuda_tensor_modified
++
++        return _rebuild_cuda_tensor_modified, (None, None, None, None, None, None, 0)
++
++
++def test_cuda_tensor_rebuild_in_spawned_process():
++    from sglang.srt.utils.patch_torch import monkey_patch_torch_reductions
++    from sglang.srt.utils.patch_torch_test import _receive_cuda_tensor as receiver
++
++    monkey_patch_torch_reductions()
++    context = multiprocessing.get_context("spawn")
++    parent, child = context.Pipe()
++    worker = context.Process(target=receiver, args=(child,))
++    worker.start()
++    child.close()
++    try:
++        parent.send_bytes(pickle.dumps(_CudaPayload()))
++        assert parent.poll(60), "Spawned tensor receiver did not respond"
++        value, error = parent.recv()
++        assert error is None, error
++        assert value == (None, None, None, None, None, None, 0)
++        worker.join(timeout=10)
++        assert worker.exitcode == 0
++    finally:
++        parent.close()
++        if worker.is_alive():
++            worker.kill()
++            worker.join(timeout=10)

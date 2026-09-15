@@ -23,6 +23,7 @@ from typing import Any
 from stitch.pools.base import Pool
 from stitch.publish import claim_run, publish_version, wake_pool
 from stitch.stores.base import Store
+from stitch.stores.modal_volume import ModalVolumeStore
 from stitch.stores.s3 import S3Store
 from stitch.types import WEIGHT_PREFIX, VersionRef, decide_pointer_move
 
@@ -85,7 +86,7 @@ class Publisher:
         the framework's run directory — a durability boundary for a mounted store
         (every rank commits) and a no-op for an upload store. The version publish
         splits by backend: with a shared mount every host leader commits its mount
-        and rank 0 publishes from the refreshed view; with per-host uploads each
+        and rank 0 verifies the committed files; with per-host uploads each
         leader uploads its node-local files and rank 0 commits ``latest`` only after
         the gathered receipts verify, so a replica never follows ``latest`` to
         incomplete bytes."""
@@ -107,7 +108,7 @@ class Publisher:
         if isinstance(self._store, S3Store):
             self._publish_uploaded(target, published_dir, expected)
         else:
-            self._publish_mounted(published_dir)
+            self._publish_mounted(target, published_dir, expected)
 
     def _pointer_snapshot(self, target: VersionRef) -> tuple[bool, VersionRef | None]:
         """Rank 0 reads ``latest`` and every rank agrees on the gathered result.
@@ -144,8 +145,10 @@ class Publisher:
         _, already, expected, _ = rank_zero[0]
         return already, expected
 
-    def _publish_mounted(self, published_dir: str) -> None:
-        """Commit every host's mount, then publish from rank 0's refreshed view."""
+    def _publish_mounted(
+        self, target: VersionRef, published_dir: str, expected: VersionRef | None
+    ) -> None:
+        """Commit every host's mount, then verify durable files before publication."""
         commit_error = None
         if self._comms.is_host_leader():
             try:
@@ -157,10 +160,25 @@ class Publisher:
         publish_error = None
         if self._comms.rank() in (None, 0):
             try:
-                self._store.refresh()
-                publish_version(
-                    self._store, self._pool, published_dir, run_id=self._run_id
+                manifest = (
+                    self._store.verify_committed_version(target, published_dir)
+                    if isinstance(self._store, ModalVolumeStore)
+                    else None
                 )
+                if manifest is None:
+                    self._store.refresh()
+                    publish_version(
+                        self._store, self._pool, published_dir, run_id=self._run_id
+                    )
+                else:
+                    self._store.compare_and_advance_pointer(expected, target)
+                    wake_pool(self._pool, target)
+                    logger.info(
+                        "published %s: kind=%s files=%d",
+                        target.identity,
+                        manifest.kind.value,
+                        len(manifest.files),
+                    )
             except Exception:  # noqa: BLE001
                 publish_error = f"rank 0:\n{traceback.format_exc()}"
         self._raise_gathered_failures("checkpoint publication", publish_error)

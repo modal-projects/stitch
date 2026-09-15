@@ -24,6 +24,8 @@ class SGLangRuntime:
     repository: str
     branch: str
     commit: str
+    patches: tuple[Path, ...] = ()
+    image_run_commands: tuple[str, ...] = ()
 
 
 DEFAULT_SGLANG_RUNTIME = SGLangRuntime(
@@ -56,8 +58,11 @@ def build_serving_image(
     runtime: SGLangRuntime = DEFAULT_SGLANG_RUNTIME,
 ) -> modal.Image:
     """Build the rollout-pool image for one experiment config."""
-    return (
-        modal.Image.from_registry(runtime.image)
+    image = modal.Image.from_registry(runtime.image)
+    if runtime.image_run_commands:
+        image = image.run_commands(*runtime.image_run_commands)
+    image = (
+        image.entrypoint([])
         .run_commands(
             "rm -rf /tmp/stitch-sglang-overlay"
             f" && git clone --filter=blob:none --single-branch --branch {runtime.branch}"
@@ -92,8 +97,12 @@ def build_serving_image(
         # The kernel-cache volume can't mount over a non-empty path — clear it as the final
         # filesystem step (repopulated on boot).
         .run_commands("rm -rf /root/.cache/sglang")
-        .add_local_python_source("stitch")
-        .add_local_dir(
-            str(_COOKBOOK_DIR), remote_path="/root/cookbook", ignore=["**/__pycache__"]
+    )
+    for patch in runtime.patches:
+        remote_path = f"/tmp/{patch.name}"
+        image = image.add_local_file(str(patch), remote_path, copy=True).run_commands(
+            f"git -C /sgl-workspace/sglang apply {remote_path}"
         )
+    return image.add_local_python_source("stitch").add_local_dir(
+        str(_COOKBOOK_DIR), remote_path="/root/cookbook", ignore=["**/__pycache__"]
     )
