@@ -31,7 +31,7 @@ packages = ["src/stitch"]
 exclude = ["*_test.py"]
 
 [tool.pytest.ini_options]
-testpaths = ["src", "cookbook"]  # google-style: foo_test.py sits beside foo.py
+testpaths = ["src", "cookbook", "tools"]  # google-style: foo_test.py sits beside foo.py
 python_files = ["*_test.py"]
 pythonpath = ["."]  # so the co-located cookbook hook test imports the top-level cookbook/ package
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import shutil
 import statistics
@@ -34,6 +35,15 @@ class WeightUpdateSpec:
     server_args: dict[str, str]
     tp_size: int = 4
     port: int = 8001
+    logprob_abs_tolerance: float = 0.0
+
+    def __post_init__(self) -> None:
+        _validate_logprob_tolerance(self.logprob_abs_tolerance)
+
+
+def _validate_logprob_tolerance(tolerance: float) -> None:
+    if not math.isfinite(tolerance) or tolerance < 0.0:
+        raise ValueError("logprob_abs_tolerance must be finite and nonnegative")
 
 
 def server_args_for_mode(
@@ -213,19 +223,33 @@ def _generate(
             float(item[0] if isinstance(item, (list, tuple)) else item)
             for item in raw_logprobs
         ]
-        if fingerprint_logprobs and not result["output_ids"]:
-            raise RuntimeError("fingerprint token IDs are incomplete")
-        if fingerprint_logprobs and len(result["output_ids"]) != len(
-            result["output_logprobs"]
-        ):
-            raise RuntimeError("fingerprint logprobs are incomplete")
+        _validate_fingerprint(result, require_logprobs=fingerprint_logprobs)
     return result
+
+
+def _validate_fingerprint(
+    fingerprint: dict[str, Any], *, require_logprobs: bool
+) -> None:
+    token_ids = fingerprint["output_ids"]
+    logprobs = fingerprint["output_logprobs"]
+    if require_logprobs and not token_ids:
+        raise RuntimeError("fingerprint token IDs are incomplete")
+    if len(token_ids) != len(logprobs):
+        raise RuntimeError("fingerprint logprobs are incomplete")
+    if not all(math.isfinite(value) for value in logprobs):
+        raise RuntimeError("fingerprint logprobs must be finite")
 
 
 def _assert_repeat_consistency(
     fingerprints: list[dict[str, Any]],
+    *,
+    logprob_abs_tolerance: float = 0.0,
+    require_logprobs: bool = True,
 ) -> dict[str, Any]:
+    _validate_logprob_tolerance(logprob_abs_tolerance)
     first, second = fingerprints
+    for fingerprint in fingerprints:
+        _validate_fingerprint(fingerprint, require_logprobs=require_logprobs)
     if first["output_ids"] != second["output_ids"]:
         raise RuntimeError("repeated fingerprint token IDs differ")
     if first["text"] != second["text"]:
@@ -253,7 +277,13 @@ def _assert_repeat_consistency(
         result["exact_token_ids"] = True
         result["tokens"] = len(first["output_ids"])
     if max_logprob_difference is not None:
+        if max_logprob_difference > logprob_abs_tolerance:
+            raise RuntimeError(
+                f"repeated fingerprint logprob difference {max_logprob_difference:g} "
+                f"exceeds absolute tolerance {logprob_abs_tolerance:g}"
+            )
         result["repeat_max_logprob_abs_diff"] = max_logprob_difference
+        result["logprob_abs_tolerance"] = logprob_abs_tolerance
     return result
 
 
@@ -275,7 +305,11 @@ def _fingerprint_hashes(fingerprint: dict[str, Any]) -> dict[str, str]:
 def _assert_target_changed(
     baseline: dict[str, Any],
     target: dict[str, Any],
+    *,
+    require_logprobs: bool = True,
 ) -> dict[str, Any]:
+    for fingerprint in (baseline, target):
+        _validate_fingerprint(fingerprint, require_logprobs=require_logprobs)
     token_ids_changed = baseline["output_ids"] != target["output_ids"]
     text_changed = baseline["text"] != target["text"]
     if baseline["output_logprobs"] and len(baseline["output_logprobs"]) == len(
@@ -657,7 +691,9 @@ def run_delta_weight_update(
                         fingerprint=True,
                         fingerprint_logprobs=False,
                     ),
-                ]
+                ],
+                logprob_abs_tolerance=spec.logprob_abs_tolerance,
+                require_logprobs=False,
             )
         results["fingerprint_before"] = {
             "wall_s": baseline_fingerprint["wall_s"],
@@ -840,8 +876,16 @@ def run_delta_weight_update(
             for fingerprint in fingerprints
         ]
         results["correctness"] = {
-            **_assert_repeat_consistency(fingerprints),
-            **_assert_target_changed(baseline_fingerprint, fingerprints[0]),
+            **_assert_repeat_consistency(
+                fingerprints,
+                logprob_abs_tolerance=spec.logprob_abs_tolerance,
+                require_logprobs=fingerprint_logprobs,
+            ),
+            **_assert_target_changed(
+                baseline_fingerprint,
+                fingerprints[0],
+                require_logprobs=fingerprint_logprobs,
+            ),
         }
         results["status"] = "passed"
         _print_profile_summary(results)
