@@ -27,6 +27,7 @@ MILES_ROOT = "/root/miles"
 # Applied at container start, after any dev overlay; each moves to the fork when
 # the pin advances.
 MILES_RUNTIME_PATCHES = (
+    "/root/cookbook/miles_disagg/patches/miles-external-rollout-cleanup.patch",
     "/root/cookbook/miles_disagg/patches/miles-stable-weight-versions.patch",
     "/root/cookbook/miles_disagg/patches/miles-seed-baseline-scalars.patch",
     "/root/cookbook/miles_disagg/patches/miles-hf-checkpoint-dtypes.patch",

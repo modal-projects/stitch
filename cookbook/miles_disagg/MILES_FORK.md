@@ -57,6 +57,13 @@ The dated image supplies Megatron-LM, TransformerEngine, CUDA, and other
 compiled dependencies. Miles is installed over it with `--no-deps`, so the
 image and Miles revision must remain compatible.
 
+`trainer_image.MILES_RUNTIME_PATCHES` applies the remaining integration patches
+at container startup, after any development overlay. These preserve stable
+weight versions, initialize canonical baseline scalars and dtypes from the
+served checkpoint, and keep synchronous external-rollout cleanup from querying
+or aborting Miles-managed workers. External cleanup still drains agent-owned
+tasks and invokes their abort hook.
+
 ## Responsibilities
 
 Miles owns trainer-side state:
