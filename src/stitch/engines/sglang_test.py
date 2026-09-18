@@ -126,6 +126,45 @@ def test_stamp_response_generate_vs_openai() -> None:
     assert "meta_info" not in openai and "weight_version" not in openai
 
 
+@pytest.mark.parametrize(("start", "end"), [(0, 0), (4, 5)])
+def test_stamp_response_openai_choice_metadata(start: int, end: int) -> None:
+    engine = SGLangEngine("http://engine", "/base", "/ckpt")
+    response = {
+        "choices": [
+            {"meta_info": {"weight_version": "default", "completion_tokens": 2}},
+            {"meta_info": {"weight_version": "default"}},
+            {"message": {"content": "x"}},
+            {"meta_info": None},
+        ]
+    }
+
+    engine.stamp_response(response, VersionRef("r1", start), VersionRef("r1", end))
+
+    assert response == {
+        "weight_version_start": start,
+        "weight_version_end": end,
+        "choices": [
+            {
+                "meta_info": {
+                    "weight_version": str(start),
+                    "weight_version_start": start,
+                    "weight_version_end": end,
+                    "completion_tokens": 2,
+                }
+            },
+            {
+                "meta_info": {
+                    "weight_version": str(start),
+                    "weight_version_start": start,
+                    "weight_version_end": end,
+                }
+            },
+            {"message": {"content": "x"}},
+            {"meta_info": None},
+        ],
+    }
+
+
 def _commit_request(
     *,
     kind: VersionKind,

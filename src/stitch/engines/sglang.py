@@ -221,6 +221,12 @@ class SGLangEngine(Engine):
         else:  # OpenAI-style routes at the top level
             response["weight_version_start"] = served.version
             response["weight_version_end"] = current.version
+            for choice in response.get("choices", []):
+                meta = choice.get("meta_info")
+                if isinstance(meta, dict):
+                    meta["weight_version"] = str(served.version)
+                    meta["weight_version_start"] = served.version
+                    meta["weight_version_end"] = current.version
 
     def _extra_key(self, served: VersionRef, user: str | None) -> str:
         # Namespace the KV cache by version+run so radix prefixes aren't shared across versions.
