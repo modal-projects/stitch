@@ -5,8 +5,7 @@ Disk destination:
     uv run --extra modal modal run -d \
       tools/profiling/kimi_k3_mxfp4_delta_weight_update.py
 
-CPU destination with the canonical checkpoint on local storage (the recipe's
-declared update mode):
+CPU destination with the canonical checkpoint on local storage:
 
     uv run --extra modal modal run -d \
       tools/profiling/kimi_k3_mxfp4_delta_weight_update.py \
@@ -31,7 +30,6 @@ from cookbook.common.hf_download import (
     local_cached_snapshot,
 )
 from cookbook.common.serving_image import build_serving_image
-from cookbook.miles_disagg.configs import kimi_k3_mxfp4 as model
 from tools.profiling._delta_weight_update import (
     WeightUpdateSpec,
     modal_runtime_label,
@@ -50,6 +48,38 @@ from tools.profiling._synthetic_delta import (
     synthetic_delta_profile_id,
 )
 
+ROLLOUT_MODEL = "moonshotai/Kimi-K3"
+ROLLOUT_REVISION = "9f62e4e9fffbd0a83ddd60e1c209d828994b3569"
+ROLLOUT_GPUS = 8
+GPU = "B300"
+MEMORY_MIB = (1048576, 4194304)
+EPHEMERAL_DISK_MIB = 2097152
+SGLANG_SERVER_ARGS = {
+    "--tp": "8",
+    "--trust-remote-code": "",
+    "--load-format": "fastsafetensors",
+    "--model-loader-extra-config": '{"enable_gds":false}',
+    "--weight-loader-drop-cache-after-load": "",
+    "--enable-cpu-weight-cache": "",
+    "--cpu-weight-cache-max-compile-group-gb": "16",
+    "--cpu-weight-cache-canonical-checkpoint-dir": "/local-checkpoint/canonical",
+    "--dist-timeout": "3600",
+    "--context-length": "1048576",
+    "--max-running-requests": "32",
+    "--cuda-graph-max-bs-decode": "32",
+    "--mem-fraction-static": "0.85",
+    "--kv-cache-dtype": "fp8_e4m3",
+    "--mamba-ssm-dtype": "bfloat16",
+    "--mamba-radix-cache-strategy": "extra_buffer_lazy",
+    "--chunked-prefill-size": "16384",
+    "--schedule-policy": "lpm",
+    "--mm-feature-transport": "cuda_ipc",
+    "--mm-processor-worker-num": "2",
+    "--mm-io-worker-num": "16",
+    "--reasoning-parser": "kimi_k3",
+    "--tool-call-parser": "kimi_k3",
+}
+
 APP_NAME = "profile-kimi-k3-mxfp4-delta-weight-update"
 EXPERIMENT = "kimi_k3_mxfp4"
 HF_CACHE_PATH = "/root/.cache/huggingface"
@@ -61,9 +91,7 @@ DELTA_SPEC = SyntheticDeltaSpec(
     # Text-only RL leaves the vision encoder and projector fixed.
     immutable_prefixes=("vision_tower.", "mm_projector."),
 )
-DELTA_ID = (
-    f"kimi-k3/{model.ROLLOUT_SOURCE_REVISION}/{synthetic_delta_profile_id(DELTA_SPEC)}"
-)
+DELTA_ID = f"kimi-k3/{ROLLOUT_REVISION}/{synthetic_delta_profile_id(DELTA_SPEC)}"
 DELTA_SOURCE_DIR = f"{DELTA_MOUNT}/{DELTA_ID}"
 BASE_CHECKPOINT_DIR = "/local-checkpoint/kimi-k3-mxfp4/base"
 LOCAL_TARGET_CHECKPOINT_DIR = "/local-checkpoint/kimi-k3-mxfp4/target"
@@ -112,7 +140,7 @@ download_image = (
 serving_image = build_serving_image(
     hf_cache_path=HF_CACHE_PATH,
     experiment=EXPERIMENT,
-    extra_env=getattr(model, "SGLANG_SERVER_ENV", None),
+    extra_env=None,
 ).add_local_dir(
     str(Path(__file__).resolve().parents[1]),
     remote_path="/root/tools",
@@ -142,8 +170,8 @@ def _download_model_file(repo_file: CachedRepoFile) -> str:
 def download_model() -> str:
     return download_snapshot(
         _download_model_file,
-        model.ROLLOUT_SOURCE_MODEL,
-        model.ROLLOUT_SOURCE_REVISION,
+        ROLLOUT_MODEL,
+        ROLLOUT_REVISION,
         volume=hf_cache_volume,
     )
 
@@ -161,8 +189,8 @@ def download_model() -> str:
 def prepare_delta() -> dict:
     return prepare_standard_delta(
         local_cached_snapshot(
-            model.ROLLOUT_SOURCE_MODEL,
-            model.ROLLOUT_SOURCE_REVISION,
+            ROLLOUT_MODEL,
+            ROLLOUT_REVISION,
         ),
         DELTA_SOURCE_DIR,
         spec=DELTA_SPEC,
@@ -172,10 +200,10 @@ def prepare_delta() -> dict:
 
 @app.function(
     image=serving_image,
-    gpu=f"{model.modal.gpu}:{model.ROLLOUT_NUM_GPUS_PER_ENGINE}",
+    gpu=f"{GPU}:{ROLLOUT_GPUS}",
     cpu=64,
-    memory=(model.modal.rollout_memory_mib[0], 4 * 1024 * 1024),
-    ephemeral_disk=model.modal.rollout_ephemeral_disk_mib,
+    memory=MEMORY_MIB,
+    ephemeral_disk=EPHEMERAL_DISK_MIB,
     volumes={
         HF_CACHE_PATH: hf_cache_volume.read_only(),
         DELTA_MOUNT: delta_volume.read_only(),
@@ -191,12 +219,12 @@ def benchmark(
 ) -> dict:
     materialize_checkpoint_view(
         local_cached_snapshot(
-            model.ROLLOUT_SOURCE_MODEL,
-            model.ROLLOUT_SOURCE_REVISION,
+            ROLLOUT_MODEL,
+            ROLLOUT_REVISION,
         ),
         BASE_CHECKPOINT_DIR,
     )
-    server_args = dict(model.SGLANG_SERVER_ARGS)
+    server_args = dict(SGLANG_SERVER_ARGS)
     server_args["--cpu-weight-cache-max-compile-group-gb"] = CPU_CACHE_GROUP_GB
     return run_delta_weight_update(
         WeightUpdateSpec(
@@ -205,7 +233,7 @@ def benchmark(
             local_target_checkpoint_dir=LOCAL_TARGET_CHECKPOINT_DIR,
             local_canonical_checkpoint_dir=CANONICAL_CHECKPOINT_DIR,
             server_args=server_args,
-            tp_size=model.ROLLOUT_NUM_GPUS_PER_ENGINE,
+            tp_size=ROLLOUT_GPUS,
         ),
         source_dir=DELTA_SOURCE_DIR,
         target_version=1,
