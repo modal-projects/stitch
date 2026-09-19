@@ -1,24 +1,178 @@
-"""miles checkpoint preparation, ported to plain functions the app registers as Modal
-functions: build the bf16 masters + the served base (bf16 / fp8 / nvfp4) and the raw-mode
-torch_dist ref_load. All read their experiment constants off the selected config module.
-"""
+"""Prepare pinned BF16 masters, BF16 or NVFP4 served weights, and TorchDist references."""
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import subprocess
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Any
 
+from cookbook.miles_disagg import trainer_image
 from cookbook.miles_disagg.trainer_image import (
     MEGATRON_PATH,
     MILES_ROOT,
     TORCH_DIST_CONVERT_WRAPPER,
 )
+
+_COMPLETION_FILE = ".stitch-prep.json"
+
+
+def pinned_miles_revision(exp) -> str:
+    """Preparation receipts require an immutable converter, including on reuse."""
+    if os.environ.get("MILES_LOCAL_DIR"):
+        raise ValueError(
+            "checkpoint preparation does not support MILES_LOCAL_DIR; "
+            "pin the tested Miles changes with a full MILES_REPO_REF commit hash"
+        )
+    revision = getattr(exp, "MILES_REPO_REF", trainer_image.MILES_REPO_REF)
+    if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", revision):
+        raise ValueError(
+            "checkpoint preparation requires a full MILES_REPO_REF commit hash"
+        )
+    return revision
+
+
+def _preparation_identity(exp, output_format: str) -> dict[str, Any]:
+    miles_revision = pinned_miles_revision(exp)
+    revision = getattr(exp, "SOURCE_REVISION", None)
+    if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", revision):
+        raise ValueError("checkpoint preparation requires a pinned SOURCE_REVISION")
+    identity = {
+        "schema": 1,
+        "source_model": exp.SOURCE_MODEL,
+        "source_revision": revision,
+        "output_format": output_format,
+        "unpack_fused_experts": getattr(exp, "UNPACK_FUSED_EXPERTS", False),
+        "bf16_carveouts": {
+            name: getattr(exp.miles, name, None)
+            for name in (
+                "num_layers_at_start_in_bf16",
+                "num_layers_at_end_in_bf16",
+                "extra_high_precision_layers_hf",
+            )
+        },
+        "converter": {
+            "image": trainer_image.MILES_IMAGE_TAG,
+            "miles_revision": miles_revision,
+            "extra_packages": list(getattr(exp, "TRAINER_EXTRA_PIP_PACKAGES", ())),
+            "image_commands": list(getattr(exp, "TRAINER_IMAGE_RUN_COMMANDS", ())),
+            "environment": dict(getattr(exp, "PREP_ENV", {})),
+        },
+    }
+    if output_format == "torch_dist":
+        identity["topology"] = {
+            "model_type": exp.miles.megatron_model_type,
+            "nodes": exp.modal.torch_dist_prep_nodes,
+            "gpus_per_node": exp.modal.torch_dist_prep_gpus_per_node,
+            "arguments": shlex.split(exp.modal.torch_dist_convert_extra_args),
+            "modal_wrapper": getattr(exp, "USE_MODAL_TORCH_DIST_WRAPPER", False),
+        }
+    # Compare tuples and lists in the representation persisted by the receipt.
+    return json.loads(json.dumps(identity))
+
+
+def _artifact_file(directory: Path, filename: str) -> Path:
+    relative = Path(filename)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ValueError(f"checkpoint filename escapes {directory}: {filename!r}")
+    return directory / relative
+
+
+def _file_sizes(directory: Path, filenames) -> dict[str, int]:
+    sizes = {}
+    for name in sorted(filenames):
+        path = _artifact_file(directory, name)
+        if not path.is_file() or path.stat().st_size == 0:
+            raise RuntimeError(f"checkpoint file is missing or empty: {path}")
+        sizes[name] = path.stat().st_size
+    return sizes
+
+
+def _hf_checkpoint_files(directory: str | Path) -> dict[str, int]:
+    root = Path(directory)
+    config = json.loads((root / "config.json").read_text())
+    if not isinstance(config, dict):
+        raise ValueError(f"invalid checkpoint config: {root / 'config.json'}")
+    filenames = {"config.json"}
+    index_path = root / "model.safetensors.index.json"
+    if index_path.exists():
+        index = json.loads(index_path.read_text())
+        weight_map = index.get("weight_map") if isinstance(index, dict) else None
+        if not isinstance(weight_map, dict) or not weight_map:
+            raise ValueError(f"checkpoint index has no weight map: {index_path}")
+        shards = set(weight_map.values())
+        filenames.add(index_path.name)
+    else:
+        shards = {path.name for path in root.glob("*.safetensors")}
+    if not shards or any(not isinstance(name, str) or not name for name in shards):
+        raise ValueError(f"checkpoint has no safetensors shards: {root}")
+    return _file_sizes(root, filenames | shards)
+
+
+def _existing_artifact_error(directory: Path, detail: str) -> RuntimeError:
+    return RuntimeError(
+        f"cannot reuse checkpoint {directory}: {detail}; "
+        "choose a new checkpoint path or inspect and remove this artifact before retrying"
+    )
+
+
+def _require_completion(
+    directory: Path, identity: dict[str, Any], *, name: str = _COMPLETION_FILE
+) -> dict[str, int]:
+    try:
+        manifest = json.loads((directory / name).read_text())
+    except (OSError, ValueError) as exc:
+        raise _existing_artifact_error(directory, f"missing or invalid {name}") from exc
+    if not isinstance(manifest, dict) or manifest.get("identity") != identity:
+        raise _existing_artifact_error(directory, f"identity differs in {name}")
+    files = manifest.get("files")
+    if not isinstance(files, dict) or _file_sizes(directory, files) != files:
+        raise _existing_artifact_error(directory, f"file inventory differs in {name}")
+    return files
+
+
+def _write_completion(
+    directory: Path,
+    identity: dict[str, Any],
+    files: dict[str, int],
+    *,
+    name: str = _COMPLETION_FILE,
+) -> None:
+    (directory / name).write_text(
+        json.dumps({"identity": identity, "files": files}, sort_keys=True) + "\n"
+    )
+
+
+def _has_content(directory: Path) -> bool:
+    return directory.exists() and (
+        not directory.is_dir() or next(directory.iterdir(), None) is not None
+    )
+
+
+def _torch_dist_reusable(directory: Path, identity: dict[str, Any]) -> bool:
+    """Each node's receipt certifies that its checkpoint files were committed."""
+    if not _has_content(directory):
+        return False
+    for rank in range(identity["topology"]["nodes"]):
+        _require_completion(directory, identity, name=f".stitch-prep-node-{rank}.json")
+    tracker = (directory / "latest_checkpointed_iteration.txt").read_text().strip()
+    if tracker == "release":
+        checkpoint = directory / "release"
+    elif tracker.isdigit():
+        checkpoint = directory / f"iter_{int(tracker):07d}"
+    else:
+        raise _existing_artifact_error(directory, f"invalid tracker {tracker!r}")
+    shards = list(checkpoint.glob("*.distcp"))
+    if not shards:
+        raise _existing_artifact_error(directory, f"no distcp shards in {checkpoint}")
+    _file_sizes(checkpoint, {".metadata", "common.pt", *(p.name for p in shards)})
+    return True
 
 
 def apply_prep_environment(exp) -> None:
@@ -34,9 +188,7 @@ def apply_prep_environment(exp) -> None:
 
 def _bf16_masters(exp, source_snapshot: str) -> str:
     """Resolve the immutable BF16 source used by both checkpoint converters."""
-    if _is_int4(source_snapshot) or getattr(
-        exp, "MATERIALIZE_BF16_MASTERS", True
-    ):
+    if getattr(exp, "MATERIALIZE_BF16_MASTERS", True):
         return str(exp.BF16_CHECKPOINT_PATH)
     return source_snapshot
 
@@ -46,49 +198,36 @@ def prepare_checkpoints(
     checkpoint_volume,
     *,
     source_snapshot: str,
-    rollout_snapshot: str | None,
 ) -> None:
-    """Build the bf16 masters (trainer arch source) + the served base on a GPU.
-
-    masters (bf16): a quantized source (Kimi INT4) is dequantized; a bf16 source IS the
-    masters. served base: bf16 = masters; a published ROLLOUT_SOURCE_MODEL is copied
-    directly; otherwise NVFP4 is built with Miles' TE-direct quantizer over the masters.
-    """
+    """Prepare BF16 masters and the BF16 or NVFP4 serving checkpoint."""
     checkpoint_volume.reload()
     materialized_bf16_dir = str(exp.BF16_CHECKPOINT_PATH)
     served_dir = str(exp.miles.hf_checkpoint)
     served_format = getattr(exp, "SERVED_CHECKPOINT_FORMAT", "nvfp4")
-    if served_format not in {"bf16", "fp8", "nvfp4"}:
+    if served_format not in {"bf16", "nvfp4"}:
         raise SystemExit(f"unsupported SERVED_CHECKPOINT_FORMAT={served_format!r}")
     tools = f"{MILES_ROOT}/tools"
 
     src = source_snapshot
-    is_int4 = _is_int4(src)  # read the source's quant scheme, not its repo name
+    _hf_checkpoint_files(src)
+    if _quantization_config(src):
+        raise ValueError(
+            f"source checkpoint {src} is quantized; an explicit BF16 conversion is required"
+        )
 
     def _build_bf16(out: str) -> None:
-        if is_int4:
-            print("dequantizing INT4 source -> bf16 masters (GPU)...", flush=True)
-            subprocess.run(
-                [
-                    "python",
-                    f"{tools}/convert_kimi_int4_to_bf16.py",
-                    "--model-dir",
-                    src,
-                    "--output-dir",
-                    out,
-                ],
-                check=True,
-            )
-        else:
-            _copy_tree("bf16 masters", src, out)
-        _strip_stale_quant_config(os.path.join(out, "config.json"))
+        _copy_tree("bf16 masters", src, out)
         if getattr(exp, "UNPACK_FUSED_EXPERTS", False):
             from cookbook.miles_disagg.unpack_experts import unpack_fused_experts
 
             unpack_fused_experts(out)
 
-    if is_int4 or getattr(exp, "MATERIALIZE_BF16_MASTERS", True):
-        _staged(materialized_bf16_dir, _build_bf16)
+    if getattr(exp, "MATERIALIZE_BF16_MASTERS", True):
+        _staged(
+            materialized_bf16_dir,
+            _build_bf16,
+            identity=_preparation_identity(exp, "bf16"),
+        )
         bf16_dir = materialized_bf16_dir
     else:
         bf16_dir = src
@@ -103,19 +242,6 @@ def prepare_checkpoints(
         checkpoint_volume.commit()
         print(f"Prepared masters={bf16_dir} served_base={bf16_dir}")
         return
-
-    rollout_source = getattr(exp, "ROLLOUT_SOURCE_MODEL", None)
-    if rollout_source:
-        if rollout_snapshot != served_dir:
-            raise ValueError(
-                "rollout snapshot must be downloaded directly to the served path: "
-                f"{rollout_snapshot!r} != {served_dir!r}"
-            )
-        print(f"Prepared masters={bf16_dir} served_base={served_dir}")
-        return
-
-    if served_format == "fp8":
-        raise SystemExit("SERVED_CHECKPOINT_FORMAT='fp8' requires ROLLOUT_SOURCE_MODEL")
 
     # nvfp4: miles' TE-direct quantizer. bf16 carve-outs must match the trainer's
     # --num-layers-at-start/end-in-bf16 so the served base == the export layout.
@@ -146,7 +272,7 @@ def prepare_checkpoints(
             env={**os.environ, **getattr(exp, "PREP_ENV", {})},
         )
 
-    _staged(served_dir, _build_nvfp4)
+    _staged(served_dir, _build_nvfp4, identity=_preparation_identity(exp, "nvfp4"))
     checkpoint_volume.commit()
     print(f"Prepared masters={bf16_dir} served_base={served_dir}")
 
@@ -165,10 +291,14 @@ def prepare_torch_dist(
         raise SystemExit("this config does not use a torch_dist trainer checkpoint")
     checkpoint_volume.reload()
     bf16_dir = _bf16_masters(exp, source_snapshot)
+    _hf_checkpoint_files(bf16_dir)
+    if bf16_dir != source_snapshot:
+        _require_completion(Path(bf16_dir), _preparation_identity(exp, "bf16"))
+    if _quantization_config(bf16_dir):
+        raise ValueError(f"TorchDist conversion requires BF16 masters: {bf16_dir}")
     torch_dist_dir = str(torch_dist_path)
-    if os.path.exists(
-        os.path.join(torch_dist_dir, "latest_checkpointed_iteration.txt")
-    ):
+    identity = _preparation_identity(exp, "torch_dist")
+    if _torch_dist_reusable(Path(torch_dist_dir), identity):
         print(f"reusing existing torch_dist {torch_dist_dir}")
         return
     if not exp.miles.megatron_model_type:
@@ -216,23 +346,28 @@ def prepare_torch_dist(
     subprocess.run(command, check=True, env=env)
     # Every node commits its own distcp shards (disjoint files merge on the Volume);
     # a rank-0-only commit would drop the other nodes' shards.
+    directory = Path(torch_dist_dir)
+    files = _file_sizes(
+        directory,
+        (
+            str(path.relative_to(directory))
+            for path in directory.rglob("*")
+            if path.is_file() and not path.name.startswith(".stitch-prep-")
+        ),
+    )
     checkpoint_volume.commit()
-    if rank == 0:
-        print(f"Prepared torch_dist={torch_dist_dir}")
+    _write_completion(directory, identity, files, name=f".stitch-prep-node-{rank}.json")
+    checkpoint_volume.commit()
+    print(f"Prepared torch_dist={torch_dist_dir} node={rank}")
 
 
-# A single Volume->Volume stream is backend-fetch bound; ~8 parallel streams recover ~5x (the
-# sglang base-seed's profiled knee). 16 MiB reads run at full mount speed while bounding memory.
 _COPY_WORKERS = int(os.environ.get("PREP_COPY_WORKERS", "8"))
 _COPY_CHUNK = 16 << 20
-_COPY_LOG_STEP_GB = (
-    50  # one progress line per this many GB, so a multi-TB copy isn't a silent stall
-)
+_COPY_LOG_STEP_GB = 50
 
 
 def _copy_tree(label: str, src: str, dst: str) -> None:
-    """Copy a checkpoint dir, dereferencing the HF cache's blob symlinks into real files (the old
-    ``cp -aL``), but across a thread pool for the ~5x and with throttled GB/GB + rate progress."""
+    """Copy cached HF blobs into independent files with bounded parallel reads."""
     src_files = [
         p for p in Path(src).rglob("*") if p.is_file()
     ]  # is_file() follows symlinks
@@ -269,46 +404,33 @@ def _copy_tree(label: str, src: str, dst: str) -> None:
     print(f"copied {label}: {total_gb:.0f} GB", flush=True)
 
 
-def _staged(final_dir: str, build, *, resume: bool = False) -> None:
-    """Build into a .partial sibling and atomically rename, so an interrupted step never
-    leaves a half-built dir the reuse check mistakes for complete."""
-    if os.path.isdir(final_dir) and os.listdir(final_dir):
+def _staged(final_dir: str, build, *, identity: dict[str, Any]) -> None:
+    """Publish a validated HF artifact; existing bytes require matching provenance."""
+    final = Path(final_dir)
+    if _has_content(final):
+        recorded = _require_completion(final, identity)
+        if _hf_checkpoint_files(final) != recorded:
+            raise _existing_artifact_error(final, "HF shard inventory changed")
         print(f"reusing existing {final_dir}")
         return
-    partial = f"{final_dir}.partial"
-    if not resume:
-        subprocess.run(["rm", "-rf", partial], check=True)
-    os.makedirs(partial, exist_ok=True)
-    build(partial)
-    os.rename(partial, final_dir)
+    partial = Path(f"{final_dir}.partial")
+    if _has_content(partial):
+        raise _existing_artifact_error(partial, "unfinished preparation")
+    partial.mkdir(parents=True, exist_ok=True)
+    build(str(partial))
+    files = _hf_checkpoint_files(partial)
+    _write_completion(partial, identity, files)
+    os.rename(partial, final)
 
 
-def _strip_stale_quant_config(config_path: str) -> None:
-    """Drop any quantization_config (top-level and text_config-nested) from an HF config,
-    so the bf16 masters don't claim the source's quant scheme."""
-    if not os.path.exists(config_path):
-        return
-    with open(config_path) as f:
-        cfg = json.load(f)
-    removed = bool(cfg.pop("quantization_config", None))
-    if isinstance(cfg.get("text_config"), dict):
-        removed = bool(cfg["text_config"].pop("quantization_config", None)) or removed
-    if removed:
-        with open(config_path, "w") as f:
-            json.dump(cfg, f, indent=2)
-        print(f"stripped stale quantization_config from {config_path}")
-
-
-def _is_int4(model_dir: str) -> bool:
+def _quantization_config(model_dir: str) -> dict:
     cfg_path = os.path.join(model_dir, "config.json")
     if not os.path.exists(cfg_path):
-        return False
+        return {}
     with open(cfg_path) as f:
         cfg = json.load(f) or {}
-    # VLMs (Kimi K2.x) nest the quant config under text_config.
-    qc = (
+    return (
         (cfg.get("text_config") or {}).get("quantization_config")
         or cfg.get("quantization_config")
         or {}
     )
-    return qc.get("quant_method") == "compressed-tensors"

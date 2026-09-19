@@ -179,7 +179,6 @@ def prepare_base() -> None:
         model,
         checkpoint_volume,
         source_snapshot=source_snapshot,
-        rollout_snapshot=None,
     )
 
 

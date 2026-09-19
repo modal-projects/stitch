@@ -1,15 +1,4 @@
-"""Preparation stage for the miles cookbook — a separate Modal app from the rollout app.
-
-Prep builds the served base, the torch_dist ref_load, and the dataset: a one-shot stage that
-runs once before serving. It lives in its own app so invoking it never instantiates the
-``Server`` in ``app.py`` — and therefore never brings up the rollout autoscaler floor
-(``rollout_min_containers``), a serving concern with no place in preparation. Run prep first,
-then deploy the rollout app:
-
-    EXPERIMENT_CONFIG=<cfg> uv run --extra modal modal run -d -m cookbook.miles_disagg.prep_app::prepare_checkpoints
-    EXPERIMENT_CONFIG=<cfg> uv run --extra modal modal run -d -m cookbook.miles_disagg.prep_app::prepare_torch_dist
-    EXPERIMENT_CONFIG=<cfg> uv run --extra modal modal run -d -m cookbook.miles_disagg.prep_app::prepare_dataset
-"""
+"""Prepare pinned model and dataset artifacts without starting a rollout fleet."""
 
 from __future__ import annotations
 
@@ -29,11 +18,8 @@ from cookbook.common.constants import (
 from cookbook.common.hf_download import (
     DOWNLOAD_MAX_CONTAINERS,
     CachedRepoFile,
-    LocalRepoFile,
     download_cached_safetensors_file,
     download_cached_snapshot,
-    download_local_safetensors_file,
-    download_local_snapshot,
     local_cached_snapshot,
 )
 from cookbook.miles_disagg import prep, trainer_image
@@ -41,10 +27,6 @@ from cookbook.miles_disagg import prep, trainer_image
 EXPERIMENT = os.environ[
     "EXPERIMENT_CONFIG"
 ]  # required; a default would silently prep the wrong experiment
-MILES_LOCAL_DIR = os.environ.get(
-    "MILES_LOCAL_DIR"
-)  # optional dev overlay of a local miles checkout
-
 exp = importlib.import_module(f"cookbook.miles_disagg.configs.{EXPERIMENT}")
 modal_cfg = exp.modal
 miles_cfg = exp.miles
@@ -52,8 +34,7 @@ miles_cfg = exp.miles
 image = trainer_image.build_trainer_image(
     hf_cache_path=str(HF_CACHE_PATH),
     experiment=EXPERIMENT,
-    miles_repo_ref=getattr(exp, "MILES_REPO_REF", trainer_image.MILES_REPO_REF),
-    miles_local=MILES_LOCAL_DIR,
+    miles_repo_ref=prep.pinned_miles_revision(exp),
     extra_pip_packages=getattr(exp, "TRAINER_EXTRA_PIP_PACKAGES", ()),
     image_run_commands=getattr(exp, "TRAINER_IMAGE_RUN_COMMANDS", ()),
 )
@@ -91,21 +72,6 @@ def _download_source_file(repo_file: CachedRepoFile) -> str:
 
 @app.function(
     image=image,
-    cpu=4,
-    memory=4096,
-    max_containers=DOWNLOAD_MAX_CONTAINERS,
-    volumes={str(CHECKPOINTS_PATH): checkpoint_volume},
-    timeout=6 * 60 * MINUTES,
-    secrets=[modal.Secret.from_name("huggingface-secret")],
-    include_source=False,
-)
-def _download_rollout_file(repo_file: LocalRepoFile) -> str:
-    prep.apply_prep_environment(exp)
-    return download_local_safetensors_file(repo_file, commit=checkpoint_volume.commit)
-
-
-@app.function(
-    image=image,
     gpu=checkpoint_gpu,
     volumes={
         str(HF_CACHE_PATH): hf_cache_volume,
@@ -123,20 +89,10 @@ def prepare_checkpoints() -> None:
         getattr(exp, "SOURCE_REVISION", None),
         volume=hf_cache_volume,
     )
-    rollout_snapshot = None
-    if rollout_source := getattr(exp, "ROLLOUT_SOURCE_MODEL", None):
-        rollout_snapshot = download_local_snapshot(
-            _download_rollout_file,
-            rollout_source,
-            getattr(exp, "ROLLOUT_SOURCE_REVISION", None),
-            miles_cfg.hf_checkpoint,
-            volume=checkpoint_volume,
-        )
     prep.prepare_checkpoints(
         exp,
         checkpoint_volume,
         source_snapshot=source_snapshot,
-        rollout_snapshot=rollout_snapshot,
     )
 
 
