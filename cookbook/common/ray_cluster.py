@@ -128,6 +128,34 @@ def start_ray_worker(my_ip: str, master_addr: str, *, ray_port: int) -> None:
     )
 
 
+def reload_volumes_on_nodes(volume_ids: list[str], *, n_nodes: int) -> None:
+    """Refresh every training mount before launching actors that read checkpoints."""
+    import ray
+    from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+
+    nodes = {node["NodeID"] for node in ray.nodes() if node["Alive"]}
+    if len(nodes) != n_nodes:
+        raise RuntimeError(f"expected {n_nodes} live Ray nodes, found {len(nodes)}")
+
+    @ray.remote(num_cpus=0)
+    def reload(volume_ids):
+        import modal
+
+        for volume_id in volume_ids:
+            modal.Volume.from_id(volume_id).reload()
+        return ray.get_runtime_context().get_node_id()
+
+    pending = [
+        reload.options(
+            scheduling_strategy=NodeAffinitySchedulingStrategy(node_id, soft=False)
+        ).remote(volume_ids)
+        for node_id in sorted(nodes)
+    ]
+    refreshed = ray.get(pending, timeout=RAY_WORKER_JOIN_TIMEOUT)
+    if set(refreshed) != nodes:
+        raise RuntimeError("training volumes were not refreshed on every Ray node")
+
+
 def start_ray_node(
     rank: int,
     master_addr: str,

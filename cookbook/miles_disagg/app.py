@@ -1,21 +1,7 @@
-"""Disaggregated miles training on Modal, assembled on the stitch core.
+"""Miles training and SGLang rollout deployment, selected by EXPERIMENT_CONFIG.
 
-``EXPERIMENT_CONFIG`` selects a config module under ``cookbook.miles_disagg.configs``. The
-Server (sglang + stitch sidecar) is the shared common one; the Trainer runs miles on Ray
-and publishes XOR deltas through the configured checkpoint store.
-
-Prepare the checkpoints once first (a separate app, so prep never spins up the rollout Server
-floor — see ``cookbook.miles_disagg.prep_app``), then launch a run with one command — it mints a
-unique run id, stands up that run's pool, and starts training. A fresh launch is isolated even
-from an identical-config launch; resume retains the existing run id (see
-``cookbook.miles_disagg.launch``):
-
-    EXPERIMENT_CONFIG=glm45_air_fp8 uv run --extra modal python -m cookbook.miles_disagg.launch
-
-Config access is uniform: the experiment module ``exp`` is the single source of truth —
-its ``exp.modal`` (infra), ``exp.miles`` (training), and ``exp.<CONST>`` are read directly;
-shared deployment constants come from ``common.constants``. ``ROLLOUT_CONCURRENCY`` is the
-one resolved value (the experiment's Flash target, else the engine's concurrency).
+RUN_ID scopes the pool, checkpoints, and publications. The launcher assigns it
+before importing this module; prep_app prepares inputs separately.
 """
 
 from __future__ import annotations
@@ -48,7 +34,10 @@ from cookbook.common.constants import (
     STITCH_PATH,
 )
 from cookbook.miles_disagg import trainer_image
-from cookbook.miles_disagg.config import YAML_CONFIG_FIELDS, MilesConfig
+from cookbook.miles_disagg.config import (
+    YAML_CONFIG_FIELDS,
+    MilesConfig,
+)
 from cookbook.miles_disagg.resume import (
     newest_complete_export,
     prepare_attempt,
@@ -328,19 +317,6 @@ class Trainer:
             "Miles patch",
         )
         self.rank = rank
-        # Every rank's Megatron reads the tracker this rewrites, so the restore has to
-        # land before the first reload of the mount in train(); a clustered method call
-        # starts only after every container's enter returns. Resolved here, not from the
-        # payload, so it cannot disagree with the Server's boot-checkpoint search.
-        self.resume_point = (
-            prepare_attempt(
-                run_volume,
-                run_id=RUN_ID,
-                save_hf=getattr(miles_cfg, "save_hf", None),
-            )
-            if self.rank == 0 and STORE_DEPLOYMENT.backend == storage.MODAL_VOLUME
-            else None
-        )
         process.start_host_mem_monitor()  # per-node host-RAM trace
         ray_cluster.start_ray_node(
             rank,
@@ -366,10 +342,6 @@ class Trainer:
         first publish fails its claim's rewind guard instead of relabeling
         history.
         """
-        # Makes rank 0's enter-time resume restore visible to this rank.
-        for volume in train_volumes.values():
-            volume.reload()
-
         cfg = MilesConfig.from_payload(payload)
         launch.materialize_node_local_yaml(cfg, "te_precision_config_file")
         if self.rank != 0:
@@ -377,13 +349,28 @@ class Trainer:
             ray_cluster.hold_worker_node(self.master_addr, ray_port=RAY_PORT)
             return
 
-        resume_point = self.resume_point
+        # Warm containers may enter during an active attempt. Only an actual
+        # training call may rewind its tracker, before any actor reads the mount.
+        resume_point = (
+            prepare_attempt(
+                run_volume,
+                run_id=RUN_ID,
+                save_hf=getattr(miles_cfg, "save_hf", None),
+            )
+            if STORE_DEPLOYMENT.backend == storage.MODAL_VOLUME
+            else None
+        )
+        ray_cluster.reload_volumes_on_nodes(
+            [volume.object_id for volume in train_volumes.values()],
+            n_nodes=miles_cfg.n_train_nodes,
+        )
 
         cfg.rollout_endpoint_url = ModalFlashPool(APP_NAME, "Server").gateway_url()
         if resume_point is not None:
             cfg.load = resume_point.trainer_checkpoint
             cfg.hf_checkpoint = resume_point.rollout_checkpoint
             cfg.exit_on_missing_checkpoint = True
+            cfg.use_checkpoint_opt_param_scheduler = True
         # Miles requires this CLI argument; the deployment owns its run-scoped value.
         cfg.update_weight_disk_dir = str(UPDATES_DIR)
         if getattr(cfg, "save_interval", None) is None:
