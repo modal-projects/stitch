@@ -1,35 +1,42 @@
 # Rollout probes
 
 This directory contains a development harness for load-testing a rollout pool
-and observing weight-version convergence. It is not a deployment example.
+and observing its weight versions.
 
 - `traffic.py` sends long-decode, long-prefill, agentic, or mixed traffic and
   records version attribution.
-- `poller.py` records each replica's version, convergence lag, staging and
+- `poller.py` samples discovered replicas' versions, staging and
   engine pause timing, and not-ready windows.
 - `app.py` runs both probes on Modal and stores JSONL results.
 
 ## Run
 
-The probes and target pool must use the same Modal environment. Results are
-written under the run tag on the `stitch-probe-results` Volume.
+Prepare and launch the maintained `glm5_3_fp8` standalone recipe using the
+[cookbook](../../cookbook/README.md), then use its run ID below. The probes and
+target pool must use the same Modal environment. Results are written under the
+run tag on the `stitch-probe-results` Volume.
 
 ```bash
-uv run --extra modal modal environment create stitch-dev
+export MODAL_ENVIRONMENT=stitch-dev
+export RUN_ID=your-existing-run-id
+export STITCH_POOL_APP="stitch-standalone-glm5-3-fp8-${RUN_ID}"
 
-EXPERIMENT_CONFIG=glm45_air_fp8 \
-  uv run --extra modal modal deploy -m cookbook.miles_disagg.app -e stitch-dev
+uv run --extra modal modal profile current
+uv run --extra modal modal deploy -e "$MODAL_ENVIRONMENT" -m tools.probes.app
+```
 
-uv run --extra modal modal deploy -m tools.probes.app -e stitch-dev
+Run the polling and traffic commands in separate terminals with the variables
+above set in each:
 
-uv run --extra modal modal run -e stitch-dev \
+```bash
+uv run --extra modal modal run -e "$MODAL_ENVIRONMENT" \
   -m tools.probes.app::poll \
-  --pool-app stitch-glm45-air-fp8 --tag demo
+  --pool-app "$STITCH_POOL_APP" --tag "$RUN_ID"
 
-uv run --extra modal modal run -e stitch-dev \
+uv run --extra modal modal run -e "$MODAL_ENVIRONMENT" \
   -m tools.probes.app::traffic \
-  --pool-app stitch-glm45-air-fp8 \
-  --shape agentic --concurrency 32 --duration 1800 --tag demo
+  --pool-app "$STITCH_POOL_APP" --model zai-org/GLM-5.3 \
+  --shape agentic --concurrency 32 --duration 1800 --tag "$RUN_ID"
 ```
 
 ## Limits
@@ -39,7 +46,10 @@ uv run --extra modal modal run -e stitch-dev \
 - Traffic uses synthetic text and approximate token counts.
 - Version-floor polling samples an arbitrary replica through `/server_info`;
   use per-replica logs for exact attribution.
-- Recorded baselines are reviewed by humans and are not CI thresholds.
+- Poller summaries are diagnostic and must not be used for convergence
+  acceptance. They do not establish a complete participant set; the reported
+  convergence lag includes only replicas observed at that version. Empty or
+  incomplete observations can therefore omit lagging replicas.
 
 ## Sidecar config check (CPU-only)
 
@@ -50,18 +60,7 @@ consuming package's factory (this repo's recipes use ``--store-factory
 cookbook.common.storage:create_store``; see ``cookbook.common.process``).
 
 ```bash
-uv run --extra modal modal run -e stitch-dev -m tools.probes.sidecar_config
+uv run --extra modal modal run -e "$MODAL_ENVIRONMENT" -m tools.probes.sidecar_config
 ```
 
 Prints one machine-readable ``PROBE_RESULT ok=... detail=...`` line.
-
-## GLM-5.2 image preflight (CPU-only)
-
-This builds the exact pinned trainer and serving images, then validates model
-arguments and the DFlash contract without reserving GPUs:
-
-```bash
-modal run -e stitch-dev tools/probes/glm5_2_nvfp4_dflash_preflight.py
-```
-
-The command finishes with one machine-readable ``VERDICT ... PASS`` line.

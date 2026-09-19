@@ -31,10 +31,8 @@ The branch history keeps these physical responsibilities in separate commits;
 the immutable pin above is the executable definition of the stack.
 
 The image and immutable source pin stay together so the Python overlay remains
-ABI-compatible with the image's CUDA and C++ extensions. SGLang v0.5.17 includes
-Kimi K3, so all cookbook recipes now use this one runtime line. The fork's MXFP4
-staging path transforms runtime layouts on GPU before caching rank-ready host
-images.
+ABI-compatible with the image's CUDA and C++ extensions. All maintained recipes
+use this runtime.
 
 ## API
 
@@ -180,21 +178,12 @@ With a storage-backed canonical checkpoint, persistent host RAM is the rank
 images and native-loader state; local storage holds one canonical checkpoint.
 File-cache pages used during preparation are reclaimable.
 
-Measured component sizes are:
-
-| Model | TP | Canonical checkpoint per host | Rank image | Loader state per rank |
-| --- | ---: | ---: | ---: | ---: |
-| GLM-4.5-Air FP8 | 4 | 112.6 GB | 27.2 GB × 4 | 1.64 GB |
-| Kimi K2.6 NVFP4 | 4 | about 595 GB | about 151 GB × 4 | 4.09 GB |
-| GLM-5.2 mixed NVFP4/BF16 | 4 | 617.6 GB | 179.3 GB × 4 | 20.94 GB |
-| GLM-5.2 FP8 | 4 | 755.6 GB | 189.4 GB × 4 | 20.94 GB |
-| Kimi K3 MXFP4 | 8 | 1.561 TB | 207.5 GB × 8 | 0.14 GB maximum |
-
 Allow additional memory for the engine process, delta decoding, and bounded
-loader staging. The supplied GLM-4.5 recipe requests `(512 GiB, 2 TiB)`;
-GLM-5.2, Kimi K2.6, and Kimi K3 request `(1 TiB, 3 TiB)`, expressed as
-`(request, limit)`. GLM-5.2 FP8 reached 1.63 TB with both the canonical and rank
-images in RAM, and 1.19 TB with the canonical checkpoint on NVMe.
+loader staging. Each [maintained recipe](../README.md#supported-scenarios)
+declares its host-memory request and limit in `modal.rollout_memory_mib`.
+Checkpoint size alone is insufficient: TP placement and the model's native
+quantization transforms determine the rank images and loader state. Profile
+the chosen recipe and runtime before reducing that budget.
 
 All runtime storages are prepared and committed. Element-wise sparsity reduces
 the compressed delta transport and storage, but not the full-target checksum,
