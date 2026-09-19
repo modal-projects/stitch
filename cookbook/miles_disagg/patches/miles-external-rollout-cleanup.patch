@@ -1,18 +1,18 @@
+From: Nan <nan@modal.com>
+Subject: [PATCH] Skip worker discovery for an opaque rollout endpoint
+
+Backport the worker-discovery hunk from af40a6c310e3981fc627e63f5422bfdfb988729d
+(https://github.com/radixark/miles/pull/3236).
+
 diff --git a/miles/rollout/inference_rollout/inference_rollout_train.py b/miles/rollout/inference_rollout/inference_rollout_train.py
 --- a/miles/rollout/inference_rollout/inference_rollout_train.py
 +++ b/miles/rollout/inference_rollout/inference_rollout_train.py
-@@ -27,9 +27,11 @@ async def abort(state: GenerateState, pendings: set, rollout_id: int) -> list[list[S
-     assert not state.aborted
-     state.aborted = True
+@@ -54,6 +54,8 @@
  
--    urls = await get_worker_urls(args)
--    logger.info(f"Abort request for {urls}")
--    await asyncio.gather(*[post(f"{url}/abort_request", {"abort_all": True}) for url in urls])
-+    # The external fleet owns its workers; only abort agent-owned work below.
-+    if not getattr(args, "rollout_endpoint_url", None):
-+        urls = await get_worker_urls(args)
-+        logger.info(f"Abort request for {urls}")
-+        await asyncio.gather(*[post(f"{url}/abort_request", {"abort_all": True}) for url in urls])
  
-     # Let the agent integration tear down its in-flight trials so they stop hitting
-     # SGLang, instead of running on until their own max_seq_len / timeout.
+ async def get_worker_urls(args: Namespace):
++    if args.rollout_endpoint_url is not None:
++        return []
+     if parse(sglang_router.__version__) <= parse("0.2.1") or args.use_miles_router:
+         response = await get(f"http://{args.sglang_router_ip}:{args.sglang_router_port}/list_workers")
+         urls = response["urls"]
