@@ -1,20 +1,11 @@
-"""Launch a Miles/Stitch run whose trainer retries and resumes on its own.
+"""Launch or resume Miles training on a run-scoped deployed pool.
 
-A fresh launch mints a run id, deploys the run's pool, waits for its floor, and
-spawns the trainer. Recovery is Modal's job, not this script's: the trainer
-retries with identical input and re-derives its resume state from the run
-volume (``cookbook.miles_disagg.resume``), so nothing here supervises a running
-trainer and a live pool is never redeployed.
+A fresh launch assigns the run identity before importing the deployment module.
+Resume cancels the recorded trainer and starts its successor against the existing
+pool. Each trainer attempt derives recovery state from the run's durable files.
 
-``--resume-from RUN_ID`` reuses a run's identity for a takeover or a run past
-its retry budget: it cancels the recorded trainer call and spawns a successor
-on the deployed pool. If the pool is gone, deploy it first under the same id:
-
-    EXPERIMENT_CONFIG=<experiment> RUN_ID=<run> uv run --extra modal modal deploy -m cookbook.miles_disagg.app
-
-A plain script, not a ``modal run`` entrypoint: ``App.deploy()`` only persists
-outside a ``modal run`` session, and minting the id before importing the pool
-module lets its app name resolve from ``RUN_ID`` at import.
+This is a plain script because App.deploy() persists only outside a modal run
+session.
 """
 
 from __future__ import annotations

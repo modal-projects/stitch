@@ -1,16 +1,7 @@
-"""Launch an isolated standalone rollout pool.
+"""Launch a standalone pool and claim its initial policy version.
 
-A run's pool is a deployed Flash app an external trainer or harness reaches by name, so the
-run id has to be in the app name before the pool exists. This mints the id, deploys
-``app.py``'s pool under it, waits for the replica floor, and prints the endpoints the
-publisher and rollout clients need. A fresh launch is isolated even from an
-identical-config launch; pass ``--run-id`` to recreate an existing pool's deployment.
-
-    EXPERIMENT_CONFIG=glm5_2_fp8 uv run --extra modal python -m cookbook.standalone.launch
-
-A plain script, not a ``modal run`` entrypoint: ``App.deploy()`` only persists outside a
-``modal run`` session. Minting the id here, before importing the pool module, lets the
-pool's app name resolve from ``RUN_ID`` at import.
+The run identity must be set before importing the deployment module. This is a
+plain script because App.deploy() persists only outside a modal run session.
 """
 
 from __future__ import annotations
