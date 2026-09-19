@@ -76,6 +76,17 @@ def build_trainer_image(
             f" && python3 -m pip install --no-deps -e {MILES_ROOT}"
         )
         .add_local_file(
+            str(
+                Path(__file__).resolve().parent
+                / "patches/megatron-mixed-gradient-dtypes.patch"
+            ),
+            "/root/megatron-mixed-gradient-dtypes.patch",
+            copy=True,
+        )
+        .run_commands(
+            f"cd {MEGATRON_PATH} && git apply /root/megatron-mixed-gradient-dtypes.patch"
+        )
+        .add_local_file(
             str(_TORCH_DIST_WRAPPER_SRC), TORCH_DIST_CONVERT_WRAPPER, copy=True
         )
     )
