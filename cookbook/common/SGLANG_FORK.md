@@ -11,14 +11,14 @@ default runtime:
 
 ```python
 DEFAULT_SGLANG_RUNTIME = SGLangRuntime(
-    image="lmsysorg/sglang:v0.5.17",
+    image="lmsysorg/sglang:v0.5.20",
     repository="https://github.com/modal-projects/sglang.git",
-    branch="stitch-sglang-v0.5.17",
-    commit="d050d06437d96196fc68d5b4e5c246408790d537",
+    branch="stitch-sglang-v0.5.20",
+    commit="253c1860683cd5cbd8b8dafb46e360ee82fd1f7a",
 )
 ```
 
-The branch is upstream v0.5.17 plus four independently reviewable layers:
+The branch is upstream v0.5.20 plus four independently reviewable layers:
 
 | Layer | Responsibility |
 | --- | --- |
@@ -31,7 +31,7 @@ The branch history keeps these physical responsibilities in separate commits;
 the immutable pin above is the executable definition of the stack.
 
 The image and immutable source pin stay together so the Python overlay remains
-ABI-compatible with the image's CUDA and C++ extensions. SGLang v0.5.17 includes
+ABI-compatible with the image's CUDA and C++ extensions. SGLang v0.5.20 includes
 Kimi K3, so all cookbook recipes now use this one runtime line. The fork's MXFP4
 staging path transforms runtime layouts on GPU before caching rank-ready host
 images.
