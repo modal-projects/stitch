@@ -28,7 +28,7 @@ from cookbook.common.hf_download import (
 )
 from cookbook.common.serving_image import build_serving_image
 from cookbook.miles_disagg import prep, trainer_image
-from cookbook.miles_disagg.configs import glm5_2_nvfp4 as model
+from tools.profiling import _glm5_2_nvfp4 as model
 from tools.profiling._delta_weight_update import (
     WeightUpdateSpec,
     modal_runtime_label,
