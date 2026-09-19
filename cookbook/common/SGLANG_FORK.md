@@ -189,6 +189,7 @@ Measured component sizes are:
 | GLM-5.2 mixed NVFP4/BF16 | 4 | 617.6 GB | 179.3 GB × 4 | 20.94 GB |
 | GLM-5.2 FP8 | 4 | 755.6 GB | 189.4 GB × 4 | 20.94 GB |
 | Kimi K3 MXFP4 | 8 | 1.561 TB | 207.5 GB × 8 | 0.14 GB maximum |
+| GLM-5.3-Flash FP8 | 8 | 328.3 GB | 40.7 GB × 8 | 4.28 MB |
 
 Allow additional memory for the engine process, delta decoding, and bounded
 loader staging. The supplied GLM-4.5 recipe requests `(512 GiB, 2 TiB)`;

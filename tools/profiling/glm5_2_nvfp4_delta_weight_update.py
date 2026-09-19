@@ -89,6 +89,13 @@ DELTA_SOURCE_DIR = f"{DELTA_MOUNT}/{DELTA_ID}"
 LOCAL_TARGET_CHECKPOINT_DIR = "/local-checkpoint/glm5-2-nvfp4/target"
 LOCAL_CANONICAL_CHECKPOINT_DIR = "/local-checkpoint/glm5-2-nvfp4/canonical"
 SGLANG_CACHE_PATH = "/root/.cache/sglang"
+# The fixed external drafter is outside the target-weight update path. Profile
+# the target model directly, as the other weight-update profilers do.
+SGLANG_SERVER_ARGS = {
+    key: value
+    for key, value in model.SGLANG_SERVER_ARGS.items()
+    if key not in model.DFLASH_SERVER_ARGS
+}
 
 app = modal.App(APP_NAME)
 hf_cache_volume = modal.Volume.from_name(
@@ -228,7 +235,7 @@ def benchmark(
             base_checkpoint_dir=str(model.ROLLOUT_CHECKPOINT_PATH),
             local_target_checkpoint_dir=LOCAL_TARGET_CHECKPOINT_DIR,
             local_canonical_checkpoint_dir=LOCAL_CANONICAL_CHECKPOINT_DIR,
-            server_args=model.SGLANG_SERVER_ARGS,
+            server_args=SGLANG_SERVER_ARGS,
             tp_size=model.ROLLOUT_GPUS_PER_ENGINE,
         ),
         source_dir=DELTA_SOURCE_DIR,
