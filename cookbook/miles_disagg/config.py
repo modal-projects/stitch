@@ -8,7 +8,11 @@ Modal-infra half of an experiment is ``common.config.ModalConfig``.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
+
+from cookbook.common.config import validate_serving_config
+from cookbook.miles_disagg import nvfp4
 
 _MILES_SKIP = {"environment", "async_mode", "megatron_model_type"}
 # Fields miles reads as YAML files; inline dicts are materialized before launch.
@@ -97,3 +101,35 @@ class MilesConfig:
         cfg.async_mode = payload["async_mode"]
         cfg.megatron_model_type = payload["megatron_model_type"]
         return cfg
+
+
+def validate_recipe(recipe: Any) -> None:
+    """Check checkpoint and deployment agreements before constructing Modal images."""
+    cfg = recipe.miles
+    validate_serving_config(recipe, gpus_per_engine=cfg.rollout_num_gpus_per_engine)
+    served = Path(recipe.ROLLOUT_CHECKPOINT_PATH)
+    masters = Path(recipe.BF16_CHECKPOINT_PATH)
+    if Path(cfg.hf_checkpoint) != served:
+        raise ValueError("miles.hf_checkpoint must match ROLLOUT_CHECKPOINT_PATH")
+    served_format = getattr(recipe, "SERVED_CHECKPOINT_FORMAT", "nvfp4")
+    if served_format == "bf16":
+        if served != masters:
+            raise ValueError(
+                "BF16 serving requires ROLLOUT_CHECKPOINT_PATH == BF16_CHECKPOINT_PATH"
+            )
+    elif served_format == "nvfp4":
+        if served == masters:
+            raise ValueError(
+                "Quantized ROLLOUT_CHECKPOINT_PATH must differ from BF16_CHECKPOINT_PATH"
+            )
+    else:
+        raise ValueError(f"Unsupported SERVED_CHECKPOINT_FORMAT: {served_format!r}")
+    if getattr(cfg, "megatron_to_hf_mode", None) == "raw":
+        reference = getattr(recipe, "TORCH_DIST_CHECKPOINT_PATH", None)
+        ref_load = getattr(cfg, "ref_load", None)
+        if not reference or not ref_load or Path(ref_load) != Path(reference):
+            raise ValueError(
+                "Raw export requires miles.ref_load == TORCH_DIST_CHECKPOINT_PATH"
+            )
+    if served_format == "nvfp4":
+        nvfp4.validate_environments(recipe)

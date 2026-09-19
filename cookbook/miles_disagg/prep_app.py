@@ -23,11 +23,13 @@ from cookbook.common.hf_download import (
     local_cached_snapshot,
 )
 from cookbook.miles_disagg import prep, trainer_image
+from cookbook.miles_disagg.config import validate_recipe
 
 EXPERIMENT = os.environ[
     "EXPERIMENT_CONFIG"
 ]  # required; a default would silently prep the wrong experiment
 exp = importlib.import_module(f"cookbook.miles_disagg.configs.{EXPERIMENT}")
+validate_recipe(exp)
 modal_cfg = exp.modal
 miles_cfg = exp.miles
 

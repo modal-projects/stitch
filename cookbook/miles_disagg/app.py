@@ -37,6 +37,7 @@ from cookbook.miles_disagg import trainer_image
 from cookbook.miles_disagg.config import (
     YAML_CONFIG_FIELDS,
     MilesConfig,
+    validate_recipe,
 )
 from cookbook.miles_disagg.resume import (
     newest_complete_export,
@@ -56,6 +57,7 @@ MILES_LOCAL_DIR = os.environ.get(
 )  # optional dev overlay of a local miles checkout
 
 exp = importlib.import_module(f"cookbook.miles_disagg.configs.{EXPERIMENT}")
+validate_recipe(exp)
 modal_cfg = exp.modal
 miles_cfg = exp.miles
 
