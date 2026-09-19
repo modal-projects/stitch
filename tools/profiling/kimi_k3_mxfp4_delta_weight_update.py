@@ -114,7 +114,7 @@ serving_image = build_serving_image(
     experiment=EXPERIMENT,
     extra_env=getattr(model, "SGLANG_SERVER_ENV", None),
 ).add_local_dir(
-    str(Path(__file__).resolve().parents[1]),
+    str(_REPO_ROOT / "tools"),
     remote_path="/root/tools",
     ignore=["**/__pycache__", "**/*.pyc"],
 )

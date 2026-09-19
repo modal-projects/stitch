@@ -11,14 +11,14 @@ default runtime:
 
 ```python
 DEFAULT_SGLANG_RUNTIME = SGLangRuntime(
-    image="lmsysorg/sglang:v0.5.17",
+    image="lmsysorg/sglang:v0.5.20",
     repository="https://github.com/modal-projects/sglang.git",
-    branch="stitch-sglang-v0.5.17",
-    commit="d050d06437d96196fc68d5b4e5c246408790d537",
+    branch="stitch-sglang-v0.5.20",
+    commit="253c1860683cd5cbd8b8dafb46e360ee82fd1f7a",
 )
 ```
 
-The branch is upstream v0.5.17 plus four independently reviewable layers:
+The branch is upstream v0.5.20 plus four independently reviewable layers:
 
 | Layer | Responsibility |
 | --- | --- |
@@ -31,7 +31,7 @@ The branch history keeps these physical responsibilities in separate commits;
 the immutable pin above is the executable definition of the stack.
 
 The image and immutable source pin stay together so the Python overlay remains
-ABI-compatible with the image's CUDA and C++ extensions. SGLang v0.5.17 includes
+ABI-compatible with the image's CUDA and C++ extensions. SGLang v0.5.20 includes
 Kimi K3, so all cookbook recipes now use this one runtime line. The fork's MXFP4
 staging path transforms runtime layouts on GPU before caching rank-ready host
 images.
@@ -189,6 +189,7 @@ Measured component sizes are:
 | GLM-5.2 mixed NVFP4/BF16 | 4 | 617.6 GB | 179.3 GB × 4 | 20.94 GB |
 | GLM-5.2 FP8 | 4 | 755.6 GB | 189.4 GB × 4 | 20.94 GB |
 | Kimi K3 MXFP4 | 8 | 1.561 TB | 207.5 GB × 8 | 0.14 GB maximum |
+| GLM-5.3-Flash FP8 | 8 | 328.3 GB | 40.7 GB × 8 | 4.28 MB |
 
 Allow additional memory for the engine process, delta decoding, and bounded
 loader staging. The supplied GLM-4.5 recipe requests `(512 GiB, 2 TiB)`;

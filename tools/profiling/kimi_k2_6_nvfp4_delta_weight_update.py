@@ -59,6 +59,7 @@ BASE_CHECKPOINT_DIR = f"{LOCAL_CHECKPOINT_ROOT}/base"
 LOCAL_TARGET_CHECKPOINT_DIR = f"{LOCAL_CHECKPOINT_ROOT}/target"
 LOCAL_CANONICAL_CHECKPOINT_DIR = f"{LOCAL_CHECKPOINT_ROOT}/canonical"
 SGLANG_CACHE_PATH = "/root/.cache/sglang"
+_REPO_ROOT = Path(__file__).resolve().parents[2] if modal.is_local() else Path("/root")
 
 SGLANG_SERVER_ARGS = {
     "--served-model-name": ROLLOUT_MODEL,
@@ -104,12 +105,12 @@ download_image = (
         }
     )
     .add_local_dir(
-        str(Path(__file__).resolve().parents[1]),
+        str(_REPO_ROOT / "tools"),
         remote_path="/root/tools",
         ignore=["**/__pycache__", "**/*.pyc"],
     )
     .add_local_dir(
-        str(Path(__file__).resolve().parents[2] / "cookbook"),
+        str(_REPO_ROOT / "cookbook"),
         remote_path="/root/cookbook",
         ignore=["**/__pycache__", "**/*.pyc"],
     )
@@ -118,7 +119,7 @@ serving_image = build_serving_image(
     hf_cache_path=str(HF_CACHE_PATH),
     experiment=EXPERIMENT,
 ).add_local_dir(
-    str(Path(__file__).resolve().parents[1]),
+    str(_REPO_ROOT / "tools"),
     remote_path="/root/tools",
     ignore=["**/__pycache__", "**/*.pyc"],
 )

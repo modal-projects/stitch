@@ -12,11 +12,6 @@ LOCAL_CHECKPOINT_PATH = None
 SIDECAR_COMMIT_MODE = "in_place"
 SIDECAR_FLUSH_CACHE_ON_COMMIT = False
 SGLANG_DELTA_UPDATE_MODE = "cpu"
-SGLANG_SERVER_ENV = {
-    # SGLang v0.5.16's FA3 backend lacks EAGLE's post-draft overlap-plan hook.
-    # Prepare verification metadata on the main stream while keeping EAGLE enabled.
-    "SGLANG_ENABLE_OVERLAP_PLAN_STREAM": "0",
-}
 
 SOURCE_MODEL = "zai-org/GLM-4.5-Air"
 SOURCE_REVISION = "a24ceef6ce4f3536971efe9b778bdaa1bab18daa"
