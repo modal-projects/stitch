@@ -48,6 +48,12 @@ def test_sidecar_config_requires_nonnegative_boot_version() -> None:
         SidecarConfig(**_BASE, delta_update_mode="cpu", boot_version=-1)
 
 
+@pytest.mark.parametrize("timeout", [0, -1, float("inf"), float("nan")])
+def test_sidecar_config_requires_bounded_health_timeout(timeout: float) -> None:
+    with pytest.raises(ValueError, match="engine_health_timeout"):
+        SidecarConfig(**_BASE, delta_update_mode="cpu", engine_health_timeout=timeout)
+
+
 def test_sidecar_config_requires_local_checkpoint_dir_in_disk_mode() -> None:
     with pytest.raises(
         ValueError, match="local_checkpoint_dir is required in disk mode"
@@ -89,6 +95,7 @@ _FULL = SidecarConfig(
     reconcile_interval=2.5,
     watchdog_interval=1.0,
     watchdog_failure_threshold=7,
+    engine_health_timeout=30.0,
 )
 
 
@@ -172,6 +179,7 @@ def test_run_builds_engine_and_serves(monkeypatch: pytest.MonkeyPatch) -> None:
         reconcile_interval=0.0,
         watchdog_interval=1.0,
         watchdog_failure_threshold=7,
+        engine_health_timeout=30.0,
     )
     sidecar.run(config, store_out)
 
@@ -179,7 +187,11 @@ def test_run_builds_engine_and_serves(monkeypatch: pytest.MonkeyPatch) -> None:
         "http://127.0.0.1:8001",
         "/model",
         "/cache/weights",
-        {"delta_update_mode": "disk", "disk_load_format": "auto"},
+        {
+            "delta_update_mode": "disk",
+            "disk_load_format": "auto",
+            "health_timeout": 30.0,
+        },
     )
     store, engine, serve_kwargs = calls["serve"]
     assert store is store_out

@@ -85,6 +85,7 @@ def test_start_sidecar_passes_s3_store_settings(monkeypatch) -> None:
         run_id="run-a",
         boot_version=0,
         commit_mode="in_place",
+        engine_health_timeout=30.0,
     )
 
     command = commands[0]
@@ -96,6 +97,7 @@ def test_start_sidecar_passes_s3_store_settings(monkeypatch) -> None:
     # it back and drive core's factory seam exactly as ``stitch.sidecar.main``
     # does. The empty volume_name never reaches the flags.
     config = SidecarConfig.from_argv(command[3:])
+    assert config.engine_health_timeout == 30.0
     assert config.store_options == {
         "backend": storage.S3,
         "s3_root": "s3://bucket/experiment/run-a",

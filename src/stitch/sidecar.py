@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import logging
+import math
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -64,12 +65,18 @@ class SidecarConfig:
     reconcile_interval: float = 5.0
     watchdog_interval: float = 5.0
     watchdog_failure_threshold: int = 3
+    engine_health_timeout: float = 5.0
 
     def __post_init__(self) -> None:
         if not self.run_id:
             raise ValueError("run_id is required")
         if self.boot_version < 0:
             raise ValueError("boot_version must be non-negative")
+        if (
+            not math.isfinite(self.engine_health_timeout)
+            or self.engine_health_timeout <= 0
+        ):
+            raise ValueError("engine_health_timeout must be finite and positive")
         if self.delta_update_mode == "disk" and not self.local_checkpoint_dir:
             raise ValueError("local_checkpoint_dir is required in disk mode")
         if ":" not in self.store_factory:
@@ -116,6 +123,8 @@ class SidecarConfig:
             str(self.watchdog_interval),
             "--watchdog-failure-threshold",
             str(self.watchdog_failure_threshold),
+            "--engine-health-timeout",
+            str(self.engine_health_timeout),
         ]
         for key, value in self.store_options.items():
             argv += ["--store-opt", f"{key}={value}"]
@@ -161,6 +170,7 @@ class SidecarConfig:
             reconcile_interval=args.reconcile_interval,
             watchdog_interval=args.watchdog_interval,
             watchdog_failure_threshold=args.watchdog_failure_threshold,
+            engine_health_timeout=args.engine_health_timeout,
         )
 
 
@@ -190,6 +200,7 @@ def _sidecar_parser() -> argparse.ArgumentParser:
     )  # 0 disables the periodic re-check
     p.add_argument("--watchdog-interval", type=float, default=5.0)
     p.add_argument("--watchdog-failure-threshold", type=int, default=3)
+    p.add_argument("--engine-health-timeout", type=float, default=5.0)
     p.add_argument("--local-checkpoint-dir")
     p.add_argument("--flush-cache-on-commit", action="store_true")
     p.add_argument("--debug-requests", action="store_true")
@@ -222,6 +233,7 @@ def run(config: SidecarConfig, store: Store) -> None:
         config.local_checkpoint_dir,
         delta_update_mode=config.delta_update_mode,
         disk_load_format=config.disk_load_format,
+        health_timeout=config.engine_health_timeout,
     )
     serve(
         store,
