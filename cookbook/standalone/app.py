@@ -82,7 +82,6 @@ draft_volume = (
     modal.Volume.from_name(
         modal_cfg.draft_volume,
         environment_name=modal_cfg.draft_volume_env,
-        version=2,
     )
     if modal_cfg.draft_volume
     else None
