@@ -19,7 +19,7 @@ from pathlib import Path
 
 import modal
 
-from cookbook.common.constants import CHECKPOINTS_PATH, HF_CACHE_PATH
+from cookbook.common.constants import CHECKPOINTS_PATH, DRAFT_PATH, HF_CACHE_PATH
 from cookbook.common.hf_download import (
     DOWNLOAD_MAX_CONTAINERS,
     CachedRepoFile,
@@ -91,6 +91,7 @@ LOCAL_CANONICAL_CHECKPOINT_DIR = "/local-checkpoint/glm5-2-nvfp4/canonical"
 SGLANG_CACHE_PATH = "/root/.cache/sglang"
 
 app = modal.App(APP_NAME)
+draft_volume = modal.Volume.from_name("dflash-checkpoints")
 hf_cache_volume = modal.Volume.from_name(
     "huggingface-cache", create_if_missing=True, version=2
 )
@@ -212,6 +213,7 @@ def prepare_delta() -> dict:
         str(CHECKPOINTS_PATH): checkpoint_volume.read_only(),
         DELTA_MOUNT: delta_volume.read_only(),
         SGLANG_CACHE_PATH: sglang_cache_volume,
+        str(DRAFT_PATH): draft_volume.read_only(),
     },
     timeout=6 * 60 * 60,
 )

@@ -27,7 +27,9 @@ uv run --extra modal modal run -e <env> -d \
 
 Entrypoints document checkpoint preparation and expose their options through
 `--help`. GLM-5.3 profilers use the prepared cookbook checkpoints; the other
-entrypoints own their preparation or download settings. Profiler-only settings
+entrypoints own their preparation or download settings. GLM-5.2 NVFP4 expects
+its DFlash artifact on the existing `dflash-checkpoints` Volume in the selected
+Modal environment, mounted read-only at `/draft`. Profiler-only settings
 belong with these scripts rather than in the training recipe catalog.
 
 The shared runner checks one replica through initialization, target staging,
