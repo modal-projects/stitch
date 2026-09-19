@@ -1,16 +1,4 @@
-"""Standalone rollout serving on the stitch core — the pool without a trainer.
-
-``EXPERIMENT_CONFIG`` selects a config module under ``cookbook.standalone``. The Server
-(sglang + stitch sidecar) receives rollout traffic through Modal's KV-aware routing.
-Weight publications arrive from an external trainer or harness through the configured
-checkpoint store.
-
-Prepare the served base once first (a separate app, so prep never spins up the rollout
-Server floor — see ``cookbook.standalone.prep_app``), then launch a pool with one command —
-it mints a unique run id and stands up that run's pool (see ``cookbook.standalone.launch``):
-
-    EXPERIMENT_CONFIG=glm5_2_fp8 uv run --extra modal python -m cookbook.standalone.launch
-"""
+"""Deploy a versioned SGLang rollout pool for an external trainer."""
 
 from __future__ import annotations
 
@@ -21,6 +9,7 @@ import modal
 
 from cookbook.common import server as common_server
 from cookbook.common import serving_image, storage
+from cookbook.common.config import validate_serving_config
 from cookbook.common.constants import (
     CHECKPOINTS_PATH,
     DRAFT_PATH,
@@ -37,6 +26,7 @@ EXPERIMENT = os.environ[
     "EXPERIMENT_CONFIG"
 ]  # required; a default would silently serve the wrong experiment
 exp = importlib.import_module(f"cookbook.standalone.configs.{EXPERIMENT}")
+validate_serving_config(exp, gpus_per_engine=exp.ROLLOUT_GPUS_PER_ENGINE)
 modal_cfg = exp.modal
 
 # Minted once for a run. The same identity scopes the pool, Stitch pointer, and

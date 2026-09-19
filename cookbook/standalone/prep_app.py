@@ -1,12 +1,4 @@
-"""Preparation stage for a standalone pool — a separate Modal app from the rollout app.
-
-Prep materializes the served base checkpoint: a one-shot stage that runs once before
-serving. It lives in its own app so invoking it never instantiates the ``Server`` in
-``app.py`` — and therefore never brings up the rollout autoscaler floor. A quantized
-release checkpoint is served as published, so download is the whole preparation:
-
-    EXPERIMENT_CONFIG=glm5_2_fp8 uv run --extra modal modal run -d -m cookbook.standalone.prep_app::download_base
-"""
+"""Download the pinned serving checkpoint without starting a rollout fleet."""
 
 from __future__ import annotations
 
@@ -16,6 +8,7 @@ from pathlib import Path
 
 import modal
 
+from cookbook.common.config import validate_serving_config
 from cookbook.common.constants import CHECKPOINTS_PATH, MINUTES
 from cookbook.common.hf_download import (
     DOWNLOAD_MAX_CONTAINERS,
@@ -28,6 +21,7 @@ EXPERIMENT = os.environ[
     "EXPERIMENT_CONFIG"
 ]  # required; a default would silently prep the wrong experiment
 exp = importlib.import_module(f"cookbook.standalone.configs.{EXPERIMENT}")
+validate_serving_config(exp, gpus_per_engine=exp.ROLLOUT_GPUS_PER_ENGINE)
 
 app = modal.App(f"{exp.APP_NAME}-prep")
 checkpoint_volume = modal.Volume.from_name(
