@@ -22,7 +22,6 @@ from cookbook.common.hf_download import (
     download_local_snapshot,
 )
 from cookbook.common.serving_image import build_serving_image
-from cookbook.miles_disagg.configs import glm45_air_fp8 as model
 from tools.profiling._delta_weight_update import (
     WeightUpdateSpec,
     modal_runtime_label,
@@ -37,6 +36,10 @@ from tools.profiling._synthetic_delta import (
     synthetic_delta_profile_id,
 )
 
+ROLLOUT_SOURCE_MODEL = "zai-org/GLM-4.5-Air-FP8"
+ROLLOUT_SOURCE_REVISION = "f9a9c5acf5e543cd24d659a056c5dbcda78ffcfc"
+ROLLOUT_CHECKPOINT_PATH = Path("/checkpoints/glm45-air-fp8")
+
 APP_NAME = "profile-glm45-air-fp8-delta-weight-update"
 EXPERIMENT = "glm45_air_fp8"
 DELTA_MOUNT = "/synthetic-delta"
@@ -48,17 +51,16 @@ DELTA_SPEC = SyntheticDeltaSpec(
     immutable_prefixes=("model.layers.46.",),
 )
 DELTA_ID = (
-    f"glm45-air/{model.ROLLOUT_SOURCE_REVISION}/"
-    f"{synthetic_delta_profile_id(DELTA_SPEC)}"
+    f"glm45-air/{ROLLOUT_SOURCE_REVISION}/{synthetic_delta_profile_id(DELTA_SPEC)}"
 )
 DELTA_SOURCE_DIR = f"{DELTA_MOUNT}/{DELTA_ID}"
-BASE_CHECKPOINT_DIR = str(model.ROLLOUT_CHECKPOINT_PATH)
+BASE_CHECKPOINT_DIR = str(ROLLOUT_CHECKPOINT_PATH)
 LOCAL_TARGET_CHECKPOINT_DIR = "/local-checkpoint/glm45-air-fp8/target"
 LOCAL_CANONICAL_CHECKPOINT_DIR = "/local-checkpoint/glm45-air-fp8/canonical"
 SGLANG_CACHE_PATH = "/root/.cache/sglang"
 
 SGLANG_SERVER_ARGS = {
-    "--served-model-name": model.ROLLOUT_SOURCE_MODEL,
+    "--served-model-name": ROLLOUT_SOURCE_MODEL,
     "--load-format": "fastsafetensors",
     "--model-loader-extra-config": '{"enable_gds":false}',
     "--weight-loader-drop-cache-after-load": "",
@@ -120,8 +122,8 @@ def prepare_base() -> str:
     """Materialize the pinned public FP8 checkpoint as one immutable artifact."""
     return download_local_snapshot(
         _download_base_file,
-        model.ROLLOUT_SOURCE_MODEL,
-        model.ROLLOUT_SOURCE_REVISION,
+        ROLLOUT_SOURCE_MODEL,
+        ROLLOUT_SOURCE_REVISION,
         BASE_CHECKPOINT_DIR,
         volume=checkpoint_volume,
     )
