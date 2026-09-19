@@ -6,12 +6,15 @@ sizing, and preparation topology live here.
 
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass
 from typing import Any, Literal
 
 # ``"X+"`` is Modal's tier floor: that class or better (e.g. "B200+" = B200 or B300).
 GPUType = Literal["H100", "H200", "B200", "B200+", "B300", "A100"]
 
 
+@dataclass(kw_only=True)
 class ModalConfig:
     """Modal infrastructure: GPU model, region, rollout-pool sizing, prep topology."""
 
@@ -39,10 +42,6 @@ class ModalConfig:
     torch_dist_prep_ephemeral_disk_mib: int | None = None
     trainer_ephemeral_disk_mib: int | None = None
 
-    def __init__(self, **kwargs: Any) -> None:
-        for k, v in kwargs.items():
-            setattr(self, k, v)
-
     def rollout_gpus(self, per_engine: int) -> str | list[str]:
         """GPU request for one rollout engine: ``rollout_gpu`` falling back to ``gpu``,
         with the per-engine count attached (a list when multiple types are acceptable)."""
@@ -50,3 +49,30 @@ class ModalConfig:
         if isinstance(spec, str):
             return f"{spec}:{per_engine}"
         return [f"{gpu_type}:{per_engine}" for gpu_type in spec]
+
+
+def validate_serving_config(recipe: Any, *, gpus_per_engine: int) -> None:
+    """Check the recipe contracts shared by preparation and rollout deployment."""
+    model = getattr(recipe, "SOURCE_MODEL", None)
+    if not isinstance(model, str) or not model.strip():
+        raise ValueError("SOURCE_MODEL must name a checkpoint repository")
+    revision = getattr(recipe, "SOURCE_REVISION", None)
+    if (
+        not isinstance(revision, str)
+        or re.fullmatch(r"[0-9a-fA-F]{40}", revision) is None
+    ):
+        raise ValueError("SOURCE_REVISION must pin a full checkpoint commit hash")
+
+    args = recipe.SGLANG_SERVER_ARGS
+    if gpus_per_engine <= 0 or int(args.get("--tp", 1)) != gpus_per_engine:
+        raise ValueError(
+            "SGLANG_SERVER_ARGS --tp must match the GPU count per rollout engine"
+        )
+    mode = getattr(recipe, "SGLANG_DELTA_UPDATE_MODE", "disk")
+    if mode not in {"cpu", "disk"}:
+        raise ValueError(f"Unsupported SGLANG_DELTA_UPDATE_MODE: {mode!r}")
+    if ("--enable-cpu-weight-cache" in args) != (mode == "cpu"):
+        raise ValueError(
+            "SGLANG_DELTA_UPDATE_MODE='cpu' requires --enable-cpu-weight-cache; "
+            "disk mode requires it to be absent"
+        )
