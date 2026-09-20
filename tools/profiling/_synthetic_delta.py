@@ -13,6 +13,7 @@ from collections import defaultdict
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any, Literal
 
@@ -20,7 +21,7 @@ CheckpointFormat = Literal["nvfp4", "mxfp4", "fp8"]
 
 _STREAM_BYTES = 8 * 1024 * 1024
 _PATTERN_COUNT = 2
-_GENERATOR_VERSION = "rollout-value-density-v5"
+_GENERATOR_VERSION = "rollout-value-density-v6"
 _DEFAULT_QUANTIZED_VALUE_DENSITY = {
     "nvfp4": 0.003,
     "mxfp4": 0.003,
@@ -403,52 +404,62 @@ def _make_delta(
     return delta
 
 
-def _encode_tensor_delta(
+def _encode_tensor_lineage(
     handle: Any,
     *,
     name: str,
     offset: int,
     byte_count: int,
     encoding: _Encoding,
-    patterns: _PatternBank,
-    compressor_context: Any,
-) -> _EncodedDelta | None:
+    pattern_banks: list[_PatternBank],
+) -> list[_EncodedDelta | None]:
     import numpy as np
     import xxhash
+    import zstandard
 
-    checksum = xxhash.xxh3_128()
-    compressor = compressor_context.compressobj()
-    compressed = bytearray()
-    changed_values = 0
-    changed_bytes = 0
+    checksums = [xxhash.xxh3_128() for _ in pattern_banks]
+    compressors = [
+        zstandard.ZstdCompressor(level=1).compressobj() for _ in pattern_banks
+    ]
+    compressed = [bytearray() for _ in pattern_banks]
+    changed_values = [0 for _ in pattern_banks]
+    changed_bytes = [0 for _ in pattern_banks]
     handle.seek(offset)
     position = 0
     while position < byte_count:
         chunk = handle.read(min(_STREAM_BYTES, byte_count - position))
         if not chunk:
             raise RuntimeError(f"{name!r} ended before its declared size")
-        base = np.frombuffer(chunk, dtype=np.uint8)
-        mask = patterns.mask(
-            name=name,
-            encoding=encoding,
-            byte_offset=position,
-            byte_count=len(chunk),
-        )
-        delta = _make_delta(base, mask, encoding, tensor_name=name)
-        checksum.update(np.bitwise_xor(base, delta))
-        changed_values += _changed_values(delta, encoding)
-        changed_bytes += int(np.count_nonzero(delta))
-        compressed.extend(compressor.compress(delta))
+        target = np.frombuffer(chunk, dtype=np.uint8).copy()
+        for index, patterns in enumerate(pattern_banks):
+            mask = patterns.mask(
+                name=name,
+                encoding=encoding,
+                byte_offset=position,
+                byte_count=len(chunk),
+            )
+            delta = _make_delta(target, mask, encoding, tensor_name=name)
+            np.bitwise_xor(target, delta, out=target)
+            checksums[index].update(target)
+            changed_values[index] += _changed_values(delta, encoding)
+            changed_bytes[index] += int(np.count_nonzero(delta))
+            compressed[index].extend(compressors[index].compress(delta))
         position += len(chunk)
-    compressed.extend(compressor.flush())
-    if changed_values == 0:
-        return None
-    return _EncodedDelta(
-        compressed=bytes(compressed),
-        target_checksum=checksum.hexdigest(),
-        changed_values=changed_values,
-        changed_bytes=changed_bytes,
-    )
+    for payload, compressor in zip(compressed, compressors, strict=True):
+        payload.extend(compressor.flush())
+    return [
+        (
+            _EncodedDelta(
+                compressed=bytes(compressed[index]),
+                target_checksum=checksums[index].hexdigest(),
+                changed_values=changed_values[index],
+                changed_bytes=changed_bytes[index],
+            )
+            if changed_values[index]
+            else None
+        )
+        for index in range(len(pattern_banks))
+    ]
 
 
 def _empty_encoding_stats() -> dict[str, int]:
@@ -469,16 +480,18 @@ def write_standard_delta(
     *,
     spec: SyntheticDeltaSpec,
     seed: int = 42,
+    versions: int = 4,
     workers: int | None = None,
     output_shard_for_tensor: Callable[[str], int] | None = None,
 ) -> dict[str, Any]:
-    """Write a checksummed XOR delta directly in rollout-checkpoint space."""
+    """Write a checksummed XOR lineage directly in rollout-checkpoint space."""
 
     import numpy as np
     import safetensors.numpy
-    import zstandard
 
     spec.validate()
+    if versions < 1:
+        raise ValueError("versions must be positive")
     if output_shard_for_tensor is not None and spec.output_shards is None:
         raise ValueError("output_shard_for_tensor requires output_shards")
     started = time.perf_counter()
@@ -492,22 +505,25 @@ def write_standard_delta(
     for name, filename in weight_map.items():
         names_by_shard.setdefault(filename, []).append(name)
 
-    target_dir = Path(source_dir) / "weight_v000001"
-    target_dir.mkdir(parents=True, exist_ok=False)
-    patterns = _PatternBank(seed)
+    target_dirs = [
+        Path(source_dir) / f"weight_v{version:06d}"
+        for version in range(1, versions + 1)
+    ]
+    for target_dir in target_dirs:
+        target_dir.mkdir(parents=True, exist_ok=False)
+    pattern_banks = [_PatternBank(seed + index) for index in range(versions)]
 
     def encode_source_shard(item: tuple[str, list[str]]) -> dict[str, Any]:
         filename, names = item
         source_path = checkpoint / filename
         data_start, header = _safetensors_header(source_path)
         names.sort(key=lambda tensor_name: header[tensor_name]["data_offsets"][0])
-        encoded_tensors: dict[str, Any] = {}
-        checksums: dict[str, str] = {}
+        encoded_tensors = [dict() for _ in range(versions)]
+        checksums = [dict() for _ in range(versions)]
         immutable: dict[str, dict[str, int]] = defaultdict(
             lambda: {"tensors": 0, "tensor_bytes": 0}
         )
-        by_encoding: dict[str, dict[str, int]] = defaultdict(_empty_encoding_stats)
-        compressor = zstandard.ZstdCompressor(level=1)
+        by_encoding = [defaultdict(_empty_encoding_stats) for _ in range(versions)]
         with source_path.open("rb") as handle:
             for name in names:
                 tensor = header[name]
@@ -525,32 +541,34 @@ def write_standard_delta(
                 )
                 if encoding is None:
                     raise AssertionError(f"{name!r} was not classified")
-                stats = by_encoding[encoding.name]
-                stats["eligible_tensors"] += 1
-                stats["tensor_bytes"] += byte_count
-                stats["logical_values"] += round(
-                    byte_count * encoding.logical_values_per_byte
-                )
-                encoded = _encode_tensor_delta(
+                for version_stats in by_encoding:
+                    stats = version_stats[encoding.name]
+                    stats["eligible_tensors"] += 1
+                    stats["tensor_bytes"] += byte_count
+                    stats["logical_values"] += round(
+                        byte_count * encoding.logical_values_per_byte
+                    )
+                encoded_lineage = _encode_tensor_lineage(
                     handle,
                     name=name,
                     offset=data_start + begin,
                     byte_count=byte_count,
                     encoding=encoding,
-                    patterns=patterns,
-                    compressor_context=compressor,
+                    pattern_banks=pattern_banks,
                 )
-                if encoded is None:
-                    continue
-                encoded_tensors[name] = np.frombuffer(
-                    encoded.compressed,
-                    dtype=np.uint8,
-                )
-                checksums[name] = encoded.target_checksum
-                stats["changed_tensors"] += 1
-                stats["changed_values"] += encoded.changed_values
-                stats["changed_bytes"] += encoded.changed_bytes
-                stats["compressed_bytes"] += len(encoded.compressed)
+                for version_index, encoded in enumerate(encoded_lineage):
+                    if encoded is None:
+                        continue
+                    encoded_tensors[version_index][name] = np.frombuffer(
+                        encoded.compressed,
+                        dtype=np.uint8,
+                    )
+                    checksums[version_index][name] = encoded.target_checksum
+                    stats = by_encoding[version_index][encoding.name]
+                    stats["changed_tensors"] += 1
+                    stats["changed_values"] += encoded.changed_values
+                    stats["changed_bytes"] += encoded.changed_bytes
+                    stats["compressed_bytes"] += len(encoded.compressed)
             if hasattr(os, "posix_fadvise"):
                 try:
                     os.posix_fadvise(
@@ -567,17 +585,19 @@ def write_standard_delta(
             "encoded_tensors": encoded_tensors,
             "checksums": checksums,
             "immutable": dict(immutable),
-            "by_encoding": dict(by_encoding),
+            "by_encoding": [dict(stats) for stats in by_encoding],
         }
         print(
             "SYNTHETIC_DELTA_SOURCE="
             + json.dumps(
                 {
                     "filename": filename,
-                    "changed_tensors": len(encoded_tensors),
-                    "compressed_bytes": sum(
-                        tensor.nbytes for tensor in encoded_tensors.values()
-                    ),
+                    "versions": versions,
+                    "changed_tensors": [len(tensors) for tensors in encoded_tensors],
+                    "compressed_bytes": [
+                        sum(tensor.nbytes for tensor in tensors.values())
+                        for tensors in encoded_tensors
+                    ],
                 },
                 sort_keys=True,
             ),
@@ -592,59 +612,62 @@ def write_standard_delta(
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
         source_shards = list(executor.map(encode_source_shard, names_by_shard.items()))
 
-    aggregate: dict[str, dict[str, int | float]] = defaultdict(_empty_encoding_stats)
+    aggregates: list[dict[str, dict[str, int | float]]] = [
+        defaultdict(_empty_encoding_stats) for _ in range(versions)
+    ]
     immutable: dict[str, dict[str, int]] = defaultdict(
         lambda: {"tensors": 0, "tensor_bytes": 0}
     )
-    entries: list[tuple[str, Any, str, str]] = []
+    entries_by_version: list[list[tuple[str, Any, str, str]]] = [
+        [] for _ in range(versions)
+    ]
     for shard in source_shards:
-        for name, tensor in shard["encoded_tensors"].items():
-            entries.append(
-                (
-                    name,
-                    tensor,
-                    shard["checksums"][name],
-                    shard["filename"],
+        for version_index in range(versions):
+            for name, tensor in shard["encoded_tensors"][version_index].items():
+                entries_by_version[version_index].append(
+                    (
+                        name,
+                        tensor,
+                        shard["checksums"][version_index][name],
+                        shard["filename"],
+                    )
                 )
-            )
-        for encoding, values in shard["by_encoding"].items():
-            for key, value in values.items():
-                aggregate[encoding][key] += value
+            for encoding, values in shard["by_encoding"][version_index].items():
+                for key, value in values.items():
+                    aggregates[version_index][encoding][key] += value
         for reason, values in shard["immutable"].items():
             for key, value in values.items():
                 immutable[reason][key] += value
-    if not entries:
-        raise RuntimeError("synthetic delta did not change any checkpoint value")
+    if any(not entries for entries in entries_by_version):
+        raise RuntimeError("synthetic delta lineage contains an empty version")
 
-    output: list[dict[str, Any]]
-    if spec.output_shards is None:
-        output_by_name: dict[str, dict[str, Any]] = {}
-        for name, tensor, checksum, source_filename in entries:
-            shard = output_by_name.setdefault(
-                source_filename,
-                {"filename": source_filename, "tensors": {}, "checksums": {}},
-            )
-            shard["tensors"][name] = tensor
-            shard["checksums"][name] = checksum
-        output = list(output_by_name.values())
-    else:
+    def layout_output(entries: list[tuple[str, Any, str, str]]) -> list[dict[str, Any]]:
+        if spec.output_shards is None:
+            output_by_name: dict[str, dict[str, Any]] = {}
+            for name, tensor, checksum, source_filename in entries:
+                shard = output_by_name.setdefault(
+                    source_filename,
+                    {"filename": source_filename, "tensors": {}, "checksums": {}},
+                )
+                shard["tensors"][name] = tensor
+                shard["checksums"][name] = checksum
+            return list(output_by_name.values())
+
         shard_count = min(spec.output_shards, len(entries))
         output = [
             {
-                "filename": (f"model-{index:05d}-of-{shard_count:05d}.safetensors"),
+                "filename": f"model-{index:05d}-of-{shard_count:05d}.safetensors",
                 "tensors": {},
                 "checksums": {},
                 "payload_bytes": 0,
             }
             for index in range(shard_count)
         ]
-        if output_shard_for_tensor is None:
-            ordered_entries = sorted(
-                entries,
-                key=lambda item: (-item[1].nbytes, item[0]),
-            )
-        else:
-            ordered_entries = sorted(entries, key=lambda item: item[0])
+        ordered_entries = (
+            sorted(entries, key=lambda item: (-item[1].nbytes, item[0]))
+            if output_shard_for_tensor is None
+            else sorted(entries, key=lambda item: item[0])
+        )
         for name, tensor, checksum, _ in ordered_entries:
             if output_shard_for_tensor is None:
                 shard = min(output, key=lambda item: item["payload_bytes"])
@@ -659,8 +682,12 @@ def write_standard_delta(
             shard["tensors"][name] = tensor
             shard["checksums"][name] = checksum
             shard["payload_bytes"] += tensor.nbytes
+        return output
 
-    def save_output_shard(shard: dict[str, Any]) -> dict[str, Any]:
+    def save_output_shard(
+        target_dir: Path,
+        shard: dict[str, Any],
+    ) -> dict[str, Any]:
         target_path = target_dir / shard["filename"]
         safetensors.numpy.save_file(
             shard["tensors"],
@@ -681,66 +708,95 @@ def write_standard_delta(
         )
         return result
 
-    with ThreadPoolExecutor(max_workers=min(worker_count, len(output))) as executor:
-        output_stats = list(executor.map(save_output_shard, output))
+    version_results = []
+    for version_index, entries in enumerate(entries_by_version):
+        version = version_index + 1
+        target_dir = target_dirs[version_index]
+        output = layout_output(entries)
+        with ThreadPoolExecutor(max_workers=min(worker_count, len(output))) as executor:
+            output_stats = list(
+                executor.map(
+                    partial(save_output_shard, target_dir),
+                    output,
+                )
+            )
 
-    delta_weight_map = {
-        name: shard["filename"] for shard in output for name in shard["tensors"]
-    }
-    for values in aggregate.values():
-        logical_values = int(values["logical_values"])
-        tensor_bytes = int(values["tensor_bytes"])
-        values["changed_value_density"] = int(values["changed_values"]) / logical_values
-        values["changed_byte_density"] = int(values["changed_bytes"]) / tensor_bytes
+        delta_weight_map = {
+            name: shard["filename"] for shard in output for name in shard["tensors"]
+        }
+        aggregate = aggregates[version_index]
+        for values in aggregate.values():
+            logical_values = int(values["logical_values"])
+            tensor_bytes = int(values["tensor_bytes"])
+            values["changed_value_density"] = (
+                int(values["changed_values"]) / logical_values
+            )
+            values["changed_byte_density"] = int(values["changed_bytes"]) / tensor_bytes
 
-    metadata = {
-        "version": "000001",
-        "base_version": "000000",
-        "delta_encoding": "xor",
-        "compression_format": "zstd",
-        "checksum_format": "xxh3-128",
-        "synthetic_generator": _GENERATOR_VERSION,
-        "synthetic_spec": json.dumps(
-            spec.as_dict(),
-            sort_keys=True,
-            separators=(",", ":"),
-        ),
-        "synthetic_seed": str(seed),
-    }
-    (target_dir / "model.safetensors.index.json").write_text(
-        json.dumps({"metadata": metadata, "weight_map": delta_weight_map})
-    )
+        metadata = {
+            "version": f"{version:06d}",
+            "base_version": f"{version - 1:06d}",
+            "delta_encoding": "xor",
+            "compression_format": "zstd",
+            "checksum_format": "xxh3-128",
+            "synthetic_generator": _GENERATOR_VERSION,
+            "synthetic_spec": json.dumps(
+                spec.as_dict(),
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            "synthetic_seed": str(seed + version_index),
+        }
+        (target_dir / "model.safetensors.index.json").write_text(
+            json.dumps({"metadata": metadata, "weight_map": delta_weight_map})
+        )
 
-    eligible_tensors = sum(
-        int(values["eligible_tensors"]) for values in aggregate.values()
-    )
-    changed_tensors = sum(
-        int(values["changed_tensors"]) for values in aggregate.values()
-    )
-    tensor_bytes = sum(int(values["tensor_bytes"]) for values in aggregate.values())
-    compressed_bytes = sum(
-        int(values["compressed_bytes"]) for values in aggregate.values()
-    )
-    changed_bytes = sum(int(values["changed_bytes"]) for values in aggregate.values())
-    wire_bytes = sum(int(shard["wire_bytes"]) for shard in output_stats)
+        eligible_tensors = sum(
+            int(values["eligible_tensors"]) for values in aggregate.values()
+        )
+        changed_tensors = sum(
+            int(values["changed_tensors"]) for values in aggregate.values()
+        )
+        tensor_bytes = sum(int(values["tensor_bytes"]) for values in aggregate.values())
+        compressed_bytes = sum(
+            int(values["compressed_bytes"]) for values in aggregate.values()
+        )
+        changed_bytes = sum(
+            int(values["changed_bytes"]) for values in aggregate.values()
+        )
+        wire_bytes = sum(int(shard["wire_bytes"]) for shard in output_stats)
+        version_results.append(
+            {
+                "version": version,
+                "seed": seed + version_index,
+                "delta_shards": len(output_stats),
+                "eligible_tensors": eligible_tensors,
+                "changed_tensors": changed_tensors,
+                "eligible_tensor_bytes": tensor_bytes,
+                "changed_bytes": changed_bytes,
+                "changed_byte_density": changed_bytes / tensor_bytes,
+                "compressed_bytes": compressed_bytes,
+                "wire_bytes": wire_bytes,
+                "wire_ratio": wire_bytes / tensor_bytes,
+                "by_encoding": dict(aggregate),
+            }
+        )
+
+    first = version_results[0]
     return {
         "generator": _GENERATOR_VERSION,
         "scope": "mutable_rollout_values",
         "spec": spec.as_dict(),
         "seed": seed,
+        "versions": versions,
         "checkpoint_shards": len(names_by_shard),
-        "delta_shards": len(output_stats),
         "checkpoint_tensors": len(weight_map),
-        "eligible_tensors": eligible_tensors,
-        "changed_tensors": changed_tensors,
-        "eligible_tensor_bytes": tensor_bytes,
-        "changed_bytes": changed_bytes,
-        "changed_byte_density": changed_bytes / tensor_bytes,
-        "compressed_bytes": compressed_bytes,
-        "wire_bytes": wire_bytes,
-        "wire_ratio": wire_bytes / tensor_bytes,
         "immutable": dict(immutable),
-        "by_encoding": dict(aggregate),
+        "lineage": version_results,
+        # Keep the one-step fields stable for existing reports.
+        **{
+            key: value for key, value in first.items() if key not in {"version", "seed"}
+        },
         "generation_s": round(time.perf_counter() - started, 6),
     }
 
@@ -752,17 +808,21 @@ def prepare_standard_delta(
     spec: SyntheticDeltaSpec,
     commit: Callable[[], None],
     seed: int = 42,
+    versions: int = 4,
     workers: int | None = None,
     output_shard_for_tensor: Callable[[str], int] | None = None,
 ) -> dict[str, Any]:
-    """Reuse or build one durable standardized profiling delta."""
+    """Reuse or build one durable standardized profiling delta lineage."""
 
     metadata_path = Path(source_dir) / "delta_profile.json"
-    index_path = Path(source_dir) / "weight_v000001" / "model.safetensors.index.json"
+    index_path = (
+        Path(source_dir) / f"weight_v{versions:06d}" / "model.safetensors.index.json"
+    )
     expected = {
         "generator": _GENERATOR_VERSION,
         "spec": spec.as_dict(),
         "seed": seed,
+        "versions": versions,
     }
     if metadata_path.is_file() and index_path.is_file():
         result = json.loads(metadata_path.read_text())
@@ -778,6 +838,7 @@ def prepare_standard_delta(
         source_dir,
         spec=spec,
         seed=seed,
+        versions=versions,
         workers=workers,
         output_shard_for_tensor=output_shard_for_tensor,
     )

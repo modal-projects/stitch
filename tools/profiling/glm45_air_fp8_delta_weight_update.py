@@ -31,6 +31,7 @@ from tools.profiling._delta_weight_update import (
     parse_update_mode,
     run_delta_weight_update,
 )
+from tools.profiling._sglang_runtime import VALIDATION_SGLANG_RUNTIME
 from tools.profiling._synthetic_delta import (
     SyntheticDeltaSpec,
     prepare_standard_delta,
@@ -90,6 +91,7 @@ sglang_cache_volume = modal.Volume.from_name(
 serving_image = build_serving_image(
     hf_cache_path="/root/.cache/huggingface",
     experiment=EXPERIMENT,
+    runtime=VALIDATION_SGLANG_RUNTIME,
 ).add_local_dir(
     str(Path(__file__).resolve().parents[1]),
     remote_path="/root/tools",
@@ -174,7 +176,7 @@ def benchmark(
             server_args=SGLANG_SERVER_ARGS,
         ),
         source_dir=DELTA_SOURCE_DIR,
-        target_version=1,
+        target_versions=(1, 3, 4),
         update_mode=parse_update_mode(update_mode),
         canonical_storage=parse_canonical_storage(canonical_storage),
         runtime=runtime,

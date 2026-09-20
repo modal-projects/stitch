@@ -44,6 +44,7 @@ from tools.profiling._hf_checkpoint import (
     download_snapshot,
     materialize_checkpoint_view,
 )
+from tools.profiling._sglang_runtime import VALIDATION_SGLANG_RUNTIME
 from tools.profiling._synthetic_delta import (
     SyntheticDeltaSpec,
     prepare_standard_delta,
@@ -113,6 +114,7 @@ serving_image = build_serving_image(
     hf_cache_path=HF_CACHE_PATH,
     experiment=EXPERIMENT,
     extra_env=getattr(model, "SGLANG_SERVER_ENV", None),
+    runtime=VALIDATION_SGLANG_RUNTIME,
 ).add_local_dir(
     str(_REPO_ROOT / "tools"),
     remote_path="/root/tools",
@@ -196,19 +198,18 @@ def benchmark(
         ),
         BASE_CHECKPOINT_DIR,
     )
-    server_args = dict(model.SGLANG_SERVER_ARGS)
-    server_args["--cpu-weight-cache-max-compile-group-gb"] = CPU_CACHE_GROUP_GB
     return run_delta_weight_update(
         WeightUpdateSpec(
             model_name="Kimi K3 MXFP4",
             base_checkpoint_dir=BASE_CHECKPOINT_DIR,
             local_target_checkpoint_dir=LOCAL_TARGET_CHECKPOINT_DIR,
             local_canonical_checkpoint_dir=CANONICAL_CHECKPOINT_DIR,
-            server_args=server_args,
+            server_args=model.SGLANG_SERVER_ARGS,
             tp_size=model.ROLLOUT_NUM_GPUS_PER_ENGINE,
+            max_compile_group_gb=int(CPU_CACHE_GROUP_GB),
         ),
         source_dir=DELTA_SOURCE_DIR,
-        target_version=1,
+        target_versions=(1, 3, 4),
         update_mode=parse_update_mode(update_mode),
         canonical_storage=parse_canonical_storage(canonical_storage),
         runtime=runtime,

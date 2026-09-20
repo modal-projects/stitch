@@ -1,9 +1,9 @@
 """Shared runner for SGLang delta weight-update profilers.
 
-Model-specific Modal apps supply the checkpoint paths, recorded delta, GPU
-shape, and direct SGLang arguments. This module owns the benchmark sequence:
-initial load, live generation during destination initialization and target
-staging, the commit RPC, and post-update generation.
+Model-specific Modal apps supply the checkpoint paths, recorded delta lineage,
+GPU shape, and direct SGLang arguments. This module owns the benchmark
+sequence: startup through routing readiness, live generation during target
+preparation, the commit RPC, and post-update generation.
 """
 
 from __future__ import annotations
@@ -14,9 +14,9 @@ import os
 import shutil
 import statistics
 import struct
+import subprocess
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -34,37 +34,66 @@ class WeightUpdateSpec:
     server_args: dict[str, str]
     tp_size: int = 4
     port: int = 8001
+    max_compile_group_gb: int = 8
 
 
 def server_args_for_mode(
     server_args: dict[str, str],
     update_mode: UpdateMode,
     canonical_storage: CanonicalStorage | None,
+    target_checkpoint_dir: str,
     canonical_checkpoint_dir: str,
+    max_compile_group_gb: int,
 ) -> dict[str, str]:
     """Return direct SGLang arguments for one update mode."""
 
-    result = dict(server_args)
+    legacy_options = {
+        "--enable-cpu-weight-cache",
+        "--cpu-weight-cache-max-compile-group-gb",
+        "--cpu-weight-cache-canonical-checkpoint-dir",
+    }
+    result = {
+        key: value for key, value in server_args.items() if key not in legacy_options
+    }
+    result["--weight-update-staging"] = update_mode
+    result["--weight-version"] = "0"
+    result.pop("--weight-update-local-checkpoint-dir", None)
+    result.pop("--weight-update-max-compile-group-gb", None)
     if update_mode == "cpu":
         if canonical_storage not in {"memory", "disk"}:
             raise ValueError(
                 "canonical_storage must be 'memory' or 'disk' for CPU updates"
             )
-        result["--enable-cpu-weight-cache"] = ""
-        result.setdefault("--cpu-weight-cache-max-compile-group-gb", "8")
-        result.pop("--cpu-weight-cache-canonical-checkpoint-dir", None)
+        result["--weight-update-max-compile-group-gb"] = str(max_compile_group_gb)
         if canonical_storage == "disk":
-            result["--cpu-weight-cache-canonical-checkpoint-dir"] = (
-                canonical_checkpoint_dir
-            )
+            result["--weight-update-local-checkpoint-dir"] = canonical_checkpoint_dir
     elif update_mode == "disk":
         if canonical_storage is not None:
             raise ValueError("canonical_storage applies only to CPU updates")
-        result.pop("--enable-cpu-weight-cache", None)
-        result.pop("--cpu-weight-cache-max-compile-group-gb", None)
-        result.pop("--cpu-weight-cache-canonical-checkpoint-dir", None)
+        result["--weight-update-local-checkpoint-dir"] = target_checkpoint_dir
     else:
         raise ValueError(f"unsupported update mode: {update_mode!r}")
+    return result
+
+
+def server_args_for_native_load(
+    server_args: dict[str, str],
+    weight_version: int,
+) -> dict[str, str]:
+    """Return arguments for an independent native load of one full target."""
+
+    staging_options = {
+        "--enable-cpu-weight-cache",
+        "--cpu-weight-cache-max-compile-group-gb",
+        "--cpu-weight-cache-canonical-checkpoint-dir",
+        "--weight-update-staging",
+        "--weight-update-local-checkpoint-dir",
+        "--weight-update-max-compile-group-gb",
+    }
+    result = {
+        key: value for key, value in server_args.items() if key not in staging_options
+    }
+    result["--weight-version"] = str(weight_version)
     return result
 
 
@@ -222,6 +251,53 @@ def _generate(
     return result
 
 
+def _weight_checksums(client: Any, url: str) -> dict[str, Any]:
+    result = _post(client, url, "/weights_checker", {"action": "checksum"})
+    ranks = result.get("ranks") or []
+    if not ranks or not result.get("per_engine_checksum"):
+        raise RuntimeError(f"weight checksum response is incomplete: {result}")
+    return result
+
+
+def _validate_weight_checksums(
+    before: dict[str, Any],
+    after: dict[str, Any],
+    *,
+    expected_ranks: int,
+) -> dict[str, Any]:
+    before_ranks = before["ranks"]
+    after_ranks = after["ranks"]
+    if len(before_ranks) != expected_ranks or len(after_ranks) != expected_ranks:
+        raise RuntimeError(
+            "weight checksum rank count mismatch: "
+            f"expected={expected_ranks} before={len(before_ranks)} "
+            f"after={len(after_ranks)}"
+        )
+    if before["per_engine_checksum"] == after["per_engine_checksum"]:
+        raise RuntimeError("live engine weight checksum did not change")
+
+    before_draft = {
+        (rank_index, name): checksum
+        for rank_index, rank in enumerate(before_ranks)
+        for name, checksum in rank["checksums"].items()
+        if name.startswith("draft.")
+    }
+    after_draft = {
+        (rank_index, name): checksum
+        for rank_index, rank in enumerate(after_ranks)
+        for name, checksum in rank["checksums"].items()
+        if name.startswith("draft.")
+    }
+    if before_draft != after_draft:
+        raise RuntimeError("speculative draft weights changed with target weights")
+    return {
+        "ranks": len(after_ranks),
+        "per_engine_checksum": after["per_engine_checksum"],
+        "draft_tensors": len(after_draft),
+        "draft_unchanged": True,
+    }
+
+
 def _assert_repeat_consistency(
     fingerprints: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -355,7 +431,7 @@ class _GenerationProbe:
 
 
 class _MemoryProbe:
-    def __init__(self, interval_s: float = 1.0) -> None:
+    def __init__(self, interval_s: float = 2.0) -> None:
         self.interval_s = interval_s
         self.stop = threading.Event()
         self.samples: list[dict[str, int | str]] = []
@@ -427,6 +503,44 @@ def _memory_snapshot() -> dict[str, int | str]:
         key, separator, value = line.partition(":")
         if separator and key in wanted:
             result[f"{key}_bytes"] = int(value.split()[0]) * 1024
+    try:
+        completed = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=memory.used",
+                "--format=csv,noheader,nounits",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        gpu_used_mib = [
+            int(line.strip()) for line in completed.stdout.splitlines() if line.strip()
+        ]
+        if gpu_used_mib:
+            result["gpu_memory_used_total_bytes"] = sum(gpu_used_mib) << 20
+            result["gpu_memory_used_max_rank_bytes"] = max(gpu_used_mib) << 20
+    except (FileNotFoundError, subprocess.SubprocessError, ValueError):
+        pass
+    return result
+
+
+def _local_storage_snapshot(paths: dict[str, str]) -> dict[str, int]:
+    result: dict[str, int] = {}
+    for label, root in paths.items():
+        total = 0
+        if os.path.isdir(root):
+            for directory, _, filenames in os.walk(root):
+                for filename in filenames:
+                    try:
+                        total += os.path.getsize(os.path.join(directory, filename))
+                    except FileNotFoundError:
+                        pass
+        result[f"{label}_bytes"] = total
+    usage = shutil.disk_usage("/")
+    result["filesystem_used_bytes"] = usage.used
+    result["filesystem_free_bytes"] = usage.free
     return result
 
 
@@ -499,36 +613,7 @@ def _cpu_usage_delta(
     }
 
 
-def _drop_checkpoint_page_cache(path: str) -> dict[str, Any]:
-    """Release setup-only file cache before allocating persistent CPU images."""
-
-    started = time.perf_counter()
-    files = [entry.path for entry in os.scandir(path) if entry.is_file()]
-
-    def drop(filename: str) -> int:
-        fd = os.open(filename, os.O_RDONLY)
-        try:
-            if hasattr(os, "posix_fadvise"):
-                try:
-                    os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
-                except OSError:
-                    pass
-            return os.fstat(fd).st_size
-        finally:
-            os.close(fd)
-
-    with ThreadPoolExecutor(max_workers=min(8, len(files) or 1)) as executor:
-        released_bytes = sum(executor.map(drop, files))
-    return {
-        "files": len(files),
-        "bytes": released_bytes,
-        "wall_s": round(time.perf_counter() - started, 6),
-    }
-
-
 def _print_profile_summary(results: dict[str, Any]) -> None:
-    stage_ranks = results.get("stage_rank_stats") or []
-    commit_ranks = results.get("commit_rank_stats") or []
     summary = {
         key: results.get(key)
         for key in (
@@ -538,42 +623,129 @@ def _print_profile_summary(results: dict[str, Any]) -> None:
             "canonical_storage",
             "sample_id",
             "status",
-            "initial_load_s",
-            "destination_init_s",
-            "destination_init_cpu",
-            "generation_during_destination_init",
-            "memory_during_destination_init",
-            "stage_s",
-            "stage_cpu",
-            "commit_rpc_s",
-            "commit_cpu",
-            "stage_through_commit_s",
-            "generation_during_stage",
-            "correctness",
+            "startup_ready_s",
+            "startup_cpu",
+            "memory_during_startup",
         )
         if key in results
     }
-    summary["critical_rank_stage_s"] = max(
-        (rank.get("wall_s", rank.get("total_wall_s", 0.0)) for rank in stage_ranks),
-        default=None,
-    )
-    destination_init_ranks = results.get("destination_init_rank_stats") or []
-    summary["critical_rank_destination_init_s"] = max(
-        (rank.get("wall_s", 0.0) for rank in destination_init_ranks),
-        default=None,
-    )
-    summary["critical_rank_commit_s"] = max(
-        (rank.get("wall_s", 0.0) for rank in commit_ranks),
-        default=None,
-    )
+    summary["updates"] = [
+        {
+            key: update.get(key)
+            for key in (
+                "from_version",
+                "target_version",
+                "delta_count",
+                "prepare_s",
+                "prepare_cpu",
+                "commit_rpc_s",
+                "commit_cpu",
+                "prepare_through_commit_s",
+                "generation_during_prepare",
+                "critical_rank_prepare_s",
+                "critical_rank_commit_s",
+                "correctness",
+            )
+        }
+        for update in results.get("updates", [])
+    ]
     print(f"PROFILE_SUMMARY={json.dumps(summary, sort_keys=True)}", flush=True)
+
+
+def _validate_delta_lineage(source_dir: str, target_versions: tuple[int, ...]) -> None:
+    if not target_versions or target_versions != tuple(sorted(set(target_versions))):
+        raise ValueError("target_versions must be a non-empty increasing sequence")
+    if target_versions[0] <= 0:
+        raise ValueError("target_versions must follow base version 0")
+    for version in range(1, target_versions[-1] + 1):
+        index_path = (
+            Path(source_dir) / f"weight_v{version:06d}" / "model.safetensors.index.json"
+        )
+        if not index_path.is_file():
+            raise FileNotFoundError(f"delta target is missing: {index_path}")
+        metadata = json.loads(index_path.read_text()).get("metadata") or {}
+        if metadata.get("delta_encoding") != "xor":
+            raise ValueError(f"profiling requires an XOR delta: {index_path}")
+        if int(metadata.get("version", -1)) != version:
+            raise ValueError(f"delta version metadata is invalid: {index_path}")
+        if int(metadata.get("base_version", -1)) != version - 1:
+            raise ValueError(f"delta lineage is not contiguous: {index_path}")
+
+
+def _critical_rank_time(rank_stats: list[dict[str, Any]] | None) -> float | None:
+    return max(
+        (
+            rank.get("wall_s", rank.get("total_wall_s", 0.0))
+            for rank in (rank_stats or [])
+        ),
+        default=None,
+    )
+
+
+def _validate_generation_probe(
+    generation: _GenerationProbe,
+    expected_version: int,
+) -> dict[str, Any]:
+    summary = generation.summary()
+    if generation.errors or not generation.samples:
+        raise RuntimeError(f"generation was not healthy during preparation: {summary}")
+    observed = {sample["weight_version"] for sample in generation.samples}
+    if observed != {str(expected_version)}:
+        raise RuntimeError(
+            "generation switched weight versions during preparation: "
+            f"expected={expected_version} observed={summary}"
+        )
+    return summary
+
+
+def _fingerprint_after_commit(
+    url: str,
+    *,
+    target_version: int,
+    previous_fingerprint: dict[str, Any],
+    fingerprint_logprobs: bool,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    generation = _generate(url)
+    fingerprints = [
+        _generate(
+            url,
+            fingerprint=True,
+            fingerprint_logprobs=fingerprint_logprobs,
+        )
+        for _ in range(2)
+    ]
+    observed_versions = {
+        generation["weight_version"],
+        *(fingerprint["weight_version"] for fingerprint in fingerprints),
+    }
+    if observed_versions != {str(target_version)}:
+        raise RuntimeError(
+            "post-update generation reported unexpected weight versions: "
+            f"{sorted(str(value) for value in observed_versions)}"
+        )
+    correctness = {
+        **_assert_repeat_consistency(fingerprints),
+        **_assert_target_changed(previous_fingerprint, fingerprints[0]),
+    }
+    return fingerprints[0], {
+        "generation_after": generation,
+        "fingerprint_probes": [
+            {
+                "wall_s": fingerprint["wall_s"],
+                "weight_version": fingerprint["weight_version"],
+                **_fingerprint_hashes(fingerprint),
+            }
+            for fingerprint in fingerprints
+        ],
+        "correctness": correctness,
+    }
 
 
 def run_delta_weight_update(
     spec: WeightUpdateSpec,
     *,
     source_dir: str,
-    target_version: int,
+    target_versions: tuple[int, ...],
     update_mode: UpdateMode,
     canonical_storage: CanonicalStorage | None,
     runtime: str,
@@ -584,22 +756,16 @@ def run_delta_weight_update(
     import httpx
     from autoinference_utils.endpoint import SGLangEndpoint
 
-    target_dir = Path(source_dir) / f"weight_v{target_version:06d}"
-    target_index = target_dir / "model.safetensors.index.json"
     base_index = Path(spec.base_checkpoint_dir) / "model.safetensors.index.json"
     if not base_index.is_file():
         raise FileNotFoundError(f"base checkpoint is missing: {base_index}")
-    if not target_index.is_file():
-        raise FileNotFoundError(f"delta target is missing: {target_index}")
-    target_metadata = json.loads(target_index.read_text()).get("metadata") or {}
-    if not target_metadata.get("delta_encoding"):
-        raise ValueError(f"profiling requires a delta target: {target_index}")
+    _validate_delta_lineage(source_dir, target_versions)
 
     results: dict[str, Any] = {
         "model": spec.model_name,
         "base_checkpoint_dir": spec.base_checkpoint_dir,
         "source_dir": source_dir,
-        "target_version": target_version,
+        "target_versions": list(target_versions),
         "update_mode": update_mode,
         "canonical_storage": canonical_storage,
         "runtime": runtime,
@@ -610,6 +776,8 @@ def run_delta_weight_update(
     }
 
     shutil.rmtree(spec.local_target_checkpoint_dir, ignore_errors=True)
+    if spec.local_canonical_checkpoint_dir != spec.local_target_checkpoint_dir:
+        shutil.rmtree(spec.local_canonical_checkpoint_dir, ignore_errors=True)
 
     endpoint = SGLangEndpoint(
         model_path=spec.base_checkpoint_dir,
@@ -619,23 +787,44 @@ def run_delta_weight_update(
             spec.server_args,
             update_mode,
             canonical_storage,
+            spec.local_target_checkpoint_dir,
             spec.local_canonical_checkpoint_dir,
+            spec.max_compile_group_gb,
         ),
-        # Allow for a cold, model-sized initial load. Destination initialization
-        # is measured separately after the endpoint begins serving.
+        # Startup includes the model load and construction of the configured
+        # inactive update destination; readiness is the externally useful bound.
         health_timeout=2 * 60 * 60,
         health_poll_interval=10,
         log_requests_level=-1,
     )
+    endpoint_running = False
+    reference_endpoint = None
     url = f"http://127.0.0.1:{spec.port}"
     try:
-        initial_load_started = time.perf_counter()
-        endpoint.start()
-        results["initial_load_s"] = round(
-            time.perf_counter() - initial_load_started,
-            6,
+        startup_started = time.perf_counter()
+        startup_cpu_started = _cgroup_cpu_usage_s()
+        startup_io_started = _cgroup_io_snapshot()
+        with _MemoryProbe() as memory:
+            endpoint.start()
+        endpoint_running = True
+        results["startup_ready_s"] = round(time.perf_counter() - startup_started, 6)
+        results["startup_cpu"] = _cpu_usage_delta(
+            startup_cpu_started,
+            _cgroup_cpu_usage_s(),
+            results["startup_ready_s"],
         )
-        results["memory_after_initial_load"] = _memory_snapshot()
+        results["startup_io"] = _io_usage_delta(
+            startup_io_started,
+            _cgroup_io_snapshot(),
+        )
+        results["memory_during_startup"] = memory.summary()
+        results["memory_after_startup"] = _memory_snapshot()
+        results["storage_after_startup"] = _local_storage_snapshot(
+            {
+                "target": spec.local_target_checkpoint_dir,
+                "canonical": spec.local_canonical_checkpoint_dir,
+            }
+        )
         results["generation_before"] = _generate(url)
         speculative_algorithm = spec.server_args.get(
             "--speculative-algorithm", ""
@@ -664,185 +853,236 @@ def run_delta_weight_update(
             "weight_version": baseline_fingerprint["weight_version"],
             **_fingerprint_hashes(baseline_fingerprint),
         }
+        if baseline_fingerprint["weight_version"] != "0":
+            raise RuntimeError(
+                "base generation reported unexpected weight version: "
+                f"{baseline_fingerprint['weight_version']!r}"
+            )
 
+        results["updates"] = []
+        previous_version = 0
+        previous_fingerprint = baseline_fingerprint
         with httpx.Client(timeout=None, trust_env=False) as client:
-            destination_init_started = time.perf_counter()
-            destination_init_cpu_started = _cgroup_cpu_usage_s()
-            destination_init_io_started = _cgroup_io_snapshot()
-            generation = _GenerationProbe(url)
-            memory = _MemoryProbe()
-            try:
-                with generation, memory:
-                    init_payload = {
-                        "base_checkpoint_dir": spec.base_checkpoint_dir,
-                        "target_version": 0,
-                        "destination": update_mode,
-                    }
-                    if update_mode == "disk":
-                        init_payload["local_checkpoint_dir"] = (
-                            spec.local_target_checkpoint_dir
-                        )
-                    initialized = _post(
+            previous_checksums = _weight_checksums(client, url)
+            results["base_weight_checksums"] = {
+                "ranks": len(previous_checksums["ranks"]),
+                "per_engine_checksum": previous_checksums["per_engine_checksum"],
+            }
+            for target_version in target_versions:
+                update: dict[str, Any] = {
+                    "from_version": previous_version,
+                    "target_version": target_version,
+                    "delta_count": target_version - previous_version,
+                }
+                prepare_started = time.perf_counter()
+                prepare_cpu_started = _cgroup_cpu_usage_s()
+                prepare_io_started = _cgroup_io_snapshot()
+                with _GenerationProbe(url) as generation, _MemoryProbe() as memory:
+                    prepared = _post(
                         client,
                         url,
-                        "/stage_weight_update",
-                        init_payload,
+                        "/prepare_weight_update",
+                        {
+                            "checkpoint_source_dir": source_dir,
+                            "target_version": target_version,
+                        },
                     )
-            finally:
-                results["generation_during_destination_init"] = generation.summary()
-                results["memory_during_destination_init"] = memory.summary()
-            results["destination_init_s"] = round(
-                time.perf_counter() - destination_init_started,
-                6,
-            )
-            results["destination_init_cpu"] = _cpu_usage_delta(
-                destination_init_cpu_started,
-                _cgroup_cpu_usage_s(),
-                results["destination_init_s"],
-            )
-            results["destination_init_io"] = _io_usage_delta(
-                destination_init_io_started,
-                _cgroup_io_snapshot(),
-            )
-            results["destination_init_rank_stats"] = initialized.get("rank_stats")
-            results["memory_after_destination_init"] = _memory_snapshot()
-            if generation.errors or not generation.samples:
-                raise RuntimeError(
-                    "generation was not healthy during destination initialization: "
-                    f"{generation.summary()}"
+                update["prepare_s"] = round(
+                    time.perf_counter() - prepare_started,
+                    6,
                 )
-            if {sample["weight_version"] for sample in generation.samples} != {
-                baseline_fingerprint["weight_version"]
-            }:
-                raise RuntimeError(
-                    "generation switched weight versions during destination "
-                    f"initialization: {generation.summary()}"
+                update["prepare_cpu"] = _cpu_usage_delta(
+                    prepare_cpu_started,
+                    _cgroup_cpu_usage_s(),
+                    update["prepare_s"],
                 )
-            if update_mode == "disk":
-                results["destination_init_cache_drop"] = _drop_checkpoint_page_cache(
-                    spec.local_target_checkpoint_dir
+                update["prepare_io"] = _io_usage_delta(
+                    prepare_io_started,
+                    _cgroup_io_snapshot(),
+                )
+                update["prepare_rank_stats"] = prepared.get("rank_stats")
+                update["critical_rank_prepare_s"] = _critical_rank_time(
+                    update["prepare_rank_stats"]
+                )
+                update["generation_during_prepare"] = _validate_generation_probe(
+                    generation,
+                    previous_version,
+                )
+                update["memory_during_prepare"] = memory.summary()
+                update["memory_after_prepare"] = _memory_snapshot()
+                update["storage_after_prepare"] = _local_storage_snapshot(
+                    {
+                        "target": spec.local_target_checkpoint_dir,
+                        "canonical": spec.local_canonical_checkpoint_dir,
+                    }
                 )
 
-            stage_started = time.perf_counter()
-            stage_cpu_started = _cgroup_cpu_usage_s()
-            stage_io_started = _cgroup_io_snapshot()
-            with _GenerationProbe(url) as generation:
-                stage_payload = {
-                    "base_checkpoint_dir": spec.base_checkpoint_dir,
-                    "checkpoint_source_dir": source_dir,
-                    "target_version": target_version,
-                    "destination": update_mode,
-                }
-                if update_mode == "disk":
-                    stage_payload["local_checkpoint_dir"] = (
-                        spec.local_target_checkpoint_dir
-                    )
-                staged = _post(
+                commit_started = time.perf_counter()
+                commit_cpu_started = _cgroup_cpu_usage_s()
+                commit_io_started = _cgroup_io_snapshot()
+                committed = _post(
                     client,
                     url,
-                    "/stage_weight_update",
-                    stage_payload,
+                    "/commit_weight_update",
+                    {
+                        "target_version": target_version,
+                        "abort_all_requests": False,
+                        "torch_empty_cache": False,
+                    },
                 )
-            results["stage_s"] = round(time.perf_counter() - stage_started, 6)
-            results["stage_cpu"] = _cpu_usage_delta(
-                stage_cpu_started,
-                _cgroup_cpu_usage_s(),
-                results["stage_s"],
-            )
-            results["stage_io"] = _io_usage_delta(
-                stage_io_started,
-                _cgroup_io_snapshot(),
-            )
-            results["stage_rank_stats"] = staged.get("rank_stats")
-            results["generation_during_stage"] = generation.summary()
-            results["memory_after_stage"] = _memory_snapshot()
-            if generation.errors or not generation.samples:
-                raise RuntimeError(
-                    f"generation was not healthy during staging: {generation.summary()}"
+                update["commit_rpc_s"] = round(
+                    time.perf_counter() - commit_started,
+                    6,
                 )
-            if {sample["weight_version"] for sample in generation.samples} != {
-                baseline_fingerprint["weight_version"]
-            }:
-                raise RuntimeError(
-                    "generation switched weight versions during staging: "
-                    f"{generation.summary()}"
+                update["commit_cpu"] = _cpu_usage_delta(
+                    commit_cpu_started,
+                    _cgroup_cpu_usage_s(),
+                    update["commit_rpc_s"],
                 )
+                update["commit_io"] = _io_usage_delta(
+                    commit_io_started,
+                    _cgroup_io_snapshot(),
+                )
+                update["commit_rank_stats"] = committed.get("rank_stats")
+                update["critical_rank_commit_s"] = _critical_rank_time(
+                    update["commit_rank_stats"]
+                )
+                update["memory_after_commit"] = _memory_snapshot()
+                update["prepare_through_commit_s"] = round(
+                    time.perf_counter() - prepare_started,
+                    6,
+                )
+                previous_fingerprint, post_commit = _fingerprint_after_commit(
+                    url,
+                    target_version=target_version,
+                    previous_fingerprint=previous_fingerprint,
+                    fingerprint_logprobs=fingerprint_logprobs,
+                )
+                update.update(post_commit)
+                current_checksums = _weight_checksums(client, url)
+                update["live_weight_checksums"] = _validate_weight_checksums(
+                    previous_checksums,
+                    current_checksums,
+                    expected_ranks=spec.tp_size,
+                )
+                results["updates"].append(update)
+                previous_version = target_version
+                previous_checksums = current_checksums
 
-            commit_started = time.perf_counter()
-            commit_cpu_started = _cgroup_cpu_usage_s()
-            commit_io_started = _cgroup_io_snapshot()
-            if update_mode == "cpu":
-                commit_path = "/update_weights_from_cpu"
-                commit_payload = {
-                    "target_version": target_version,
-                    "flush_cache": False,
-                }
+            failure_version = target_versions[-1] + 1
+            try:
+                _post(
+                    client,
+                    url,
+                    "/prepare_weight_update",
+                    {
+                        "checkpoint_source_dir": source_dir,
+                        "target_version": failure_version,
+                    },
+                )
+            except RuntimeError as exc:
+                failure_message = str(exc)
             else:
-                commit_path = "/update_weights_from_disk"
-                commit_payload = {
-                    "model_path": spec.local_target_checkpoint_dir,
-                    "load_format": spec.server_args.get("--load-format", "auto"),
-                    "weight_version": str(target_version),
-                    "flush_cache": False,
-                }
-            committed = _post(
-                client,
-                url,
-                commit_path,
-                commit_payload,
-            )
-            results["commit_rpc_s"] = round(
-                time.perf_counter() - commit_started,
-                6,
-            )
-            results["commit_cpu"] = _cpu_usage_delta(
-                commit_cpu_started,
-                _cgroup_cpu_usage_s(),
-                results["commit_rpc_s"],
-            )
-            results["commit_io"] = _io_usage_delta(
-                commit_io_started,
-                _cgroup_io_snapshot(),
-            )
-            results["commit_rank_stats"] = committed.get("rank_stats")
-            results["stage_through_commit_s"] = round(
-                time.perf_counter() - stage_started,
-                6,
-            )
-
-        results["generation_after"] = _generate(url)
-        fingerprints = [
-            _generate(
+                raise RuntimeError(
+                    f"missing weight version {failure_version} prepared successfully"
+                )
+            failure_fingerprint = _generate(
                 url,
                 fingerprint=True,
                 fingerprint_logprobs=fingerprint_logprobs,
-            ),
-            _generate(
-                url,
-                fingerprint=True,
-                fingerprint_logprobs=fingerprint_logprobs,
-            ),
-        ]
-        observed_versions = {
-            results["generation_after"]["weight_version"],
-            *(fingerprint["weight_version"] for fingerprint in fingerprints),
-        }
-        if observed_versions != {str(target_version)}:
-            raise RuntimeError(
-                "post-update generation reported unexpected weight versions: "
-                f"{sorted(str(value) for value in observed_versions)}"
             )
-        results["fingerprint_probes"] = [
-            {
-                "wall_s": fingerprint["wall_s"],
-                "weight_version": fingerprint["weight_version"],
+            if failure_fingerprint["weight_version"] != str(previous_version):
+                raise RuntimeError(
+                    "failed preparation changed the served version: "
+                    f"{failure_fingerprint['weight_version']!r}"
+                )
+            failure_checksums = _weight_checksums(client, url)
+            if (
+                failure_checksums["per_engine_checksum"]
+                != previous_checksums["per_engine_checksum"]
+            ):
+                raise RuntimeError("failed preparation changed live weights")
+            results["preparation_failure"] = {
+                "target_version": failure_version,
+                "error": failure_message,
+                "served_version": failure_fingerprint["weight_version"],
+                "live_weights_unchanged": True,
             }
-            for fingerprint in fingerprints
-        ]
-        results["correctness"] = {
-            **_assert_repeat_consistency(fingerprints),
-            **_assert_target_changed(baseline_fingerprint, fingerprints[0]),
+
+        final_version = target_versions[-1]
+        final_live_checksums = previous_checksums
+        final_live_fingerprint = previous_fingerprint
+        endpoint.stop()
+        endpoint_running = False
+
+        if update_mode == "disk":
+            reference_checkpoint_dir = spec.local_target_checkpoint_dir
+            reference_materialization = {"reused_staged_checkpoint": True}
+        elif canonical_storage == "disk":
+            reference_checkpoint_dir = spec.local_canonical_checkpoint_dir
+            reference_materialization = {"reused_canonical_checkpoint": True}
+        else:
+            from sglang.srt.weight_sync.disk_checkpoint import materialize
+
+            reference_checkpoint_dir = spec.local_target_checkpoint_dir
+            shutil.rmtree(reference_checkpoint_dir, ignore_errors=True)
+            reference_materialization = materialize(
+                local_checkpoint_dir=reference_checkpoint_dir,
+                base_checkpoint_dir=spec.base_checkpoint_dir,
+                checkpoint_source_dir=source_dir,
+                target_version=final_version,
+                base_version=0,
+            )
+        results["reference_materialization"] = reference_materialization
+
+        reference_endpoint = SGLangEndpoint(
+            model_path=reference_checkpoint_dir,
+            worker_port=spec.port,
+            tp=spec.tp_size,
+            extra_server_args=server_args_for_native_load(
+                spec.server_args,
+                final_version,
+            ),
+            health_timeout=2 * 60 * 60,
+            health_poll_interval=10,
+            log_requests_level=-1,
+        )
+        clean_load_started = time.perf_counter()
+        reference_endpoint.start()
+        results["reference_load_s"] = round(
+            time.perf_counter() - clean_load_started,
+            6,
+        )
+        with httpx.Client(timeout=None, trust_env=False) as client:
+            reference_checksums = _weight_checksums(client, url)
+        if reference_checksums["ranks"] != final_live_checksums["ranks"]:
+            raise RuntimeError(
+                "clean native load rank checksums differ from live weights"
+            )
+        if (
+            reference_checksums["per_engine_checksum"]
+            != final_live_checksums["per_engine_checksum"]
+        ):
+            raise RuntimeError(
+                "clean native load engine checksum differs from live weights"
+            )
+        reference_fingerprint = _generate(
+            url,
+            fingerprint=True,
+            fingerprint_logprobs=fingerprint_logprobs,
+        )
+        fingerprint_comparison = _assert_repeat_consistency(
+            [final_live_fingerprint, reference_fingerprint]
+        )
+        results["clean_native_load"] = {
+            "checkpoint_dir": reference_checkpoint_dir,
+            "weight_version": reference_fingerprint["weight_version"],
+            "per_engine_checksum": reference_checksums["per_engine_checksum"],
+            "matches_live_runtime": True,
+            "fingerprint_comparison": fingerprint_comparison,
+            **_fingerprint_hashes(reference_fingerprint),
         }
+
         results["status"] = "passed"
         _print_profile_summary(results)
         print(json.dumps(results, indent=2), flush=True)
@@ -854,7 +1094,13 @@ def run_delta_weight_update(
         print(json.dumps(results, indent=2), flush=True)
         raise
     finally:
-        try:
-            endpoint.stop()
-        except Exception as exc:  # noqa: BLE001 - preserve the benchmark result
-            print(f"warning: failed to stop SGLang cleanly: {exc}", flush=True)
+        for running_endpoint in (
+            reference_endpoint,
+            endpoint if endpoint_running else None,
+        ):
+            if running_endpoint is None:
+                continue
+            try:
+                running_endpoint.stop()
+            except Exception as exc:  # noqa: BLE001 - preserve benchmark result
+                print(f"warning: failed to stop SGLang cleanly: {exc}", flush=True)
