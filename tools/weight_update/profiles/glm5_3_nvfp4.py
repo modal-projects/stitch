@@ -18,7 +18,7 @@ from cookbook.common.constants import (
 )
 from cookbook.common.serving_image import DEFAULT_SGLANG_RUNTIME, build_serving_image
 from cookbook.miles_disagg.configs import glm5_3_nvfp4 as model
-from tools.profiling._delta_weight_update import (
+from tools.weight_update.benchmark import (
     WeightUpdateSpec,
     modal_runtime_label,
     parse_canonical_storage,
@@ -26,7 +26,7 @@ from tools.profiling._delta_weight_update import (
     parse_update_mode,
     run_delta_weight_update,
 )
-from tools.profiling._synthetic_delta import (
+from tools.weight_update.synthetic_delta import (
     SyntheticDeltaSpec,
     prepare_standard_delta,
     synthetic_delta_profile_id,
@@ -73,7 +73,7 @@ image = build_serving_image(
     extra_env=model.SGLANG_SERVER_ENV,
     runtime=getattr(model, "SGLANG_RUNTIME", DEFAULT_SGLANG_RUNTIME),
 ).add_local_dir(
-    str(Path(__file__).resolve().parents[1]),
+    str(Path(__file__).resolve().parents[2]),
     remote_path="/root/tools",
     ignore=["**/__pycache__", "**/*.pyc"],
 )
@@ -131,7 +131,7 @@ def benchmark(
             tp_size=model.ROLLOUT_GPUS_PER_ENGINE,
         ),
         source_dir=DELTA_SOURCE_DIR,
-        target_version=1,
+        target_versions=(1,),
         update_mode=parse_update_mode(update_mode),
         canonical_storage=parse_canonical_storage(canonical_storage),
         runtime=runtime,

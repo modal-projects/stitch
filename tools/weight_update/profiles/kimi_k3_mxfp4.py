@@ -1,14 +1,14 @@
-"""Download Kimi K3 and validate one complete MXFP4 delta update on Modal.
+"""Download Kimi K3 and validate a complete MXFP4 delta lineage on Modal.
 
 Disk destination:
 
     uv run --extra modal modal run -d \
-      tools/profiling/kimi_k3_mxfp4_delta_weight_update.py
+      tools/weight_update/profiles/kimi_k3_mxfp4.py
 
 CPU destination with the canonical checkpoint on local storage:
 
     uv run --extra modal modal run -d \
-      tools/profiling/kimi_k3_mxfp4_delta_weight_update.py \
+      tools/weight_update/profiles/kimi_k3_mxfp4.py \
       --update-mode cpu --canonical-storage disk
 
 ``--canonical-storage`` applies only with ``--update-mode cpu``; use
@@ -29,21 +29,23 @@ from cookbook.common.hf_download import (
     download_cached_safetensors_file,
     local_cached_snapshot,
 )
-from cookbook.common.serving_image import build_serving_image
-from tools.profiling._delta_weight_update import (
+from cookbook.common.serving_image import DEFAULT_SGLANG_RUNTIME, build_serving_image
+from tools.weight_update.benchmark import (
     WeightUpdateSpec,
     modal_runtime_label,
     parse_canonical_storage,
     parse_update_destination,
     parse_update_mode,
     run_delta_weight_update,
+    run_post_mutation_failure,
 )
-from tools.profiling._hf_checkpoint import (
+from tools.weight_update.hf import (
     download_snapshot,
     materialize_checkpoint_view,
 )
-from tools.profiling._synthetic_delta import (
+from tools.weight_update.synthetic_delta import (
     SyntheticDeltaSpec,
+    append_reversal_delta,
     prepare_standard_delta,
     synthetic_delta_profile_id,
 )
@@ -60,10 +62,10 @@ SGLANG_SERVER_ARGS = {
     "--load-format": "fastsafetensors",
     "--model-loader-extra-config": '{"enable_gds":false}',
     "--weight-loader-drop-cache-after-load": "",
-    "--enable-cpu-weight-cache": "",
-    "--cpu-weight-cache-max-compile-group-gb": "16",
-    "--cpu-weight-cache-canonical-checkpoint-dir": "/local-checkpoint/canonical",
+    "--weight-update-max-compile-group-gb": "16",
     "--dist-timeout": "3600",
+    # Initializing either CPU destination moves a 1.56 TB canonical checkpoint.
+    "--watchdog-timeout": "3600",
     "--context-length": "1048576",
     "--max-running-requests": "32",
     "--cuda-graph-max-bs-decode": "32",
@@ -98,7 +100,7 @@ LOCAL_TARGET_CHECKPOINT_DIR = "/local-checkpoint/kimi-k3-mxfp4/target"
 CPU_CACHE_GROUP_GB = "16"
 CANONICAL_CHECKPOINT_DIR = "/local-checkpoint/kimi-k3-mxfp4/canonical"
 SGLANG_CACHE_PATH = "/root/.cache/sglang"
-_REPO_ROOT = Path(__file__).resolve().parents[2] if modal.is_local() else Path("/root")
+_REPO_ROOT = Path(__file__).resolve().parents[3] if modal.is_local() else Path("/root")
 
 app = modal.App(APP_NAME)
 hf_cache_volume = modal.Volume.from_name(
@@ -141,8 +143,9 @@ serving_image = build_serving_image(
     hf_cache_path=HF_CACHE_PATH,
     experiment=EXPERIMENT,
     extra_env=None,
+    runtime=DEFAULT_SGLANG_RUNTIME,
 ).add_local_dir(
-    str(Path(__file__).resolve().parents[1]),
+    str(Path(__file__).resolve().parents[2]),
     remote_path="/root/tools",
     ignore=["**/__pycache__", "**/*.pyc"],
 )
@@ -187,7 +190,7 @@ def download_model() -> str:
     timeout=6 * 60 * 60,
 )
 def prepare_delta() -> dict:
-    return prepare_standard_delta(
+    lineage = prepare_standard_delta(
         local_cached_snapshot(
             ROLLOUT_MODEL,
             ROLLOUT_REVISION,
@@ -196,6 +199,12 @@ def prepare_delta() -> dict:
         spec=DELTA_SPEC,
         commit=delta_volume.commit,
     )
+    reversal = append_reversal_delta(
+        DELTA_SOURCE_DIR,
+        reverse_version=4,
+        commit=delta_volume.commit,
+    )
+    return {"lineage": lineage, "reversal": reversal}
 
 
 @app.function(
@@ -216,6 +225,7 @@ def benchmark(
     canonical_storage: str | None,
     runtime: str,
     sample_id: str,
+    post_mutation_failure_only: bool = False,
 ) -> dict:
     materialize_checkpoint_view(
         local_cached_snapshot(
@@ -224,24 +234,30 @@ def benchmark(
         ),
         BASE_CHECKPOINT_DIR,
     )
-    server_args = dict(SGLANG_SERVER_ARGS)
-    server_args["--cpu-weight-cache-max-compile-group-gb"] = CPU_CACHE_GROUP_GB
-    return run_delta_weight_update(
-        WeightUpdateSpec(
-            model_name="Kimi K3 MXFP4",
-            base_checkpoint_dir=BASE_CHECKPOINT_DIR,
-            local_target_checkpoint_dir=LOCAL_TARGET_CHECKPOINT_DIR,
-            local_canonical_checkpoint_dir=CANONICAL_CHECKPOINT_DIR,
-            server_args=server_args,
-            tp_size=ROLLOUT_GPUS,
-        ),
+    spec = WeightUpdateSpec(
+        model_name="Kimi K3 MXFP4",
+        base_checkpoint_dir=BASE_CHECKPOINT_DIR,
+        local_target_checkpoint_dir=LOCAL_TARGET_CHECKPOINT_DIR,
+        local_canonical_checkpoint_dir=CANONICAL_CHECKPOINT_DIR,
+        server_args=SGLANG_SERVER_ARGS,
+        tp_size=ROLLOUT_GPUS,
+        max_compile_group_gb=int(CPU_CACHE_GROUP_GB),
+    )
+    common = dict(
         source_dir=DELTA_SOURCE_DIR,
-        target_version=1,
         update_mode=parse_update_mode(update_mode),
         canonical_storage=parse_canonical_storage(canonical_storage),
         runtime=runtime,
         sample_id=sample_id,
     )
+    if post_mutation_failure_only:
+        return run_post_mutation_failure(
+            spec,
+            served_version=0,
+            failure_version=1,
+            **common,
+        )
+    return run_delta_weight_update(spec, target_versions=(1, 3, 4), **common)
 
 
 @app.local_entrypoint()
@@ -250,6 +266,7 @@ def main(
     canonical_storage: str | None = None,
     sample_id: str = "1",
     skip_preparation: bool = False,
+    post_mutation_failure_only: bool = False,
 ) -> None:
     parsed_mode, parsed_storage = parse_update_destination(
         update_mode,
@@ -263,4 +280,5 @@ def main(
         parsed_storage,
         modal_runtime_label(),
         sample_id,
+        post_mutation_failure_only,
     )

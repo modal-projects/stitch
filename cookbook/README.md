@@ -367,7 +367,7 @@ then run with `--update-mode disk|cpu`. CPU runs also select
 
 ```bash
 uv run --extra modal modal run -d \
-  tools/profiling/glm45_air_fp8_delta_weight_update.py \
+  tools/weight_update/profiles/glm45_air_fp8.py \
   --update-mode cpu \
   --canonical-storage memory
 ```
@@ -384,7 +384,7 @@ vision tower and projector are excluded.
 
 ```bash
 uv run --extra modal modal run -d \
-  tools/profiling/kimi_k3_mxfp4_delta_weight_update.py \
+  tools/weight_update/profiles/kimi_k3_mxfp4.py \
   --update-mode cpu \
   --canonical-storage disk
 ```

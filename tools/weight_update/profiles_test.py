@@ -1,16 +1,11 @@
 from __future__ import annotations
 
-import importlib
 from pathlib import PurePosixPath
 
-import pytest
+from tools.weight_update.profiles import glm5_3_nvfp4 as profiler
 
 
-@pytest.mark.parametrize("model_name", ["glm5_2_nvfp4", "glm5_3_nvfp4"])
-def test_local_draft_checkpoint_is_mounted(model_name):
-    profiler = importlib.import_module(
-        f"tools.profiling.{model_name}_delta_weight_update"
-    )
+def test_local_draft_checkpoint_is_mounted():
     draft = PurePosixPath(
         profiler.model.SGLANG_SERVER_ARGS["--speculative-draft-model-path"]
     )

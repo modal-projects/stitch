@@ -4,7 +4,7 @@ The entrypoint downloads the pinned serving checkpoint, prepares a standardized
 element-wise synthetic delta, and runs one verified update.
 
     MODAL_FUNCTION_RUNTIME=runc uv run --extra modal modal run -d \
-      tools/profiling/glm45_air_fp8_delta_weight_update.py \
+      tools/weight_update/profiles/glm45_air_fp8.py \
       --update-mode cpu --canonical-storage memory
 """
 
@@ -22,7 +22,7 @@ from cookbook.common.hf_download import (
     download_local_snapshot,
 )
 from cookbook.common.serving_image import build_serving_image
-from tools.profiling._delta_weight_update import (
+from tools.weight_update.benchmark import (
     WeightUpdateSpec,
     modal_runtime_label,
     parse_canonical_storage,
@@ -30,7 +30,7 @@ from tools.profiling._delta_weight_update import (
     parse_update_mode,
     run_delta_weight_update,
 )
-from tools.profiling._synthetic_delta import (
+from tools.weight_update.synthetic_delta import (
     SyntheticDeltaSpec,
     prepare_standard_delta,
     synthetic_delta_profile_id,
@@ -93,7 +93,7 @@ serving_image = build_serving_image(
     hf_cache_path="/root/.cache/huggingface",
     experiment=EXPERIMENT,
 ).add_local_dir(
-    str(Path(__file__).resolve().parents[1]),
+    str(Path(__file__).resolve().parents[2]),
     remote_path="/root/tools",
     ignore=["**/__pycache__", "**/*.pyc"],
 )
@@ -176,7 +176,7 @@ def benchmark(
             server_args=SGLANG_SERVER_ARGS,
         ),
         source_dir=DELTA_SOURCE_DIR,
-        target_version=1,
+        target_versions=(1,),
         update_mode=parse_update_mode(update_mode),
         canonical_storage=parse_canonical_storage(canonical_storage),
         runtime=runtime,

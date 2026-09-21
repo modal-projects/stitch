@@ -1,11 +1,12 @@
-"""Profile one Kimi K2.6 NVFP4 delta weight update on Modal.
+"""Profile a verified GLM-5.3-Flash FP8 delta lineage on eight B300s.
 
-The entrypoint downloads NVIDIA's pinned serving checkpoint, builds a
-standardized element-wise synthetic delta, and runs one verified update.
+The entrypoint downloads the pinned public checkpoint, constructs one
+deterministic element-wise synthetic delta lineage, and verifies repeated and
+folded updates.
 
     MODAL_FUNCTION_RUNTIME=runc uv run --extra modal modal run -d \
-      tools/profiling/kimi_k2_6_nvfp4_delta_weight_update.py \
-      --update-mode cpu --canonical-storage disk
+      tools/weight_update/profiles/glm5_3_flash_fp8.py \
+      --update-mode cpu --canonical-storage memory
 """
 
 from __future__ import annotations
@@ -14,86 +15,98 @@ from pathlib import Path
 
 import modal
 
-from cookbook.common.constants import HF_CACHE_PATH
 from cookbook.common.hf_download import (
     DOWNLOAD_MAX_CONTAINERS,
     CachedRepoFile,
     download_cached_safetensors_file,
     local_cached_snapshot,
 )
-from cookbook.common.serving_image import build_serving_image
-from tools.profiling._delta_weight_update import (
+from cookbook.common.serving_image import DEFAULT_SGLANG_RUNTIME, build_serving_image
+from tools.weight_update.benchmark import (
     WeightUpdateSpec,
     modal_runtime_label,
     parse_canonical_storage,
     parse_update_destination,
     parse_update_mode,
     run_delta_weight_update,
+    run_post_mutation_failure,
 )
-from tools.profiling._hf_checkpoint import (
+from tools.weight_update.hf import (
     download_snapshot,
     materialize_checkpoint_view,
 )
-from tools.profiling._synthetic_delta import (
+from tools.weight_update.synthetic_delta import (
     SyntheticDeltaSpec,
+    append_reversal_delta,
     prepare_standard_delta,
     synthetic_delta_profile_id,
 )
 
-APP_NAME = "profile-kimi-k2-6-nvfp4-delta-weight-update"
-EXPERIMENT = "kimi_k2_6_nvfp4"
-ROLLOUT_MODEL = "nvidia/Kimi-K2.6-NVFP4"
-ROLLOUT_REVISION = "2fd3a800dedd098b8327eb49e93ebc75f85da19f"
+APP_NAME = "profile-glm5-3-flash-fp8-delta-weight-update"
+EXPERIMENT = "glm5_3_flash_fp8"
+ROLLOUT_MODEL = "zai-org/GLM-5.3-Flash"
+ROLLOUT_REVISION = "eb9eb208eb0d988989d07a6a12d0fdeb5f52574a"
+ROLLOUT_GPUS = 8
+HF_CACHE_PATH = "/root/.cache/huggingface"
 DELTA_MOUNT = "/synthetic-delta"
 DELTA_SPEC = SyntheticDeltaSpec(
-    checkpoint_format="nvfp4",
-    quantized_value_density=0.003,
+    checkpoint_format="fp8",
+    quantized_value_density=0.006,
     high_precision_value_density=0.01,
-    # Text-only RL leaves the vision encoder and projector fixed.
-    immutable_prefixes=("vision_tower.", "multi_modal_projector."),
+    # Text-policy training leaves the vision tower and native MTP layer fixed.
+    immutable_prefixes=(
+        "model.visual.",
+        "model.language_model.layers.45.",
+    ),
 )
-DELTA_ID = f"kimi-k2-6/{ROLLOUT_REVISION}/{synthetic_delta_profile_id(DELTA_SPEC)}"
+DELTA_ID = f"glm5-3-flash/{ROLLOUT_REVISION}/{synthetic_delta_profile_id(DELTA_SPEC)}"
 DELTA_SOURCE_DIR = f"{DELTA_MOUNT}/{DELTA_ID}"
-LOCAL_CHECKPOINT_ROOT = "/local-checkpoint/kimi-k2-6-nvfp4"
-BASE_CHECKPOINT_DIR = f"{LOCAL_CHECKPOINT_ROOT}/base"
-LOCAL_TARGET_CHECKPOINT_DIR = f"{LOCAL_CHECKPOINT_ROOT}/target"
-LOCAL_CANONICAL_CHECKPOINT_DIR = f"{LOCAL_CHECKPOINT_ROOT}/canonical"
+BASE_CHECKPOINT_DIR = "/local-checkpoint/glm5-3-flash-fp8/base"
+LOCAL_TARGET_CHECKPOINT_DIR = "/local-checkpoint/glm5-3-flash-fp8/target"
+LOCAL_CANONICAL_CHECKPOINT_DIR = "/local-checkpoint/glm5-3-flash-fp8/canonical"
 SGLANG_CACHE_PATH = "/root/.cache/sglang"
+_REPO_ROOT = Path(__file__).resolve().parents[3] if modal.is_local() else Path("/root")
 
 SGLANG_SERVER_ARGS = {
     "--served-model-name": ROLLOUT_MODEL,
     "--load-format": "fastsafetensors",
     "--model-loader-extra-config": '{"enable_gds":false}',
     "--weight-loader-drop-cache-after-load": "",
-    "--trust-remote-code": "",
-    "--tool-call-parser": "kimi_k2",
-    "--reasoning-parser": "kimi_k2",
+    "--dtype": "auto",
+    "--reasoning-parser": "glm45",
+    "--tool-call-parser": "glm47",
     "--dist-timeout": "3600",
     "--watchdog-timeout": "3600",
-    "--kv-cache-dtype": "fp8_e4m3",
-    "--attention-backend": "tokenspeed_mla",
     "--context-length": "32768",
+    "--dsa-prefill-backend": "trtllm",
+    "--dsa-decode-backend": "trtllm",
+    "--kv-cache-dtype": "fp8_e4m3",
+    "--moe-runner-backend": "flashinfer_trtllm",
     "--mem-fraction-static": "0.80",
     "--chunked-prefill-size": "16384",
-    "--schedule-conservativeness": "0.5",
-    "--schedule-policy": "lpm",
     "--max-running-requests": "32",
     "--decode-log-interval": "100",
-    "--cuda-graph-max-bs-decode": "32",
     "--random-seed": "42",
     "--skip-server-warmup": "",
 }
 
 app = modal.App(APP_NAME)
 hf_cache_volume = modal.Volume.from_name(
-    "huggingface-cache", create_if_missing=True, version=2
+    "huggingface-cache",
+    create_if_missing=True,
+    version=2,
 )
 delta_volume = modal.Volume.from_name(
-    "stitch-synthetic-deltas", create_if_missing=True, version=2
+    "stitch-synthetic-deltas",
+    create_if_missing=True,
+    version=2,
 )
 sglang_cache_volume = modal.Volume.from_name(
-    "sglang-cache", create_if_missing=True, version=2
+    "sglang-cache",
+    create_if_missing=True,
+    version=2,
 )
+
 download_image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install("huggingface_hub[hf_transfer]")
@@ -104,21 +117,22 @@ download_image = (
         }
     )
     .add_local_dir(
-        str(Path(__file__).resolve().parents[1]),
-        remote_path="/root/tools",
+        str(_REPO_ROOT / "cookbook"),
+        remote_path="/root/cookbook",
         ignore=["**/__pycache__", "**/*.pyc"],
     )
     .add_local_dir(
-        str(Path(__file__).resolve().parents[2] / "cookbook"),
-        remote_path="/root/cookbook",
+        str(_REPO_ROOT / "tools"),
+        remote_path="/root/tools",
         ignore=["**/__pycache__", "**/*.pyc"],
     )
 )
 serving_image = build_serving_image(
-    hf_cache_path=str(HF_CACHE_PATH),
+    hf_cache_path=HF_CACHE_PATH,
     experiment=EXPERIMENT,
+    runtime=DEFAULT_SGLANG_RUNTIME,
 ).add_local_dir(
-    str(Path(__file__).resolve().parents[1]),
+    str(_REPO_ROOT / "tools"),
     remote_path="/root/tools",
     ignore=["**/__pycache__", "**/*.pyc"],
 )
@@ -129,7 +143,7 @@ serving_image = build_serving_image(
     cpu=4,
     memory=4096,
     max_containers=DOWNLOAD_MAX_CONTAINERS,
-    volumes={str(HF_CACHE_PATH): hf_cache_volume},
+    volumes={HF_CACHE_PATH: hf_cache_volume},
     secrets=[modal.Secret.from_name("huggingface-secret")],
     timeout=6 * 60 * 60,
 )
@@ -139,7 +153,7 @@ def _download_model_file(repo_file: CachedRepoFile) -> str:
 
 @app.function(
     image=download_image,
-    volumes={str(HF_CACHE_PATH): hf_cache_volume},
+    volumes={HF_CACHE_PATH: hf_cache_volume},
     secrets=[modal.Secret.from_name("huggingface-secret")],
     timeout=6 * 60 * 60,
 )
@@ -157,59 +171,73 @@ def download_model() -> str:
     cpu=64,
     memory=(64 * 1024, 512 * 1024),
     volumes={
-        str(HF_CACHE_PATH): hf_cache_volume.read_only(),
+        HF_CACHE_PATH: hf_cache_volume.read_only(),
         DELTA_MOUNT: delta_volume,
     },
     timeout=6 * 60 * 60,
 )
 def prepare_delta() -> dict:
-    return prepare_standard_delta(
+    lineage = prepare_standard_delta(
         local_cached_snapshot(ROLLOUT_MODEL, ROLLOUT_REVISION),
         DELTA_SOURCE_DIR,
         spec=DELTA_SPEC,
         commit=delta_volume.commit,
     )
+    reversal = append_reversal_delta(
+        DELTA_SOURCE_DIR,
+        reverse_version=4,
+        commit=delta_volume.commit,
+    )
+    return {"lineage": lineage, "reversal": reversal}
 
 
 @app.function(
     image=serving_image,
-    gpu="B300:4",
+    gpu=f"B300:{ROLLOUT_GPUS}",
     cpu=64,
     memory=(1024 * 1024, 3 * 1024 * 1024),
-    # Disk mode retains both the immutable base and a complete mutable target.
-    ephemeral_disk=1_572_864,
+    ephemeral_disk=1024 * 1024,
     volumes={
-        str(HF_CACHE_PATH): hf_cache_volume.read_only(),
+        HF_CACHE_PATH: hf_cache_volume.read_only(),
         DELTA_MOUNT: delta_volume.read_only(),
         SGLANG_CACHE_PATH: sglang_cache_volume,
     },
-    timeout=4 * 60 * 60,
+    timeout=6 * 60 * 60,
 )
 def benchmark(
     update_mode: str,
     canonical_storage: str | None,
     runtime: str,
     sample_id: str,
+    post_mutation_failure_only: bool = False,
 ) -> dict:
     materialize_checkpoint_view(
         local_cached_snapshot(ROLLOUT_MODEL, ROLLOUT_REVISION),
         BASE_CHECKPOINT_DIR,
     )
-    return run_delta_weight_update(
-        WeightUpdateSpec(
-            model_name="Kimi K2.6 NVFP4",
-            base_checkpoint_dir=BASE_CHECKPOINT_DIR,
-            local_target_checkpoint_dir=LOCAL_TARGET_CHECKPOINT_DIR,
-            local_canonical_checkpoint_dir=LOCAL_CANONICAL_CHECKPOINT_DIR,
-            server_args=SGLANG_SERVER_ARGS,
-        ),
+    spec = WeightUpdateSpec(
+        model_name="GLM-5.3-Flash FP8",
+        base_checkpoint_dir=BASE_CHECKPOINT_DIR,
+        local_target_checkpoint_dir=LOCAL_TARGET_CHECKPOINT_DIR,
+        local_canonical_checkpoint_dir=LOCAL_CANONICAL_CHECKPOINT_DIR,
+        server_args=SGLANG_SERVER_ARGS,
+        tp_size=ROLLOUT_GPUS,
+    )
+    common = dict(
         source_dir=DELTA_SOURCE_DIR,
-        target_version=1,
         update_mode=parse_update_mode(update_mode),
         canonical_storage=parse_canonical_storage(canonical_storage),
         runtime=runtime,
         sample_id=sample_id,
     )
+    if post_mutation_failure_only:
+        return run_post_mutation_failure(
+            spec,
+            served_version=4,
+            failure_version=5,
+            **common,
+        )
+    return run_delta_weight_update(spec, target_versions=(1, 3, 4), **common)
 
 
 @app.local_entrypoint()
@@ -218,6 +246,7 @@ def main(
     canonical_storage: str | None = None,
     sample_id: str = "1",
     skip_preparation: bool = False,
+    post_mutation_failure_only: bool = False,
 ) -> None:
     mode, storage = parse_update_destination(update_mode, canonical_storage)
     if not skip_preparation:
@@ -228,4 +257,5 @@ def main(
         storage,
         modal_runtime_label(),
         sample_id,
+        post_mutation_failure_only,
     )

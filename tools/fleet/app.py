@@ -37,7 +37,7 @@ def poll(
     duration: float = 3600.0,
     tag: str = "run",
 ) -> None:
-    from tools.probes import poller
+    from tools.fleet import poller
 
     out = f"{RESULTS_ROOT}/{tag}/server_info.jsonl"
     asyncio.run(
@@ -63,7 +63,7 @@ def traffic(
     tag: str = "run",
 ) -> None:
     from stitch.pools.modal_flash import ModalFlashPool
-    from tools.probes import traffic as traffic_mod
+    from tools.fleet import traffic as traffic_mod
 
     gateway = ModalFlashPool(pool_app, pool_cls).gateway_url()
     out = f"{RESULTS_ROOT}/{tag}/traffic-{shape}.jsonl"
