@@ -62,18 +62,39 @@ def test_serving_tensor_parallelism_must_match_gpu_request(
         validate_serving_config(serving_recipe, gpus_per_engine=gpus_per_engine)
 
 
-def test_cpu_updates_require_the_server_weight_cache(serving_recipe):
-    del serving_recipe.SGLANG_SERVER_ARGS["--enable-cpu-weight-cache"]
+@pytest.mark.parametrize(
+    "argument",
+    [
+        "--weight-update-staging",
+        "--weight-update-local-checkpoint-dir",
+        "--weight-version",
+    ],
+)
+def test_serving_rejects_stitch_managed_server_arguments(serving_recipe, argument):
+    serving_recipe.SGLANG_SERVER_ARGS[argument] = "value"
 
-    with pytest.raises(ValueError, match="--enable-cpu-weight-cache"):
+    with pytest.raises(ValueError, match="managed server arguments"):
         validate_serving_config(serving_recipe, gpus_per_engine=8)
 
 
-def test_disk_updates_require_the_server_weight_cache_to_be_disabled(serving_recipe):
+def test_serving_requires_an_explicit_update_mode(serving_recipe):
+    del serving_recipe.SGLANG_DELTA_UPDATE_MODE
+
+    with pytest.raises(ValueError, match="SGLANG_DELTA_UPDATE_MODE"):
+        validate_serving_config(serving_recipe, gpus_per_engine=8)
+
+
+@pytest.mark.parametrize("path", ["", 1])
+def test_serving_rejects_invalid_local_checkpoint_path(serving_recipe, path):
+    serving_recipe.LOCAL_CHECKPOINT_PATH = path
+
+    with pytest.raises(ValueError, match="LOCAL_CHECKPOINT_PATH"):
+        validate_serving_config(serving_recipe, gpus_per_engine=8)
+
+
+def test_disk_updates_require_a_local_checkpoint(serving_recipe):
     serving_recipe.SGLANG_DELTA_UPDATE_MODE = "disk"
+    serving_recipe.LOCAL_CHECKPOINT_PATH = None
 
-    with pytest.raises(ValueError, match="--enable-cpu-weight-cache"):
+    with pytest.raises(ValueError, match="disk.*LOCAL_CHECKPOINT_PATH"):
         validate_serving_config(serving_recipe, gpus_per_engine=8)
-
-    del serving_recipe.SGLANG_SERVER_ARGS["--enable-cpu-weight-cache"]
-    validate_serving_config(serving_recipe, gpus_per_engine=8)

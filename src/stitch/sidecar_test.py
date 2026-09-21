@@ -15,7 +15,6 @@ _FACTORY = "stitch.sidecar_test:_recording_store_factory"
 
 _BASE = dict(
     bulletin_root="/cache/run-a",
-    base_checkpoint_dir="/model",
     run_id="run-a",
     # Opaque to core's config: only ``main`` imports and calls it.
     store_factory=_FACTORY,
@@ -82,7 +81,6 @@ _FULL = SidecarConfig(
     upstream="http://127.0.0.1:18001",
     local_checkpoint_dir="/cache/weights",
     delta_update_mode="disk",
-    disk_load_format="safetensors",
     store_options={
         "backend": "s3",
         "s3_root": "s3://bucket/experiment/run-a",
@@ -109,8 +107,6 @@ def test_from_argv_fills_unflagged_fields_with_defaults() -> None:
         [
             "--bulletin-root",
             "/cache/run-a",
-            "--base-checkpoint-dir",
-            "/model",
             "--delta-update-mode",
             "cpu",
             "--store-factory",
@@ -155,11 +151,10 @@ def test_run_builds_engine_and_serves(monkeypatch: pytest.MonkeyPatch) -> None:
 
     def _engine(
         base_url: str,
-        base_checkpoint_dir: str,
         local_checkpoint_dir: str | None = None,
         **kwargs: Any,
     ) -> object:
-        calls["engine"] = (base_url, base_checkpoint_dir, local_checkpoint_dir, kwargs)
+        calls["engine"] = (base_url, local_checkpoint_dir, kwargs)
         return engine_out
 
     def _serve(store: Any, engine: Any, **kwargs: Any) -> None:
@@ -185,11 +180,9 @@ def test_run_builds_engine_and_serves(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert calls["engine"] == (
         "http://127.0.0.1:8001",
-        "/model",
         "/cache/weights",
         {
             "delta_update_mode": "disk",
-            "disk_load_format": "auto",
             "health_timeout": 30.0,
         },
     )

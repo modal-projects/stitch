@@ -39,7 +39,7 @@ def test_rl_serving_contract(monkeypatch) -> None:
     assert "--speculative-algorithm" not in app.SGLANG_SERVER_ARGS
     assert app.draft_volume is None
     assert app.exp.SGLANG_DELTA_UPDATE_MODE == "cpu"
-    assert "--enable-cpu-weight-cache" in app.SGLANG_SERVER_ARGS
+    assert "--weight-update-staging" not in app.SGLANG_SERVER_ARGS
     assert app.exp.SIDECAR_COMMIT_MODE == "in_place"
     assert not app.exp.SIDECAR_FLUSH_CACHE_ON_COMMIT
 

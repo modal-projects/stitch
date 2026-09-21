@@ -35,7 +35,6 @@ SGLANG_SERVER_ARGS = {
     "--tp": "1",
     "--dtype": "bfloat16",
     "--load-format": "safetensors",
-    "--enable-cpu-weight-cache": "",
     "--weight-loader-drop-cache-after-load": "",
     "--reasoning-parser": "qwen3",
     "--context-length": "8192",

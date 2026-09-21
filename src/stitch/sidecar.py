@@ -51,10 +51,8 @@ class SidecarConfig:
     port: int = 8000
     upstream: str = "http://127.0.0.1:8001"
     bulletin_root: str
-    base_checkpoint_dir: str
     local_checkpoint_dir: str | None = None
     delta_update_mode: DeltaUpdateMode
-    disk_load_format: str = "auto"
     store_factory: str
     store_options: dict[str, str] = field(default_factory=dict)
     commit_mode: CommitMode = "in_place"
@@ -103,12 +101,8 @@ class SidecarConfig:
             self.upstream,
             "--bulletin-root",
             self.bulletin_root,
-            "--base-checkpoint-dir",
-            self.base_checkpoint_dir,
             "--delta-update-mode",
             self.delta_update_mode,
-            "--disk-load-format",
-            self.disk_load_format,
             "--store-factory",
             self.store_factory,
             "--commit-mode",
@@ -156,10 +150,8 @@ class SidecarConfig:
             port=args.port,
             upstream=args.upstream,
             bulletin_root=args.bulletin_root,
-            base_checkpoint_dir=args.base_checkpoint_dir,
             local_checkpoint_dir=args.local_checkpoint_dir,
             delta_update_mode=args.delta_update_mode,
-            disk_load_format=args.disk_load_format,
             store_factory=args.store_factory,
             store_options=store_options,
             commit_mode=args.commit_mode,
@@ -181,9 +173,7 @@ def _sidecar_parser() -> argparse.ArgumentParser:
     p.add_argument("--port", type=int, default=8000)
     p.add_argument("--upstream", default="http://127.0.0.1:8001")
     p.add_argument("--bulletin-root", required=True)
-    p.add_argument("--base-checkpoint-dir", required=True)
     p.add_argument("--delta-update-mode", choices=["disk", "cpu"], required=True)
-    p.add_argument("--disk-load-format", default="auto")
     p.add_argument("--store-factory", required=True, metavar="MODULE:CALLABLE")
     p.add_argument(
         "--store-opt",
@@ -229,10 +219,8 @@ def run(config: SidecarConfig, store: Store) -> None:
     deployment constructs its own instance instead of going through argv."""
     engine = SGLangEngine(
         config.upstream,
-        config.base_checkpoint_dir,
         config.local_checkpoint_dir,
         delta_update_mode=config.delta_update_mode,
-        disk_load_format=config.disk_load_format,
         health_timeout=config.engine_health_timeout,
     )
     serve(

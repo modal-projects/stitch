@@ -92,8 +92,6 @@ SGLANG_SERVER_ARGS = {
     "--tp": "4",
     "--load-format": "fastsafetensors",
     "--model-loader-extra-config": '{"enable_gds":false}',
-    "--enable-cpu-weight-cache": "",
-    "--cpu-weight-cache-max-compile-group-gb": "8",
     "--weight-loader-drop-cache-after-load": "",
     "--dist-timeout": "3600",
     "--watchdog-timeout": "3600",

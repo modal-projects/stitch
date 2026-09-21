@@ -61,6 +61,7 @@ class FakeEngine(Engine):
         self.calls: list[str] = []
         self.staged: list[VersionRef] = []
         self.committed: list[VersionRef] = []
+        self.commit_flushes: list[bool] = []
         self.initialized_versions: list[int] = []
 
     async def stage(self, manifest: VersionManifest, source_dir: str) -> None:
@@ -68,12 +69,10 @@ class FakeEngine(Engine):
         self.calls.append(f"stage:{manifest.ref.version}")
 
     async def commit(
-        self,
-        manifest: VersionManifest,
-        *,
-        flush_cache: bool = False,
+        self, manifest: VersionManifest, *, flush_cache: bool = False
     ) -> None:
         self.committed.append(manifest.ref)
+        self.commit_flushes.append(flush_cache)
         self.calls.append(f"commit:{manifest.ref.version}")
 
     async def flush_cache(self) -> None:
@@ -131,9 +130,23 @@ def test_fresh_reconcile() -> None:
         assert VersionRef("r1", 3) in engine.committed
         assert r.sync_state is SyncState.IDLE
         assert r.ready
-        assert (
-            "flush_cache" not in engine.calls
-        )  # flushing is not automatic; it rides commit(flush_cache=…)
+
+    _run(go())
+
+
+@pytest.mark.parametrize("flush_cache", [False, True])
+def test_reconcile_passes_commit_cache_policy(flush_cache: bool) -> None:
+    async def go() -> None:
+        engine = FakeEngine()
+        reconciler = _make_reconciler(
+            store=FakeStore(VersionRef("r1", 1), _full("r1", 1)),
+            engine=engine,
+            flush_cache_on_commit=flush_cache,
+        )
+
+        await reconciler.reconcile()
+
+        assert engine.commit_flushes == [flush_cache]
 
     _run(go())
 
@@ -304,7 +317,7 @@ def test_coalesce_does_not_cross_run_lineage() -> None:
     _run(go())
 
 
-def test_coalesce_observation_failure_commits_staged_target() -> None:
+def test_coalesce_observation_failure_commits_prepared_target() -> None:
     class FailSecondRefreshStore(FakeStore):
         def refresh(self) -> None:
             super().refresh()
@@ -462,9 +475,7 @@ def test_new_request_waits_for_in_place_commit() -> None:
         original_commit = engine.commit
 
         async def slow_commit(
-            manifest: VersionManifest,
-            *,
-            flush_cache: bool = False,
+            manifest: VersionManifest, *, flush_cache: bool = False
         ) -> None:
             commit_started.set()
             await finish_commit.wait()
@@ -743,10 +754,9 @@ def test_commit_failure_is_terminal() -> None:
         engine = FakeEngine()
 
         async def fail_commit(
-            _manifest: VersionManifest,
-            *,
-            flush_cache: bool = False,
+            _manifest: VersionManifest, *, flush_cache: bool = False
         ) -> None:
+            del flush_cache
             raise RuntimeError("partial weight copy")
 
         engine.commit = fail_commit  # type: ignore[method-assign]

@@ -46,12 +46,16 @@ def serve_startup(
 
     if delta_update_mode not in {"disk", "cpu"}:
         raise ValueError(f"unsupported delta update mode: {delta_update_mode!r}")
-    cpu_cache_enabled = "--enable-cpu-weight-cache" in sglang_args
-    if cpu_cache_enabled != (delta_update_mode == "cpu"):
-        raise ValueError(
-            "SGLANG_DELTA_UPDATE_MODE must be 'cpu' exactly when "
-            "--enable-cpu-weight-cache is present in SGLANG_SERVER_ARGS"
-        )
+    if delta_update_mode == "disk" and not local_checkpoint_dir:
+        raise ValueError("disk delta update mode requires local_checkpoint_dir")
+    sglang_args = {
+        **sglang_args,
+        "--weight-update-staging": delta_update_mode,
+        "--weight-version": str(boot_version),
+    }
+    sglang_args.pop("--weight-update-local-checkpoint-dir", None)
+    if local_checkpoint_dir is not None:
+        sglang_args["--weight-update-local-checkpoint-dir"] = local_checkpoint_dir
 
     replica.endpoint = SGLangEndpoint(
         model_path=model_name,
@@ -81,10 +85,8 @@ def serve_startup(
         sidecar_port=SIDECAR_PORT,
         sglang_port=SGLANG_PORT,
         bulletin_root=bulletin_root,
-        base_checkpoint_dir=model_name,
         local_checkpoint_dir=local_checkpoint_dir,
         delta_update_mode=delta_update_mode,
-        disk_load_format=str(sglang_args.get("--load-format", "auto")),
         store_backend=store_backend,
         volume_name=volume_name,
         s3_root=s3_root,

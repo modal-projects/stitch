@@ -1,10 +1,10 @@
 """The trainer-agnostic weight-sync SGLang image shared by every recipe.
 
 No trainer package is installed: delta application lives in the engine behind
-``/stage_weight_update``. Precision comes from the served checkpoint, not a
-``--quantization`` flag. The fork pin carries asynchronous weight staging, correct
-quantized weight loading, and the optional CPU delta cache. See ``SGLANG_FORK.md`` for
-the patch stack and how to re-port onto a newer SGLang release.
+``/prepare_weight_update`` and ``/commit_weight_update``. Precision comes from
+the served checkpoint, not a ``--quantization`` flag. The fork pin carries
+verified checkpoint materialization and disk or CPU staging. See
+``SGLANG_FORK.md`` for the patch stack and how to re-port it.
 """
 
 from __future__ import annotations
@@ -27,10 +27,10 @@ class SGLangRuntime:
 
 
 DEFAULT_SGLANG_RUNTIME = SGLangRuntime(
-    image="lmsysorg/sglang:v0.5.17",
+    image="lmsysorg/sglang:v0.5.20",
     repository="https://github.com/modal-projects/sglang.git",
-    branch="stitch-sglang-v0.5.17",
-    commit="d050d06437d96196fc68d5b4e5c246408790d537",
+    branch="stitch-sglang-v0.5.20",
+    commit="18df9cb22e5b7c0b3dc5303376bf61c4a4090db4",
 )
 
 _COOKBOOK_DIR = Path(__file__).resolve().parent.parent

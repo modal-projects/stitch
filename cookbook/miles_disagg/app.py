@@ -214,8 +214,8 @@ class Server:
             s3_root=store_config.get("stitch_s3_root"),
             s3_endpoint_url=store_config.get("stitch_s3_endpoint_url"),
             commit_mode=exp.SIDECAR_COMMIT_MODE,
-            run_id=RUN_ID,
             flush_cache_on_commit=exp.SIDECAR_FLUSH_CACHE_ON_COMMIT,
+            run_id=RUN_ID,
             startup_timeout=SERVER_STARTUP_TIMEOUT,
             engine_health_timeout=getattr(exp, "SIDECAR_ENGINE_HEALTH_TIMEOUT", 5.0),
         )

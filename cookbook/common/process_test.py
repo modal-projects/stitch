@@ -74,10 +74,8 @@ def test_start_sidecar_passes_s3_store_settings(monkeypatch) -> None:
         sidecar_port=8000,
         sglang_port=8001,
         bulletin_root="/cache/run-a",
-        base_checkpoint_dir="/model",
         local_checkpoint_dir=None,
         delta_update_mode="cpu",
-        disk_load_format="auto",
         store_backend=storage.S3,
         volume_name="",
         s3_root="s3://bucket/experiment/run-a",
@@ -85,6 +83,7 @@ def test_start_sidecar_passes_s3_store_settings(monkeypatch) -> None:
         run_id="run-a",
         boot_version=0,
         commit_mode="in_place",
+        flush_cache_on_commit=True,
         engine_health_timeout=30.0,
     )
 
@@ -97,6 +96,7 @@ def test_start_sidecar_passes_s3_store_settings(monkeypatch) -> None:
     # it back and drive core's factory seam exactly as ``stitch.sidecar.main``
     # does. The empty volume_name never reaches the flags.
     config = SidecarConfig.from_argv(command[3:])
+    assert config.flush_cache_on_commit
     assert config.engine_health_timeout == 30.0
     assert config.store_options == {
         "backend": storage.S3,

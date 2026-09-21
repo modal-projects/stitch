@@ -281,19 +281,20 @@ v25.
 
 Each recipe sets `SGLANG_DELTA_UPDATE_MODE`:
 
-| Mode | Prepared state | During engine pause | Use when |
+| Recipe settings | Prepared state | During engine pause | Use when |
 | --- | --- | --- | --- |
-| `disk` | Complete checkpoint on local storage | Reload from disk | Host RAM is constrained or the trainer publishes full checkpoints |
-| `cpu` | Rank-ready images in RAM; canonical checkpoint in RAM or on local storage | Copy the images to GPU | Updates are deltas and minimizing the pause justifies rank-image RAM |
+| `disk` + `LOCAL_CHECKPOINT_PATH` | Complete checkpoint on local storage | Reload from disk | Host RAM is constrained or the trainer publishes full checkpoints |
+| `cpu` + `LOCAL_CHECKPOINT_PATH=None` | Canonical checkpoint and rank-ready images in RAM | Copy the images to GPU | Host RAM can hold both representations and the shortest preparation is preferred |
+| `cpu` + `LOCAL_CHECKPOINT_PATH` | Canonical checkpoint on local NVMe; rank-ready images in RAM | Copy the images to GPU | Host RAM can hold the rank images but not both representations |
 
 Both modes reconstruct and checksum the complete target in canonical checkpoint
 space. CPU mode accepts deltas only and requires a new replica for a new
 lineage. Disk mode accepts full checkpoints and deltas and can reset a live
 replica.
 
-Every bundled recipe serves `cpu` updates except Kimi K3, which uses `disk`.
-The profiling scripts exercise both modes. Memory sizing and SGLang details are
-in [`SGLANG_FORK.md`](common/SGLANG_FORK.md).
+The bundled recipes currently use CPU staging with the canonical checkpoint in
+RAM. The profiling scripts exercise all three storage layouts. Memory sizing
+and SGLang details are in [`SGLANG_FORK.md`](common/SGLANG_FORK.md).
 
 ## Persistent storage
 

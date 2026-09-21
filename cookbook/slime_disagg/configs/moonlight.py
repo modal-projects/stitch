@@ -26,7 +26,6 @@ SGLANG_SERVER_ARGS = {
     # Use the no-GDS fastsafetensors path on hosts without nvidia-fs.
     "--load-format": "fastsafetensors",
     "--model-loader-extra-config": '{"enable_gds":false}',
-    "--enable-cpu-weight-cache": "",
     "--weight-loader-drop-cache-after-load": "",
     "--context-length": "8192",
     "--mem-fraction-static": "0.85",

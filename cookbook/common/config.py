@@ -68,11 +68,25 @@ def validate_serving_config(recipe: Any, *, gpus_per_engine: int) -> None:
         raise ValueError(
             "SGLANG_SERVER_ARGS --tp must match the GPU count per rollout engine"
         )
-    mode = getattr(recipe, "SGLANG_DELTA_UPDATE_MODE", "disk")
+    mode = getattr(recipe, "SGLANG_DELTA_UPDATE_MODE", None)
     if mode not in {"cpu", "disk"}:
         raise ValueError(f"Unsupported SGLANG_DELTA_UPDATE_MODE: {mode!r}")
-    if ("--enable-cpu-weight-cache" in args) != (mode == "cpu"):
+    local_checkpoint = getattr(recipe, "LOCAL_CHECKPOINT_PATH", None)
+    if local_checkpoint is not None and (
+        not isinstance(local_checkpoint, str) or not local_checkpoint.strip()
+    ):
+        raise ValueError("LOCAL_CHECKPOINT_PATH must be a non-empty path or None")
+    if mode == "disk" and local_checkpoint is None:
+        raise ValueError("disk delta updates require LOCAL_CHECKPOINT_PATH")
+
+    managed_args = {
+        "--weight-update-staging",
+        "--weight-update-local-checkpoint-dir",
+        "--weight-version",
+    }
+    configured = managed_args.intersection(args)
+    if configured:
         raise ValueError(
-            "SGLANG_DELTA_UPDATE_MODE='cpu' requires --enable-cpu-weight-cache; "
-            "disk mode requires it to be absent"
+            "Stitch configures SGLang's staged-update lifecycle; remove managed "
+            f"server arguments: {', '.join(sorted(configured))}"
         )

@@ -48,14 +48,15 @@ class Engine:
         self, manifest: VersionManifest, *, flush_cache: bool = False
     ) -> None:
         """Apply the staged checkpoint to the serving weights; the gate covers only this.
-        ``flush_cache`` (a commit-policy decision the reconciler passes) evicts the engine's
-        prefix/KV cache as part of the commit. Once this begins, any failure leaves
-        the live engine state uncertain and requires replacing the replica."""
+        ``flush_cache`` is an explicit commit policy: callers that namespace cached
+        request state by weight version can preserve it across an in-place update.
+        Once this begins, any failure leaves the live engine state uncertain and
+        requires replacing the replica."""
         raise NotImplementedError
 
     async def flush_cache(self) -> None:
         """Evict the engine's prefix/KV cache — the standalone ``/flush_cache`` primitive.
-        Commit-time flushing goes through ``commit(flush_cache=…)`` instead."""
+        Commit-time eviction is controlled independently by ``commit(flush_cache=...)``."""
         raise NotImplementedError
 
     async def pause(self) -> None:
