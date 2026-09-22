@@ -27,9 +27,7 @@ def test_changed_identity_does_not_overwrite_checkpoint(tmp_path):
     prep._staged(str(output), _checkpoint, identity={"source_revision": "a" * 40})
 
     with pytest.raises(RuntimeError, match="identity differs"):
-        prep._staged(
-            str(output), _checkpoint, identity={"source_revision": "b" * 40}
-        )
+        prep._staged(str(output), _checkpoint, identity={"source_revision": "b" * 40})
 
     assert (output / "model.safetensors").read_bytes() == b"weights"
 

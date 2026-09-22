@@ -11,7 +11,7 @@ from stitch import sidecar
 from stitch.sidecar import SidecarConfig
 from stitch.stores.base import Store
 
-_FACTORY = "stitch.sidecar_test:_recording_store_factory"
+_FACTORY = f"{__name__}:_recording_store_factory"
 
 _BASE = dict(
     bulletin_root="/cache/run-a",
@@ -238,7 +238,7 @@ def test_main_rejects_a_factory_that_returns_a_non_store(
     )
 
     argv = SidecarConfig(
-        **{**_BASE, "store_factory": "stitch.sidecar_test:_not_a_store_factory"},
+        **{**_BASE, "store_factory": f"{__name__}:_not_a_store_factory"},
         delta_update_mode="cpu",
     ).to_argv()
     with pytest.raises(TypeError, match="not a stitch Store"):
@@ -250,8 +250,8 @@ def test_main_rejects_a_factory_that_returns_a_non_store(
     ("spec", "error", "message"),
     [
         ("no.such.module:factory", ModuleNotFoundError, "No module named"),
-        ("stitch.sidecar_test:missing", ImportError, "has no attribute 'missing'"),
-        ("stitch.sidecar_test:_BASE", TypeError, "not callable"),
+        (f"{__name__}:missing", ImportError, "has no attribute 'missing'"),
+        (f"{__name__}:_BASE", TypeError, "not callable"),
     ],
 )
 def test_load_store_factory_rejects_unresolvable_references(

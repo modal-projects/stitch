@@ -2,9 +2,9 @@
 
 Runs without Modal/torch: the real ``_store`` builds a local dir (volume_name=None from
 the temp root) and only ``_pool`` is faked. The distributed publish protocol itself
-is covered by ``src/stitch/publisher_test.py``; here is the cookbook's wiring of
+is covered by ``tests/stitch/test_publisher.py``; here is the cookbook's wiring of
 trainer args to the core Store/Pool/comms, plus the request-hook gate. Run directly:
-  PYTHONPATH=src:. python cookbook/common/hooks_test.py
+  PYTHONPATH=src:. python tests/cookbook/common/test_hooks.py
 """
 
 from __future__ import annotations

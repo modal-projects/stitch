@@ -28,12 +28,12 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/stitch"]
-exclude = ["*_test.py"]
 
 [tool.pytest.ini_options]
-testpaths = ["src", "cookbook", "tools"]  # google-style: foo_test.py sits beside foo.py
-python_files = ["*_test.py"]
-pythonpath = ["."]  # so the co-located cookbook hook test imports the top-level cookbook/ package
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = ["--import-mode=importlib"]
+pythonpath = ["src", "."]
 
 [tool.ruff]
 target-version = "py311"

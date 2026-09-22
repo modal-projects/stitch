@@ -36,7 +36,10 @@ TIMEOUT_ENV_VAR = "STITCH_TEST_TIMEOUT"
 DEFAULT_TIMEOUT_S = 30.0
 
 # Modules whose tests need a working event loop / real sockets.
-SKIP_WHEN_SANDBOXED = ("src/stitch/service_test.py", "src/stitch/sync_test.py")
+SKIP_WHEN_SANDBOXED = (
+    "tests/stitch/test_service.py",
+    "tests/stitch/test_sync.py",
+)
 
 _sandbox_reason: str | None = None
 
@@ -89,7 +92,9 @@ def pytest_report_header(config: pytest.Config) -> list[str]:
     ]
 
 
-def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: list[pytest.Item]
+) -> None:
     if _sandbox_reason is None:
         return
     skip = pytest.mark.skip(reason=f"sandboxed environment ({_sandbox_reason})")
