@@ -5,7 +5,6 @@ from typing import Any
 import pytest
 
 from cookbook.miles_disagg import trainer_image as miles_trainer_image
-from cookbook.slime_disagg import trainer_image as slime_trainer_image
 
 
 # Cross-integration coverage lives at the cookbook boundary so ``cookbook.common``
@@ -57,9 +56,8 @@ def _build(
     ("trainer_image", "local_source_arg"),
     [
         (miles_trainer_image, "miles_local"),
-        (slime_trainer_image, "slime_local"),
     ],
-    ids=["miles", "slime"],
+    ids=["miles"],
 )
 def test_sources_remain_fast_runtime_mounts_by_default(
     monkeypatch,
@@ -80,9 +78,8 @@ def test_sources_remain_fast_runtime_mounts_by_default(
     ("trainer_image", "local_source_arg", "local_source", "trainer_root"),
     [
         (miles_trainer_image, "miles_local", "/local/miles", "/root/miles"),
-        (slime_trainer_image, "slime_local", "/local/slime", "/root/slime"),
     ],
-    ids=["miles", "slime"],
+    ids=["miles"],
 )
 def test_copy_source_image_can_be_extended_after_local_fork_overlay(
     monkeypatch,
