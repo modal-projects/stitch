@@ -1,6 +1,6 @@
 # SGLang fork
 
-Stitch overlays a small SGLang fork onto the matching upstream image. The fork
+Stitch overlays an SGLang fork onto the matching upstream image. The fork
 adds general, asynchronous checkpoint staging and correct complete-weight
 loading for quantized rollout models.
 
@@ -11,65 +11,88 @@ default runtime:
 
 ```python
 DEFAULT_SGLANG_RUNTIME = SGLangRuntime(
-    image="lmsysorg/sglang:v0.5.17",
+    image="lmsysorg/sglang:v0.5.20",
     repository="https://github.com/modal-projects/sglang.git",
-    branch="stitch-sglang-v0.5.17",
-    commit="d050d06437d96196fc68d5b4e5c246408790d537",
+    branch="stitch-sglang-v0.5.20",
+    commit="18df9cb22e5b7c0b3dc5303376bf61c4a4090db4",
 )
 ```
 
-The branch is upstream v0.5.17 plus four independently reviewable layers:
+The branch is upstream v0.5.20 plus four independently reviewable layers:
 
 | Layer | Responsibility |
 | --- | --- |
 | Reload lifecycle | Restore checkpoint-facing layouts, run each quantization method's native loader and post-load hooks, and fail closed if a partially mutated model cannot be rolled back. |
 | Verified materialization | Apply and fold complete XOR delta lineages in canonical checkpoint space, verify the published checksum, and durably materialize disk targets. |
 | CPU staging | Build bounded rank-ready host images while serving, optionally keep the canonical checkpoint on local NVMe, then commit every runtime storage in place. |
-| Serving correctness | Preserve routed-expert state and sampling masks across data-parallel and speculative paths, classify client cancellations, and surface scheduler-process failures. |
+| Serving correctness | Preserve request aborts, routed-expert state, and sampling masks across data-parallel and speculative paths, and surface scheduler-process failures. |
 
 The branch history keeps these physical responsibilities in separate commits;
 the immutable pin above is the executable definition of the stack.
 
 The image and immutable source pin stay together so the Python overlay remains
-ABI-compatible with the image's CUDA and C++ extensions. SGLang v0.5.17 includes
+ABI-compatible with the image's CUDA and C++ extensions. SGLang v0.5.20 includes
 Kimi K3, so all cookbook recipes now use this one runtime line. The fork's MXFP4
 staging path transforms runtime layouts on GPU before caching rank-ready host
 images.
 
 ## API
 
-`POST /stage_weight_update` prepares a target without changing live weights:
+Enable one inactive destination when starting the server:
+
+```python
+"--weight-update-staging": "disk",  # or "cpu"
+"--weight-version": "0",
+```
+
+Disk staging requires `--weight-update-local-checkpoint-dir`. With CPU staging,
+the same option keeps the canonical checkpoint on local NVMe; omit it to keep
+the canonical checkpoint in RAM. Server startup initializes the destination
+from the checkpoint already loaded by SGLang before the server becomes ready.
+
+`POST /prepare_weight_update` reconstructs and verifies a complete inactive
+target without changing live weights:
 
 ```json
 {
-  "base_checkpoint_dir": "/checkpoints/<artifact-id>",
-  "base_version": 0,
   "checkpoint_source_dir": "/stitch/<run-id>/updates",
-  "local_checkpoint_dir": "/local-checkpoint",
-  "target_version": 7,
-  "destination": "disk"
+  "target_version": 7
 }
 ```
 
-- `base_checkpoint_dir` is the immutable checkpoint already loaded by the
-  engine. `base_version` records its logical version and defaults to 0.
-- `checkpoint_source_dir` contains `weight_vNNNNNN` publications. It is omitted
-  when initializing the base version.
-- `destination="disk"` requires `local_checkpoint_dir` and accepts FULL or
-  DELTA targets.
-- `destination="cpu"` does not use `local_checkpoint_dir`. The base version
-  initializes the cache; later targets must be DELTAs.
+`checkpoint_source_dir` contains the immutable `weight_vNNNNNN` publications.
+Preparation follows and folds the verified lineage from the currently served
+version to `target_version`. A second request for the same prepared version is
+idempotent. Before commit, a newer target in the same lineage may supersede the
+inactive preparation; stale targets are rejected and the served weights remain
+unchanged.
 
-Commit remains a separate operation:
+`POST /commit_weight_update` exposes the prepared target:
 
-- `POST /update_weights_from_disk` runs SGLang’s complete checkpoint loader.
-- `POST /update_weights_from_cpu` copies already-prepared rank images into the
-  existing target-model CUDA storages. A speculative draft model remains fixed;
-  target verification preserves generation correctness while its acceptance
-  rate may change as the target evolves.
+```json
+{
+  "target_version": 7,
+  "abort_all_requests": false,
+  "torch_empty_cache": false,
+  "flush_cache": false
+}
+```
 
-The separation is the pause boundary: after startup, staging may overlap rollout
-generation, while commit is the short operation coordinated by Stitch.
+`flush_cache` defaults to `true`, which requires an idle scheduler. Stitch sets
+it to `false` for in-place commits because every request is keyed by its served
+weight version, so cached prefixes from different versions cannot alias.
+
+Disk commit runs SGLang's native complete-checkpoint loader and verifies that
+all live tensor layouts and storage addresses are preserved. CPU commit copies
+the complete rank images into the existing target-model CUDA storages. A
+speculative draft model remains fixed in either mode; target verification
+preserves generation correctness while its acceptance rate may change as the
+target evolves.
+
+The separation is the pause boundary: after startup, preparation may overlap
+rollout generation, while commit is coordinated with engine quiescence. CPU
+commit is the short H2D-only path; disk commit performs a complete native
+checkpoint reload and therefore holds the pause longer.
 
 ## Disk destination
 
@@ -85,17 +108,17 @@ reading and writing each changed target tensor once. The folded representation
 is ephemeral: no aggregate delta or additional checkpoint is persisted. The
 final published target checksum remains the commit boundary.
 
-The rollout engine initially loads its boot checkpoint directly from
-`base_checkpoint_dir`. Its logical version is normally v0 and may be a saved
-version for a resumed run. Stitch initializes the mutable local checkpoint
-before the replica enters rotation, then reconciles it to the visible version.
-Local storage must hold the mutable checkpoint plus filesystem headroom; the
-immutable boot checkpoint remains in its configured source.
+The rollout engine initially loads its boot checkpoint directly from the
+configured model path. Its logical version is normally v0 and may be a saved
+version for a resumed run. SGLang initializes the mutable local checkpoint
+before declaring the server ready, then Stitch reconciles it to the visible
+version before the replica enters rotation. Local storage must hold the mutable
+checkpoint plus filesystem headroom; the immutable boot checkpoint remains in
+its configured source.
 
-The commit RPC still reads and transforms the complete target checkpoint. On
-each commit, Stitch forwards the load format selected for the initial server
-load. On hosts without GDS, recipes select fastsafetensors’ supported no-GDS
-mode:
+The commit RPC still reads and transforms the complete target checkpoint using
+the load format configured for the initial server load. On hosts without GDS,
+recipes select fastsafetensors’ supported no-GDS mode:
 
 ```python
 "--load-format": "fastsafetensors",
@@ -119,7 +142,7 @@ CPU mode keeps rank-ready images in RAM for the shortest commit:
    then builds every next rank image while inference continues. The in-memory
    path streams deltas through a bounded work budget; the storage-backed path
    reuses the transactional disk materializer.
-4. `/update_weights_from_cpu` performs distributed preflight and copies the
+4. `/commit_weight_update` performs distributed preflight and copies the
    complete images into the existing CUDA storages without replacing storage
    pointers.
 
@@ -137,8 +160,8 @@ lineage-sized CPU arena after reconstruction.
 Enable it explicitly:
 
 ```python
-"--enable-cpu-weight-cache": "",
-"--cpu-weight-cache-max-compile-group-gb": "8",
+"--weight-update-staging": "cpu",
+"--weight-update-max-compile-group-gb": "8",
 ```
 
 By default, both the canonical checkpoint and rank images remain in RAM. Keep
@@ -146,7 +169,7 @@ only the rank images in RAM by placing the canonical checkpoint on writable
 host-local storage:
 
 ```python
-"--cpu-weight-cache-canonical-checkpoint-dir": "/local-checkpoint/canonical",
+"--weight-update-local-checkpoint-dir": "/local-checkpoint/canonical",
 ```
 
 Use local NVMe rather than a network or shared filesystem. This path pays a
@@ -184,17 +207,18 @@ Measured component sizes are:
 
 | Model | TP | Canonical checkpoint per host | Rank image | Loader state per rank |
 | --- | ---: | ---: | ---: | ---: |
-| GLM-4.5-Air FP8 | 4 | 112.6 GB | 27.2 GB × 4 | 1.64 GB |
-| Kimi K2.6 NVFP4 | 4 | about 595 GB | about 151 GB × 4 | 4.09 GB |
-| GLM-5.2 mixed NVFP4/BF16 | 4 | 617.6 GB | 179.3 GB × 4 | 20.94 GB |
-| GLM-5.2 FP8 | 4 | 755.6 GB | 189.4 GB × 4 | 20.94 GB |
-| Kimi K3 MXFP4 | 8 | 1.561 TB | 207.5 GB × 8 | 0.14 GB maximum |
+| GLM-5.2 mixed NVFP4/BF16 | 4 | 617.63 GB | 155.83 GB × 4 | 0.69 MB |
+| GLM-5.2 FP8 | 4 | 755.63 GB | 188.30 GB × 4 | 0 |
+| GLM-5.3-Flash FP8 | 8 | 328.34 GB | 40.73 GB × 8 | 0.05 MB |
+| Kimi K2.6 NVFP4 | 4 | 595.19 GB | 151.17 GB × 4 | 0 |
+| Kimi K3 MXFP4 | 8 | 1.561 TB | 207.47 GB × 8 | 8.04 MB |
 
 Allow additional memory for the engine process, delta decoding, and bounded
-loader staging. The supplied GLM-4.5 recipe requests `(512 GiB, 2 TiB)`;
-GLM-5.2, Kimi K2.6, and Kimi K3 request `(1 TiB, 3 TiB)`, expressed as
-`(request, limit)`. GLM-5.2 FP8 reached 1.63 TB with both the canonical and rank
-images in RAM, and 1.19 TB with the canonical checkpoint on NVMe.
+loader staging. Modal memory requests use `(request, limit)`. K3 all-RAM
+validation requires a 4 TiB limit. Exact-final GLM-5.2 FP8 validation reached
+1.58 TB of cgroup memory with the canonical checkpoint in RAM and 1.54 TB with
+it on NVMe. The NVMe path's file-cache pages are reclaimable; its persistent
+allocation is the rank images and loader state.
 
 All runtime storages are prepared and committed. Element-wise sparsity reduces
 the compressed delta transport and storage, but not the full-target checksum,
@@ -225,14 +249,12 @@ because they cannot yet be committed atomically.
 For a new SGLang release:
 
 1. create `stitch-sglang-vX` from the exact upstream tag;
-2. omit the fastsafetensors commit if upstream already contains PR #31859;
+2. audit which fork responsibilities the release already provides and omit
+   superseded code;
 3. reapply the remaining responsibilities as separate commits;
-4. audit the release’s loader, quantization, scheduler, process-group, and
+4. audit the release's loader, quantization, scheduler, process-group, and
    CUDA-graph primitives and delete fork code superseded upstream;
 5. run SGLang’s own pre-commit hooks and focused unit tests;
 6. validate generation before, during, and after one complete delta update on
    FP8 and ModelOpt NVFP4, and validate MXFP4 transforms on Blackwell; and
 7. update the image, branch, immutable commit, and this file.
-
-Upstream fastsafetensors reference:
-<https://github.com/sgl-project/sglang/pull/31859>.
