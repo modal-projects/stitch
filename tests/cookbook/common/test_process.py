@@ -85,6 +85,8 @@ def test_start_sidecar_passes_s3_store_settings(monkeypatch) -> None:
         commit_mode="in_place",
         flush_cache_on_commit=True,
         engine_health_timeout=30.0,
+        proxy_max_connections=256,
+        proxy_max_keepalive_connections=64,
     )
 
     command = commands[0]
@@ -98,6 +100,8 @@ def test_start_sidecar_passes_s3_store_settings(monkeypatch) -> None:
     config = SidecarConfig.from_argv(command[3:])
     assert config.flush_cache_on_commit
     assert config.engine_health_timeout == 30.0
+    assert config.proxy_max_connections == 256
+    assert config.proxy_max_keepalive_connections == 64
     assert config.store_options == {
         "backend": storage.S3,
         "s3_root": "s3://bucket/experiment/run-a",

@@ -94,6 +94,8 @@ _FULL = SidecarConfig(
     watchdog_interval=1.0,
     watchdog_failure_threshold=7,
     engine_health_timeout=30.0,
+    proxy_max_connections=256,
+    proxy_max_keepalive_connections=64,
 )
 
 
@@ -175,6 +177,8 @@ def test_run_builds_engine_and_serves(monkeypatch: pytest.MonkeyPatch) -> None:
         watchdog_interval=1.0,
         watchdog_failure_threshold=7,
         engine_health_timeout=30.0,
+        proxy_max_connections=256,
+        proxy_max_keepalive_connections=64,
     )
     sidecar.run(config, store_out)
 
@@ -200,6 +204,8 @@ def test_run_builds_engine_and_serves(monkeypatch: pytest.MonkeyPatch) -> None:
         "reconcile_interval": 0.0,
         "watchdog_interval": 1.0,
         "watchdog_failure_threshold": 7,
+        "proxy_max_connections": 256,
+        "proxy_max_keepalive_connections": 64,
     }
 
 

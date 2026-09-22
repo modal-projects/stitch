@@ -64,6 +64,8 @@ class SidecarConfig:
     watchdog_interval: float = 5.0
     watchdog_failure_threshold: int = 3
     engine_health_timeout: float = 5.0
+    proxy_max_connections: int = 100
+    proxy_max_keepalive_connections: int = 20
 
     def __post_init__(self) -> None:
         if not self.run_id:
@@ -119,6 +121,10 @@ class SidecarConfig:
             str(self.watchdog_failure_threshold),
             "--engine-health-timeout",
             str(self.engine_health_timeout),
+            "--proxy-max-connections",
+            str(self.proxy_max_connections),
+            "--proxy-max-keepalive-connections",
+            str(self.proxy_max_keepalive_connections),
         ]
         for key, value in self.store_options.items():
             argv += ["--store-opt", f"{key}={value}"]
@@ -163,6 +169,8 @@ class SidecarConfig:
             watchdog_interval=args.watchdog_interval,
             watchdog_failure_threshold=args.watchdog_failure_threshold,
             engine_health_timeout=args.engine_health_timeout,
+            proxy_max_connections=args.proxy_max_connections,
+            proxy_max_keepalive_connections=args.proxy_max_keepalive_connections,
         )
 
 
@@ -191,6 +199,8 @@ def _sidecar_parser() -> argparse.ArgumentParser:
     p.add_argument("--watchdog-interval", type=float, default=5.0)
     p.add_argument("--watchdog-failure-threshold", type=int, default=3)
     p.add_argument("--engine-health-timeout", type=float, default=5.0)
+    p.add_argument("--proxy-max-connections", type=int, default=100)
+    p.add_argument("--proxy-max-keepalive-connections", type=int, default=20)
     p.add_argument("--local-checkpoint-dir")
     p.add_argument("--flush-cache-on-commit", action="store_true")
     p.add_argument("--debug-requests", action="store_true")
@@ -236,6 +246,8 @@ def run(config: SidecarConfig, store: Store) -> None:
         reconcile_interval=config.reconcile_interval,
         watchdog_interval=config.watchdog_interval,
         watchdog_failure_threshold=config.watchdog_failure_threshold,
+        proxy_max_connections=config.proxy_max_connections,
+        proxy_max_keepalive_connections=config.proxy_max_keepalive_connections,
     )
 
 

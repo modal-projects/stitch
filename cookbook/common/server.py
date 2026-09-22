@@ -34,6 +34,8 @@ def serve_startup(
     flush_cache_on_commit: bool = False,
     startup_timeout: int,
     engine_health_timeout: float = 5.0,
+    proxy_max_connections: int = 100,
+    proxy_max_keepalive_connections: int = 20,
 ) -> None:
     """Start sglang + the versioned-proxy sidecar on a Server replica (from ``@modal.enter``).
     SGLang starts directly from the immutable boot checkpoint. The sidecar enters
@@ -96,6 +98,8 @@ def serve_startup(
         commit_mode=commit_mode,
         flush_cache_on_commit=flush_cache_on_commit,
         engine_health_timeout=engine_health_timeout,
+        proxy_max_connections=proxy_max_connections,
+        proxy_max_keepalive_connections=proxy_max_keepalive_connections,
     )
     # Modal admits the container when @enter returns. The sidecar owns readiness:
     # /health stays 503 through destination initialization and first catch-up.

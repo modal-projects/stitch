@@ -64,6 +64,8 @@ def test_serve_startup_owns_weight_staging_args(
         commit_mode="in_place",
         flush_cache_on_commit=True,
         startup_timeout=60,
+        proxy_max_connections=256,
+        proxy_max_keepalive_connections=64,
     )
 
     args = endpoint_args["extra_server_args"]
@@ -74,3 +76,5 @@ def test_serve_startup_owns_weight_staging_args(
     else:
         assert args["--weight-update-local-checkpoint-dir"] == expected_local_dir
     assert sidecar_args["flush_cache_on_commit"] is True
+    assert sidecar_args["proxy_max_connections"] == 256
+    assert sidecar_args["proxy_max_keepalive_connections"] == 64

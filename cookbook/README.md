@@ -174,6 +174,10 @@ Rollout capacity is controlled by `rollout_min_containers`,
 backpressure are controlled by `--max-running-requests` and
 `--max-queued-requests` in the recipe.
 
+Configure the sidecar's HTTP connection pool with `proxy_max_connections` (default
+100) and `proxy_max_keepalive_connections` (default 20 idle connections) in
+`serve_startup`, or with `--proxy-max-connections` / `--proxy-max-keepalive-connections`.
+
 After changing fleet or SGLang settings, redeploy the active run with the same
 experiment and run ID:
 

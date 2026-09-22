@@ -165,6 +165,65 @@ async def _asgi_post(
     return start["status"], headers, response_body
 
 
+@pytest.mark.parametrize("limit", [None, 128], ids=["default-100", "configured-128"])
+def test_proxy_connection_limits(monkeypatch, limit):
+    async def go():
+        arrived = {n: asyncio.Event() for n in (100, 128)}
+        release = asyncio.Event()
+        count = 0
+
+        async def handle(reader, writer):
+            nonlocal count
+            try:
+                headers = await reader.readuntil(b"\r\n\r\n")
+                for line in headers.split(b"\r\n"):
+                    if line.lower().startswith(b"content-length:"):
+                        await reader.readexactly(int(line.split(b":", 1)[1]))
+                count += 1
+                if count in arrived:
+                    arrived[count].set()
+                # Hold all responses so the test exercises real HTTPX pool capacity.
+                await release.wait()
+                writer.write(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                    b"Content-Length: 2\r\nConnection: close\r\n\r\n{}"
+                )
+                await writer.drain()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        server = await asyncio.start_server(handle, "127.0.0.1", 0, backlog=128)
+        port = server.sockets[0].getsockname()[1]
+        engine = _ProxyEngine()
+        monkeypatch.setattr(engine, "base_url", lambda: f"http://127.0.0.1:{port}")
+        sidecar = _GateSidecar(VersionRef("run", 3))
+        options = {} if limit is None else {"proxy_max_connections": limit}
+        app = create_app(sidecar.gate, sidecar, engine, **options)
+        async with server, app.router.lifespan_context(app):
+            requests = [asyncio.create_task(_asgi_post(app, {})) for _ in range(128)]
+            try:
+                await asyncio.wait_for(arrived[100].wait(), timeout=10)
+                if limit is None:
+                    # The default pool cannot forward the remaining 28 requests yet.
+                    with pytest.raises(TimeoutError):
+                        await asyncio.wait_for(arrived[128].wait(), timeout=1)
+                    assert count == 100
+                else:
+                    # Ignoring the configured limit must fail here, not be suppressed.
+                    await asyncio.wait_for(arrived[128].wait(), timeout=10)
+                    assert count == 128
+            finally:
+                release.set()
+                responses = await asyncio.wait_for(
+                    asyncio.gather(*requests), timeout=10
+                )
+            assert count == 128
+            assert all(status == 200 for status, _, _ in responses)
+
+    asyncio.run(go())
+
+
 def test_upstream_transport_failure_is_retryable_and_releases_admission(
     monkeypatch, caplog
 ):

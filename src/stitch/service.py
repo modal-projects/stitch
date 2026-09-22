@@ -72,6 +72,8 @@ def create_app(
     *,
     versioned_routes: Iterable[str] = VERSIONED_ROUTES,
     upstream_timeout: float | None = 3600.0,
+    proxy_max_connections: int = 100,
+    proxy_max_keepalive_connections: int = 20,
 ):
     """The versioned rollout proxy. Versioned routes are admitted through the gate
     (constraint enforced, serving version captured), stamped by the engine, forwarded,
@@ -91,7 +93,14 @@ def create_app(
     def client() -> Any:
         c = pooled.get("client")
         if c is None:
-            c = httpx.AsyncClient(timeout=timeout, trust_env=False)
+            c = httpx.AsyncClient(
+                timeout=timeout,
+                trust_env=False,
+                limits=httpx.Limits(
+                    max_connections=proxy_max_connections,
+                    max_keepalive_connections=proxy_max_keepalive_connections,
+                ),
+            )
             pooled["client"] = c
         return c
 
@@ -297,6 +306,8 @@ def serve(
     reconcile_interval: float = 5.0,
     watchdog_interval: float = 5.0,
     watchdog_failure_threshold: int = 3,
+    proxy_max_connections: int = 100,
+    proxy_max_keepalive_connections: int = 20,
 ) -> None:
     """Run one replica's sidecar: build the Reconciler over the given store+engine
     and serve the versioned proxy. The deployment supplies the concrete instances."""
@@ -322,7 +333,13 @@ def serve(
         TerminalFailureMonitor(reconciler.wait_for_terminal_error),
     )
     config = uvicorn.Config(
-        create_app(reconciler.gate, reconciler, engine),
+        create_app(
+            reconciler.gate,
+            reconciler,
+            engine,
+            proxy_max_connections=proxy_max_connections,
+            proxy_max_keepalive_connections=proxy_max_keepalive_connections,
+        ),
         host=host,
         port=port,
         log_level="info",
