@@ -80,6 +80,11 @@ measurements and
 [`SGLANG_FORK.md`](cookbook/common/SGLANG_FORK.md#cpu-destination) for memory
 sizing and destination tradeoffs.
 
+The [reference recipe catalog](cookbook/README.md#reference-recipes) covers
+agentic NVFP4 training, a small BF16 math starter, and standalone FP8 serving.
+[Weight-update profiles](tools/README.md#weight-update-validation) cover a broader
+set of architectures independently of the training recipes.
+
 ## Integrations
 
 The core package is trainer-, engine-, and provider-agnostic through the
@@ -88,7 +93,7 @@ The core package is trainer-, engine-, and provider-agnostic through the
 [`Pool`](src/stitch/pools/base.py) interfaces.
 
 Stitch includes Modal Volume and S3 stores, SGLang engines, Modal Flash pools,
-and reference Miles, Slime, and standalone deployments. See the
+and reference Miles and standalone deployments. See the
 [`cookbook`](cookbook/README.md) to choose an update mode, launch a run, scale
 the rollout fleet, and validate an update. Fork pins and re-porting notes are
 in [`SGLANG_FORK.md`](cookbook/common/SGLANG_FORK.md) and
