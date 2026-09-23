@@ -345,23 +345,10 @@ Datasets are independent of models and runs:
     └── <dataset-specific-assets>/
 ```
 
-Every trainer attempt is a fresh container, so the Miles trainer points
-`TRITON_CACHE_DIR` and `TORCHINDUCTOR_CACHE_DIR` into the `miles-kernel-cache`
-Volume, keyed by GPU compute capability and the image's torch/triton versions:
-
-```text
-/kernel-cache/
-└── sm103/torch-2.11.0+cu130-triton-3.6.0/
-    ├── triton/     # Triton kernels, plus fla autotune timing tables
-    └── inductor/   # torch.compile graphs and generated kernels
-```
-
-The first attempt on a new (GPU, toolchain) tree pays the compile cost as a side
-effect of training; later attempts and runs compile only new kernel/shape keys.
-Writes are committed at the end of each attempt (and in the background by the
-Volume); each attempt reloads the tree before training. Set
-`modal.kernel_cache_volume` in a recipe to use another Volume, or `None` to keep
-the caches on container scratch.
+The Miles trainer points `TRITON_CACHE_DIR` and `TORCHINDUCTOR_CACHE_DIR` at
+`/kernel-cache/<sm_cc>/torch-<ver>-triton-<ver>/{triton,inductor}`, so compiled
+kernels survive across attempts and runs on the same GPU arch and toolchain.
+Set `modal.kernel_cache_volume` to use another Volume, or `None` to disable.
 
 ## External speculative drafts
 

@@ -142,12 +142,10 @@ draft_volume = (
     if modal_cfg.draft_volume
     else None
 )
-# Compiled Triton/Inductor kernels; every attempt is a fresh container, so without
-# this each one recompiles and re-autotunes from zero (see common/kernel_cache.py).
 kernel_cache_volume = (
     modal.Volume.from_name(
         modal_cfg.kernel_cache_volume, create_if_missing=True, version=2
-    )
+    )  # compiled Triton/Inductor kernels; survives fresh containers
     if modal_cfg.kernel_cache_volume
     else None
 )
@@ -342,9 +340,7 @@ class Trainer:
         )
         self.rank = rank
         process.start_host_mem_monitor()  # per-node host-RAM trace
-        # Ray workers inherit the raylet's environment, so this must land in
-        # os.environ before `ray start`; the recipe's environment stays last so it
-        # can still override a cache location.
+        # Must be in os.environ before `ray start`; Ray workers inherit it.
         cache_env = (
             kernel_cache.environment(KERNEL_CACHE_PATH)
             if kernel_cache_volume is not None
@@ -380,7 +376,6 @@ class Trainer:
         if self.rank != 0:
             # Returning here would exit this container under its Ray node.
             ray_cluster.hold_worker_node(self.master_addr, ray_port=RAY_PORT)
-            _commit_kernel_cache()
             return
 
         # Warm containers may enter during an active attempt. Only an actual
@@ -481,19 +476,6 @@ class Trainer:
                     )
                 except Exception as exc:  # noqa: BLE001
                     print(f"WARNING: could not commit train log: {exc}")
-                _commit_kernel_cache()
-
-
-def _commit_kernel_cache() -> None:
-    """Persist this node's compiled kernels for the next attempt. Volumes also commit
-    in the background and at container exit; this is the explicit end-of-attempt
-    boundary, and a failure is not worth failing the attempt over."""
-    if kernel_cache_volume is None:
-        return
-    try:
-        kernel_cache_volume.commit()
-    except Exception as exc:  # noqa: BLE001
-        print(f"WARNING: could not commit kernel cache: {exc}")
 
 
 def _build_train_cmd(cfg: MilesConfig) -> str:
