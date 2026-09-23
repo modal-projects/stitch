@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from cookbook.common.constants import KERNEL_CACHE_PATH
 from cookbook.miles_disagg import trainer_image
 from cookbook.miles_disagg.configs import qwen3_4b_math
 
@@ -27,6 +28,18 @@ def test_maintained_recipes_import_through_deployment_entrypoints(
     assert app.exp.__name__ == f"cookbook.miles_disagg.configs.{recipe}"
     assert app.modal_cfg is app.exp.modal
     assert app.miles_cfg is app.exp.miles
+
+
+def test_trainer_mounts_kernel_cache_volume(monkeypatch):
+    monkeypatch.setenv("EXPERIMENT_CONFIG", "qwen3_6_35b_a3b_nvfp4")
+    monkeypatch.setenv("RUN_ID", "test-run")
+    monkeypatch.delenv("STITCH_STORE_BACKEND", raising=False)
+    monkeypatch.delenv("MILES_LOCAL_DIR", raising=False)
+    monkeypatch.delitem(sys.modules, "cookbook.miles_disagg.app", raising=False)
+
+    app = importlib.import_module("cookbook.miles_disagg.app")
+
+    assert app.train_volumes[str(KERNEL_CACHE_PATH)].name == "kernel-cache"
 
 
 @pytest.mark.parametrize("entrypoint", ["app", "prep_app"])

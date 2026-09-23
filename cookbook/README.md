@@ -304,6 +304,7 @@ Run publications use either the experiment Volume or S3, according to
 | `miles-data` | `/data` | Pinned datasets |
 | `stitch-<framework>-<model>` | `/stitch` | Run-scoped checkpoints and logs; publications when using the Volume backend |
 | `sglang-cache` | `/root/.cache/sglang` | Compiled SGLang kernels |
+| `kernel-cache` | `/root/.cache/kernel-cache` | Compiled Triton and TorchInductor kernels |
 | Configured draft Volume | `/draft` | Optional external speculative draft |
 
 Prepared model layouts have stable paths. For example:

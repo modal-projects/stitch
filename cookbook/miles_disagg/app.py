@@ -26,6 +26,7 @@ from cookbook.common.constants import (
     DATA_PATH,
     DRAFT_PATH,
     HF_CACHE_PATH,
+    KERNEL_CACHE_PATH,
     MINUTES,
     MODAL_SESSION_ID_HEADER,
     RAY_PORT,
@@ -135,12 +136,16 @@ draft_volume = (
     if modal_cfg.draft_volume
     else None
 )
+kernel_cache_volume = modal.Volume.from_name(
+    modal_cfg.kernel_cache_volume, create_if_missing=True, version=2
+)
 
 train_volumes = {
     str(HF_CACHE_PATH): hf_cache_volume,
     str(CHECKPOINTS_PATH): checkpoint_volume,
     str(DATA_PATH): data_volume,
     str(STITCH_PATH): run_volume,
+    str(KERNEL_CACHE_PATH): kernel_cache_volume,
 }
 
 app = modal.App(APP_NAME)
@@ -320,6 +325,8 @@ class Trainer:
             extra_env={
                 "MILES_HOST_IP": my_ip,
                 "PYTHONPATH": f"{MEGATRON_PATH}:{os.environ.get('PYTHONPATH', '')}",  # source-only megatron.training
+                "TRITON_CACHE_DIR": str(KERNEL_CACHE_PATH / "triton"),
+                "TORCHINDUCTOR_CACHE_DIR": str(KERNEL_CACHE_PATH / "inductor"),
                 **miles_cfg.environment,
             },
         )
