@@ -376,27 +376,26 @@ def test_request_hook_min_lag() -> None:
         assert request["max_attempts"] == 900
 
 
-def test_request_hook_reads_shared_mount_without_reload() -> None:
+def test_request_hook_reads_pointer_without_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         store = ModalVolumeStore(root, run_id="run-abc")
         store.advance_pointer(VersionRef("run-abc", 1))
         pointer = hooks._CachedPointer()
-        original_refresh = ModalVolumeStore.refresh
 
         def unexpected_refresh(_store) -> None:
             raise AssertionError(
-                "the request gate must not reload the publisher's mount"
+                "the request gate must not refresh the publisher's store"
             )
 
-        ModalVolumeStore.refresh = unexpected_refresh
-        try:
-            args = _args(str(root), experiment_volume_name="weights")
-            assert asyncio.run(pointer.get(args, ttl=0)) == 1
-            store.advance_pointer(VersionRef("run-abc", 2))
-            assert asyncio.run(pointer.get(args, ttl=0)) == 2
-        finally:
-            ModalVolumeStore.refresh = original_refresh
+        monkeypatch.setattr(ModalVolumeStore, "refresh", unexpected_refresh)
+        monkeypatch.setattr(hooks, "_store", lambda _args: store)
+        args = _args(str(root), experiment_volume_name="weights")
+        assert asyncio.run(pointer.get(args, ttl=0)) == 1
+        store.advance_pointer(VersionRef("run-abc", 2))
+        assert asyncio.run(pointer.get(args, ttl=0)) == 2
 
 
 def test_request_hook_exact_and_none() -> None:

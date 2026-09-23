@@ -2,8 +2,10 @@
 
 ``root`` is one run's directory. The training framework owns
 ``<root>/updates/`` and may recreate it while initializing; Stitch owns the
-self-identifying ``<root>/latest`` commit pointer. Durability is an explicit
-Volume commit and cross-host visibility is a reload.
+self-identifying ``<root>/latest`` commit pointer. Checkpoint bytes become
+durable through a mounted-Volume commit; the small pointer uses the Volume API's
+transactional upload so readers observe either the old value or the new one.
+The run ID is the pointer's relative directory inside the Volume.
 """
 
 from __future__ import annotations
@@ -11,7 +13,8 @@ from __future__ import annotations
 import contextlib
 import os
 import tempfile
-from pathlib import Path
+from io import BytesIO
+from pathlib import Path, PurePosixPath
 
 from stitch.stores.base import Store
 from stitch.types import VersionManifest, VersionRef
@@ -29,8 +32,16 @@ class ModalVolumeStore(Store):
     ) -> None:
         if not run_id:
             raise ValueError("run_id is required")
+        volume_path = PurePosixPath(run_id)
+        if (
+            volume_path.is_absolute()
+            or volume_path == PurePosixPath(".")
+            or ".." in volume_path.parts
+        ):
+            raise ValueError("run_id must be a non-empty relative path without '..'")
         self.root = Path(root)
         self.volume_name = volume_name
+        self._pointer_path = str(volume_path / _POINTER)
         self.run_id = run_id
 
     def refresh(self) -> None:
@@ -38,10 +49,16 @@ class ModalVolumeStore(Store):
             _volume(self.volume_name).reload()
 
     def read_pointer(self) -> VersionRef | None:
-        path = self.root / _POINTER
-        if not path.exists():
+        try:
+            if self.volume_name is not None:
+                text = b"".join(
+                    _volume(self.volume_name).read_file(self._pointer_path)
+                ).decode("utf-8")
+            else:
+                text = (self.root / _POINTER).read_text(encoding="utf-8")
+        except FileNotFoundError:
             return None
-        text = path.read_text(encoding="utf-8").strip()
+        text = text.strip()
         return VersionRef.parse(text) if text else None
 
     def advance_pointer(self, ref: VersionRef) -> None:
@@ -49,10 +66,18 @@ class ModalVolumeStore(Store):
             raise ValueError(
                 f"store is scoped to run {self.run_id!r}, got {ref.run_id!r}"
             )
+        if self.volume_name is not None:
+            # A mounted rename followed by commit can expose a zero-filled file
+            # while the new blocks become visible. The upload transaction swaps
+            # this control-plane value as one durable object.
+            with _volume(self.volume_name).batch_upload(force=True) as upload:
+                upload.put_file(
+                    BytesIO(ref.identity.encode("utf-8")),
+                    self._pointer_path,
+                )
+            return
         self.root.mkdir(parents=True, exist_ok=True)
         _atomic_write(self.root / _POINTER, ref.identity)
-        if self.volume_name:
-            _volume(self.volume_name).commit()
 
     def claim(self, boot: VersionRef) -> None:
         if not boot.run_id:
