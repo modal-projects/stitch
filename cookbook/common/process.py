@@ -131,34 +131,6 @@ def terminate_process(process: subprocess.Popen | None) -> None:
             pass
 
 
-def apply_git_patches(patch_paths: list[str], repo_dir: str, label: str) -> None:
-    """Apply git patches to a runtime checkout, tolerating an already-applied patch
-    (idempotent across container restarts)."""
-    for patch_path in patch_paths:
-        if not os.path.exists(patch_path):
-            raise FileNotFoundError(f"{label} not found: {patch_path}")
-        check = subprocess.run(
-            ["git", "-C", repo_dir, "apply", "--check", patch_path],
-            capture_output=True,
-            text=True,
-        )
-        if check.returncode == 0:
-            subprocess.run(["git", "-C", repo_dir, "apply", patch_path], check=True)
-            print(f"[{label}] applied {patch_path}", flush=True)
-            continue
-        reverse = subprocess.run(
-            ["git", "-C", repo_dir, "apply", "--reverse", "--check", patch_path],
-            capture_output=True,
-            text=True,
-        )
-        if reverse.returncode == 0:
-            print(f"[{label}] already applied {patch_path}", flush=True)
-            continue
-        raise RuntimeError(
-            f"cannot apply {label} {patch_path}\ncheck: {check.stderr}\nreverse: {reverse.stderr}"
-        )
-
-
 def start_host_mem_monitor(interval_s: int = 20) -> None:
     """Trace this node's host-RAM from a daemon thread. Modal exposes no host-RAM metric, so
     this log line is the only signal for the OOM peak (the publish weight-gather). Best-effort."""

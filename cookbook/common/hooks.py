@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from stitch.pools.modal_flash import ModalFlashPool
@@ -19,7 +20,6 @@ from stitch.publisher import Publisher, TrainerComms
 from stitch.stores.base import Store
 
 from . import process, storage
-from .constants import MODAL_SESSION_ID_HEADER
 
 logger = logging.getLogger(__name__)
 
@@ -39,18 +39,6 @@ class _TorchComms(TrainerComms):
 
     def is_host_leader(self) -> bool:
         return process.dist_is_container_leader()
-
-
-def sample_affinity_key(sample: Any) -> str | None:
-    """Return one stable routing key for a rollout trajectory or GRPO group."""
-    group_index = getattr(sample, "group_index", None)
-    if group_index is not None:
-        return f"group-{group_index}"
-    for name in ("routing_key", "session_id"):
-        value = getattr(sample, name, None)
-        if value is not None:
-            return str(value)
-    return None
 
 
 # ── publish ────────────────────────────────────────────────────────────────────
@@ -84,11 +72,12 @@ def _publisher(args: Any) -> Publisher:
 
 # ── staleness-gated rollout requests ────────────────────────────────────────────
 async def gated_rollout_request_hook(
-    args: Any, sample: Any, request: dict[str, Any]
+    hook_args: dict[str, Any], _context: Any, request: dict[str, Any]
 ) -> None:
     """Pin each request to a bounded-staleness version, so a too-stale replica returns a
     retryable 409 (nudging it to sync) instead of the trainer spending rollout compute on
     weights beyond its lag bound."""
+    args = SimpleNamespace(**hook_args)
     payload, headers = request["payload"], dict(request.get("headers") or {})
     mode = str(getattr(args, "rollout_request_weight_version_mode", "min"))
 
@@ -107,24 +96,31 @@ async def gated_rollout_request_hook(
         latest=latest,
         lag=lag,
         exact=exact,
-        session_id=sample_affinity_key(sample),
-        affinity_header=MODAL_SESSION_ID_HEADER,
     )
     request["headers"] = headers
-    request["max_retries"] = int(
-        getattr(args, "rollout_request_retry_attempts", request.get("max_retries", 60))
+    request["max_attempts"] = int(
+        getattr(
+            args,
+            "rollout_request_max_attempts",
+            request.get("max_attempts", 1),
+        )
     )
-    request["retry_sleep"] = float(
-        getattr(args, "rollout_request_retry_sleep", request.get("retry_sleep", 1.0))
+    request["retry_interval"] = float(
+        getattr(
+            args,
+            "rollout_request_retry_interval",
+            request.get("retry_interval", 1.0),
+        )
     )
 
 
 class _CachedPointer:
     """TTL-cached ``latest`` version from the trainer's configured store.
 
-    The publisher and request hooks share one store client. Refreshing here can
-    disrupt a Volume publisher that is still writing, while S3 needs no refresh;
-    cross-host refresh belongs to rollout-replica reconciliation.
+    The request gate reads the trainer host's mounted view, which the rank-zero
+    publisher updates directly. Reloading that mount can fail while framework
+    processes hold files open; cross-host refresh belongs to rollout-replica
+    reconciliation, and S3 has no mounted snapshot to refresh.
     """
 
     def __init__(self) -> None:

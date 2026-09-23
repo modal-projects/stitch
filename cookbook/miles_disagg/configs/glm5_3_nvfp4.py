@@ -12,19 +12,6 @@ APP_NAME = "stitch-glm5-3-nvfp4"
 EXPERIMENT_VOLUME_NAME = "stitch-miles-glm5-3-nvfp4"
 LOCAL_CHECKPOINT_PATH = None
 TRAINER_EXTRA_PIP_PACKAGES = swebench_config.TRAINER_PACKAGES
-TRAINER_IMAGE_RUN_COMMANDS = (
-    "uv pip install --system --break-system-packages flashinfer-python==0.6.15.post1",
-    "uv pip install --system --break-system-packages --no-deps "
-    "--index-url https://flashinfer.ai/whl "
-    "flashinfer-cubin==0.6.15.post1",
-    "uv pip install --system --break-system-packages --no-deps "
-    "--index-url https://flashinfer.ai/whl/cu130 "
-    "flashinfer-jit-cache==0.6.15.post1+cu130",
-)
-MEGATRON_RUNTIME_PATCHES = [
-    "/root/cookbook/miles_disagg/patches/megatron-hdo-dp-reshardable-step.patch",
-    "/root/cookbook/miles_disagg/patches/megatron-r3-dispatch.patch",
-]
 
 SOURCE_MODEL = "zai-org/GLM-5.3-BF16"
 SOURCE_REVISION = "9d2398f478cab2de883137db3a36ad2c96205e24"
@@ -182,13 +169,13 @@ class _Miles(MilesConfig):
     custom_rollout_request_hook_path = (
         "cookbook.common.hooks.gated_rollout_request_hook"
     )
-    custom_config_path = {
+    custom_rollout_request_hook_args = {
         "rollout_request_weight_version_mode": "min",
         "rollout_request_weight_version_lag": 1,
-        "rollout_request_retry_attempts": 1200,
-        "rollout_request_retry_sleep": 1.0,
-        "rollout_request_timeout_secs": 300,
+        "rollout_request_max_attempts": 1200,
+        "rollout_request_retry_interval": 1.0,
     }
+    miles_router_timeout = 300
 
     update_weights_interval = 1
     update_weight_transfer_mode = "disk-delta"
@@ -209,8 +196,8 @@ class _Miles(MilesConfig):
 
     rollout_health_check_first_wait = 600
     tito_model = "glm47"
-    session_server_port = [30000, 30064]
-    session_server_startup_timeout_seconds = 600
+    session_server_port = 30000
+    session_server_workers = 64
 
     num_rollout = 500
     save_interval = 10

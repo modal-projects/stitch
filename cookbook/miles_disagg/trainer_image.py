@@ -19,20 +19,11 @@ from cookbook.common import trainer_image as common_trainer_image
 
 # Dated tag, never `latest`: Modal caches from_registry per tag string and won't re-pull
 # a moved mutable tag, so `latest` silently serves whatever was first pulled.
-MILES_IMAGE_TAG = "radixark/miles:dev-202607290235"
+MILES_IMAGE_TAG = "radixark/miles:dev-202609231228"
 MILES_REPO_URL = "https://github.com/modal-projects/miles.git"
-MILES_REPO_REF = "13fa3952ffe682955806cef8e9343b9d7d891af8"
+MILES_REPO_REF = "a59ed7bc657ef16e74bea9ec916e41930dd2ede8"
 
 MILES_ROOT = "/root/miles"
-# Applied at container start, after any dev overlay; each moves to the fork when
-# the pin advances.
-MILES_RUNTIME_PATCHES = (
-    "/root/cookbook/miles_disagg/patches/miles-external-rollout-cleanup.patch",
-    "/root/cookbook/miles_disagg/patches/miles-stable-weight-versions.patch",
-    "/root/cookbook/miles_disagg/patches/miles-seed-baseline-scalars.patch",
-    "/root/cookbook/miles_disagg/patches/miles-hf-checkpoint-dtypes.patch",
-    "/root/cookbook/miles_disagg/patches/miles-hf-static-weights.patch",
-)
 # Source-only megatron.training must be on PYTHONPATH.
 MEGATRON_PATH = "/root/Megatron-LM"
 TORCH_DIST_CONVERT_WRAPPER = "/root/convert_hf_to_torch_dist_modal.py"
@@ -60,9 +51,6 @@ def build_trainer_image(
     image = (
         modal.Image.from_registry(MILES_IMAGE_TAG)
         .entrypoint([])
-        # TransformerEngine 2.17 declares this dependency, but the dated Miles
-        # image installs its TE wheels with --no-deps.
-        .pip_install("onnxscript==0.7.1")
         # RDMA/EFA userspace so multi-node NCCL binds EFA under rdma=True instead of TCP.
         .apt_install(
             "libibverbs-dev", "libibverbs1", "libhwloc-dev", "libnl-route-3-200"
@@ -74,17 +62,6 @@ def build_trainer_image(
             f" && git clone {MILES_REPO_URL} {MILES_ROOT}"
             f" && cd {MILES_ROOT} && git fetch origin {miles_repo_ref} && git checkout FETCH_HEAD"
             f" && python3 -m pip install --no-deps -e {MILES_ROOT}"
-        )
-        .add_local_file(
-            str(
-                Path(__file__).resolve().parent
-                / "patches/megatron-mixed-gradient-dtypes.patch"
-            ),
-            "/root/megatron-mixed-gradient-dtypes.patch",
-            copy=True,
-        )
-        .run_commands(
-            f"cd {MEGATRON_PATH} && git apply /root/megatron-mixed-gradient-dtypes.patch"
         )
         .add_local_file(
             str(_TORCH_DIST_WRAPPER_SRC), TORCH_DIST_CONVERT_WRAPPER, copy=True

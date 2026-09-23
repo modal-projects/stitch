@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -42,3 +43,18 @@ def test_incomplete_checkpoint_is_not_published(tmp_path):
         prep._staged(str(output), incomplete, identity={})
 
     assert not output.exists()
+
+
+def test_trainer_only_packages_do_not_change_checkpoint_identity(monkeypatch):
+    monkeypatch.delenv("MILES_LOCAL_DIR", raising=False)
+    recipe = SimpleNamespace(
+        SOURCE_MODEL="org/model",
+        SOURCE_REVISION="a" * 40,
+        TRAINER_EXTRA_PIP_PACKAGES=("agent-runtime==1",),
+        miles=SimpleNamespace(),
+    )
+
+    first = prep._preparation_identity(recipe, "bf16")
+    recipe.TRAINER_EXTRA_PIP_PACKAGES = ("agent-runtime==2",)
+
+    assert prep._preparation_identity(recipe, "bf16") == first
