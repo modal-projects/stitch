@@ -20,13 +20,7 @@ from uuid import uuid4
 import modal
 import modal.experimental
 
-from cookbook.common import (
-    launch,
-    ray_cluster,
-    server,
-    serving_image,
-    storage,
-)
+from cookbook.common import launch, ray_cluster, server, serving_image, storage
 from cookbook.common.constants import (
     CHECKPOINTS_PATH,
     DATA_PATH,
