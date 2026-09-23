@@ -14,7 +14,7 @@ SGLANG_CACHE_PATH = (
     "/root/.cache/sglang"  # sglang kernel/JIT cache; survives cold starts
 )
 KERNEL_CACHE_PATH = Path(
-    "/kernel-cache"  # trainer Triton/TorchInductor cache; survives fresh containers
+    "/kernel-cache"  # Triton/TorchInductor kernel cache; survives cold starts
 )
 
 # Ports.

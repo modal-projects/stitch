@@ -1,10 +1,9 @@
-"""Persistent Triton/TorchInductor kernel cache for trainer containers.
+"""Persistent Triton/TorchInductor kernel cache.
 
-By default both write compiled kernels to container scratch, so every fresh trainer
-container recompiles and re-autotunes from zero. Pointing the cache dirs into a
-Volume, keyed by GPU compute capability (SASS is arch-specific) and torch/triton
-version (the toolchain identity of the artifacts), lets later containers reuse them.
-Kernel source bumps need no key change: both caches hash the source into the entry.
+Both default to container scratch, so every fresh container recompiles and
+re-autotunes from zero. Pointing the cache dirs into a Volume, keyed by GPU compute
+capability (SASS is arch-specific) and torch/triton version, lets later containers
+reuse them. Kernel source bumps need no key change: both caches hash the source.
 """
 
 from __future__ import annotations

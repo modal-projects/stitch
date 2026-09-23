@@ -51,7 +51,7 @@ def test_trainer_mounts_kernel_cache_volume_by_default(monkeypatch):
 
     volume = app.train_volumes[str(KERNEL_CACHE_PATH)]
     assert volume is app.kernel_cache_volume
-    assert volume.name == "miles-kernel-cache"
+    assert volume.name == "kernel-cache"
 
 
 def test_recipe_can_disable_kernel_cache_volume(monkeypatch):

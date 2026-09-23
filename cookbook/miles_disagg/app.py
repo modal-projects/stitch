@@ -145,7 +145,7 @@ draft_volume = (
 kernel_cache_volume = (
     modal.Volume.from_name(
         modal_cfg.kernel_cache_volume, create_if_missing=True, version=2
-    )  # compiled Triton/Inductor kernels; survives fresh containers
+    )  # survives cold starts
     if modal_cfg.kernel_cache_volume
     else None
 )

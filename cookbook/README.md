@@ -304,7 +304,7 @@ Run publications use either the experiment Volume or S3, according to
 | `miles-data` | `/data` | Pinned datasets |
 | `stitch-<framework>-<model>` | `/stitch` | Run-scoped checkpoints and logs; publications when using the Volume backend |
 | `sglang-cache` | `/root/.cache/sglang` | Compiled SGLang kernels |
-| `miles-kernel-cache` | `/kernel-cache` | Compiled Triton and TorchInductor kernels for the Miles trainer |
+| `kernel-cache` | `/kernel-cache` | Compiled Triton and TorchInductor kernels |
 | Configured draft Volume | `/draft` | Optional external speculative draft |
 
 Prepared model layouts have stable paths. For example:
@@ -344,11 +344,6 @@ Datasets are independent of models and runs:
     ├── <trainer-input>
     └── <dataset-specific-assets>/
 ```
-
-The Miles trainer points `TRITON_CACHE_DIR` and `TORCHINDUCTOR_CACHE_DIR` at
-`/kernel-cache/<sm_cc>/torch-<ver>-triton-<ver>/{triton,inductor}`, so compiled
-kernels survive across attempts and runs on the same GPU arch and toolchain.
-Set `modal.kernel_cache_volume` to use another Volume, or `None` to disable.
 
 ## External speculative drafts
 
