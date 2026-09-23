@@ -20,12 +20,20 @@ from uuid import uuid4
 import modal
 import modal.experimental
 
-from cookbook.common import launch, ray_cluster, server, serving_image, storage
+from cookbook.common import (
+    kernel_cache,
+    launch,
+    ray_cluster,
+    server,
+    serving_image,
+    storage,
+)
 from cookbook.common.constants import (
     CHECKPOINTS_PATH,
     DATA_PATH,
     DRAFT_PATH,
     HF_CACHE_PATH,
+    KERNEL_CACHE_PATH,
     MINUTES,
     RAY_PORT,
     SERVER_STARTUP_TIMEOUT,
@@ -134,12 +142,26 @@ draft_volume = (
     if modal_cfg.draft_volume
     else None
 )
+# Compiled Triton/Inductor kernels; every attempt is a fresh container, so without
+# this each one recompiles and re-autotunes from zero (see common/kernel_cache.py).
+kernel_cache_volume = (
+    modal.Volume.from_name(
+        modal_cfg.kernel_cache_volume, create_if_missing=True, version=2
+    )
+    if modal_cfg.kernel_cache_volume
+    else None
+)
 
 train_volumes = {
     str(HF_CACHE_PATH): hf_cache_volume,
     str(CHECKPOINTS_PATH): checkpoint_volume,
     str(DATA_PATH): data_volume,
     str(STITCH_PATH): run_volume,
+    **(
+        {str(KERNEL_CACHE_PATH): kernel_cache_volume}
+        if kernel_cache_volume is not None
+        else {}
+    ),
 }
 
 app = modal.App(APP_NAME)
@@ -320,6 +342,14 @@ class Trainer:
         )
         self.rank = rank
         process.start_host_mem_monitor()  # per-node host-RAM trace
+        # Ray workers inherit the raylet's environment, so this must land in
+        # os.environ before `ray start`; the recipe's environment stays last so it
+        # can still override a cache location.
+        cache_env = (
+            kernel_cache.environment(KERNEL_CACHE_PATH)
+            if kernel_cache_volume is not None
+            else {}
+        )
         ray_cluster.start_ray_node(
             rank,
             master_addr,
@@ -329,6 +359,7 @@ class Trainer:
             extra_env={
                 "MILES_HOST_IP": my_ip,
                 "PYTHONPATH": f"{MEGATRON_PATH}:{os.environ.get('PYTHONPATH', '')}",  # source-only megatron.training
+                **cache_env,
                 **miles_cfg.environment,
             },
         )
@@ -349,6 +380,7 @@ class Trainer:
         if self.rank != 0:
             # Returning here would exit this container under its Ray node.
             ray_cluster.hold_worker_node(self.master_addr, ray_port=RAY_PORT)
+            _commit_kernel_cache()
             return
 
         # Warm containers may enter during an active attempt. Only an actual
@@ -449,6 +481,19 @@ class Trainer:
                     )
                 except Exception as exc:  # noqa: BLE001
                     print(f"WARNING: could not commit train log: {exc}")
+                _commit_kernel_cache()
+
+
+def _commit_kernel_cache() -> None:
+    """Persist this node's compiled kernels for the next attempt. Volumes also commit
+    in the background and at container exit; this is the explicit end-of-attempt
+    boundary, and a failure is not worth failing the attempt over."""
+    if kernel_cache_volume is None:
+        return
+    try:
+        kernel_cache_volume.commit()
+    except Exception as exc:  # noqa: BLE001
+        print(f"WARNING: could not commit kernel cache: {exc}")
 
 
 def _build_train_cmd(cfg: MilesConfig) -> str:

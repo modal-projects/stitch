@@ -28,6 +28,9 @@ class ModalConfig:
     region: str | None = None
     draft_volume: str | None = None
     draft_volume_env: str | None = None
+    # Trainer Triton/TorchInductor kernel cache, shared across runs and retries;
+    # None leaves the caches on container scratch.
+    kernel_cache_volume: str | None = "miles-kernel-cache"
     rollout_min_containers: int = 2
     rollout_max_containers: int | None = None
     # Flash autoscaler target: keep well below sglang engine concurrency so Flash adds
