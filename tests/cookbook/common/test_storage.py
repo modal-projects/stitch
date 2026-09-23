@@ -108,6 +108,19 @@ def test_create_store_selects_the_backend(tmp_path: Path) -> None:
     assert s3.run_id == "run-a"
 
 
+def test_create_store_preserves_the_volume_namespace(tmp_path: Path) -> None:
+    volume = create_store(
+        MODAL_VOLUME,
+        local_root=tmp_path / "run-a",
+        run_id="run-a",
+        volume_name="weights",
+        volume_root="experiments/run-a",
+    )
+
+    assert isinstance(volume, ModalVolumeStore)
+    assert volume.volume_root == Path("experiments/run-a")
+
+
 def test_s3_trainer_updates_are_node_local() -> None:
     run_dir = Path("/stitch/run-a")
 

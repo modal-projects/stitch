@@ -48,6 +48,7 @@ def start_sidecar(
     store_options = {"backend": store_backend}
     if volume_name:
         store_options["volume_name"] = volume_name
+        store_options["volume_root"] = run_id
     if s3_root:
         store_options["s3_root"] = s3_root
     if s3_endpoint_url:

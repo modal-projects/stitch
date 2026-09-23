@@ -252,6 +252,7 @@ def _boot_checkpoint(store_config: dict) -> tuple[str, int]:
         local_root=RUN_DIR,
         run_id=RUN_ID,
         volume_name=exp.EXPERIMENT_VOLUME_NAME,
+        volume_root=RUN_ID,
     )
     latest = store.read_pointer()
     if latest is None:

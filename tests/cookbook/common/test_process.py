@@ -4,6 +4,7 @@ import urllib.error
 
 from cookbook.common import process, storage
 from stitch.sidecar import SidecarConfig, _load_store_factory
+from stitch.stores.modal_volume import ModalVolumeStore
 from stitch.stores.s3 import S3Store
 
 
@@ -116,3 +117,41 @@ def test_start_sidecar_passes_s3_store_settings(monkeypatch) -> None:
     )
     assert isinstance(store, S3Store)
     assert store.run_id == "run-a"
+
+
+def test_start_sidecar_passes_the_volume_namespace(monkeypatch) -> None:
+    commands: list[list[str]] = []
+    monkeypatch.setattr(
+        process.subprocess,
+        "Popen",
+        lambda command, **_kwargs: commands.append(command) or object(),
+    )
+
+    process.start_sidecar(
+        sidecar_port=8000,
+        sglang_port=8001,
+        bulletin_root="/stitch/run-a",
+        local_checkpoint_dir=None,
+        delta_update_mode="cpu",
+        store_backend=storage.MODAL_VOLUME,
+        volume_name="weights",
+        s3_root=None,
+        s3_endpoint_url=None,
+        run_id="run-a",
+        boot_version=0,
+        commit_mode="in_place",
+    )
+
+    config = SidecarConfig.from_argv(commands[0][3:])
+    assert config.store_options == {
+        "backend": storage.MODAL_VOLUME,
+        "volume_name": "weights",
+        "volume_root": "run-a",
+    }
+    store = _load_store_factory(config.store_factory)(
+        local_root=config.bulletin_root,
+        run_id=config.run_id,
+        **config.store_options,
+    )
+    assert isinstance(store, ModalVolumeStore)
+    assert str(store.volume_root) == "run-a"

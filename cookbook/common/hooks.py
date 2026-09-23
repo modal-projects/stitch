@@ -8,6 +8,7 @@ that owns the distributed publish protocol.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from pathlib import Path
@@ -117,10 +118,9 @@ async def gated_rollout_request_hook(
 class _CachedPointer:
     """TTL-cached ``latest`` version from the trainer's configured store.
 
-    The request gate reads the trainer host's mounted view, which the rank-zero
-    publisher updates directly. Reloading that mount can fail while framework
-    processes hold files open; cross-host refresh belongs to rollout-replica
-    reconciliation, and S3 has no mounted snapshot to refresh.
+    The Store owns cross-host visibility. In particular, the Modal backend reads
+    the transactional pointer object directly instead of reloading the trainer's
+    busy mount.
     """
 
     def __init__(self) -> None:
@@ -140,7 +140,7 @@ class _CachedPointer:
         now = time.monotonic()
         if now - self._at >= ttl:
             try:
-                pointer = store.read_pointer()
+                pointer = await asyncio.to_thread(store.read_pointer)
                 self._version = pointer.version if pointer else 0
             except Exception:  # noqa: BLE001
                 logger.warning(
@@ -157,11 +157,13 @@ _latest = _CachedPointer()
 
 # ── args → run coordinates ───────────────────────────────────────────────────────
 def _store(args: Any) -> Store:
+    volume_name = getattr(args, "experiment_volume_name", None) or None
     return storage.create_store(
         str(getattr(args, "stitch_store_backend", storage.MODAL_VOLUME)),
         local_root=_transport_root(args),
         run_id=_run_id(args),
-        volume_name=getattr(args, "experiment_volume_name", None) or None,
+        volume_name=volume_name,
+        volume_root=_run_id(args) if volume_name else None,
         s3_root=getattr(args, "stitch_s3_root", None) or None,
         s3_endpoint_url=getattr(args, "stitch_s3_endpoint_url", None) or None,
     )

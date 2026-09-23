@@ -9,8 +9,12 @@ from __future__ import annotations
 import json
 import tempfile
 from pathlib import Path
+from typing import BinaryIO
+
+import pytest
 
 from stitch.publish import publish_version
+from stitch.stores import modal_volume
 from stitch.stores.modal_volume import ModalVolumeStore
 from stitch.types import VersionKind, VersionRef
 
@@ -119,6 +123,71 @@ def test_runs_sharing_a_volume_have_independent_state() -> None:
         assert second.read_pointer() == VersionRef("run-b", 0)
         assert Path(first.materialize(VersionRef("run-a", 1))).is_dir()
         assert not Path(second.materialize(VersionRef("run-b", 1))).exists()
+
+
+class _Upload:
+    def __init__(self, files: dict[str, bytes], *, force: bool) -> None:
+        self.files = files
+        self.force = force
+
+    def __enter__(self) -> _Upload:
+        return self
+
+    def __exit__(self, *_args) -> None:
+        return None
+
+    def put_file(self, source: BinaryIO, destination: str) -> None:
+        assert self.force
+        self.files[destination] = source.read()
+
+
+class _Volume:
+    def __init__(self) -> None:
+        self.files: dict[str, bytes] = {}
+
+    def batch_upload(self, *, force: bool) -> _Upload:
+        return _Upload(self.files, force=force)
+
+    def read_file(self, path: str):
+        try:
+            yield self.files[path]
+        except KeyError:
+            raise FileNotFoundError(path) from None
+
+
+def test_volume_pointer_uses_transactional_api(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    volume = _Volume()
+    monkeypatch.setattr(modal_volume, "_volume", lambda _name: volume)
+    store = ModalVolumeStore(
+        tmp_path,
+        run_id="run-a",
+        volume_name="weights",
+        volume_root="experiments/run-a",
+    )
+
+    store.advance_pointer(VersionRef("run-a", 7))
+
+    assert volume.files["experiments/run-a/latest"] == b"run-a/weight_v000007"
+    assert store.read_pointer() == VersionRef("run-a", 7)
+    assert not (tmp_path / "latest").exists()
+
+
+@pytest.mark.parametrize(
+    ("volume_name", "volume_root"),
+    [("weights", None), (None, "experiments/run-a")],
+)
+def test_volume_name_and_root_are_paired(
+    tmp_path: Path, volume_name: str | None, volume_root: str | None
+) -> None:
+    with pytest.raises(ValueError, match="configured together"):
+        ModalVolumeStore(
+            tmp_path,
+            run_id="run-a",
+            volume_name=volume_name,
+            volume_root=volume_root,
+        )
 
 
 if __name__ == "__main__":

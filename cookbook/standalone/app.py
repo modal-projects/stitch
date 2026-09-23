@@ -135,6 +135,7 @@ class Server:
             local_root=RUN_DIR,
             run_id=RUN_ID,
             volume_name=exp.EXPERIMENT_VOLUME_NAME,
+            volume_root=RUN_ID,
             s3_root=store_config.get("stitch_s3_root"),
             s3_endpoint_url=store_config.get("stitch_s3_endpoint_url"),
         )
@@ -187,6 +188,7 @@ def claim_boot_pointer() -> None:
         local_root=RUN_DIR,
         run_id=RUN_ID,
         volume_name=exp.EXPERIMENT_VOLUME_NAME,
+        volume_root=RUN_ID,
         s3_root=store_config.get("stitch_s3_root"),
         s3_endpoint_url=store_config.get("stitch_s3_endpoint_url"),
     )
