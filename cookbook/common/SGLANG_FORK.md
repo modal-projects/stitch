@@ -15,6 +15,7 @@ DEFAULT_SGLANG_RUNTIME = SGLangRuntime(
     repository="https://github.com/modal-projects/sglang.git",
     branch="stitch-sglang-v0.5.20",
     commit="18df9cb22e5b7c0b3dc5303376bf61c4a4090db4",
+    patches=(str(_PATCHES_DIR / "sglang-gemma-rmsnorm-staged-load.patch"),),
 )
 ```
 
@@ -243,6 +244,25 @@ after that point is fatal because continuing with mixed rank versions would be
 incorrect. With a fixed speculative draft, CPU staging and commit cover the
 target model only. Updating target and draft weights together is unsupported
 because they cannot yet be committed atomically.
+
+## Stitch-side patches
+
+`SGLangRuntime.patches` lists `git diff` files under [`patches/`](patches/) that
+`build_serving_image()` applies to the fork checkout at image build time, after
+`git checkout --detach <commit>` and before `python/` is copied over the base
+image. Every patch goes through `git apply --check` first, so a patch that no
+longer applies (or is already part of the pin) fails the image build rather than
+the running replica. Patches are a staging area for fixes that belong in the
+fork but have not yet advanced the pin.
+
+| Patch | What | Why |
+| --- | --- | --- |
+| `sglang-gemma-rmsnorm-staged-load.patch` | `GemmaRMSNorm` (the zero-centered `weight + 1` norm used by Qwen3.5/3.6 and Qwen3-Next) exposes its precomputed `gemma_weight` buffer via `get_derived_weight_tensors()` and refreshes it in `process_weights_after_weight_commit()`. | Its `weight_loader` wrote `weight + 1` into `self.gemma_weight`. Under CPU staging the loader runs against a same-device *shadow* module, but a non-persistent buffer that is not declared derived stays shared with the live module, so the loader crashed with a CUDA/CPU device mismatch (`rank weight compilation failed ... Expected all tensors to be on the same device`), and had it not crashed it would have mutated live serving state before commit. Declaring the buffer derived gives the shadow its own copy and puts it in the rank image, so preparation never touches live GPU state; the post-commit hook then rederives `gemma_weight = weight + 1` in place on the live module (stable storage for CUDA graphs and fused paths), matching what the disk path's `_rebind_parameter_aliases` already does. |
+
+To drop a patch once it is upstreamed into the fork: advance `commit` in
+`DEFAULT_SGLANG_RUNTIME`, remove the entry from `patches`, and delete the file.
+`git apply --check` fails on the already-patched tree, so forgetting the second
+step is caught at image build time.
 
 ## Re-porting
 

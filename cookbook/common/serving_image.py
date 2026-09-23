@@ -15,15 +15,26 @@ from pathlib import Path
 
 import modal
 
+_COOKBOOK_DIR = Path(__file__).resolve().parent.parent
+_PATCHES_DIR = _COOKBOOK_DIR / "common" / "patches"
+_OVERLAY_DIR = "/tmp/stitch-sglang-overlay"
+_OVERLAY_PATCHES_DIR = "/tmp/stitch-sglang-patches"
+
 
 @dataclass(frozen=True)
 class SGLangRuntime:
-    """An immutable SGLang source overlay and its ABI-compatible base image."""
+    """An immutable SGLang source overlay and its ABI-compatible base image.
+
+    ``patches`` are local ``git diff`` files applied to the fork checkout at image
+    build time, before its ``python/`` tree is copied over the base image. Each
+    must apply cleanly to ``commit`` or the build fails; see ``SGLANG_FORK.md``.
+    """
 
     image: str
     repository: str
     branch: str
     commit: str
+    patches: tuple[str, ...] = ()
 
 
 DEFAULT_SGLANG_RUNTIME = SGLangRuntime(
@@ -31,9 +42,8 @@ DEFAULT_SGLANG_RUNTIME = SGLangRuntime(
     repository="https://github.com/modal-projects/sglang.git",
     branch="stitch-sglang-v0.5.20",
     commit="18df9cb22e5b7c0b3dc5303376bf61c4a4090db4",
+    patches=(str(_PATCHES_DIR / "sglang-gemma-rmsnorm-staged-load.patch"),),
 )
-
-_COOKBOOK_DIR = Path(__file__).resolve().parent.parent
 
 _SERVING_ENV = {
     "HF_XET_HIGH_PERFORMANCE": "1",
@@ -56,16 +66,32 @@ def build_serving_image(
     runtime: SGLangRuntime = DEFAULT_SGLANG_RUNTIME,
 ) -> modal.Image:
     """Build the rollout-pool image for one experiment config."""
+    image = modal.Image.from_registry(runtime.image)
+    remote_patches: list[str] = []
+    for patch in runtime.patches:
+        local = Path(patch)
+        if not local.is_file():
+            raise FileNotFoundError(f"SGLang runtime patch not found: {local}")
+        remote = f"{_OVERLAY_PATCHES_DIR}/{local.name}"
+        if remote in remote_patches:
+            raise ValueError(f"duplicate SGLang runtime patch name: {local.name}")
+        remote_patches.append(remote)
+        image = image.add_local_file(str(local), remote, copy=True)
     return (
-        modal.Image.from_registry(runtime.image)
-        .run_commands(
-            "rm -rf /tmp/stitch-sglang-overlay"
+        image.run_commands(
+            f"rm -rf {_OVERLAY_DIR}"
             f" && git clone --filter=blob:none --single-branch --branch {runtime.branch}"
-            f" {runtime.repository} /tmp/stitch-sglang-overlay"
-            f" && git -C /tmp/stitch-sglang-overlay checkout --detach {runtime.commit}"
-            " && rm -rf /sgl-workspace/sglang/python/sglang"
-            " && cp -a /tmp/stitch-sglang-overlay/python/. /sgl-workspace/sglang/python/"
-            " && rm -rf /tmp/stitch-sglang-overlay"
+            f" {runtime.repository} {_OVERLAY_DIR}"
+            f" && git -C {_OVERLAY_DIR} checkout --detach {runtime.commit}"
+            + "".join(
+                # --check fails loudly on an unpatched or already-patched tree.
+                f" && git -C {_OVERLAY_DIR} apply --check {remote}"
+                f" && git -C {_OVERLAY_DIR} apply {remote}"
+                for remote in remote_patches
+            )
+            + " && rm -rf /sgl-workspace/sglang/python/sglang"
+            f" && cp -a {_OVERLAY_DIR}/python/. /sgl-workspace/sglang/python/"
+            f" && rm -rf {_OVERLAY_DIR} {_OVERLAY_PATCHES_DIR}"
         )
         .run_commands(
             f"rm -rf {hf_cache_path}"

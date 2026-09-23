@@ -1,0 +1,40 @@
+diff --git a/python/sglang/srt/layers/layernorm.py b/python/sglang/srt/layers/layernorm.py
+index 5bb45333a..f7285c2eb 100644
+--- a/python/sglang/srt/layers/layernorm.py
++++ b/python/sglang/srt/layers/layernorm.py
+@@ -15,7 +15,7 @@
+ 
+ import logging
+ from functools import lru_cache
+-from typing import Optional, Tuple, Union
++from typing import Iterable, Optional, Tuple, Union
+ 
+ import torch
+ import torch.nn as nn
+@@ -1085,9 +1085,26 @@ class GemmaRMSNorm(BaseFusedOp):
+     def _weight_loader(self, param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
+         assert param.size() == loaded_weight.size()
+         param.data.copy_(loaded_weight)
++        self._refresh_gemma_weight(param)
++
++    def _refresh_gemma_weight(self, param: Optional[torch.Tensor] = None) -> None:
+         # Keep storage stable for CUDA graphs or fused paths that capture this buffer.
++        if param is None:
++            param = self.weight
+         torch.add(param.data, 1.0, out=self.gemma_weight)
+ 
++    def get_derived_weight_tensors(self) -> Iterable[Tuple[str, torch.Tensor]]:
++        # ``gemma_weight`` is runtime state derived from ``weight``. Declaring it
++        # gives staged weight loads a same-device shadow copy of the buffer and
++        # places it in the rank weight image, so a staged load never touches the
++        # live module's buffer and the committed image already carries the
++        # refreshed value.
++        return (("gemma_weight", self.gemma_weight),)
++
++    def process_weights_after_weight_commit(self) -> None:
++        # ``weight`` bytes were copied into live storage; rederive in place.
++        self._refresh_gemma_weight()
++
+     def _forward_impl(
+         self,
+         x: torch.Tensor,
