@@ -13,9 +13,7 @@ DRAFT_PATH = Path("/draft")
 SGLANG_CACHE_PATH = (
     "/root/.cache/sglang"  # sglang kernel/JIT cache; survives cold starts
 )
-KERNEL_CACHE_PATH = Path(
-    "/kernel-cache"  # Triton/TorchInductor kernel cache; survives cold starts
-)
+KERNEL_CACHE_PATH = Path("/kernel-cache")
 
 # Ports.
 SIDECAR_PORT = 8000  # the container's public port

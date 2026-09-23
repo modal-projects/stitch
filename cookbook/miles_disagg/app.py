@@ -137,7 +137,7 @@ draft_volume = (
 )
 kernel_cache_volume = modal.Volume.from_name(
     modal_cfg.kernel_cache_volume, create_if_missing=True, version=2
-)  # survives cold starts
+)
 
 train_volumes = {
     str(HF_CACHE_PATH): hf_cache_volume,

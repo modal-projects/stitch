@@ -28,7 +28,7 @@ class ModalConfig:
     region: str | None = None
     draft_volume: str | None = None
     draft_volume_env: str | None = None
-    kernel_cache_volume: str = "kernel-cache"  # Triton/TorchInductor kernel cache
+    kernel_cache_volume: str = "kernel-cache"
     rollout_min_containers: int = 2
     rollout_max_containers: int | None = None
     # Flash autoscaler target: keep well below sglang engine concurrency so Flash adds
