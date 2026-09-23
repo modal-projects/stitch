@@ -110,6 +110,19 @@ def validate_recipe(recipe: Any) -> None:
     """Check checkpoint and deployment agreements before constructing Modal images."""
     cfg = recipe.miles
     validate_serving_config(recipe, gpus_per_engine=cfg.rollout_num_gpus_per_engine)
+    if recipe.modal.forward_session_server_ports:
+        if not getattr(cfg, "use_session_server", False):
+            raise ValueError(
+                "forward_session_server_ports requires miles.use_session_server"
+            )
+        if not isinstance(getattr(cfg, "session_server_port", None), int):
+            raise ValueError(
+                "forward_session_server_ports requires a fixed session_server_port"
+            )
+        if int(getattr(cfg, "session_server_workers", 0)) < 1:
+            raise ValueError(
+                "forward_session_server_ports requires session_server_workers >= 1"
+            )
     served = Path(recipe.ROLLOUT_CHECKPOINT_PATH)
     masters = Path(recipe.BF16_CHECKPOINT_PATH)
     if Path(cfg.hf_checkpoint) != served:

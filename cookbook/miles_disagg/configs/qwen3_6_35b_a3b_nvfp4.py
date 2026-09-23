@@ -10,16 +10,17 @@ APP_NAME = "stitch-qwen3-6-35b-nvfp4"
 EXPERIMENT_VOLUME_NAME = "stitch-miles-qwen3-6-35b-nvfp4"
 SOURCE_MODEL = "Qwen/Qwen3.6-35B-A3B"
 SOURCE_REVISION = "995ad96eacd98c81ed38be0c5b274b04031597b0"
-BF16_CHECKPOINT_PATH = CHECKPOINTS_PATH / "qwen3-6-35b-a3b-995ad96e-bf16-unpacked-v4"
-ROLLOUT_CHECKPOINT_PATH = CHECKPOINTS_PATH / "qwen3-6-35b-a3b-995ad96e-nvfp4-mse-v4"
+BF16_CHECKPOINT_PATH = CHECKPOINTS_PATH / "qwen3-6-35b-a3b-995ad96e-bf16-unpacked"
+ROLLOUT_CHECKPOINT_PATH = CHECKPOINTS_PATH / "qwen3-6-35b-a3b-995ad96e-nvfp4-mse"
 TORCH_DIST_CHECKPOINT_PATH = (
-    CHECKPOINTS_PATH / "qwen3-6-35b-a3b-995ad96e-torch-dist-tp2-ep8-v5"
+    CHECKPOINTS_PATH / "qwen3-6-35b-a3b-995ad96e-torch-dist-tp2-ep8"
 )
 SERVED_CHECKPOINT_FORMAT = "nvfp4"
 CHECKPOINT_PREP_REQUIRES_GPU = True
 UNPACK_FUSED_EXPERTS = True
 LOCAL_CHECKPOINT_PATH = None
 TRAINER_EXTRA_PIP_PACKAGES = swebench_config.TRAINER_PACKAGES
+TRAINER_IMAGE_RUN_COMMANDS = swebench_config.TRAINER_IMAGE_RUN_COMMANDS
 NVFP4_TRAINING_ENV, NVFP4_SERVING_ENV = nvfp4.environments(error_mode="MSE")
 PREP_ENV = {
     **NVFP4_TRAINING_ENV,
@@ -28,9 +29,7 @@ PREP_ENV = {
 }
 SGLANG_SERVER_ENV = dict(NVFP4_SERVING_ENV)
 MAX_SEQ_LEN = 65_536
-AGENT_PROCESSES = 16
-AGENT_THREADS_PER_PROCESS = 16
-ROLLOUT_CONCURRENT_SAMPLES = AGENT_PROCESSES * AGENT_THREADS_PER_PROCESS
+ROLLOUT_CONCURRENT_SAMPLES = 256
 SIDECAR_COMMIT_MODE = "in_place"
 SIDECAR_FLUSH_CACHE_ON_COMMIT = False
 SGLANG_DELTA_UPDATE_MODE = "cpu"
@@ -88,6 +87,7 @@ modal = ModalConfig(
         "--moe-token-dispatcher-type alltoall"
     ),
     torch_dist_prep_ephemeral_disk_mib=524_288,
+    forward_session_server_ports=True,
 )
 
 
@@ -238,8 +238,6 @@ class _Miles(MilesConfig):
     environment = {
         **swebench_config.environment(
             sandbox_app="qwen3-6-35b-nvfp4-sandbox",
-            processes=AGENT_PROCESSES,
-            threads_per_process=AGENT_THREADS_PER_PROCESS,
         ),
         **NVFP4_TRAINING_ENV,
     }

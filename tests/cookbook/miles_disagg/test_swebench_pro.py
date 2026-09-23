@@ -5,11 +5,27 @@ import subprocess
 import pytest
 
 from cookbook.miles_disagg.swebench_pro import (
+    _environment_dockerfile,
+    _instruction,
     _parse_string_list,
     _patched_paths,
     _setup_script,
     _verifier_script,
 )
+
+
+def test_instruction_matches_the_training_prompt() -> None:
+    source = {
+        "problem_statement": "Fix the bug.",
+        "requirements": "Keep compatibility.",
+        "interface": "No new interfaces.",
+    }
+
+    assert _instruction(source) == (
+        "Fix the bug.\n\n"
+        "Requirements:\nKeep compatibility.\n\n"
+        "New interfaces introduced:\nNo new interfaces."
+    )
 
 
 def test_parse_string_list_rejects_non_string_items() -> None:
@@ -41,3 +57,12 @@ def test_generated_verifier_python_is_valid() -> None:
     script = _verifier_script(["test_a.py"])
     source = script.split("python3 - <<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
     compile(source, "verifier.py", "exec")
+
+
+def test_environment_image_materializes_the_task_baseline() -> None:
+    dockerfile = _environment_dockerfile("task-image")
+
+    assert dockerfile.startswith("FROM jefzda/sweap-images:task-image\n")
+    assert "COPY setup.sh" in dockerfile
+    assert "RUN bash /tmp/miles-task-setup.sh" in dockerfile
+    assert dockerfile.endswith("ENTRYPOINT []\n")

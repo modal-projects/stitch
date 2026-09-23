@@ -145,3 +145,24 @@ def test_mapping_arguments_are_encoded_as_json() -> None:
     index = args.index("--custom-rollout-request-hook-args")
 
     assert json.loads(args[index + 1]) == {"minimum_version": 7, "retry": True}
+
+
+def test_external_agents_require_fixed_session_server_ports() -> None:
+    recipe = _recipe("qwen3_6_35b_a3b_nvfp4")
+    recipe.miles.session_server_port = None
+
+    with pytest.raises(ValueError, match="fixed session_server_port"):
+        validate_recipe(recipe)
+
+
+def test_swe_recipe_uses_harbor_without_legacy_modal_swe_hooks() -> None:
+    recipe = _recipe("qwen3_6_35b_a3b_nvfp4")
+    fields = recipe.miles._fields()
+
+    assert fields["custom_agent_function_path"] == "harbor_agent_function.run"
+    assert fields["custom_rm_path"] == "generate.reward_func"
+    assert fields.get("rollout_function_path") is None
+    assert fields["use_session_server"] is True
+    assert recipe.modal.forward_session_server_ports is True
+    assert not any("modal_swe" in str(value) for value in fields.values())
+    assert not any(key.startswith("MODAL_SWE_") for key in recipe.miles.environment)

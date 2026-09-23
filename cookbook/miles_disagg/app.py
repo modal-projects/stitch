@@ -12,6 +12,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+from contextlib import ExitStack
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
@@ -259,6 +260,41 @@ def _boot_checkpoint(store_config: dict) -> tuple[str, int]:
     return (str(export[1]), export[0]) if export else (miles_cfg.hf_checkpoint, 0)
 
 
+def _open_session_server_tunnels(
+    cfg: MilesConfig, head_ip: str, stack: ExitStack
+) -> dict[str, str] | None:
+    """Expose fixed head-node session ports for external sandbox agents."""
+    if not modal_cfg.forward_session_server_ports:
+        return None
+    if not getattr(cfg, "use_session_server", False):
+        raise ValueError("forward_session_server_ports requires use_session_server")
+    if getattr(cfg, "session_server_external_url_map", None) is not None:
+        raise ValueError(
+            "session_server_external_url_map is owned by the Modal launcher when "
+            "forward_session_server_ports is enabled"
+        )
+    port = getattr(cfg, "session_server_port", None)
+    workers = int(getattr(cfg, "session_server_workers", 0))
+    if not isinstance(port, int) or workers < 1:
+        raise ValueError(
+            "forwarded session servers require a fixed session_server_port and "
+            "at least one session_server_worker"
+        )
+
+    try:
+        urls = {
+            f"{head_ip}:{worker_port}": stack.enter_context(
+                modal.forward(worker_port)
+            ).url
+            for worker_port in range(port, port + workers)
+        }
+    except BaseException:
+        stack.close()
+        raise
+    print(f"Forwarded {workers} session-server port(s) for external agents")
+    return urls
+
+
 # ── Trainer (miles on Ray) ────────────────────────────────────────────────────
 # Multi-node needs an RDMA gang (clustered) over the EFA fabric; single-node takes
 # neither. Both are inline on the decorator so there's one declaration, not a rebind.
@@ -310,6 +346,8 @@ class Trainer:
         )
         self.master_addr = master_addr
         self.rank = rank
+        self.session_server_tunnels = ExitStack()
+        self.session_server_external_url_map = None
         process.start_host_mem_monitor()  # per-node host-RAM trace
         ray_cluster.start_ray_node(
             rank,
@@ -323,6 +361,14 @@ class Trainer:
                 **miles_cfg.environment,
             },
         )
+        if rank == 0:
+            self.session_server_external_url_map = _open_session_server_tunnels(
+                miles_cfg, master_addr, self.session_server_tunnels
+            )
+
+    @modal.exit()
+    def close_session_server_tunnels(self) -> None:
+        self.session_server_tunnels.close()
 
     @modal.method()
     def train(self, payload: dict) -> None:
@@ -397,6 +443,11 @@ class Trainer:
             **run_config,
         }
         cfg.custom_config_path = custom_config
+        if self.session_server_external_url_map is not None:
+            # Miles keeps its private address for create/collect/delete. The
+            # agent alone receives the matching public tunnel URL.
+            cfg.session_server_ip = "0.0.0.0"
+            cfg.session_server_external_url_map = self.session_server_external_url_map
         launch.resolve_config(
             cfg,
             tempfile.mkdtemp(),

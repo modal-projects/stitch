@@ -12,6 +12,7 @@ APP_NAME = "stitch-glm5-3-nvfp4"
 EXPERIMENT_VOLUME_NAME = "stitch-miles-glm5-3-nvfp4"
 LOCAL_CHECKPOINT_PATH = None
 TRAINER_EXTRA_PIP_PACKAGES = swebench_config.TRAINER_PACKAGES
+TRAINER_IMAGE_RUN_COMMANDS = swebench_config.TRAINER_IMAGE_RUN_COMMANDS
 
 SOURCE_MODEL = "zai-org/GLM-5.3-BF16"
 SOURCE_REVISION = "9d2398f478cab2de883137db3a36ad2c96205e24"
@@ -135,6 +136,7 @@ modal = ModalConfig(
         "--decoder-last-pipeline-num-layers 20"
     ),
     torch_dist_prep_ephemeral_disk_mib=2_097_152,
+    forward_session_server_ports=True,
 )
 
 
@@ -293,8 +295,6 @@ class _Miles(MilesConfig):
     environment = {
         **swebench_config.environment(
             sandbox_app="glm5-3-nvfp4-swebench-pro-sandbox",
-            processes=48,
-            boot_concurrency_per_process=10,
         ),
         "NCCL_NVLS_ENABLE": "1",
         "INDEXER_ROPE_NEOX_STYLE": "0",

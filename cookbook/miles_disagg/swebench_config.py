@@ -1,13 +1,20 @@
-"""Shared SWE-bench Pro agent and dataset settings; recipes own model and capacity."""
+"""Shared SWE-bench Pro Harbor settings; recipes own model and capacity."""
+
+import json
 
 from cookbook.common.constants import DATA_PATH
 
 DATASET_PATH = DATA_PATH / "swebench-pro"
-TRAINER_PACKAGES = (
-    "harbor[modal,huggingface]==0.20.0",
-    "mini-swe-agent==2.4.5",
-    "swebench==4.1.0",
-    "modal==1.5.3",
+TRAINER_PACKAGES = ("uv==0.8.15", "modal==1.5.3")
+HARBOR_REVISION = "581c7975f5d038cf6f553edc2e1eacfe6696790b"
+TRAINER_IMAGE_RUN_COMMANDS = (
+    "install -d /opt/harbor && git -C /opt/harbor init && "
+    "git -C /opt/harbor remote add origin "
+    "https://github.com/harbor-framework/harbor.git && "
+    f"git -C /opt/harbor fetch --depth=1 origin {HARBOR_REVISION} && "
+    "git -C /opt/harbor checkout --detach FETCH_HEAD && "
+    'uv pip install --python /opt/sglang/bin/python3 '
+    '"/opt/harbor[modal,huggingface]" "mini-swe-agent==2.4.5"',
 )
 
 
@@ -23,50 +30,46 @@ def arguments() -> dict:
         "fully_async": True,
         "pause_generation_mode": "in_place",
         "rollout_submission_granularity": "sample",
-        "custom_rollout_log_function_path": "modal_swe_metrics.log_rollout_data",
         "custom_generate_function_path": (
             "miles.rollout.generate_hub.agentic_tool_call.generate"
         ),
-        "custom_agent_function_path": "modal_swe_agent_function.run",
-        "custom_rm_path": "modal_swe_agent_function.reward_func",
-        "use_session_server": "v2",
-        "session_sample_picker_path": "modal_swe_agent_function.pick_latest_leaf",
-        "session_sample_postprocessor_path": "modal_swe_agent_function.postprocess_samples",
+        "custom_agent_function_path": "harbor_agent_function.run",
+        "custom_rm_path": "generate.reward_func",
+        "use_session_server": True,
     }
 
 
 def environment(
     *,
     sandbox_app: str,
-    processes: int,
-    threads_per_process: int = 16,
-    boot_concurrency_per_process: int = 4,
 ) -> dict[str, str]:
     return {
         "PYTHONPATH": (
-            "/root/Megatron-LM:/root/miles:/root/miles/examples/experimental/modal-swe"
+            "/root/Megatron-LM:/root/miles:"
+            "/root/miles/examples/experimental/harbor:"
+            "/root/miles/examples/swe-agent-harbor-docker"
         ),
         "CUDA_DEVICE_MAX_CONNECTIONS": "1",
         "RAY_health_check_timeout_ms": "60000",
         "RAY_health_check_failure_threshold": "30",
-        "AGENT_MODEL_NAME": "model",
-        "MSWEA_SILENT_STARTUP": "1",
-        "MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT": "1",
-        "LITELLM_LOG": "ERROR",
-        "MODAL_SWE_TASKS_DIR": f"{DATASET_PATH}/tasks",
-        "MODAL_SWE_SANDBOX_APP": sandbox_app,
-        "MODAL_SWE_MAX_STEPS": "256",
-        "MODAL_SWE_EPISODE_TIMEOUT": "7200",
-        "MODAL_SWE_MODEL_REQUEST_TIMEOUT": "1800",
-        "MODAL_SWE_EXEC_TIMEOUT": "120",
-        "MODAL_SWE_OUTPUT_HARD_LIMIT_BYTES": str(16 * 1024 * 1024),
-        "MODAL_SWE_SETUP_TIMEOUT": "240",
-        "MODAL_SWE_VERIFY_TIMEOUT": "3600",
-        "MODAL_SWE_INJECT_PYTEST_REPORTER": "0",
-        "MODAL_SWE_MEMORY_MIB": "2048",
-        "MODAL_SWE_AGENT_PROCESSES": str(processes),
-        "MODAL_SWE_AGENT_THREADS_PER_PROCESS": str(threads_per_process),
-        "MODAL_SWE_SANDBOX_BOOT_CONCURRENCY_PER_PROCESS": str(
-            boot_concurrency_per_process
+        "HARBOR_ENV_TYPE": "modal",
+        "HARBOR_ENV_KWARGS": json.dumps(
+            {
+                "app_name": sandbox_app,
+                "modal_sandbox_v2": True,
+                "sandbox_timeout_secs": 7_800,
+            },
+            separators=(",", ":"),
         ),
+        "HARBOR_TASKS_DIR": f"{DATASET_PATH}/tasks",
+        "HARBOR_TRIALS_DIR": "/tmp/harbor-trials",
+        "AGENT_MODEL_NAME": "model",
+        "AGENT_MAX_INPUT_TOKENS": "57344",
+        "AGENT_MAX_OUTPUT_TOKENS": "8192",
+        "AGENT_TIMEOUT": "6600",
+        "AGENT_TRIAL_TIMEOUT": "7200",
+        "HARBOR_MAX_SEQ_LEN": "65536",
+        "HARBOR_AGENT_MAX_ITERATIONS": "256",
+        "HARBOR_OVERRIDE_MEMORY_MB": "2048",
+        "HARBOR_VERIFIER_TIMEOUT_SEC": "3600",
     }

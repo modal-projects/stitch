@@ -5,13 +5,13 @@ Stitch installs an immutable Miles revision over a dated trainer image:
 ```python
 MILES_IMAGE_TAG = "radixark/miles:dev-202609231228"
 MILES_REPO_URL = "https://github.com/modal-projects/miles.git"
-MILES_REPO_REF = "a59ed7bc657ef16e74bea9ec916e41930dd2ede8"
+MILES_REPO_REF = "4aa480cf44a7447d96b1fb2fe5f7049c2411fcba"
 ```
 
 The image supplies the compiled CUDA, Transformer Engine, and Megatron-LM
 environment. The source pin belongs to
 `modal-projects/miles:stitch-miles`: upstream Miles main at
-`a6b72d31f2`, followed by reviewed changes that remain open upstream. Stitch no
+`fbc511100c`, followed by reviewed changes that remain open upstream. Stitch no
 longer patches Miles at container startup.
 
 ## Carried behavior
@@ -21,12 +21,11 @@ longer patches Miles at container startup.
 | Async rollout | [#3062](https://github.com/radixark/miles/pull/3062), [#3339](https://github.com/radixark/miles/pull/3339) | Dispose blocked producers and decode session samples off the event loop. |
 | Sampling replay | [#3354](https://github.com/radixark/miles/pull/3354) | Replay bounded top-p support during training. |
 | Resume and saving | [#2688](https://github.com/radixark/miles/pull/2688), [#3342](https://github.com/radixark/miles/pull/3342), [#3616](https://github.com/radixark/miles/pull/3616) | Preserve explicit resume selection, overlap final HF export, and retain declared source-owned tensors. |
-| External fleet | [#3236](https://github.com/radixark/miles/pull/3236), [#3344](https://github.com/radixark/miles/pull/3344) | Treat one opaque URL as the rollout fleet and expose a request-policy hook with explicit arguments. |
+| External fleet | [#3236](https://github.com/radixark/miles/pull/3236), [#3344](https://github.com/radixark/miles/pull/3344), [#3637](https://github.com/radixark/miles/pull/3637) | Treat one opaque URL as the rollout fleet, expose request policy, and give external agents routable session URLs while Miles retains private control-plane addresses. |
 | Disk delta | [#3237](https://github.com/radixark/miles/pull/3237) | Match emitted tensor names, shapes, dtypes, and raw checkpoint layouts before XOR encoding. |
 | NVFP4 | [#3592](https://github.com/radixark/miles/pull/3592), [#3601](https://github.com/radixark/miles/pull/3601) | Preserve nested BF16 carve-outs and adapt Qwen3.6 rollout checkpoints. |
-| Data and agents | [#2801](https://github.com/radixark/miles/pull/2801), [#2802](https://github.com/radixark/miles/pull/2802), [#3600](https://github.com/radixark/miles/pull/3600), [#3617](https://github.com/radixark/miles/pull/3617) | Support mixed text/multimodal datasets and reject infrastructure failures as samples. |
-| Modal SWE | Branch-only | Provide the Modal Sandbox transport and verified mini-SWE agent adapter used by these recipes; upstream Miles does not ship this provider-specific example. |
-| Ray placement | Branch-only | Keep the worker manager on the Ray head, where Miles' head-affinity lookup can reach the local dashboard. |
+| Data and agents | [#2801](https://github.com/radixark/miles/pull/2801), [#2802](https://github.com/radixark/miles/pull/2802), [#3600](https://github.com/radixark/miles/pull/3600), [#3617](https://github.com/radixark/miles/pull/3617) | Support mixed text/multimodal datasets and discard infrastructure-only Harbor failures rather than training on them. |
+| Ray placement | Branch-only | Resolve the Ray head node before worker launch so head-pinned control actors do not depend on worker-side dashboard access. |
 
 The integration boundary is intentionally small:
 

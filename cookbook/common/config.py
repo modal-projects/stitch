@@ -41,6 +41,9 @@ class ModalConfig:
     torch_dist_convert_extra_args: str = ""
     torch_dist_prep_ephemeral_disk_mib: int | None = None
     trainer_ephemeral_disk_mib: int | None = None
+    # Expose fixed Miles session-server ports to agents running outside the
+    # trainer network (for example, inside cloud sandboxes).
+    forward_session_server_ports: bool = False
 
     def rollout_gpus(self, per_engine: int) -> str | list[str]:
         """GPU request for one rollout engine: ``rollout_gpu`` falling back to ``gpu``,

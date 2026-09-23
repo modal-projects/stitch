@@ -58,6 +58,24 @@ git update-ref refs/miles/task-baseline "$baseline_commit"
 """
 
 
+def _environment_dockerfile(image_tag: str) -> str:
+    """Build the task baseline into the image Harbor launches."""
+    return (
+        f"FROM jefzda/sweap-images:{image_tag}\n"
+        "COPY setup.sh /tmp/miles-task-setup.sh\n"
+        "RUN bash /tmp/miles-task-setup.sh && rm /tmp/miles-task-setup.sh\n"
+        "ENTRYPOINT []\n"
+    )
+
+
+def _instruction(source: dict) -> str:
+    return (
+        f"{source['problem_statement']}\n\n"
+        f"Requirements:\n{source['requirements']}\n\n"
+        f"New interfaces introduced:\n{source['interface']}"
+    )
+
+
 def _verifier_script(selected_tests: list[str]) -> str:
     selected = shlex.quote(",".join(selected_tests))
     return rf"""#!/bin/bash
@@ -226,11 +244,11 @@ def prepare_swebench_pro(data_root: Path) -> Path:
             tests_dir = task_dir / "tests"
             environment_dir.mkdir(parents=True, exist_ok=True)
             tests_dir.mkdir(parents=True, exist_ok=True)
-            (environment_dir / "Dockerfile").write_text(
-                f"FROM jefzda/sweap-images:{source['dockerhub_tag']}\n"
-            )
             (environment_dir / "setup.sh").write_text(
                 _setup_script(source["before_repo_set_cmd"])
+            )
+            (environment_dir / "Dockerfile").write_text(
+                _environment_dockerfile(source["dockerhub_tag"])
             )
             (tests_dir / "test.sh").write_text(_verifier_script(selected_tests))
             (tests_dir / "run_script.sh").write_text(run_script.read_text())
@@ -242,14 +260,12 @@ def prepare_swebench_pro(data_root: Path) -> Path:
                 "".join(f"{path}\n" for path in _patched_paths(source["test_patch"]))
             )
             (task_dir / "task.toml").write_text("[verifier]\ntimeout_sec = 3600\n")
+            instruction = _instruction(source)
+            (task_dir / "instruction.md").write_text(instruction + "\n")
 
             prompt_rows.append(
                 {
-                    "prompt": (
-                        f"{source['problem_statement']}\n\n"
-                        f"Requirements:\n{source['requirements']}\n\n"
-                        f"New interfaces introduced:\n{source['interface']}"
-                    ),
+                    "prompt": instruction,
                     "metadata": {
                         "instance_id": instance_id,
                         "task_dir": str(task_dir),
