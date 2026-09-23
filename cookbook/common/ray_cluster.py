@@ -55,7 +55,7 @@ def start_ray_head(my_ip: str, n_nodes: int, *, ray_port: int) -> None:
                 f"--node-ip-address={my_ip}",
                 f"--port={ray_port}",
                 "--disable-usage-stats",
-                "--include-dashboard=false",
+                "--include-dashboard=true",
             ],
             check=True,
             timeout=RAY_START_TIMEOUT,

@@ -10,21 +10,16 @@ APP_NAME = "stitch-qwen3-6-35b-nvfp4"
 EXPERIMENT_VOLUME_NAME = "stitch-miles-qwen3-6-35b-nvfp4"
 SOURCE_MODEL = "Qwen/Qwen3.6-35B-A3B"
 SOURCE_REVISION = "995ad96eacd98c81ed38be0c5b274b04031597b0"
-BF16_CHECKPOINT_PATH = CHECKPOINTS_PATH / "qwen3-6-35b-a3b-995ad96e-bf16-unpacked-v1"
-ROLLOUT_CHECKPOINT_PATH = CHECKPOINTS_PATH / "qwen3-6-35b-a3b-995ad96e-nvfp4-mse"
+BF16_CHECKPOINT_PATH = CHECKPOINTS_PATH / "qwen3-6-35b-a3b-995ad96e-bf16-unpacked-v4"
+ROLLOUT_CHECKPOINT_PATH = CHECKPOINTS_PATH / "qwen3-6-35b-a3b-995ad96e-nvfp4-mse-v4"
 TORCH_DIST_CHECKPOINT_PATH = (
-    CHECKPOINTS_PATH / "qwen3-6-35b-a3b-995ad96e-torch-dist-tp2-ep8-v1"
+    CHECKPOINTS_PATH / "qwen3-6-35b-a3b-995ad96e-torch-dist-tp2-ep8-v5"
 )
 SERVED_CHECKPOINT_FORMAT = "nvfp4"
 CHECKPOINT_PREP_REQUIRES_GPU = True
 UNPACK_FUSED_EXPERTS = True
 LOCAL_CHECKPOINT_PATH = None
 TRAINER_EXTRA_PIP_PACKAGES = swebench_config.TRAINER_PACKAGES
-MEGATRON_RUNTIME_PATCHES = [
-    "/root/cookbook/miles_disagg/patches/megatron-r3-dispatch.patch",
-    "/root/cookbook/miles_disagg/patches/megatron-hdo-dp-reshardable-step.patch",
-]
-
 NVFP4_TRAINING_ENV, NVFP4_SERVING_ENV = nvfp4.environments(error_mode="MSE")
 PREP_ENV = {
     **NVFP4_TRAINING_ENV,
@@ -88,6 +83,7 @@ modal = ModalConfig(
         "--context-parallel-size 1 "
         "--expert-model-parallel-size 8 "
         "--expert-tensor-parallel-size 1 "
+        "--mtp-num-layers 0 "
         "--sequence-parallel "
         "--moe-token-dispatcher-type alltoall"
     ),
@@ -103,6 +99,9 @@ class _Miles(MilesConfig):
     ref_load = str(TORCH_DIST_CHECKPOINT_PATH)
     megatron_to_hf_mode = "raw"
     model_name = "qwen3_6"
+    # This recipe serves and trains only the target model; the source checkpoint's
+    # optional MTP block is neither part of the rollout model nor the RL objective.
+    mtp_num_layers = 0
     extra_high_precision_layers_hf = [".shared_expert."]
     extra_high_precision_layers_megatron = [
         ".shared_experts.linear_fc1",
@@ -130,15 +129,15 @@ class _Miles(MilesConfig):
     custom_rollout_request_hook_path = (
         "cookbook.common.hooks.gated_rollout_request_hook"
     )
-    custom_config_path = {
-        # The language-only trainer retains the source checkpoint's frozen vision tower.
-        "hf_export_static_weight_prefixes": ["model.visual."],
+    custom_rollout_request_hook_args = {
         "rollout_request_weight_version_mode": "min",
         "rollout_request_weight_version_lag": 1,
-        "rollout_request_retry_attempts": 1200,
-        "rollout_request_retry_sleep": 1.0,
-        "rollout_request_timeout_secs": 300,
+        "rollout_request_max_attempts": 1200,
+        "rollout_request_retry_interval": 1.0,
     }
+    miles_router_timeout = 300
+    # Preserve source-owned modules that the target-only trainer does not instantiate.
+    hf_export_source_tensor_prefixes = ["model.visual.", "mtp."]
 
     update_weights_interval = 1
     update_weight_transfer_mode = "disk-delta"
@@ -148,8 +147,8 @@ class _Miles(MilesConfig):
     custom_update_weight_post_write_path = "cookbook.common.hooks.commit_and_wake"
 
     tito_model = "qwen35"
-    session_server_port = [30000, 30008]
-    session_server_startup_timeout_seconds = 600
+    session_server_port = 30000
+    session_server_workers = 8
 
     num_rollout = 500
     save_interval = 20

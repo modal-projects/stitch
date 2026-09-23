@@ -37,8 +37,6 @@ image = trainer_image.build_trainer_image(
     hf_cache_path=str(HF_CACHE_PATH),
     experiment=EXPERIMENT,
     miles_repo_ref=prep.pinned_miles_revision(exp),
-    extra_pip_packages=getattr(exp, "TRAINER_EXTRA_PIP_PACKAGES", ()),
-    image_run_commands=getattr(exp, "TRAINER_IMAGE_RUN_COMMANDS", ()),
 )
 
 hf_cache_volume = modal.Volume.from_name(

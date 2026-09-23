@@ -60,8 +60,6 @@ def _preparation_identity(exp, output_format: str) -> dict[str, Any]:
         "converter": {
             "image": trainer_image.MILES_IMAGE_TAG,
             "miles_revision": miles_revision,
-            "extra_packages": list(getattr(exp, "TRAINER_EXTRA_PIP_PACKAGES", ())),
-            "image_commands": list(getattr(exp, "TRAINER_IMAGE_RUN_COMMANDS", ())),
             "environment": dict(getattr(exp, "PREP_ENV", {})),
         },
     }
