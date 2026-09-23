@@ -1,3 +1,4 @@
+import json
 from copy import deepcopy
 from importlib import import_module
 from types import SimpleNamespace
@@ -5,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from cookbook.miles_disagg import nvfp4
-from cookbook.miles_disagg.config import validate_recipe
+from cookbook.miles_disagg.config import MilesConfig, validate_recipe
 from cookbook.miles_disagg.resume import validate_resumable_config
 
 
@@ -60,6 +61,15 @@ def test_quantized_serving_cannot_overwrite_bf16_masters():
 
     with pytest.raises(ValueError, match="must differ from BF16_CHECKPOINT_PATH"):
         validate_recipe(recipe)
+
+
+def test_qwen36_target_only_recipe_omits_mtp_from_training_and_conversion():
+    recipe = _recipe("qwen3_6_35b_a3b_nvfp4")
+
+    assert recipe.miles.mtp_num_layers == 0
+    assert "--mtp-num-layers 0" in recipe.modal.torch_dist_convert_extra_args
+    assert "--speculative-algorithm" not in recipe.SGLANG_SERVER_ARGS
+    assert "mtp." in recipe.miles.hf_export_source_tensor_prefixes
 
 
 @pytest.mark.parametrize("ref_load", [None, "/checkpoints/another-model-torch-dist"])
@@ -122,3 +132,16 @@ def test_nvfp4_actual_environments_must_match_the_declared_metric():
 
     with pytest.raises(ValueError, match="NVTE_NVFP4_4OVER6_ERR_MODE"):
         validate_recipe(recipe)
+
+
+def test_mapping_arguments_are_encoded_as_json() -> None:
+    config = MilesConfig()
+    config.custom_rollout_request_hook_args = {
+        "minimum_version": 7,
+        "retry": True,
+    }
+
+    args = config.cli_args()
+    index = args.index("--custom-rollout-request-hook-args")
+
+    assert json.loads(args[index + 1]) == {"minimum_version": 7, "retry": True}

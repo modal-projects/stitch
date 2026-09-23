@@ -27,6 +27,7 @@ from cookbook.common.constants import (
     DRAFT_PATH,
     HF_CACHE_PATH,
     MINUTES,
+    MODAL_SESSION_ID_HEADER,
     RAY_PORT,
     SERVER_STARTUP_TIMEOUT,
     SGLANG_CACHE_PATH,
@@ -308,16 +309,6 @@ class Trainer:
             miles_cfg.n_train_nodes
         )
         self.master_addr = master_addr
-        process.apply_git_patches(
-            list(getattr(exp, "MEGATRON_RUNTIME_PATCHES", [])),
-            MEGATRON_PATH,
-            "Megatron patch",
-        )
-        process.apply_git_patches(
-            list(trainer_image.MILES_RUNTIME_PATCHES),
-            MILES_ROOT,
-            "Miles patch",
-        )
         self.rank = rank
         process.start_host_mem_monitor()  # per-node host-RAM trace
         ray_cluster.start_ray_node(
@@ -368,11 +359,16 @@ class Trainer:
         )
 
         cfg.rollout_endpoint_url = ModalFlashPool(APP_NAME, "Server").gateway_url()
+        cfg.rollout_session_affinity_header = MODAL_SESSION_ID_HEADER
         if resume_point is not None:
             cfg.load = resume_point.trainer_checkpoint
             cfg.hf_checkpoint = resume_point.rollout_checkpoint
             cfg.exit_on_missing_checkpoint = True
             cfg.use_checkpoint_opt_param_scheduler = True
+        boot_version = resume_point.version if resume_point is not None else 0
+        # The external fleet already serves this version. Miles owns the next
+        # publication number and must continue the same monotonic stream.
+        cfg.update_weight_initial_version = boot_version
         # Miles requires this CLI argument; the deployment owns its run-scoped value.
         cfg.update_weight_disk_dir = str(UPDATES_DIR)
         if getattr(cfg, "save_interval", None) is None:
@@ -381,14 +377,24 @@ class Trainer:
             cfg.save = str(RUN_DIR / "checkpoints")
             if save_hf := getattr(cfg, "save_hf", None):
                 cfg.save_hf = str(RUN_DIR / save_hf)
-        # miles setattr's every key onto args for the hooks.
-        custom_config = {
-            **(cfg.custom_config_path or {}),
+        # Miles setattr's custom config keys onto the trainer args. Its request
+        # hook runs in a separate session-server process, so the immutable store
+        # coordinates travel through the dedicated hook-args contract.
+        run_config = {
             **STORE_DEPLOYMENT.hook_config(APP_NAME),
             "experiment_volume_name": exp.EXPERIMENT_VOLUME_NAME,
+            "run_id": RUN_ID,
+            "update_weight_disk_dir": cfg.update_weight_disk_dir,
+        }
+        custom_config = {
+            **(getattr(cfg, "custom_config_path", None) or {}),
+            **run_config,
             "rollout_modal_flash_app_name": APP_NAME,
             "rollout_modal_flash_server_cls_name": "Server",
-            "run_id": RUN_ID,
+        }
+        cfg.custom_rollout_request_hook_args = {
+            **(getattr(cfg, "custom_rollout_request_hook_args", None) or {}),
+            **run_config,
         }
         cfg.custom_config_path = custom_config
         launch.resolve_config(
@@ -402,11 +408,8 @@ class Trainer:
         # Claim the version already served by the pool before Miles publishes.
         from cookbook.common import hooks
 
-        boot_version = resume_point.version if resume_point is not None else 0
         hooks.claim_pool(
-            SimpleNamespace(
-                update_weight_disk_dir=cfg.update_weight_disk_dir, **custom_config
-            ),
+            SimpleNamespace(**custom_config),
             boot_version=boot_version,
         )
         # Replicas ahead of the claimed pointer are exiting, so they are not floor.

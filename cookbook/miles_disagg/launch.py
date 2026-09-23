@@ -43,6 +43,8 @@ def _parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = _parser().parse_args()
+    if not os.environ.get("MODAL_ENVIRONMENT"):
+        raise SystemExit("MODAL_ENVIRONMENT must name the environment for this run")
     experiment = os.environ["EXPERIMENT_CONFIG"]
     exp = importlib.import_module(f"cookbook.miles_disagg.configs.{experiment}")
 

@@ -8,6 +8,7 @@ Modal-infra half of an experiment is ``common.config.ModalConfig``.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -77,6 +78,8 @@ class MilesConfig:
                 out.append(flag)
             elif isinstance(val, list):
                 out += [flag] + [str(v) for v in val]
+            elif isinstance(val, dict):
+                out += [flag, json.dumps(val, separators=(",", ":"))]
             else:
                 out += [flag, str(val)]
         return out

@@ -359,13 +359,13 @@ def test_request_hook_min_lag() -> None:
         args = _args(
             str(root),
             rollout_request_weight_version_lag=2,
-            rollout_request_retry_attempts=900,
+            rollout_request_max_attempts=900,
         )
         request = {"payload": {}}
         asyncio.run(
             hooks.gated_rollout_request_hook(
-                args,
-                SimpleNamespace(group_index=1, routing_key="sample-key"),
+                vars(args),
+                SimpleNamespace(session_id="session-1"),
                 request,
             )
         )
@@ -373,8 +373,7 @@ def test_request_hook_min_lag() -> None:
             "min_version": 8,
             "exact_version": None,
         }
-        assert request["headers"]["Modal-Session-ID"] == "group-1"
-        assert request["max_retries"] == 900
+        assert request["max_attempts"] == 900
 
 
 def test_request_hook_reads_shared_mount_without_reload() -> None:
@@ -400,16 +399,6 @@ def test_request_hook_reads_shared_mount_without_reload() -> None:
             ModalVolumeStore.refresh = original_refresh
 
 
-def test_sample_affinity_key_fallbacks() -> None:
-    assert hooks.sample_affinity_key(SimpleNamespace(group_index=7)) == "group-7"
-    assert (
-        hooks.sample_affinity_key(SimpleNamespace(routing_key="trajectory"))
-        == "trajectory"
-    )
-    assert hooks.sample_affinity_key(SimpleNamespace(session_id="legacy")) == "legacy"
-    assert hooks.sample_affinity_key(SimpleNamespace()) is None
-
-
 def test_request_hook_exact_and_none() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -420,10 +409,12 @@ def test_request_hook_exact_and_none() -> None:
         exact_req = {"payload": {}}
         asyncio.run(
             hooks.gated_rollout_request_hook(
-                _args(
-                    str(root),
-                    rollout_request_weight_version_mode="exact",
-                    rollout_request_weight_version_lag=1,
+                vars(
+                    _args(
+                        str(root),
+                        rollout_request_weight_version_mode="exact",
+                        rollout_request_weight_version_lag=1,
+                    )
                 ),
                 SimpleNamespace(session_id=None),
                 exact_req,
@@ -438,7 +429,7 @@ def test_request_hook_exact_and_none() -> None:
         none_req = {"payload": {}}
         asyncio.run(
             hooks.gated_rollout_request_hook(
-                _args(str(root), rollout_request_weight_version_mode="none"),
+                vars(_args(str(root), rollout_request_weight_version_mode="none")),
                 SimpleNamespace(session_id=None),
                 none_req,
             )
@@ -461,7 +452,13 @@ def test_request_hook_cache_switches_runs() -> None:
         async def read(root: str, run_id: str) -> dict:
             request = {"payload": {}}
             await hooks.gated_rollout_request_hook(
-                _args(root, run_id=run_id, rollout_request_weight_version_lag=0),
+                vars(
+                    _args(
+                        root,
+                        run_id=run_id,
+                        rollout_request_weight_version_lag=0,
+                    )
+                ),
                 SimpleNamespace(session_id=None),
                 request,
             )

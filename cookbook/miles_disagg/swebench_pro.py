@@ -6,6 +6,7 @@ import ast
 import json
 import shlex
 import subprocess
+import tempfile
 from pathlib import Path
 
 EVALUATOR_REVISION = "ca10a60a5fcae51e6948ffe1485d4153d421e6c5"
@@ -168,97 +169,100 @@ def prepare_swebench_pro(data_root: Path) -> Path:
 
     source_revision = "7ab5114912baf22bb098818e604c02fe7ad2c11f"
     tasks_root = data_root / "tasks"
-    source_root = data_root / "SWE-bench_Pro-os"
     data_root.mkdir(parents=True, exist_ok=True)
-    _checkout_evaluator(source_root)
+    with tempfile.TemporaryDirectory(prefix="swebench-pro-evaluator-") as temp_dir:
+        source_root = Path(temp_dir) / "SWE-bench_Pro-os"
+        _checkout_evaluator(source_root)
 
-    source_rows = load_dataset(
-        "ScaleAI/SWE-bench_Pro",
-        revision=source_revision,
-        split="test",
-    )
-    if len(source_rows) != 731:
-        raise RuntimeError(
-            f"Expected 731 SWE-bench Pro test tasks; got {len(source_rows)}"
+        source_rows = load_dataset(
+            "ScaleAI/SWE-bench_Pro",
+            revision=source_revision,
+            split="test",
         )
-
-    tasks_root.mkdir(parents=True, exist_ok=True)
-    prompt_rows = []
-    instance_ids = set()
-    for source in source_rows:
-        instance_id = source["instance_id"]
-        if instance_id in instance_ids:
-            raise RuntimeError(f"Duplicate SWE-bench Pro task: {instance_id}")
-        instance_ids.add(instance_id)
-
-        official_assets = source_root / "run_scripts" / instance_id
-        run_script = official_assets / "run_script.sh"
-        parser_script = official_assets / "parser.py"
-        if not run_script.is_file() or not parser_script.is_file():
-            raise FileNotFoundError(
-                f"{instance_id}: missing official run_script.sh or parser.py"
+        if len(source_rows) != 731:
+            raise RuntimeError(
+                f"Expected 731 SWE-bench Pro test tasks; got {len(source_rows)}"
             )
 
-        selected_tests = _parse_string_list(
-            source["selected_test_files_to_run"],
-            "selected_test_files_to_run",
-            instance_id,
-        )
-        required_tests = sorted(
-            set(
-                _parse_string_list(source["fail_to_pass"], "fail_to_pass", instance_id)
-                + _parse_string_list(
-                    source["pass_to_pass"], "pass_to_pass", instance_id
+        tasks_root.mkdir(parents=True, exist_ok=True)
+        prompt_rows = []
+        instance_ids = set()
+        for source in source_rows:
+            instance_id = source["instance_id"]
+            if instance_id in instance_ids:
+                raise RuntimeError(f"Duplicate SWE-bench Pro task: {instance_id}")
+            instance_ids.add(instance_id)
+
+            official_assets = source_root / "run_scripts" / instance_id
+            run_script = official_assets / "run_script.sh"
+            parser_script = official_assets / "parser.py"
+            if not run_script.is_file() or not parser_script.is_file():
+                raise FileNotFoundError(
+                    f"{instance_id}: missing official run_script.sh or parser.py"
+                )
+
+            selected_tests = _parse_string_list(
+                source["selected_test_files_to_run"],
+                "selected_test_files_to_run",
+                instance_id,
+            )
+            required_tests = sorted(
+                set(
+                    _parse_string_list(
+                        source["fail_to_pass"], "fail_to_pass", instance_id
+                    )
+                    + _parse_string_list(
+                        source["pass_to_pass"], "pass_to_pass", instance_id
+                    )
                 )
             )
-        )
-        if not selected_tests or not required_tests:
-            raise RuntimeError(
-                f"{instance_id}: selected and required tests must be non-empty"
+            if not selected_tests or not required_tests:
+                raise RuntimeError(
+                    f"{instance_id}: selected and required tests must be non-empty"
+                )
+
+            task_dir = tasks_root / instance_id
+            environment_dir = task_dir / "environment"
+            tests_dir = task_dir / "tests"
+            environment_dir.mkdir(parents=True, exist_ok=True)
+            tests_dir.mkdir(parents=True, exist_ok=True)
+            (environment_dir / "Dockerfile").write_text(
+                f"FROM jefzda/sweap-images:{source['dockerhub_tag']}\n"
             )
+            (environment_dir / "setup.sh").write_text(
+                _setup_script(source["before_repo_set_cmd"])
+            )
+            (tests_dir / "test.sh").write_text(_verifier_script(selected_tests))
+            (tests_dir / "run_script.sh").write_text(run_script.read_text())
+            (tests_dir / "parser.py").write_text(parser_script.read_text())
+            (tests_dir / "required_tests.json").write_text(
+                json.dumps(required_tests) + "\n"
+            )
+            (tests_dir / "protected_test_paths.txt").write_text(
+                "".join(f"{path}\n" for path in _patched_paths(source["test_patch"]))
+            )
+            (task_dir / "task.toml").write_text("[verifier]\ntimeout_sec = 3600\n")
 
-        task_dir = tasks_root / instance_id
-        environment_dir = task_dir / "environment"
-        tests_dir = task_dir / "tests"
-        environment_dir.mkdir(parents=True, exist_ok=True)
-        tests_dir.mkdir(parents=True, exist_ok=True)
-        (environment_dir / "Dockerfile").write_text(
-            f"FROM jefzda/sweap-images:{source['dockerhub_tag']}\n"
-        )
-        (environment_dir / "setup.sh").write_text(
-            _setup_script(source["before_repo_set_cmd"])
-        )
-        (tests_dir / "test.sh").write_text(_verifier_script(selected_tests))
-        (tests_dir / "run_script.sh").write_text(run_script.read_text())
-        (tests_dir / "parser.py").write_text(parser_script.read_text())
-        (tests_dir / "required_tests.json").write_text(
-            json.dumps(required_tests) + "\n"
-        )
-        (tests_dir / "protected_test_paths.txt").write_text(
-            "".join(f"{path}\n" for path in _patched_paths(source["test_patch"]))
-        )
-        (task_dir / "task.toml").write_text("[verifier]\ntimeout_sec = 3600\n")
-
-        prompt_rows.append(
-            {
-                "prompt": (
-                    f"{source['problem_statement']}\n\n"
-                    f"Requirements:\n{source['requirements']}\n\n"
-                    f"New interfaces introduced:\n{source['interface']}"
-                ),
-                "metadata": {
-                    "instance_id": instance_id,
-                    "task_dir": str(task_dir),
-                    "sandbox_cwd": "/app",
-                    "agent_name": "mini-swe-agent",
-                    "source_dataset": "ScaleAI/SWE-bench_Pro",
-                    "source_revision": source_revision,
-                    "split": "test",
-                    "repo": source["repo"],
-                    "repo_language": source["repo_language"],
-                },
-            }
-        )
+            prompt_rows.append(
+                {
+                    "prompt": (
+                        f"{source['problem_statement']}\n\n"
+                        f"Requirements:\n{source['requirements']}\n\n"
+                        f"New interfaces introduced:\n{source['interface']}"
+                    ),
+                    "metadata": {
+                        "instance_id": instance_id,
+                        "task_dir": str(task_dir),
+                        "sandbox_cwd": "/app",
+                        "agent_name": "mini-swe-agent",
+                        "source_dataset": "ScaleAI/SWE-bench_Pro",
+                        "source_revision": source_revision,
+                        "split": "test",
+                        "repo": source["repo"],
+                        "repo_language": source["repo_language"],
+                    },
+                }
+            )
 
     prompt_path = data_root / "test.jsonl"
     prompt_path.write_text("".join(json.dumps(row) + "\n" for row in prompt_rows))

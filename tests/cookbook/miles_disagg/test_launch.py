@@ -37,6 +37,7 @@ def _launch(
         return SimpleNamespace(object_id="fc-1")
 
     monkeypatch.setenv("EXPERIMENT_CONFIG", "test")
+    monkeypatch.setenv("MODAL_ENVIRONMENT", "stitch-dev")
     monkeypatch.setattr(launch.importlib, "import_module", import_module)
     monkeypatch.setattr(common_launch, "deploy_pool_and_spawn", spawn)
     monkeypatch.setattr(common_launch, "spawn_on_pool", spawn)
@@ -73,6 +74,19 @@ def test_fresh_launch_mints_a_run_id(monkeypatch) -> None:
     assert spawned["run_id"] == "feedc0de"
     assert spawned["run"].APP_NAME == "app-run"
     assert "cancelled" not in spawned
+
+
+def test_launch_requires_an_explicit_modal_environment(monkeypatch) -> None:
+    monkeypatch.delenv("MODAL_ENVIRONMENT", raising=False)
+    monkeypatch.setenv("EXPERIMENT_CONFIG", "test")
+    monkeypatch.setattr(
+        launch,
+        "_parser",
+        lambda: SimpleNamespace(parse_args=lambda: SimpleNamespace(resume_from=None)),
+    )
+
+    with pytest.raises(SystemExit, match="MODAL_ENVIRONMENT"):
+        launch.main()
 
 
 def test_fresh_launch_honors_explicit_run_id(monkeypatch) -> None:

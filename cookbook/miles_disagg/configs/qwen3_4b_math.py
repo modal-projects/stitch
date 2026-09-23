@@ -17,9 +17,9 @@ APP_NAME = "stitch-qwen3-4b-math"
 EXPERIMENT_VOLUME_NAME = "stitch-miles-qwen3-4b-math"
 SOURCE_MODEL = "Qwen/Qwen3-4B"
 SOURCE_REVISION = "1cfa9a7208912126459214e8b04321603b3df60c"
-BF16_CHECKPOINT_PATH = CHECKPOINTS_PATH / "qwen3-4b-1cfa9a72-bf16"
+BF16_CHECKPOINT_PATH = CHECKPOINTS_PATH / "qwen3-4b-1cfa9a72-bf16-v4"
 ROLLOUT_CHECKPOINT_PATH = BF16_CHECKPOINT_PATH
-TORCH_DIST_CHECKPOINT_PATH = CHECKPOINTS_PATH / "qwen3-4b-1cfa9a72-torch-dist-tp1"
+TORCH_DIST_CHECKPOINT_PATH = CHECKPOINTS_PATH / "qwen3-4b-1cfa9a72-torch-dist-tp1-v4"
 SERVED_CHECKPOINT_FORMAT = "bf16"
 CHECKPOINT_PREP_REQUIRES_GPU = False
 LOCAL_CHECKPOINT_PATH = None
@@ -39,6 +39,7 @@ SGLANG_SERVER_ARGS = {
     "--reasoning-parser": "qwen3",
     "--context-length": "8192",
     "--mem-fraction-static": "0.8",
+    "--max-total-tokens": "131072",
     "--chunked-prefill-size": "4096",
     "--max-running-requests": "16",
     "--cuda-graph-max-bs-decode": "16",
@@ -88,6 +89,7 @@ class _Miles(MilesConfig):
     sglang_server_concurrency = 16
     pause_generation_mode = "in_place"
     use_session_server = True
+    session_server_workers = 2
     tito_model = "qwen3"
     custom_generate_function_path = (
         "miles.rollout.generate_hub.agentic_tool_call.generate"
@@ -99,13 +101,13 @@ class _Miles(MilesConfig):
     custom_rollout_request_hook_path = (
         "cookbook.common.hooks.gated_rollout_request_hook"
     )
-    rollout_request_timeout_secs = 600
-    custom_config_path = {
+    custom_rollout_request_hook_args = {
         "rollout_request_weight_version_mode": "exact",
         "rollout_request_weight_version_lag": 0,
-        "rollout_request_retry_attempts": 240,
-        "rollout_request_retry_sleep": 1.0,
+        "rollout_request_max_attempts": 240,
+        "rollout_request_retry_interval": 1.0,
     }
+    miles_router_timeout = 600
 
     update_weights_interval = 1
     update_weight_transfer_mode = "disk-delta"
