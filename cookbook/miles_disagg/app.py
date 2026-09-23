@@ -21,7 +21,6 @@ import modal
 import modal.experimental
 
 from cookbook.common import (
-    kernel_cache,
     launch,
     ray_cluster,
     server,
@@ -342,7 +341,10 @@ class Trainer:
         process.start_host_mem_monitor()  # per-node host-RAM trace
         # Must be in os.environ before `ray start`; Ray workers inherit it.
         cache_env = (
-            kernel_cache.environment(KERNEL_CACHE_PATH)
+            {
+                "TRITON_CACHE_DIR": str(KERNEL_CACHE_PATH / "triton"),
+                "TORCHINDUCTOR_CACHE_DIR": str(KERNEL_CACHE_PATH / "inductor"),
+            }
             if kernel_cache_volume is not None
             else {}
         )
