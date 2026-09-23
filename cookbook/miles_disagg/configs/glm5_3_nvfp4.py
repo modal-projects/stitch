@@ -22,7 +22,6 @@ TRAINER_IMAGE_RUN_COMMANDS = (
     "flashinfer-jit-cache==0.6.15.post1+cu130",
 )
 MEGATRON_RUNTIME_PATCHES = [
-    "/root/cookbook/miles_disagg/patches/megatron-hdo-dp-reshardable-step.patch",
     "/root/cookbook/miles_disagg/patches/megatron-r3-dispatch.patch",
 ]
 
