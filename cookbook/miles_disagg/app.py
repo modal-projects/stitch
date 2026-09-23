@@ -339,7 +339,6 @@ class Trainer:
         )
         self.rank = rank
         process.start_host_mem_monitor()  # per-node host-RAM trace
-        # Must be in os.environ before `ray start`; Ray workers inherit it.
         cache_env = (
             {
                 "TRITON_CACHE_DIR": str(KERNEL_CACHE_PATH / "triton"),
