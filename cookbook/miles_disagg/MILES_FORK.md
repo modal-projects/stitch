@@ -5,28 +5,27 @@ Stitch installs an immutable Miles revision over a dated trainer image:
 ```python
 MILES_IMAGE_TAG = "radixark/miles:dev-202609231228"
 MILES_REPO_URL = "https://github.com/modal-projects/miles.git"
-MILES_REPO_REF = "a59ed7bc657ef16e74bea9ec916e41930dd2ede8"
+MILES_REPO_REF = "b05ec24b296bc4734a169da228a9712595708148"
 ```
 
 The image supplies the compiled CUDA, Transformer Engine, and Megatron-LM
 environment. The source pin belongs to
 `modal-projects/miles:stitch-miles`: upstream Miles main at
-`a6b72d31f2`, followed by reviewed changes that remain open upstream. Stitch no
-longer patches Miles at container startup.
+`7d1d15b1cc`, followed by reviewed changes that remain open upstream and the
+branch-only Modal SWE adapter. Stitch no longer patches Miles at container
+startup.
 
 ## Carried behavior
 
 | Area | Upstream review | Responsibility |
 | --- | --- | --- |
-| Async rollout | [#3062](https://github.com/radixark/miles/pull/3062), [#3339](https://github.com/radixark/miles/pull/3339) | Dispose blocked producers and decode session samples off the event loop. |
-| Sampling replay | [#3354](https://github.com/radixark/miles/pull/3354) | Replay bounded top-p support during training. |
+| Async rollout | [#3062](https://github.com/radixark/miles/pull/3062) | Dispose blocked producers when rollout shuts down. |
 | Resume and saving | [#2688](https://github.com/radixark/miles/pull/2688), [#3342](https://github.com/radixark/miles/pull/3342), [#3616](https://github.com/radixark/miles/pull/3616) | Preserve explicit resume selection, overlap final HF export, and retain declared source-owned tensors. |
 | External fleet | [#3236](https://github.com/radixark/miles/pull/3236), [#3344](https://github.com/radixark/miles/pull/3344) | Treat one opaque URL as the rollout fleet and expose a request-policy hook with explicit arguments. |
 | Disk delta | [#3237](https://github.com/radixark/miles/pull/3237) | Match emitted tensor names, shapes, dtypes, and raw checkpoint layouts before XOR encoding. |
-| NVFP4 | [#3592](https://github.com/radixark/miles/pull/3592), [#3601](https://github.com/radixark/miles/pull/3601) | Preserve nested BF16 carve-outs and adapt Qwen3.6 rollout checkpoints. |
-| Data and agents | [#2801](https://github.com/radixark/miles/pull/2801), [#2802](https://github.com/radixark/miles/pull/2802), [#3600](https://github.com/radixark/miles/pull/3600), [#3617](https://github.com/radixark/miles/pull/3617) | Support mixed text/multimodal datasets and reject infrastructure failures as samples. |
+| NVFP4 | [#3638](https://github.com/radixark/miles/pull/3638), [#3601](https://github.com/radixark/miles/pull/3601) | Limit conversion to main-decoder routed experts and adapt Qwen3.6 rollout checkpoints. |
 | Modal SWE | Branch-only | Provide the Modal Sandbox transport and verified mini-SWE agent adapter used by these recipes; upstream Miles does not ship this provider-specific example. |
-| Ray placement | Branch-only | Keep the worker manager on the Ray head, where Miles' head-affinity lookup can reach the local dashboard. |
+| Ray placement | [#3640](https://github.com/radixark/miles/pull/3640) | Resolve the Ray head once in the driver so head-pinned workers do not depend on worker-side dashboard access. |
 
 The integration boundary is intentionally small:
 
