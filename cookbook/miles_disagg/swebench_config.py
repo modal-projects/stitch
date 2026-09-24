@@ -23,15 +23,21 @@ def arguments() -> dict:
         "fully_async": True,
         "pause_generation_mode": "in_place",
         "rollout_submission_granularity": "sample",
-        "custom_rollout_log_function_path": "modal_swe_metrics.log_rollout_data",
+        "custom_rollout_log_function_path": (
+            "cookbook.miles_disagg.modal_swe.metrics.log_rollout_data"
+        ),
         "custom_generate_function_path": (
             "miles.rollout.generate_hub.agentic_tool_call.generate"
         ),
-        "custom_agent_function_path": "modal_swe_agent_function.run",
-        "custom_rm_path": "modal_swe_agent_function.reward_func",
+        "custom_agent_function_path": "cookbook.miles_disagg.modal_swe.agent.run",
+        "custom_rm_path": "cookbook.miles_disagg.modal_swe.agent.reward_func",
         "use_session_server": "v2",
-        "session_sample_picker_path": "modal_swe_agent_function.pick_latest_leaf",
-        "session_sample_postprocessor_path": "modal_swe_agent_function.postprocess_samples",
+        "session_sample_picker_path": (
+            "cookbook.miles_disagg.modal_swe.agent.pick_latest_leaf"
+        ),
+        "session_sample_postprocessor_path": (
+            "cookbook.miles_disagg.modal_swe.agent.postprocess_samples"
+        ),
     }
 
 
@@ -43,9 +49,7 @@ def environment(
     boot_concurrency_per_process: int = 4,
 ) -> dict[str, str]:
     return {
-        "PYTHONPATH": (
-            "/root/Megatron-LM:/root/miles:/root/miles/examples/experimental/modal-swe"
-        ),
+        "PYTHONPATH": "/root:/root/Megatron-LM:/root/miles",
         "CUDA_DEVICE_MAX_CONNECTIONS": "1",
         "RAY_health_check_timeout_ms": "60000",
         "RAY_health_check_failure_threshold": "30",
