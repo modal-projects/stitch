@@ -5,7 +5,7 @@ Stitch installs an immutable Miles revision over a dated trainer image:
 ```python
 MILES_IMAGE_TAG = "radixark/miles:dev-202609231228"
 MILES_REPO_URL = "https://github.com/modal-projects/miles.git"
-MILES_REPO_REF = "b05ec24b296bc4734a169da228a9712595708148"
+MILES_REPO_REF = "2deaece50f4db596ebaad1b5ae661f8bc2876c07"
 ```
 
 The image supplies the compiled CUDA, Transformer Engine, and Megatron-LM
@@ -24,7 +24,7 @@ startup.
 | External fleet | [#3236](https://github.com/radixark/miles/pull/3236), [#3344](https://github.com/radixark/miles/pull/3344) | Treat one opaque URL as the rollout fleet and expose a request-policy hook with explicit arguments. |
 | Disk delta | [#3237](https://github.com/radixark/miles/pull/3237) | Match emitted tensor names, shapes, dtypes, and raw checkpoint layouts before XOR encoding. |
 | NVFP4 | [#3638](https://github.com/radixark/miles/pull/3638), [#3601](https://github.com/radixark/miles/pull/3601) | Limit conversion to main-decoder routed experts and adapt Qwen3.6 rollout checkpoints. |
-| Modal SWE | Branch-only | Provide the Modal Sandbox transport and verified mini-SWE agent adapter used by these recipes; upstream Miles does not ship this provider-specific example. |
+| Modal SWE | Branch-only | Provide the Modal Sandbox transport and verified mini-SWE agent adapter, including cooperative cancellation of surplus episodes; upstream Miles does not ship this provider-specific example. |
 | Ray placement | [#3640](https://github.com/radixark/miles/pull/3640) | Resolve the Ray head once in the driver so head-pinned workers do not depend on worker-side dashboard access. |
 
 The integration boundary is intentionally small:
