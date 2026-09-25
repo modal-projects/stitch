@@ -2,7 +2,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from cookbook.common.config import GPUType, ModalConfig, validate_serving_config
+from cookbook.common.config import (
+    GPUType,
+    ModalConfig,
+    RolloutPoolConfig,
+    validate_serving_config,
+)
 from cookbook.standalone.configs import glm5_3_fp8
 
 
@@ -98,3 +103,127 @@ def test_disk_updates_require_a_local_checkpoint(serving_recipe):
 
     with pytest.raises(ValueError, match="disk.*LOCAL_CHECKPOINT_PATH"):
         validate_serving_config(serving_recipe, gpus_per_engine=8)
+
+
+def test_single_rollout_pool_preserves_existing_config() -> None:
+    config = ModalConfig(
+        gpu="B300",
+        rollout_gpu="H200",
+        rollout_min_containers=2,
+        rollout_max_containers=5,
+    )
+
+    args = {"--tp": "2"}
+    assert config.resolved_rollout_pools(
+        default_gpus_per_engine=2,
+        default_target_inputs=7,
+        default_sglang_args=args,
+    ) == (
+        RolloutPoolConfig(
+            name="Server",
+            gpu="H200",
+            gpus_per_engine=2,
+            target_inputs=7,
+            sglang_args=args,
+            min_containers=2,
+            max_containers=5,
+        ),
+    )
+    assert config.rollout_replica_floor == 2
+
+
+def test_heterogeneous_rollout_floor_is_sum_of_independent_pools() -> None:
+    config = ModalConfig(
+        rollout_pools=(
+            RolloutPoolConfig(
+                name="ServerH100",
+                gpu="H100",
+                gpus_per_engine=2,
+                target_inputs=8,
+                sglang_args={"--tp": "2", "--max-running-requests": "16"},
+                max_containers=2,
+            ),
+            RolloutPoolConfig(
+                name="ServerB300",
+                gpu="B300",
+                gpus_per_engine=1,
+                target_inputs=8,
+                sglang_args={"--tp": "1", "--max-running-requests": "16"},
+                max_containers=2,
+            ),
+        )
+    )
+
+    assert config.rollout_replica_floor == 2
+
+
+def test_heterogeneous_pools_reject_fallback_gpu_list() -> None:
+    config = ModalConfig(
+        rollout_gpu=["H100", "B300"],
+        rollout_pools=(
+            RolloutPoolConfig(
+                name="ServerH100",
+                gpu="H100",
+                gpus_per_engine=2,
+                target_inputs=8,
+                sglang_args={"--tp": "2"},
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        config.resolved_rollout_pools(
+            default_gpus_per_engine=1,
+            default_target_inputs=1,
+            default_sglang_args={},
+        )
+
+
+def test_explicit_rollout_pool_requires_one_exact_gpu_type() -> None:
+    config = ModalConfig(
+        rollout_pools=(
+            RolloutPoolConfig(
+                name="Server",
+                gpu=["H100", "B300"],
+                gpus_per_engine=1,
+                target_inputs=8,
+                sglang_args={"--tp": "1"},
+            ),
+        )
+    )
+
+    with pytest.raises(ValueError, match="one exact GPU type"):
+        config.resolved_rollout_pools(
+            default_gpus_per_engine=1,
+            default_target_inputs=1,
+            default_sglang_args={},
+        )
+
+
+def test_same_gpu_can_have_independent_engine_configurations() -> None:
+    pools = (
+        RolloutPoolConfig(
+            name="ServerB200TP1",
+            gpu="B200",
+            gpus_per_engine=1,
+            target_inputs=8,
+            sglang_args={"--tp": "1", "--max-running-requests": "16"},
+        ),
+        RolloutPoolConfig(
+            name="ServerB200TP2",
+            gpu="B200",
+            gpus_per_engine=2,
+            target_inputs=16,
+            sglang_args={"--tp": "2", "--max-running-requests": "32"},
+        ),
+    )
+    config = ModalConfig(rollout_pools=pools)
+
+    assert (
+        config.resolved_rollout_pools(
+            default_gpus_per_engine=8,
+            default_target_inputs=1,
+            default_sglang_args={},
+        )
+        == pools
+    )

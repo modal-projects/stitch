@@ -119,6 +119,97 @@ class ModalFlashPool(Pool):
             self._server().update_autoscaler(**kwargs)
 
 
+class ModalFlashFleet(Pool):
+    """One logical pool composed of independently scaled Modal Server functions."""
+
+    _SEPARATOR = "|"
+
+    def __init__(
+        self,
+        app_name: str,
+        cls_names: list[str] | tuple[str, ...],
+        *,
+        gateway_function: str,
+    ) -> None:
+        if not cls_names:
+            raise ValueError("a Modal Flash fleet requires at least one Server")
+        self.app_name = app_name
+        self.cls_names = tuple(cls_names)
+        self.gateway_function = gateway_function
+        self._pools = {name: ModalFlashPool(app_name, name) for name in self.cls_names}
+
+    def _gateway(self):
+        import modal
+
+        return modal.Function.from_name(self.app_name, self.gateway_function)
+
+    def gateway_url(self) -> str:
+        return self._require_gateway(self._gateway().get_web_url())
+
+    async def gateway_url_async(self) -> str:
+        return self._require_gateway(await self._gateway().get_web_url.aio())
+
+    def _require_gateway(self, url: str | None) -> str:
+        if not url:
+            raise RuntimeError(
+                f"no gateway URL for {self.app_name}.{self.gateway_function} — "
+                "deploy the app first"
+            )
+        return str(url).rstrip("/")
+
+    def discover_replicas(self) -> list[str]:
+        return [
+            self._replica_ref(name, replica)
+            for name, pool in self._pools.items()
+            for replica in pool.discover_replicas()
+        ]
+
+    async def discover_replicas_async(self) -> list[str]:
+        discovered = await asyncio.gather(
+            *(pool.discover_replicas_async() for pool in self._pools.values())
+        )
+        return [
+            self._replica_ref(name, replica)
+            for (name, _pool), replicas in zip(
+                self._pools.items(), discovered, strict=True
+            )
+            for replica in replicas
+        ]
+
+    def replica_request(self, replica: str, path: str) -> tuple[str, dict[str, str]]:
+        name, address = self._split_replica_ref(replica)
+        return self._pools[name].replica_request(address, path)
+
+    def wake(self, replicas: list[str], ref: VersionRef) -> None:
+        for name, addresses in self._group_replicas(replicas).items():
+            self._pools[name].wake(addresses, ref)
+
+    async def wake_async(self, replicas: list[str], ref: VersionRef) -> None:
+        grouped = self._group_replicas(replicas)
+        await asyncio.gather(
+            *(
+                self._pools[name].wake_async(addresses, ref)
+                for name, addresses in grouped.items()
+            )
+        )
+
+    def _group_replicas(self, replicas: list[str]) -> dict[str, list[str]]:
+        grouped = {name: [] for name in self.cls_names}
+        for replica in replicas:
+            name, address = self._split_replica_ref(replica)
+            grouped[name].append(address)
+        return {name: addresses for name, addresses in grouped.items() if addresses}
+
+    def _replica_ref(self, name: str, address: str) -> str:
+        return f"{name}{self._SEPARATOR}{address}"
+
+    def _split_replica_ref(self, replica: str) -> tuple[str, str]:
+        name, separator, address = replica.partition(self._SEPARATOR)
+        if not separator or name not in self._pools or not address:
+            raise ValueError(f"invalid Modal Flash fleet replica: {replica!r}")
+        return name, address
+
+
 async def _list_flash_containers_rpc(app_name: str, cls_name: str) -> list[Any]:
     from modal.client import _Client
     from modal.config import config

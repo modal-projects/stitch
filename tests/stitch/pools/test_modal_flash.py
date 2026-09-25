@@ -5,11 +5,13 @@ from __future__ import annotations
 
 from stitch.pools.base import Pool
 from stitch.pools.modal_flash import (
+    ModalFlashFleet,
     ModalFlashPool,
     _host,
     _normalize_url,
     _replica_urls,
 )
+from stitch.types import VersionRef
 
 
 def test_replica_request_routes_through_the_pool_url() -> None:
@@ -54,6 +56,40 @@ def test_host_reads_dict_or_attr() -> None:
 
     assert _host(_Container()) == "h2"
     assert _host(object()) is None
+
+
+def test_fleet_preserves_pool_identity_for_direct_requests_and_wake() -> None:
+    class _Pool:
+        def __init__(self, name):
+            self.name = name
+            self.woken = []
+
+        def discover_replicas(self):
+            return [f"https://{self.name}-replica"]
+
+        def replica_request(self, replica, path):
+            return f"{self.name}:{replica}{path}", {"pool": self.name}
+
+        def wake(self, replicas, ref):
+            self.woken.append((replicas, ref))
+
+    fleet = ModalFlashFleet("app", ["H100", "B300"], gateway_function="router")
+    fleet._pools = {name: _Pool(name) for name in fleet.cls_names}
+
+    replicas = fleet.discover_replicas()
+    assert replicas == [
+        "H100|https://H100-replica",
+        "B300|https://B300-replica",
+    ]
+    assert fleet.replica_request(replicas[1], "/server_info") == (
+        "B300:https://B300-replica/server_info",
+        {"pool": "B300"},
+    )
+
+    ref = VersionRef("run", 4)
+    fleet.wake(replicas, ref)
+    assert fleet._pools["H100"].woken == [(["https://H100-replica"], ref)]
+    assert fleet._pools["B300"].woken == [(["https://B300-replica"], ref)]
 
 
 if __name__ == "__main__":

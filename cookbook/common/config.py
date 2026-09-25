@@ -7,11 +7,34 @@ sizing, and preparation topology live here.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 # ``"X+"`` is Modal's tier floor: that class or better (e.g. "B200+" = B200 or B300).
 GPUType = Literal["H100", "H200", "B200", "B200+", "B300", "A100"]
+
+
+@dataclass(frozen=True, kw_only=True)
+class RolloutPoolConfig:
+    """One independently scaled rollout-engine configuration."""
+
+    name: str
+    gpu: GPUType | list[GPUType]
+    gpus_per_engine: int
+    target_inputs: int
+    sglang_args: dict[str, str]
+    min_containers: int = 1
+    max_containers: int | None = None
+    memory_mib: tuple[int, int] | None = None
+    ephemeral_disk_mib: int | None = None
+    cloud: str | None = None
+    region: str | None = None
+    environment: dict[str, str] = field(default_factory=dict)
+
+    def gpu_request(self) -> str | list[str]:
+        if isinstance(self.gpu, str):
+            return f"{self.gpu}:{self.gpus_per_engine}"
+        return [f"{gpu}:{self.gpus_per_engine}" for gpu in self.gpu]
 
 
 @dataclass(kw_only=True)
@@ -25,6 +48,9 @@ class ModalConfig:
     rollout_gpu: GPUType | list[GPUType] | None = None
     rollout_cpu: float | None = None
     trainer_cpu: float | None = None
+    # Separate pools guarantee a heterogeneous fleet. A ``rollout_gpu`` list is
+    # only a per-container fallback preference and does not provide that guarantee.
+    rollout_pools: tuple[RolloutPoolConfig, ...] = ()
     trainer_memory_mib: tuple[int, int] | None = None
     cloud: str | None = None
     region: str | None = None
@@ -53,6 +79,65 @@ class ModalConfig:
             return f"{spec}:{per_engine}"
         return [f"{gpu_type}:{per_engine}" for gpu_type in spec]
 
+    def resolved_rollout_pools(
+        self,
+        *,
+        default_gpus_per_engine: int,
+        default_target_inputs: int,
+        default_sglang_args: dict[str, str],
+    ) -> tuple[RolloutPoolConfig, ...]:
+        """Return complete per-pool engine configurations.
+
+        Existing single-pool recipes are lifted into the same representation at the
+        deployment boundary. Explicit pools are already self-contained.
+        """
+        if self.rollout_pools:
+            if self.rollout_gpu is not None:
+                raise ValueError("rollout_pools and rollout_gpu are mutually exclusive")
+            names = [pool.name for pool in self.rollout_pools]
+            if len(names) != len(set(names)):
+                raise ValueError("rollout pool names must be unique")
+            if any(not name.isidentifier() for name in names):
+                raise ValueError("rollout pool names must be valid Python identifiers")
+            if any(not isinstance(pool.gpu, str) for pool in self.rollout_pools):
+                raise ValueError(
+                    "each explicit rollout pool must select one exact GPU type"
+                )
+            if any(pool.min_containers < 1 for pool in self.rollout_pools):
+                raise ValueError("each rollout pool must keep at least one container")
+            if any(pool.gpus_per_engine < 1 for pool in self.rollout_pools):
+                raise ValueError("each rollout pool must use at least one GPU")
+            if any(pool.target_inputs < 1 for pool in self.rollout_pools):
+                raise ValueError("each rollout pool target_inputs must be positive")
+            if any(
+                pool.max_containers is not None
+                and pool.max_containers < pool.min_containers
+                for pool in self.rollout_pools
+            ):
+                raise ValueError(
+                    "each rollout pool max_containers must cover min_containers"
+                )
+            return self.rollout_pools
+
+        spec = self.gpu if self.rollout_gpu is None else self.rollout_gpu
+        return (
+            RolloutPoolConfig(
+                name="Server",
+                gpu=spec,
+                gpus_per_engine=default_gpus_per_engine,
+                target_inputs=default_target_inputs,
+                sglang_args=dict(default_sglang_args),
+                min_containers=self.rollout_min_containers,
+                max_containers=self.rollout_max_containers,
+            ),
+        )
+
+    @property
+    def rollout_replica_floor(self) -> int:
+        if self.rollout_pools:
+            return sum(pool.min_containers for pool in self.rollout_pools)
+        return self.rollout_min_containers
+
 
 def validate_serving_config(recipe: Any, *, gpus_per_engine: int) -> None:
     """Check the recipe contracts shared by preparation and rollout deployment."""
@@ -66,11 +151,49 @@ def validate_serving_config(recipe: Any, *, gpus_per_engine: int) -> None:
     ):
         raise ValueError("SOURCE_REVISION must pin a full checkpoint commit hash")
 
-    args = recipe.SGLANG_SERVER_ARGS
-    if gpus_per_engine <= 0 or int(args.get("--tp", 1)) != gpus_per_engine:
-        raise ValueError(
-            "SGLANG_SERVER_ARGS --tp must match the GPU count per rollout engine"
+    explicit_pools = recipe.modal.rollout_pools
+    serving_configs = (
+        tuple(
+            (pool.name, pool.gpus_per_engine, pool.target_inputs, pool.sglang_args)
+            for pool in explicit_pools
         )
+        if explicit_pools
+        else (
+            (
+                "Server",
+                gpus_per_engine,
+                recipe.modal.rollout_target_inputs or 1,
+                recipe.SGLANG_SERVER_ARGS,
+            ),
+        )
+    )
+    managed_args = {
+        "--weight-update-staging",
+        "--weight-update-local-checkpoint-dir",
+        "--weight-version",
+    }
+    for name, pool_gpus, target_inputs, args in serving_configs:
+        if pool_gpus <= 0 or int(args.get("--tp", 1)) != pool_gpus:
+            raise ValueError(
+                f"{name} SGLANG --tp must match its GPU count per rollout engine"
+            )
+        if explicit_pools:
+            try:
+                max_running = int(args["--max-running-requests"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"{name} must set an integer --max-running-requests"
+                ) from exc
+            if target_inputs > max_running:
+                raise ValueError(
+                    f"{name} target_inputs cannot exceed --max-running-requests"
+                )
+        configured = managed_args.intersection(args)
+        if configured:
+            raise ValueError(
+                "Stitch configures SGLang's staged-update lifecycle; remove managed "
+                f"server arguments from {name}: {', '.join(sorted(configured))}"
+            )
     mode = getattr(recipe, "SGLANG_DELTA_UPDATE_MODE", None)
     if mode not in {"cpu", "disk"}:
         raise ValueError(f"Unsupported SGLANG_DELTA_UPDATE_MODE: {mode!r}")
@@ -81,15 +204,3 @@ def validate_serving_config(recipe: Any, *, gpus_per_engine: int) -> None:
         raise ValueError("LOCAL_CHECKPOINT_PATH must be a non-empty path or None")
     if mode == "disk" and local_checkpoint is None:
         raise ValueError("disk delta updates require LOCAL_CHECKPOINT_PATH")
-
-    managed_args = {
-        "--weight-update-staging",
-        "--weight-update-local-checkpoint-dir",
-        "--weight-version",
-    }
-    configured = managed_args.intersection(args)
-    if configured:
-        raise ValueError(
-            "Stitch configures SGLang's staged-update lifecycle; remove managed "
-            f"server arguments: {', '.join(sorted(configured))}"
-        )

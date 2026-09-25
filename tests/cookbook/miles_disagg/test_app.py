@@ -11,7 +11,13 @@ from cookbook.miles_disagg.configs import qwen3_4b_math
 
 @pytest.mark.parametrize("entrypoint", ["app", "prep_app"])
 @pytest.mark.parametrize(
-    "recipe", ["qwen3_4b_math", "qwen3_6_35b_a3b_nvfp4", "glm5_3_nvfp4"]
+    "recipe",
+    [
+        "qwen3_4b_math",
+        "qwen3_6_35b_a3b_swebench_pro",
+        "qwen3_6_35b_a3b_nvfp4",
+        "glm5_3_nvfp4",
+    ],
 )
 def test_maintained_recipes_import_through_deployment_entrypoints(
     monkeypatch, entrypoint, recipe

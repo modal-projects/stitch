@@ -14,7 +14,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from stitch.pools.modal_flash import ModalFlashPool
+from stitch.pools.base import Pool
+from stitch.pools.modal_flash import ModalFlashFleet, ModalFlashPool
 from stitch.publish import constrain_request
 from stitch.publisher import Publisher, TrainerComms
 from stitch.stores.base import Store
@@ -178,10 +179,21 @@ def _store_key(args: Any) -> tuple[str | None, ...]:
     )
 
 
-def _pool(args: Any) -> ModalFlashPool:
+def _pool(args: Any) -> Pool:
     app = getattr(args, "rollout_modal_flash_app_name", None)
     if not app:
         raise ValueError("rollout_modal_flash_app_name is required")
+    classes = getattr(args, "rollout_modal_flash_server_cls_names", None)
+    if classes:
+        classes = list(classes)
+        if len(classes) == 1:
+            return ModalFlashPool(app, classes[0])
+        router = getattr(args, "rollout_modal_flash_router_function", None)
+        if not router:
+            raise ValueError(
+                "rollout_modal_flash_router_function is required for multiple pools"
+            )
+        return ModalFlashFleet(app, classes, gateway_function=router)
     cls = getattr(args, "rollout_modal_flash_server_cls_name", "Server")
     return ModalFlashPool(app, cls)
 

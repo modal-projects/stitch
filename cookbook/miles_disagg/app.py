@@ -34,6 +34,7 @@ from cookbook.common.constants import (
     SGLANG_CACHE_PATH,
     SIDECAR_PORT,
     STITCH_PATH,
+    STITCH_SESSION_ID_HEADER,
 )
 from cookbook.miles_disagg import trainer_image
 from cookbook.miles_disagg.config import (
@@ -47,7 +48,8 @@ from cookbook.miles_disagg.resume import (
     record_trainer_call,
 )
 from cookbook.miles_disagg.trainer_image import MEGATRON_PATH, MILES_ROOT
-from stitch.pools.modal_flash import ModalFlashPool
+from stitch.pools.base import Pool
+from stitch.pools.modal_flash import ModalFlashFleet, ModalFlashPool
 from stitch.service import await_pool_ready
 from stitch.types import VersionRef
 
@@ -62,6 +64,7 @@ exp = importlib.import_module(f"cookbook.miles_disagg.configs.{EXPERIMENT}")
 validate_recipe(exp)
 modal_cfg = exp.modal
 miles_cfg = exp.miles
+ROLLOUT_ROUTER_FUNCTION = "rollout_router"
 
 
 # Minted once for a run and retained across resume. The same identity scopes the
@@ -73,8 +76,9 @@ STORE_DEPLOYMENT = storage.StoreDeployment.from_environment()
 UPDATES_DIR = STORE_DEPLOYMENT.updates_dir(RUN_DIR)
 STORE_SECRETS = STORE_DEPLOYMENT.modal_secrets()
 
-# Flash autoscaler target / sglang concurrency cap: explicit target_inputs, else engine concurrency.
-ROLLOUT_CONCURRENCY = (
+# Legacy single-pool recipes use the experiment-wide settings. Explicit rollout
+# pools carry their own engine and autoscaling configuration.
+DEFAULT_ROLLOUT_TARGET_INPUTS = (
     modal_cfg.rollout_target_inputs or miles_cfg.sglang_server_concurrency
 )
 
@@ -150,86 +154,29 @@ train_volumes = {
 
 app = modal.App(APP_NAME)
 
-SGLANG_SERVER_ARGS = {
+configured_sglang_args = getattr(exp, "SGLANG_SERVER_ARGS", {})
+DEFAULT_SGLANG_SERVER_ARGS = {
     "--served-model-name": miles_cfg.hf_checkpoint,
     **(
         {}
-        if "--cuda-graph-config" in exp.SGLANG_SERVER_ARGS
-        else {"--cuda-graph-max-bs-decode": str(ROLLOUT_CONCURRENCY)}
+        if "--cuda-graph-config" in configured_sglang_args
+        else {"--cuda-graph-max-bs-decode": str(DEFAULT_ROLLOUT_TARGET_INPUTS)}
     ),
-    "--max-running-requests": str(ROLLOUT_CONCURRENCY),
+    "--max-running-requests": str(DEFAULT_ROLLOUT_TARGET_INPUTS),
     "--trust-remote-code": "",
-    **exp.SGLANG_SERVER_ARGS,
+    **configured_sglang_args,
 }
-
-
-# The rollout Server is a thin module-level class whose lifecycle delegates to the
-# shared common.server logic: sglang plus the stitch sidecar.
-@app.server(
-    image=server_image,
-    gpu=modal_cfg.rollout_gpus(miles_cfg.rollout_num_gpus_per_engine),
-    cpu=modal_cfg.rollout_cpu,
-    cloud=modal_cfg.cloud,
-    compute_region=modal_cfg.region,
-    volumes={
-        str(HF_CACHE_PATH): hf_cache_volume,
-        str(CHECKPOINTS_PATH): checkpoint_volume,
-        **(
-            {str(STITCH_PATH): run_volume}
-            if STORE_DEPLOYMENT.backend == storage.MODAL_VOLUME
-            else {}
-        ),
-        SGLANG_CACHE_PATH: sglang_cache_volume,
-        **(
-            {str(DRAFT_PATH): draft_volume.read_only()}
-            if draft_volume is not None
-            else {}
-        ),
-    },
-    min_containers=modal_cfg.rollout_min_containers,
-    max_containers=modal_cfg.rollout_max_containers,
-    target_concurrency=ROLLOUT_CONCURRENCY,
-    scaledown_window=15 * MINUTES,
-    ephemeral_disk=modal_cfg.rollout_ephemeral_disk_mib,
-    memory=modal_cfg.rollout_memory_mib,
-    secrets=STORE_SECRETS,
-    include_source=False,
-    port=SIDECAR_PORT,
-    routing_region=modal_cfg.routing_region,
-    experimental_options={"kv_aware_routing": True},
-    unauthenticated=True,
-    exit_grace_period=60 * MINUTES,
-    startup_timeout=SERVER_STARTUP_TIMEOUT,
+ROLLOUT_POOL_CONFIGS = modal_cfg.resolved_rollout_pools(
+    default_gpus_per_engine=miles_cfg.rollout_num_gpus_per_engine,
+    default_target_inputs=DEFAULT_ROLLOUT_TARGET_INPUTS,
+    default_sglang_args=DEFAULT_SGLANG_SERVER_ARGS,
 )
-class Server:
-    @modal.enter()
-    def startup(self) -> None:
-        STORE_DEPLOYMENT.bootstrap_credentials()
-        store_config = STORE_DEPLOYMENT.hook_config(APP_NAME)
-        model_name, boot_version = _boot_checkpoint(store_config)
-        server.serve_startup(
-            self,
-            model_name=model_name,
-            boot_version=boot_version,
-            sglang_args=SGLANG_SERVER_ARGS,
-            concurrency=ROLLOUT_CONCURRENCY,
-            bulletin_root=str(RUN_DIR),
-            local_checkpoint_dir=exp.LOCAL_CHECKPOINT_PATH,
-            delta_update_mode=exp.SGLANG_DELTA_UPDATE_MODE,
-            store_backend=store_config["stitch_store_backend"],
-            volume_name=exp.EXPERIMENT_VOLUME_NAME,
-            s3_root=store_config.get("stitch_s3_root"),
-            s3_endpoint_url=store_config.get("stitch_s3_endpoint_url"),
-            commit_mode=exp.SIDECAR_COMMIT_MODE,
-            flush_cache_on_commit=exp.SIDECAR_FLUSH_CACHE_ON_COMMIT,
-            run_id=RUN_ID,
-            startup_timeout=SERVER_STARTUP_TIMEOUT,
-            engine_health_timeout=getattr(exp, "SIDECAR_ENGINE_HEALTH_TIMEOUT", 5.0),
-        )
-
-    @modal.exit()
-    def stop(self) -> None:
-        server.serve_stop(self)
+ROLLOUT_SERVER_NAMES = tuple(pool.name for pool in ROLLOUT_POOL_CONFIGS)
+ROLLOUT_SESSION_AFFINITY_HEADER = (
+    MODAL_SESSION_ID_HEADER
+    if len(ROLLOUT_SERVER_NAMES) == 1
+    else STITCH_SESSION_ID_HEADER
+)
 
 
 def _boot_checkpoint(store_config: dict) -> tuple[str, int]:
@@ -263,6 +210,160 @@ def _boot_checkpoint(store_config: dict) -> tuple[str, int]:
         RUN_DIR, save_hf=save_hf, latest_version=latest.version
     )
     return (str(export[1]), export[0]) if export else (miles_cfg.hf_checkpoint, 0)
+
+
+class _RolloutServer:
+    rollout_pool_config: Any
+
+    @modal.enter()
+    def startup(self) -> None:
+        pool_config = self.rollout_pool_config
+        STORE_DEPLOYMENT.bootstrap_credentials()
+        store_config = STORE_DEPLOYMENT.hook_config(APP_NAME)
+        model_name, boot_version = _boot_checkpoint(store_config)
+        server.serve_startup(
+            self,
+            model_name=model_name,
+            boot_version=boot_version,
+            sglang_args={
+                "--served-model-name": miles_cfg.hf_checkpoint,
+                "--trust-remote-code": "",
+                **pool_config.sglang_args,
+            },
+            concurrency=pool_config.target_inputs,
+            bulletin_root=str(RUN_DIR),
+            local_checkpoint_dir=exp.LOCAL_CHECKPOINT_PATH,
+            delta_update_mode=exp.SGLANG_DELTA_UPDATE_MODE,
+            store_backend=store_config["stitch_store_backend"],
+            volume_name=exp.EXPERIMENT_VOLUME_NAME,
+            s3_root=store_config.get("stitch_s3_root"),
+            s3_endpoint_url=store_config.get("stitch_s3_endpoint_url"),
+            commit_mode=exp.SIDECAR_COMMIT_MODE,
+            flush_cache_on_commit=exp.SIDECAR_FLUSH_CACHE_ON_COMMIT,
+            run_id=RUN_ID,
+            startup_timeout=SERVER_STARTUP_TIMEOUT,
+            engine_health_timeout=getattr(exp, "SIDECAR_ENGINE_HEALTH_TIMEOUT", 5.0),
+        )
+
+    @modal.exit()
+    def stop(self) -> None:
+        server.serve_stop(self)
+
+
+def _define_rollout_server(pool_config: Any) -> Any:
+    """Define one independently scaled Modal Server for a rollout GPU type."""
+    cls = type(
+        pool_config.name,
+        (_RolloutServer,),
+        {
+            "__module__": __name__,
+            "__qualname__": pool_config.name,
+            "rollout_pool_config": pool_config,
+        },
+    )
+    globals()[pool_config.name] = cls
+    decorated = app.server(
+        name=pool_config.name,
+        image=(
+            server_image.env(pool_config.environment)
+            if pool_config.environment
+            else server_image
+        ),
+        gpu=pool_config.gpu_request(),
+        cpu=modal_cfg.rollout_cpu,
+        cloud=pool_config.cloud or modal_cfg.cloud,
+        compute_region=pool_config.region or modal_cfg.region,
+        volumes={
+            str(HF_CACHE_PATH): hf_cache_volume,
+            str(CHECKPOINTS_PATH): checkpoint_volume,
+            **(
+                {str(STITCH_PATH): run_volume}
+                if STORE_DEPLOYMENT.backend == storage.MODAL_VOLUME
+                else {}
+            ),
+            SGLANG_CACHE_PATH: sglang_cache_volume,
+            **(
+                {str(DRAFT_PATH): draft_volume.read_only()}
+                if draft_volume is not None
+                else {}
+            ),
+        },
+        min_containers=pool_config.min_containers,
+        max_containers=pool_config.max_containers,
+        target_concurrency=pool_config.target_inputs,
+        scaledown_window=15 * MINUTES,
+        ephemeral_disk=(
+            pool_config.ephemeral_disk_mib or modal_cfg.rollout_ephemeral_disk_mib
+        ),
+        memory=pool_config.memory_mib or modal_cfg.rollout_memory_mib,
+        secrets=STORE_SECRETS,
+        include_source=False,
+        port=SIDECAR_PORT,
+        routing_region=modal_cfg.routing_region,
+        experimental_options={"kv_aware_routing": True},
+        unauthenticated=True,
+        exit_grace_period=60 * MINUTES,
+        startup_timeout=SERVER_STARTUP_TIMEOUT,
+    )(cls)
+    globals()[pool_config.name] = decorated
+    return decorated
+
+
+ROLLOUT_SERVERS = {
+    pool.name: _define_rollout_server(pool) for pool in ROLLOUT_POOL_CONFIGS
+}
+Server = ROLLOUT_SERVERS.get("Server")
+
+
+if len(ROLLOUT_POOL_CONFIGS) > 1:
+    router_image = (
+        modal.Image.debian_slim(python_version="3.12")
+        .pip_install("fastapi", "httpx")
+        .env(
+            {
+                **STORE_DEPLOYMENT.image_environment,
+                "EXPERIMENT_CONFIG": EXPERIMENT,
+                "RUN_ID": RUN_ID,
+            }
+        )
+        .add_local_python_source("stitch")
+    )
+
+    @app.function(
+        image=router_image,
+        cpu=2.0,
+        memory=4096,
+        min_containers=1,
+        max_containers=4,
+        scaledown_window=15 * MINUTES,
+        timeout=24 * 60 * MINUTES,
+    )
+    @modal.concurrent(max_inputs=512, target_inputs=128)
+    @modal.asgi_app()
+    def rollout_router():
+        from cookbook.common.rollout_router import create_app
+
+        upstreams = {
+            name: modal.Server.from_name(APP_NAME, name).get_url()
+            for name in ROLLOUT_SERVER_NAMES
+        }
+        if any(url is None for url in upstreams.values()):
+            raise RuntimeError("a heterogeneous rollout pool has no gateway URL")
+        return create_app(
+            {name: str(url) for name, url in upstreams.items()},
+            affinity_header=STITCH_SESSION_ID_HEADER,
+            upstream_affinity_header=MODAL_SESSION_ID_HEADER,
+        )
+
+
+def rollout_pool() -> Pool:
+    if len(ROLLOUT_SERVER_NAMES) == 1:
+        return ModalFlashPool(APP_NAME, ROLLOUT_SERVER_NAMES[0])
+    return ModalFlashFleet(
+        APP_NAME,
+        ROLLOUT_SERVER_NAMES,
+        gateway_function=ROLLOUT_ROUTER_FUNCTION,
+    )
 
 
 # ── Trainer (miles on Ray) ────────────────────────────────────────────────────
@@ -367,8 +468,8 @@ class Trainer:
             n_nodes=miles_cfg.n_train_nodes,
         )
 
-        cfg.rollout_endpoint_url = ModalFlashPool(APP_NAME, "Server").gateway_url()
-        cfg.rollout_session_affinity_header = MODAL_SESSION_ID_HEADER
+        cfg.rollout_endpoint_url = rollout_pool().gateway_url()
+        cfg.rollout_session_affinity_header = ROLLOUT_SESSION_AFFINITY_HEADER
         if resume_point is not None:
             cfg.load = resume_point.trainer_checkpoint
             cfg.hf_checkpoint = resume_point.rollout_checkpoint
@@ -399,7 +500,8 @@ class Trainer:
             **(getattr(cfg, "custom_config_path", None) or {}),
             **run_config,
             "rollout_modal_flash_app_name": APP_NAME,
-            "rollout_modal_flash_server_cls_name": "Server",
+            "rollout_modal_flash_server_cls_names": list(ROLLOUT_SERVER_NAMES),
+            "rollout_modal_flash_router_function": ROLLOUT_ROUTER_FUNCTION,
         }
         cfg.custom_rollout_request_hook_args = {
             **(getattr(cfg, "custom_rollout_request_hook_args", None) or {}),
@@ -423,8 +525,8 @@ class Trainer:
         )
         # Replicas ahead of the claimed pointer are exiting, so they are not floor.
         await_pool_ready(
-            ModalFlashPool(APP_NAME, "Server"),
-            replica_floor=modal_cfg.rollout_min_containers,
+            rollout_pool(),
+            replica_floor=modal_cfg.rollout_replica_floor,
             latest=VersionRef(RUN_ID, boot_version),
         )
 

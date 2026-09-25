@@ -16,7 +16,12 @@ def test_pool_reachable_with_only_native_server(monkeypatch) -> None:
 
     monkeypatch.setattr(modal.Server, "from_name", from_name)
 
-    assert launch.pool_reachable(SimpleNamespace(APP_NAME="app-run"))
+    from stitch.pools.modal_flash import ModalFlashPool
+
+    run = SimpleNamespace(
+        APP_NAME="app-run", rollout_pool=lambda: ModalFlashPool("app-run", "Server")
+    )
+    assert launch.pool_reachable(run)
 
 
 def test_deploy_pool_waits_for_readiness_before_spawning(monkeypatch) -> None:
@@ -24,7 +29,8 @@ def test_deploy_pool_waits_for_readiness_before_spawning(monkeypatch) -> None:
     run = SimpleNamespace(
         APP_NAME="app-run",
         app=SimpleNamespace(deploy=lambda: events.append("deploy")),
-        modal_cfg=SimpleNamespace(rollout_min_containers=32),
+        modal_cfg=SimpleNamespace(rollout_replica_floor=32),
+        rollout_pool=lambda: SimpleNamespace(app_name="app-run"),
         spawn_train=lambda: events.append("spawn") or "call",
     )
 
