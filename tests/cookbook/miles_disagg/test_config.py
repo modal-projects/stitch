@@ -137,7 +137,7 @@ def test_qwen36_bf16_swebench_recipe_sizes_async_rollout_to_the_fleet():
     assert cfg.miles_router_timeout == 1800
     assert cfg.max_weight_staleness is None
     assert cfg.async_unused_samples_handler == "drop"
-    assert cfg.async_keep_partial_groups_on_abort
+    assert cfg.keep_partial_groups_on_abort
     assert cfg.use_dynamic_global_batch_size
     assert (
         cfg.custom_rollout_request_hook_args["rollout_request_weight_version_mode"]

@@ -210,7 +210,7 @@ class _Miles(MilesConfig):
     async_max_concurrent_samples = ROLLOUT_CONCURRENT_SAMPLES
     async_data_buffer_capacity_factor = 2.0
     async_unused_samples_handler = "drop"
-    async_keep_partial_groups_on_abort = True
+    keep_partial_groups_on_abort = True
     eval_interval = None
 
     use_rollout_routing_replay = True
