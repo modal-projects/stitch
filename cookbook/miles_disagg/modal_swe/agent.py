@@ -854,6 +854,13 @@ async def _terminate_sandboxes(sandbox_ids: list[str]) -> None:
             )
 
 
+def _stop_environment(env: ModalSWEEnvironment) -> None:
+    try:
+        env.stop()
+    except Exception:
+        logger.warning("Failed to clean up Modal SWE environment", exc_info=True)
+
+
 def _run_episode_sync(
     *,
     base_url: str,
@@ -1237,7 +1244,7 @@ def _run_episode_sync(
             boot_semaphore.release()
         set_phase("cleanup")
         if env is not None:
-            env.stop()
+            _stop_environment(env)
 
 
 @cache

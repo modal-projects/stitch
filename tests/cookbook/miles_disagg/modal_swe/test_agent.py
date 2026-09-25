@@ -919,6 +919,16 @@ async def test_agent_worker_propagates_unknown_adapter_bug(monkeypatch):
     assert error.value.__cause__ is None
 
 
+def test_environment_cleanup_cannot_replace_episode_result(caplog):
+    class BrokenEnvironment:
+        def stop(self):
+            raise AttributeError("'Connection' object has no attribute '_transport'")
+
+    agent_function_module._stop_environment(BrokenEnvironment())
+
+    assert "Failed to clean up Modal SWE environment" in caplog.text
+
+
 @pytest.mark.parametrize(
     "error",
     [
