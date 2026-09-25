@@ -163,7 +163,10 @@ def _task_dir(metadata: dict[str, Any]) -> Path:
     if explicit:
         path = Path(explicit)
     elif instance_id:
-        path = Path(os.getenv("MODAL_SWE_TASKS_DIR", "/data/tasks")) / str(instance_id).lower()
+        path = (
+            Path(os.getenv("MODAL_SWE_TASKS_DIR", "/data/tasks"))
+            / str(instance_id).lower()
+        )
     else:
         raise ValueError("Modal SWE metadata must contain task_dir or instance_id")
     if not path.is_dir():
@@ -174,7 +177,9 @@ def _task_dir(metadata: dict[str, Any]) -> Path:
 def _task_cwd(metadata: dict[str, Any]) -> str:
     cwd = str(metadata.get("sandbox_cwd", "/testbed"))
     if not cwd.startswith("/") or "\x00" in cwd:
-        raise ValueError(f"Sandbox working directory must be an absolute path, got {cwd!r}")
+        raise ValueError(
+            f"Sandbox working directory must be an absolute path, got {cwd!r}"
+        )
     return cwd
 
 
@@ -325,6 +330,7 @@ def _is_infrastructure_error(error: BaseException) -> bool:
         "RateLimitError",
         "RemoteProtocolError",
         "ServiceUnavailableError",
+        "Timeout",
         "TransportError",
     }
     for current in _exception_chain(error):
@@ -368,7 +374,9 @@ def _exception_metadata(error: BaseException) -> dict[str, Any]:
     return {
         "error_type": f"{type(error).__module__}.{type(error).__name__}",
         "root_error_type": f"{type(root).__module__}.{type(root).__name__}",
-        "error_chain": [f"{type(item).__module__}.{type(item).__name__}" for item in chain[:8]],
+        "error_chain": [
+            f"{type(item).__module__}.{type(item).__name__}" for item in chain[:8]
+        ],
         "root_error": f"{type(root).__name__}: {root}"[:1000],
     }
 
@@ -387,7 +395,9 @@ def _verifier_timeout(task_dir: Path, configured_timeout: int) -> int:
             raise ValueError
         return min(configured_timeout, task_timeout)
     except (KeyError, TypeError, ValueError, tomllib.TOMLDecodeError):
-        logger.warning("Invalid verifier timeout in %s; using %ss", task_config, configured_timeout)
+        logger.warning(
+            "Invalid verifier timeout in %s; using %ss", task_config, configured_timeout
+        )
         return configured_timeout
 
 
@@ -480,7 +490,9 @@ def _validated_reward(sample: Any) -> float:
         )
     reward = metadata["reward"]
     if isinstance(reward, bool) or not isinstance(reward, (int, float)):
-        raise TypeError(f"Modal SWE reward must be numeric, got {type(reward).__name__}")
+        raise TypeError(
+            f"Modal SWE reward must be numeric, got {type(reward).__name__}"
+        )
     reward = float(reward)
     if not math.isfinite(reward):
         raise ValueError(f"Modal SWE reward must be finite, got {reward}")
@@ -524,13 +536,17 @@ def pick_latest_leaf(samples: list[Any], session_metadata: dict[str, Any]) -> li
         leaf = metadata.get("leaf")
         value = leaf.get("node_id") if isinstance(leaf, dict) else None
         if isinstance(value, bool) or not isinstance(value, int):
-            raise ValueError("Modal SWE session-v2 sample is missing an integer leaf.node_id")
+            raise ValueError(
+                "Modal SWE session-v2 sample is missing an integer leaf.node_id"
+            )
         return value
 
     return [max(samples, key=node_id)]
 
 
-def postprocess_samples(samples: list[Any], session_metadata: dict[str, Any]) -> list[Any]:
+def postprocess_samples(
+    samples: list[Any], session_metadata: dict[str, Any]
+) -> list[Any]:
     """Apply the v2 default policy, then exclude infrastructure failures.
 
     ``_miles_abort`` is private adapter control metadata: it must affect sample
@@ -598,7 +614,10 @@ class _EnvironmentSnapshot:
 
     def since(self, previous: _EnvironmentSnapshot) -> _EnvironmentSnapshot:
         return _EnvironmentSnapshot(
-            **{field: max(0, getattr(self, field) - getattr(previous, field)) for field in self.__dataclass_fields__}
+            **{
+                field: max(0, getattr(self, field) - getattr(previous, field))
+                for field in self.__dataclass_fields__
+            }
         )
 
 
@@ -659,23 +678,39 @@ def _environment_metrics(
             0.0,
             agent_snapshot.exec_time - agent_snapshot.exec_remote_time,
         ),
-        "agent_tool_exec_mean": (sum(agent_durations) / len(agent_durations) if agent_durations else 0.0),
+        "agent_tool_exec_mean": (
+            sum(agent_durations) / len(agent_durations) if agent_durations else 0.0
+        ),
         "agent_tool_remote_exec_mean": (
-            sum(agent_remote_durations) / len(agent_remote_durations) if agent_remote_durations else 0.0
+            sum(agent_remote_durations) / len(agent_remote_durations)
+            if agent_remote_durations
+            else 0.0
         ),
         "agent_tool_transport_mean": (
-            sum(agent_transport_durations) / len(agent_transport_durations) if agent_transport_durations else 0.0
+            sum(agent_transport_durations) / len(agent_transport_durations)
+            if agent_transport_durations
+            else 0.0
         ),
         "agent_tool_exec_p90": (
-            sorted(agent_durations)[round((len(agent_durations) - 1) * 0.90)] if agent_durations else 0.0
+            sorted(agent_durations)[round((len(agent_durations) - 1) * 0.90)]
+            if agent_durations
+            else 0.0
         ),
         "agent_tool_exec_max": max(agent_durations, default=0.0),
         "agent_tool_input_mib": sum(agent_input_sizes) / (1024 * 1024),
-        "agent_tool_input_mean_bytes": (sum(agent_input_sizes) / len(agent_input_sizes) if agent_input_sizes else 0.0),
+        "agent_tool_input_mean_bytes": (
+            sum(agent_input_sizes) / len(agent_input_sizes)
+            if agent_input_sizes
+            else 0.0
+        ),
         "agent_tool_input_max_bytes": max(agent_input_sizes, default=0),
-        "agent_tool_input_over_64k_count": sum(size > 65536 for size in agent_input_sizes),
+        "agent_tool_input_over_64k_count": sum(
+            size > 65536 for size in agent_input_sizes
+        ),
         "agent_tool_input_over_64k_ratio": (
-            sum(size > 65536 for size in agent_input_sizes) / len(agent_input_sizes) if agent_input_sizes else 0.0
+            sum(size > 65536 for size in agent_input_sizes) / len(agent_input_sizes)
+            if agent_input_sizes
+            else 0.0
         ),
         "tool_timeout_count": agent_snapshot.command_timeout_count,
         "agent_tool_output_mib": agent_snapshot.output_bytes / (1024 * 1024),
@@ -745,7 +780,9 @@ def _attach_client_model_timings(
     )
     if total_time > 0:
         metrics["generation_time_ratio"] = min(1.0, model_request_time / total_time)
-        metrics["interaction_time_ratio"] = max(0.0, 1.0 - metrics["generation_time_ratio"])
+        metrics["interaction_time_ratio"] = max(
+            0.0, 1.0 - metrics["generation_time_ratio"]
+        )
         metrics["generation_bound"] = int(metrics["generation_time_ratio"] > 0.5)
     return metrics
 
@@ -1012,7 +1049,11 @@ def _run_episode_sync(
                     str(error)[:500],
                 )
                 elapsed = time.perf_counter() - started
-                reason = "sandbox_not_found" if _is_sandbox_not_found_error(error) else "agent_error"
+                reason = (
+                    "sandbox_not_found"
+                    if _is_sandbox_not_found_error(error)
+                    else "agent_error"
+                )
                 agent_metrics = _environment_metrics(
                     env,
                     agent_queue_time=agent_queue_time,
@@ -1050,9 +1091,11 @@ def _run_episode_sync(
         except SandboxCommandTimeoutError as error:
             diagnostic = ""
             if error.result is not None:
-                diagnostic = (error.result.output_tail if error.result.output_truncated else error.result.output)[
-                    -_VERIFIER_LOG_TAIL_CHARS:
-                ]
+                diagnostic = (
+                    error.result.output_tail
+                    if error.result.output_truncated
+                    else error.result.output
+                )[-_VERIFIER_LOG_TAIL_CHARS:]
             logger.warning(
                 "Modal SWE verifier timed out for %s after %ss",
                 task_dir.name,
@@ -1083,7 +1126,9 @@ def _run_episode_sync(
                 infrastructure=False,
                 total_time=elapsed,
                 agent_queue_time=agent_queue_time,
-                verifier_timeout_sec=_verifier_timeout(task_dir, int(settings["verify_timeout"])),
+                verifier_timeout_sec=_verifier_timeout(
+                    task_dir, int(settings["verify_timeout"])
+                ),
                 verifier_output_tail=diagnostic,
                 agent_metrics=metrics,
             )
@@ -1199,9 +1244,14 @@ def _run_episode_sync(
 def _sandbox_boot_semaphore() -> threading.BoundedSemaphore:
     """Bound per-controller startup pressure without capping active episodes."""
     default = max(1, _threads_per_agent_process())
-    limit = int(os.getenv("MODAL_SWE_SANDBOX_BOOT_CONCURRENCY_PER_PROCESS", str(default)))
+    limit = int(
+        os.getenv("MODAL_SWE_SANDBOX_BOOT_CONCURRENCY_PER_PROCESS", str(default))
+    )
     if limit <= 0:
-        raise ValueError("MODAL_SWE_SANDBOX_BOOT_CONCURRENCY_PER_PROCESS must be positive, " f"got {limit}")
+        raise ValueError(
+            "MODAL_SWE_SANDBOX_BOOT_CONCURRENCY_PER_PROCESS must be positive, "
+            f"got {limit}"
+        )
     return threading.BoundedSemaphore(limit)
 
 
@@ -1326,7 +1376,8 @@ class _AgentWorker:
         except Exception as error:
             if not _is_infrastructure_error(error):
                 raise RuntimeError(
-                    f"Modal SWE episode failed during {current_phase}: " f"{type(error).__name__}: {error}"
+                    f"Modal SWE episode failed during {current_phase}: "
+                    f"{type(error).__name__}: {error}"
                 ) from None
             logger.warning(
                 "Modal SWE worker episode failed during %s: %s: %s",
@@ -1403,7 +1454,9 @@ class _RayAgentWorkerPool:
             return _failure("rollout_cancelled")
         index, worker = self._acquire()
         try:
-            future = asyncio.ensure_future(worker.run_episode.remote({**payload, "_abort_generation": generation}))
+            future = asyncio.ensure_future(
+                worker.run_episode.remote({**payload, "_abort_generation": generation})
+            )
         except Exception:
             self._release(index)
             self._available.release()
@@ -1428,7 +1481,9 @@ class _RayAgentWorkerPool:
 
     async def abort(self) -> None:
         self.generation += 1
-        await asyncio.gather(*(worker.abort_episodes.remote(self.generation) for worker in self.workers))
+        await asyncio.gather(
+            *(worker.abort_episodes.remote(self.generation) for worker in self.workers)
+        )
 
     def ensure_progress_reporter(self) -> None:
         if self.progress_reporter is None or self.progress_reporter.done():
@@ -1438,7 +1493,9 @@ class _RayAgentWorkerPool:
         """Log one aggregate phase heartbeat for the complete controller pool."""
         while True:
             await asyncio.sleep(30)
-            stats_tasks = [asyncio.ensure_future(worker.stats.remote()) for worker in self.workers]
+            stats_tasks = [
+                asyncio.ensure_future(worker.stats.remote()) for worker in self.workers
+            ]
             done, pending = await asyncio.wait(stats_tasks, timeout=5)
             for task in pending:
                 task.cancel()
@@ -1478,9 +1535,15 @@ class _RayAgentWorkerPool:
                 sum(phases.values()),
                 self.capacity,
                 dict(sorted(phases.items())),
-                {phase: round(seconds, 1) for phase, seconds in sorted(oldest_by_phase.items())},
+                {
+                    phase: round(seconds, 1)
+                    for phase, seconds in sorted(oldest_by_phase.items())
+                },
                 max(
-                    (float(snapshot["oldest_episode_seconds"]) for snapshot in snapshots),
+                    (
+                        float(snapshot["oldest_episode_seconds"])
+                        for snapshot in snapshots
+                    ),
                     default=0.0,
                 ),
             )

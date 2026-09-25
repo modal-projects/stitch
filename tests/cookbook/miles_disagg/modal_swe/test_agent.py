@@ -314,10 +314,16 @@ def test_v2_postprocessor_marks_infrastructure_failure_aborted():
 
 
 def test_v2_picker_returns_only_latest_committed_leaf():
-    older_deep_branch = Sample(metadata={"leaf": {"node_id": 7, "path_node_ids": [0, 3, 7]}})
-    latest_shallow_branch = Sample(metadata={"leaf": {"node_id": 9, "path_node_ids": [0, 9]}})
+    older_deep_branch = Sample(
+        metadata={"leaf": {"node_id": 7, "path_node_ids": [0, 3, 7]}}
+    )
+    latest_shallow_branch = Sample(
+        metadata={"leaf": {"node_id": 9, "path_node_ids": [0, 9]}}
+    )
 
-    assert pick_latest_leaf([older_deep_branch, latest_shallow_branch], {}) == [latest_shallow_branch]
+    assert pick_latest_leaf([older_deep_branch, latest_shallow_branch], {}) == [
+        latest_shallow_branch
+    ]
 
 
 def test_v2_picker_accepts_empty_session_and_rejects_missing_commit_order():
@@ -346,7 +352,9 @@ def test_v2_postprocessor_keeps_policy_failure_trainable():
 
 
 def test_infrastructure_failure_preserves_root_cause_metadata():
-    service_error_type = type("ServiceError", (Exception,), {"__module__": "modal.exception"})
+    service_error_type = type(
+        "ServiceError", (Exception,), {"__module__": "modal.exception"}
+    )
     root = service_error_type("temporarily unavailable")
     wrapped = RuntimeError("worker failed")
     wrapped.__cause__ = root
@@ -375,7 +383,10 @@ async def test_reward_hook_returns_verifier_reward():
     sample = Sample(metadata={"reward": 1.0})
 
     assert await reward_func(None, sample) == 1.0
-    assert await reward_func(None, [sample, Sample(metadata={"reward": 0})]) == [1.0, 0.0]
+    assert await reward_func(None, [sample, Sample(metadata={"reward": 0})]) == [
+        1.0,
+        0.0,
+    ]
 
 
 @pytest.mark.asyncio
@@ -484,12 +495,19 @@ def test_rollout_metrics_aggregate_adapter_owned_timings():
     assert metrics["rollout_session/total_seconds_mean"] == 0.75
     assert metrics["rollout_model/request_count"] == 3
     assert metrics["rollout_model/trainable_completion_tokens"] == 40
-    assert metrics["rollout_model/trainable_tokens_per_backend_request_second"] == pytest.approx(40 / 7.5)
+    assert metrics[
+        "rollout_model/trainable_tokens_per_backend_request_second"
+    ] == pytest.approx(40 / 7.5)
     assert metrics["rollout_model/client_minus_backend_request_count"] == 0
-    assert metrics["rollout_model/client_minus_backend_seconds_signed"] == pytest.approx(1.5)
+    assert metrics[
+        "rollout_model/client_minus_backend_seconds_signed"
+    ] == pytest.approx(1.5)
     assert metrics["rollout_agent/agent_tool_output_hard_limit_count_mean"] == 0.5
     assert metrics["rollout_agent/context_limit_exit_ratio"] == 0.5
-    assert "client_model_request_durations_seconds" not in samples[0].metadata["agent_metrics"]
+    assert (
+        "client_model_request_durations_seconds"
+        not in samples[0].metadata["agent_metrics"]
+    )
 
 
 def test_rollout_metrics_include_masked_infrastructure_attempts():
@@ -573,7 +591,9 @@ def test_bounded_runner_preserves_small_stdout_stderr_and_return_code():
 
 
 def test_bounded_runner_caps_output_before_transport():
-    result = _run_bounded("python -c \"import sys; sys.stdout.write('a' * 600000); sys.stderr.write('b' * 400000)\"")
+    result = _run_bounded(
+        "python -c \"import sys; sys.stdout.write('a' * 600000); sys.stderr.write('b' * 400000)\""
+    )
 
     assert result.return_code == 0
     assert result.output == ""
@@ -902,10 +922,18 @@ async def test_agent_worker_propagates_unknown_adapter_bug(monkeypatch):
 @pytest.mark.parametrize(
     "error",
     [
-        RuntimeError("TITO context limit reached: prompt has 65536 tokens, configured max_seq_len is 65536"),
-        RuntimeError("Requested token count exceeds the model's maximum context length"),
-        RuntimeError("Input length (65530 tokens) exceeds the maximum allowed length (65530 tokens)"),
-        RuntimeError("The input (65692 tokens) is longer than the model's context length (65544 tokens)"),
+        RuntimeError(
+            "TITO context limit reached: prompt has 65536 tokens, configured max_seq_len is 65536"
+        ),
+        RuntimeError(
+            "Requested token count exceeds the model's maximum context length"
+        ),
+        RuntimeError(
+            "Input length (65530 tokens) exceeds the maximum allowed length (65530 tokens)"
+        ),
+        RuntimeError(
+            "The input (65692 tokens) is longer than the model's context length (65544 tokens)"
+        ),
     ],
 )
 def test_context_limit_errors_are_recognized(error):
@@ -929,20 +957,27 @@ def test_typed_context_limit_errors_are_recognized():
 
 
 def test_unrelated_bad_request_is_not_a_context_limit():
-    assert not _is_context_limit_error(RuntimeError("appended message has role='assistant'"))
+    assert not _is_context_limit_error(
+        RuntimeError("appended message has role='assistant'")
+    )
 
 
 def test_truncated_generation_error_is_recognized_through_wrappers():
     class APIError(RuntimeError):
         status_code = 409
 
-    root = APIError("truncated generation cannot be extended: the matched node ended " "with finish_reason='length'")
+    root = APIError(
+        "truncated generation cannot be extended: the matched node ended "
+        "with finish_reason='length'"
+    )
     wrapper = RuntimeError("episode cleanup failed")
     wrapper.__cause__ = root
 
     assert _is_truncated_generation_error(wrapper)
     assert _is_truncated_generation_error(
-        RuntimeError("APIError: Error code: 409 - truncated generation cannot be extended")
+        RuntimeError(
+            "APIError: Error code: 409 - truncated generation cannot be extended"
+        )
     )
 
 
@@ -967,9 +1002,15 @@ def test_modal_sandbox_not_found_is_a_distinct_infra_error():
 
 
 def test_only_recognized_external_failures_are_infrastructure():
-    service_error_type = type("ServiceError", (Exception,), {"__module__": "modal.exception"})
+    service_error_type = type(
+        "ServiceError", (Exception,), {"__module__": "modal.exception"}
+    )
+    litellm_timeout_type = type(
+        "Timeout", (Exception,), {"__module__": "litellm.exceptions"}
+    )
 
     assert _is_infrastructure_error(ConnectionError("connection reset"))
     assert _is_infrastructure_error(SandboxTransportError("invalid response"))
     assert _is_infrastructure_error(service_error_type("temporarily unavailable"))
+    assert _is_infrastructure_error(litellm_timeout_type("request expired"))
     assert not _is_infrastructure_error(RuntimeError("adapter invariant broke"))
