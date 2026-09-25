@@ -179,7 +179,7 @@ def test_startup_initializes_update_destination() -> None:
 
 
 @pytest.mark.parametrize(
-    "ready,sync_state,expects_progress",
+    "ready,sync_state,observable",
     [
         (False, SyncState.IDLE, False),
         (False, SyncState.FETCHING, False),
@@ -188,19 +188,19 @@ def test_startup_initializes_update_destination() -> None:
         (False, SyncState.ERROR, False),
         (True, SyncState.IDLE, True),
         (True, SyncState.FETCHING, True),
-        (True, SyncState.STAGING, True),
+        (True, SyncState.STAGING, False),
         (True, SyncState.COMMITTING, False),
         (True, SyncState.ERROR, True),
     ],
 )
-def test_engine_progress_expectation_follows_serving_lifecycle(
-    ready: bool, sync_state: SyncState, expects_progress: bool
+def test_engine_health_observability_follows_sync_lifecycle(
+    ready: bool, sync_state: SyncState, observable: bool
 ) -> None:
     reconciler = _make_reconciler(store=FakeStore(), engine=FakeEngine())
     reconciler.ready = ready
     reconciler.sync_state = sync_state
 
-    assert reconciler.expects_engine_progress() is expects_progress
+    assert reconciler.engine_health_observable() is observable
 
 
 def test_catch_up() -> None:
@@ -389,10 +389,42 @@ def test_run_switch_exposes_paused_reset_to_engine_watchdog() -> None:
         await reset_started.wait()
         assert engine.calls == ["pause", "reset"]
         assert r.sync_state is SyncState.COMMITTING
-        assert not r.expects_engine_progress()
+        assert not r.engine_health_observable()
 
         finish_reset.set()
         await switch
+
+    _run(go())
+
+
+def test_weight_staging_owns_engine_liveness_observation() -> None:
+    async def go() -> None:
+        engine = FakeEngine()
+        stage_started = asyncio.Event()
+        finish_stage = asyncio.Event()
+
+        async def slow_stage(manifest: VersionManifest, source_dir: str) -> None:
+            engine.staged.append(manifest.ref)
+            engine.calls.append(f"stage:{manifest.ref.version}")
+            stage_started.set()
+            await finish_stage.wait()
+
+        engine.stage = slow_stage  # type: ignore[method-assign]
+        r = _make_reconciler(
+            store=FakeStore(VersionRef("r1", 1), _delta("r1", 1, files=["v1"])),
+            engine=engine,
+        )
+        r.ready = True
+
+        reconcile = asyncio.create_task(r.reconcile())
+        await stage_started.wait()
+        assert r.sync_state is SyncState.STAGING
+        assert not r.engine_health_observable()
+
+        finish_stage.set()
+        await reconcile
+        assert r.sync_state is SyncState.IDLE
+        assert r.engine_health_observable()
 
     _run(go())
 
@@ -744,6 +776,40 @@ def test_unrecoverable_reconcile_error_reaches_terminal_monitor() -> None:
         with pytest.raises(UnrecoverableEngineError, match="process is gone"):
             await r.wait_for_terminal_error()
         assert r.server_info()["terminal_error"] == "engine process is gone"
+        await r.shutdown()
+
+    _run(go())
+
+
+def test_staging_failure_is_terminal() -> None:
+    async def go() -> None:
+        engine = FakeEngine()
+        attempts = 0
+
+        async def fail_stage(_manifest, _source_dir) -> None:
+            nonlocal attempts
+            attempts += 1
+            raise TimeoutError("preparation stalled")
+
+        engine.stage = fail_stage  # type: ignore[method-assign]
+        r = _make_reconciler(
+            store=FakeStore(VersionRef("r1", 2), _full("r1", 2)),
+            engine=engine,
+            reconcile_interval=0,
+        )
+        await r.startup()
+
+        with pytest.raises(
+            UnrecoverableEngineError,
+            match="weight staging failed; staging destination state is uncertain",
+        ):
+            await r.wait_for_terminal_error()
+        assert not r.ready
+        assert r.applied == VersionRef("r1", 0)
+        assert r.sync_state is SyncState.ERROR
+        r.wake()
+        await asyncio.sleep(0)
+        assert attempts == 1
         await r.shutdown()
 
     _run(go())

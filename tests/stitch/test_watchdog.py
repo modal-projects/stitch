@@ -49,12 +49,12 @@ class _FakeServer:
 def _watchdog(
     engine: _HealthSequence,
     *,
-    expects_engine_progress: Callable[[], bool] = lambda: True,
+    health_observable: Callable[[], bool] = lambda: True,
     failure_threshold: int = 2,
 ) -> EngineWatchdog:
     return EngineWatchdog(
         engine,  # type: ignore[arg-type]
-        expects_engine_progress=expects_engine_progress,
+        health_observable=health_observable,
         interval=0.001,
         failure_threshold=failure_threshold,
     )
@@ -64,7 +64,7 @@ def test_watchdog_does_not_probe_when_progress_is_not_expected() -> None:
     async def go() -> None:
         engine = _HealthSequence(EngineHealthStatus.UNRESPONSIVE)
         task = asyncio.create_task(
-            _watchdog(engine, expects_engine_progress=lambda: False).run()
+            _watchdog(engine, health_observable=lambda: False).run()
         )
         await asyncio.sleep(0.01)
         assert not task.done()
@@ -72,6 +72,37 @@ def test_watchdog_does_not_probe_when_progress_is_not_expected() -> None:
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
+
+    asyncio.run(go())
+
+
+def test_unobservable_interval_does_not_erase_health_failures() -> None:
+    async def go() -> None:
+        observable = True
+        first_failure = asyncio.Event()
+
+        class Engine(_HealthSequence):
+            async def check_health(self) -> EngineHealth:
+                result = await super().check_health()
+                if self.checks == 1:
+                    first_failure.set()
+                return result
+
+        engine = Engine(
+            EngineHealthStatus.UNRESPONSIVE,
+            EngineHealthStatus.UNRESPONSIVE,
+        )
+        task = asyncio.create_task(
+            _watchdog(engine, health_observable=lambda: observable).run()
+        )
+        await asyncio.wait_for(first_failure.wait(), timeout=1)
+        observable = False
+        await asyncio.sleep(0.01)
+        assert not task.done()
+        observable = True
+        with pytest.raises(UnrecoverableEngineError):
+            await asyncio.wait_for(task, timeout=1)
+        assert engine.checks == 2
 
     asyncio.run(go())
 

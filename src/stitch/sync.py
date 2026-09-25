@@ -310,9 +310,12 @@ class Reconciler:
         applied = self.applied.identity if self.applied else "boot"
         return f"catching up to live version (applied={applied}, state={self.sync_state.value})"
 
-    def expects_engine_progress(self) -> bool:
-        """Whether this replica should currently make inference progress."""
-        return self.ready and self.sync_state is not SyncState.COMMITTING
+    def engine_health_observable(self) -> bool:
+        """Whether engine health is independently observable right now."""
+        return self.ready and self.sync_state not in {
+            SyncState.STAGING,
+            SyncState.COMMITTING,
+        }
 
     async def wait_for_terminal_error(self) -> None:
         """Raise once reconciliation proves this replica must be replaced."""
@@ -480,42 +483,49 @@ class Reconciler:
             # trainer publishes continuously.
             self.sync_state = SyncState.STAGING
             initial_pointer = pointer
-            with _timed(m, "stage_s"):
-                await self.engine.stage(target, source_dir)
-                try:
-                    await asyncio.to_thread(self.store.refresh)
-                    latest = await asyncio.to_thread(self.store.read_pointer)
-                    if (
-                        latest is not None
-                        and latest.run_id == pointer.run_id
-                        and latest.version > pointer.version
-                    ):
-                        latest_target = await asyncio.to_thread(
-                            self.store.read_manifest, latest
-                        )
-                        latest_source_dir = await asyncio.to_thread(
-                            self.store.materialize, latest
-                        )
-                    else:
+            try:
+                with _timed(m, "stage_s"):
+                    await self.engine.stage(target, source_dir)
+                    try:
+                        await asyncio.to_thread(self.store.refresh)
+                        latest = await asyncio.to_thread(self.store.read_pointer)
+                        if (
+                            latest is not None
+                            and latest.run_id == pointer.run_id
+                            and latest.version > pointer.version
+                        ):
+                            latest_target = await asyncio.to_thread(
+                                self.store.read_manifest, latest
+                            )
+                            latest_source_dir = await asyncio.to_thread(
+                                self.store.materialize, latest
+                            )
+                        else:
+                            latest = None
+                    except Exception as exc:  # noqa: BLE001
                         latest = None
-                except Exception as exc:  # noqa: BLE001
-                    latest = None
-                    m["coalesce_error"] = str(exc)
-                    logger.warning(
-                        "could not inspect a newer target; committing staged v%d",
-                        pointer.version,
-                        exc_info=True,
-                    )
+                        m["coalesce_error"] = str(exc)
+                        logger.warning(
+                            "could not inspect a newer target; committing staged v%d",
+                            pointer.version,
+                            exc_info=True,
+                        )
 
-                if latest is not None:
-                    logger.info(
-                        "catch-up: staging advanced head v%d -> v%d before commit",
-                        pointer.version,
-                        latest.version,
-                    )
-                    await self.engine.stage(latest_target, latest_source_dir)
-                    pointer = latest
-                    target = latest_target
+                    if latest is not None:
+                        logger.info(
+                            "catch-up: staging advanced head v%d -> v%d before commit",
+                            pointer.version,
+                            latest.version,
+                        )
+                        await self.engine.stage(latest_target, latest_source_dir)
+                        pointer = latest
+                        target = latest_target
+            except UnrecoverableSidecarError:
+                raise
+            except Exception as exc:
+                raise UnrecoverableEngineError(
+                    "weight staging failed; staging destination state is uncertain"
+                ) from exc
 
             if pointer != initial_pointer:
                 m["initial_target_version"] = initial_pointer.version
