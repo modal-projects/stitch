@@ -23,6 +23,8 @@ class ModalConfig:
     # acceptable types in preference order (Modal falls back down the list) — e.g.
     # ["B200", "B300"] schedules engines on whichever pool has capacity.
     rollout_gpu: GPUType | list[GPUType] | None = None
+    rollout_cpu: float | None = None
+    trainer_cpu: float | None = None
     trainer_memory_mib: tuple[int, int] | None = None
     cloud: str | None = None
     region: str | None = None
