@@ -100,7 +100,7 @@ def test_qwen36_bf16_swebench_recipe_sizes_async_rollout_to_the_fleet():
     assert cfg.async_mode
     assert cfg.fully_async
     assert cfg.async_max_concurrent_samples == recipe.ROLLOUT_CONCURRENT_SAMPLES
-    assert cfg.async_max_concurrent_samples == 640
+    assert cfg.async_max_concurrent_samples == 1024
     assert cfg.sglang_server_concurrency == cfg.async_max_concurrent_samples
     assert len(recipe.modal.rollout_pools) == 4
     assert sum(pool.min_containers for pool in recipe.modal.rollout_pools) == 112
