@@ -3,7 +3,7 @@
 Stitch installs an immutable Miles revision over a dated trainer image:
 
 ```python
-MILES_IMAGE_TAG = "radixark/miles:dev-202609231228"
+MILES_IMAGE_TAG = "radixark/miles:dev-202609250800"
 MILES_REPO_URL = "https://github.com/modal-projects/miles.git"
 MILES_REPO_REF = "3082b60e69e0528c9d4c7092a2514c00dcde4e59"
 ```

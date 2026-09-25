@@ -10,8 +10,9 @@ store and sends rollout traffic directly to the pool's Modal Server. Its launche
 claims the run's boot pointer at v0 before the pool enters rotation.
 
 Every rollout `Server` enables `experimental_options={"kv_aware_routing": True}`.
-Modal handles KV-aware routing. Rollout clients use
-`ModalFlashPool(app_name, "Server")`.
+Modal handles KV-aware routing within each pool. Single-pool recipes use
+`ModalFlashPool`; recipes with explicit `rollout_pools` compose independent
+hardware pools behind one `ModalFlashFleet` endpoint.
 
 ## Reference recipes
 
@@ -20,6 +21,7 @@ Modal handles KV-aware routing. Rollout clients use
 | [`qwen3_6_35b_a3b_nvfp4`](miles_disagg/configs/qwen3_6_35b_a3b_nvfp4.py) | Agentic SWE-bench Pro training with humans& NVFP4 routed experts |
 | [`glm5_3_nvfp4`](miles_disagg/configs/glm5_3_nvfp4.py) | Large-scale agentic NVFP4 training with an external speculative draft |
 | [`qwen3_4b_math`](miles_disagg/configs/qwen3_4b_math.py) | Small synchronous BF16 GRPO starter on GSM8K |
+| [`qwen3_6_35b_a3b_swebench_pro`](miles_disagg/configs/qwen3_6_35b_a3b_swebench_pro.py) | Fully asynchronous BF16 SWE-bench Pro GRPO |
 | [`glm5_3_fp8`](standalone/configs/glm5_3_fp8.py) | Standalone FP8 rollout pool for an external trainer |
 
 The [weight-update profiles](../tools/README.md#weight-update-validation) cover
@@ -181,6 +183,15 @@ Rollout capacity is controlled by `rollout_min_containers` and
 and replacement containers during blue-green deployment. Engine concurrency and
 backpressure are controlled by `--max-running-requests` and
 `--max-queued-requests` in the recipe.
+
+For a guaranteed hardware mix, configure `rollout_pools`. Each named pool is a
+complete engine configuration with its own GPU type and count, SGLang arguments,
+autoscaling target, and replica floor/cap; this also permits multiple independent
+configurations for the same GPU type. A container is one rollout engine replica,
+not an eight-GPU node. Convert desired node capacity to replicas with
+`replicas = nodes * GPUs_per_node / GPUs_per_engine`. A `rollout_gpu` list is only
+a fallback order for one pool and does not guarantee that every listed GPU type
+is present.
 
 Configure the sidecar's HTTP connection pool with `proxy_max_connections` (default
 100) and `proxy_max_keepalive_connections` (default 20 idle connections) in
