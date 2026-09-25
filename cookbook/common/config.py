@@ -46,12 +46,12 @@ class ModalConfig:
     # acceptable types in preference order (Modal falls back down the list) — e.g.
     # ["B200", "B300"] schedules engines on whichever pool has capacity.
     rollout_gpu: GPUType | list[GPUType] | None = None
-    rollout_cpu: float | None = None
-    trainer_cpu: float | None = None
     # Separate pools guarantee a heterogeneous fleet. A ``rollout_gpu`` list is
     # only a per-container fallback preference and does not provide that guarantee.
     rollout_pools: tuple[RolloutPoolConfig, ...] = ()
-    trainer_memory_mib: tuple[int, int] | None = None
+    rollout_cpu: float | tuple[float, float] | None = None
+    trainer_cpu: float | tuple[float, float] | None = None
+    trainer_memory_mib: int | tuple[int, int] | None = None
     cloud: str | None = None
     region: str | None = None
     draft_volume: str | None = None
@@ -64,7 +64,7 @@ class ModalConfig:
     rollout_target_inputs: int | None = None
     routing_region: str = "us-east"
     rollout_ephemeral_disk_mib: int | None = None
-    rollout_memory_mib: tuple[int, int] | None = None
+    rollout_memory_mib: int | tuple[int, int] | None = None
     torch_dist_prep_nodes: int = 2
     torch_dist_prep_gpus_per_node: int = 8
     torch_dist_convert_extra_args: str = ""
