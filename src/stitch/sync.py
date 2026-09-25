@@ -310,9 +310,12 @@ class Reconciler:
         applied = self.applied.identity if self.applied else "boot"
         return f"catching up to live version (applied={applied}, state={self.sync_state.value})"
 
-    def expects_engine_progress(self) -> bool:
-        """Whether this replica should currently make inference progress."""
-        return self.ready and self.sync_state is not SyncState.COMMITTING
+    def engine_health_observable(self) -> bool:
+        """Whether engine health is independently observable right now."""
+        return self.ready and self.sync_state not in {
+            SyncState.STAGING,
+            SyncState.COMMITTING,
+        }
 
     async def wait_for_terminal_error(self) -> None:
         """Raise once reconciliation proves this replica must be replaced."""

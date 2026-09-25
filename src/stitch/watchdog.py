@@ -66,17 +66,17 @@ class SidecarWatchdog:
 class EngineWatchdog:
     """Turn repeated engine-health failures into one terminal sidecar error.
 
-    Probe only while the reconciler promises inference progress. Destination
-    initialization and commits supervise their own engine RPCs and may occupy the
-    engine's HTTP loop, so a concurrent health request is not an independent signal.
-    Staging runs alongside inference and remains functionally monitored.
+    Probe only while the reconciler promises that health is independently
+    observable. Destination initialization, staging, and commits supervise their
+    own engine RPCs and may occupy the engine's HTTP loop, so a concurrent health
+    request is not an independent signal.
     """
 
     def __init__(
         self,
         engine: Engine,
         *,
-        expects_engine_progress: Callable[[], bool],
+        health_observable: Callable[[], bool],
         interval: float = 5.0,
         failure_threshold: int = 3,
     ) -> None:
@@ -85,7 +85,7 @@ class EngineWatchdog:
         if failure_threshold < 1:
             raise ValueError("watchdog failure threshold must be positive")
         self._engine = engine
-        self._expects_engine_progress = expects_engine_progress
+        self._health_observable = health_observable
         self._interval = interval
         self._failure_threshold = failure_threshold
         self._consecutive_failures = 0
@@ -93,7 +93,7 @@ class EngineWatchdog:
     async def run(self) -> None:
         """Run until cancelled or the engine is conclusively unrecoverable."""
         while True:
-            if not self._expects_engine_progress():
+            if not self._health_observable():
                 self._consecutive_failures = 0
                 await asyncio.sleep(self._interval)
                 continue

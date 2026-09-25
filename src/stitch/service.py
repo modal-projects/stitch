@@ -326,7 +326,7 @@ def serve(
     watchdog = SidecarWatchdog(
         EngineWatchdog(
             engine,
-            expects_engine_progress=reconciler.expects_engine_progress,
+            health_observable=reconciler.engine_health_observable,
             interval=watchdog_interval,
             failure_threshold=watchdog_failure_threshold,
         ),
