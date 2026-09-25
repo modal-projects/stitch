@@ -81,10 +81,10 @@ def test_export_version(iteration: int, version: int) -> None:
 def test_resolve_resume_point_pairs_megatron_and_hf_checkpoints() -> None:
     volume = _Volume(
         {
+            "old/latest": b"old/weight_v000120",
             "old/checkpoints/latest_checkpointed_iteration.txt": b"119\n",
             "old/checkpoints/iter_0000119/state": b"checkpoint",
             "old/hf_checkpoints/weight_v000119/.complete": b"",
-            **_published(120),
         }
     )
 
@@ -102,11 +102,11 @@ def test_resolve_resume_point_pairs_megatron_and_hf_checkpoints() -> None:
 def test_resolve_resume_point_falls_back_to_previous_complete_pair() -> None:
     volume = _Volume(
         {
+            "old/latest": b"old/weight_v000100",
             "old/checkpoints/latest_checkpointed_iteration.txt": b"119\n",
             "old/checkpoints/iter_0000099/state": b"checkpoint",
             "old/checkpoints/iter_0000119/state": b"checkpoint",
             "old/hf_checkpoints/weight_v000099/.complete": b"",
-            **_published(100),
         }
     )
 
@@ -121,10 +121,11 @@ def test_resolve_resume_point_falls_back_to_previous_complete_pair() -> None:
     )
 
 
-def test_resolve_resume_point_requires_the_exports_publication() -> None:
-    # No publication for iteration 119: the resume point falls back to 99.
+def test_resolve_resume_point_does_not_select_checkpoint_ahead_of_latest() -> None:
+    # v120 is not published: the resume point falls back to v100.
     volume = _Volume(
         {
+            "old/latest": b"old/weight_v000100",
             "old/checkpoints/latest_checkpointed_iteration.txt": b"119\n",
             "old/checkpoints/iter_0000099/state": b"checkpoint",
             "old/checkpoints/iter_0000119/state": b"checkpoint",
@@ -144,6 +145,7 @@ def test_resolve_resume_point_requires_the_exports_publication() -> None:
 def test_resolve_resume_point_rejects_a_mislabeled_publication() -> None:
     volume = _Volume(
         {
+            "old/latest": b"old/weight_v000119",
             "old/checkpoints/latest_checkpointed_iteration.txt": b"119\n",
             "old/checkpoints/iter_0000119/state": b"checkpoint",
             "old/hf_checkpoints/weight_v000119/.complete": b"",
@@ -158,6 +160,7 @@ def test_resolve_resume_point_rejects_a_mislabeled_publication() -> None:
 def test_resolve_resume_point_skips_iteration_zero() -> None:
     volume = _Volume(
         {
+            "old/latest": b"old/weight_v000001",
             "old/checkpoints/latest_checkpointed_iteration.txt": b"0\n",
             "old/checkpoints/iter_0000000/state": b"checkpoint",
             "old/hf_checkpoints/weight_v000000/.complete": b"",
@@ -172,6 +175,7 @@ def test_resolve_resume_point_skips_iteration_zero() -> None:
 def test_resolve_resume_point_requires_a_complete_checkpoint_pair() -> None:
     volume = _Volume(
         {
+            "old/latest": b"old/weight_v000119",
             "old/checkpoints/latest_checkpointed_iteration.txt": b"119\n",
             "old/checkpoints/iter_0000119/state": b"checkpoint",
         }
@@ -271,7 +275,6 @@ def test_prepare_attempt_restores_the_newest_pair() -> None:
             "old/checkpoints/latest_checkpointed_iteration.txt": b"7",
             "old/checkpoints/iter_0000007/state": b"checkpoint",
             "old/hf_checkpoints/weight_v000007/.complete": b"",
-            **_published(8),
         }
     )
 
@@ -319,7 +322,6 @@ def test_prepare_attempt_refreshes_the_mount_before_the_claim(
                 "old/checkpoints/latest_checkpointed_iteration.txt": b"39",
                 "old/checkpoints/iter_0000029/state": b"checkpoint",
                 "old/hf_checkpoints/weight_v000029/.complete": b"",
-                **_published(30),
             }
         )
     volume = MountedVolume(files)

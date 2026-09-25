@@ -74,6 +74,20 @@ def resolve_resume_point(
         raise ValueError(f"invalid resume run id: {source_run_id!r}")
 
     run_root = PurePosixPath(source_run_id)
+    pointer_path = run_root / "latest"
+    try:
+        latest = VersionRef.parse(
+            _read_volume_file(volume, str(pointer_path)).decode().strip()
+        )
+    except FileNotFoundError as exc:
+        raise ResumePointNotFound(
+            f"run {source_run_id!r} has no Stitch latest pointer"
+        ) from exc
+    if latest.run_id != source_run_id:
+        raise ValueError(
+            f"latest belongs to run {latest.run_id!r}, not {source_run_id!r}"
+        )
+
     checkpoint_root = run_root / "checkpoints"
     tracker = checkpoint_root / "latest_checkpointed_iteration.txt"
     try:
@@ -103,19 +117,23 @@ def resolve_resume_point(
 
     save_hf = _validate_save_hf_template(save_hf)
     for iteration in sorted(iterations, reverse=True):
+        version = export_version(iteration)
+        if version > latest.version + 1:
+            continue
         relative_hf = save_hf.format(rollout_id=iteration)
         hf_root = run_root / relative_hf
         try:
             _read_volume_file(volume, str(hf_root / ".complete"))
         except FileNotFoundError:
             continue
-        # A crash between save and publish falls back one save interval.
-        try:
-            _check_published_version(
-                volume, run_root, version=export_version(iteration)
-            )
-        except FileNotFoundError:
-            continue
+        # ``latest`` is the durable publication record. Deltas at or below it may
+        # already be compacted behind this full checkpoint. Only the one-ahead
+        # case needs its delta: publication completed but pointer advancement did not.
+        if version == latest.version + 1:
+            try:
+                _check_published_version(volume, run_root, version=version)
+            except FileNotFoundError:
+                continue
         break
     else:
         raise ResumePointNotFound(
@@ -124,7 +142,7 @@ def resolve_resume_point(
         )
 
     return ResumePoint(
-        version=export_version(iteration),
+        version=version,
         iteration=iteration,
         source_run_id=source_run_id,
         trainer_checkpoint=str(STITCH_PATH / checkpoint_root),
