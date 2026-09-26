@@ -2,8 +2,10 @@
 
 ``root`` is one run's directory. The training framework owns
 ``<root>/updates/`` and may recreate it while initializing; Stitch owns the
-self-identifying ``<root>/latest`` commit pointer. Durability is an explicit
-Volume commit and cross-host visibility is a reload.
+self-identifying ``<root>/latest`` commit pointer. Payload durability and
+visibility use the mounted filesystem's commit/reload lifecycle. The small,
+mutable pointer uses the Volume object API so readers never observe a partially
+materialized mounted file.
 """
 
 from __future__ import annotations
@@ -11,6 +13,7 @@ from __future__ import annotations
 import contextlib
 import os
 import tempfile
+from io import BytesIO
 from pathlib import Path
 
 from stitch.stores.base import Store
@@ -38,6 +41,15 @@ class ModalVolumeStore(Store):
             _volume(self.volume_name).reload()
 
     def read_pointer(self) -> VersionRef | None:
+        if self.volume_name:
+            try:
+                data = b"".join(
+                    _volume(self.volume_name).read_file(self._pointer_volume_path)
+                )
+            except FileNotFoundError:
+                return None
+            text = data.decode("utf-8").strip()
+            return VersionRef.parse(text) if text else None
         path = self.root / _POINTER
         if not path.exists():
             return None
@@ -49,10 +61,14 @@ class ModalVolumeStore(Store):
             raise ValueError(
                 f"store is scoped to run {self.run_id!r}, got {ref.run_id!r}"
             )
+        if self.volume_name:
+            with _volume(self.volume_name).batch_upload(force=True) as upload:
+                upload.put_file(
+                    BytesIO(ref.identity.encode("utf-8")), self._pointer_volume_path
+                )
+            return
         self.root.mkdir(parents=True, exist_ok=True)
         _atomic_write(self.root / _POINTER, ref.identity)
-        if self.volume_name:
-            _volume(self.volume_name).commit()
 
     def claim(self, boot: VersionRef) -> None:
         if not boot.run_id:
@@ -94,6 +110,10 @@ class ModalVolumeStore(Store):
                 f"store is scoped to run {self.run_id!r}, got {ref.run_id!r}"
             )
         return self.root / "updates" / Path(ref.identity).name
+
+    @property
+    def _pointer_volume_path(self) -> str:
+        return f"{self.run_id}/{_POINTER}"
 
 
 def _volume(name: str):

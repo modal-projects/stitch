@@ -328,12 +328,22 @@ def test_coalesce_observation_failure_commits_prepared_target() -> None:
         store = FailSecondRefreshStore(
             VersionRef("r1", 1),
             _delta("r1", 1, files=["v1"]),
+            _delta("r1", 2, files=["v2"]),
         )
         engine = FakeEngine()
+        stage = engine.stage
+
+        async def advance_during_stage(
+            manifest: VersionManifest, source_dir: str
+        ) -> None:
+            await stage(manifest, source_dir)
+            store.advance_pointer(VersionRef("r1", 2))
+
+        engine.stage = advance_during_stage  # type: ignore[method-assign]
         r = _make_reconciler(store=store, engine=engine)
         r.applied = VersionRef("r1", 0)
 
-        assert await r._reconcile_once()
+        assert not await r._reconcile_once()
         assert engine.staged == [VersionRef("r1", 1)]
         assert engine.committed == [VersionRef("r1", 1)]
         assert r.applied == VersionRef("r1", 1)
@@ -715,7 +725,7 @@ def test_store_refresh_waits_for_update_destination() -> None:
                 )
                 super().refresh()
 
-        store = GuardedStore(VersionRef("r1", 0))
+        store = GuardedStore(VersionRef("r1", 1), _full("r1", 1))
         r = _make_reconciler(store=store, engine=engine, reconcile_interval=0.0)
         startup = asyncio.create_task(r.startup())
         await started.wait()
@@ -725,6 +735,7 @@ def test_store_refresh_waits_for_update_destination() -> None:
         release.set()
         await startup
         assert store.refreshed == 1
+        assert r.applied == VersionRef("r1", 1)
         await r.shutdown()
 
     _run(go())
@@ -900,23 +911,23 @@ def test_transient_error_recovery_needs_backstop() -> None:
 
 
 class HostViewStore(FakeStore):
-    """advance_pointer lands on the durable *remote*; read_pointer sees it only after
-    refresh() snapshots remote -> local (Volume reload semantics). refresh_gate lets a
-    test hold a pass open on a pre-publish snapshot."""
+    """The pointer is an authoritative object; refresh makes its immutable payload
+    visible. ``read_gate`` holds a pass after it snapshots the pointer."""
 
-    refresh_gate: queue.Queue[threading.Event] | None = None
+    read_gate: queue.Queue[threading.Event] | None = None
 
     def __init__(
         self, pointer: VersionRef | None = None, *manifests: VersionManifest
     ) -> None:
-        super().__init__(None, *manifests)
+        super().__init__(pointer, *manifests)
         self.remote_pointer = pointer
 
-    def refresh(self) -> None:
-        self._pointer = self.remote_pointer
-        if self.refresh_gate is not None:
-            self.refresh_gate.put(release := threading.Event())
+    def read_pointer(self) -> VersionRef | None:
+        pointer = self.remote_pointer
+        if self.read_gate is not None:
+            self.read_gate.put(release := threading.Event())
             release.wait(timeout=10)
+        return pointer
 
     def advance_pointer(self, ref: VersionRef) -> None:
         self.remote_pointer = ref
@@ -928,13 +939,13 @@ async def _preserves_concurrent_wake(interval: float) -> bool:
     r = _make_reconciler(store=store, engine=FakeEngine(), reconcile_interval=interval)
     await r.startup()  # converges to v1, ungated
 
-    gate = store.refresh_gate = queue.Queue()
+    gate = store.read_gate = queue.Queue()
     r.wake()  # start an idle pass
-    refresh = await asyncio.to_thread(gate.get, True, 10)  # snapshotted v1, held
+    read = await asyncio.to_thread(gate.get, True, 10)  # snapshotted v1, held
     store.advance_pointer(VersionRef("r1", 2))
     r.wake()  # delivered mid-pass: request another pass
-    store.refresh_gate = None
-    refresh.set()
+    store.read_gate = None
+    read.set()
     ok = await _converged(r, VersionRef("r1", 2))
     await r.shutdown()
     return ok

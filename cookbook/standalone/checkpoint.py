@@ -65,12 +65,11 @@ def claim_boot_pointer(
 ) -> VersionRef:
     """Claim an absent boot pointer without rewinding an existing run."""
 
-    store.refresh()
     pointer = store.read_pointer()
     if pointer is None:
         claim_run(store, None, run_id, boot_version=boot_version)
-        store.refresh()
         pointer = store.read_pointer()
+    store.refresh()
     return _require_run_pointer(pointer, run_id, boot_version)
 
 
@@ -85,8 +84,8 @@ def wait_for_boot_pointer(
 
     deadline = time.monotonic() + timeout_seconds
     while True:
-        store.refresh()
         if (pointer := store.read_pointer()) is not None:
+            store.refresh()
             return _require_run_pointer(pointer, run_id, boot_version)
         remaining = deadline - time.monotonic()
         if remaining <= 0:

@@ -8,6 +8,7 @@ that owns the distributed publish protocol.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from pathlib import Path
@@ -141,7 +142,7 @@ class _CachedPointer:
         now = time.monotonic()
         if now - self._at >= ttl:
             try:
-                pointer = store.read_pointer()
+                pointer = await asyncio.to_thread(store.read_pointer)
                 self._version = pointer.version if pointer else 0
             except Exception:  # noqa: BLE001
                 logger.warning(

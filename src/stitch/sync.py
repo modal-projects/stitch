@@ -437,7 +437,6 @@ class Reconciler:
                         )
 
     async def _reconcile_once_measured(self, m: dict[str, Any]) -> bool:
-        await asyncio.to_thread(self.store.refresh)
         pointer = await asyncio.to_thread(self.store.read_pointer)
         if pointer is None:
             return True
@@ -452,6 +451,10 @@ class Reconciler:
         if not self._behind(pointer):
             return True
 
+        # The pointer is the commit record: its immutable version bytes were made
+        # durable first. Refresh after observing it so the mounted snapshot cannot
+        # lag behind the target selected above.
+        await asyncio.to_thread(self.store.refresh)
         self.sync_state = SyncState.FETCHING
         self.last_error = None
         m["target_version"] = pointer.version
@@ -487,13 +490,13 @@ class Reconciler:
                 with _timed(m, "stage_s"):
                     await self.engine.stage(target, source_dir)
                     try:
-                        await asyncio.to_thread(self.store.refresh)
                         latest = await asyncio.to_thread(self.store.read_pointer)
                         if (
                             latest is not None
                             and latest.run_id == pointer.run_id
                             and latest.version > pointer.version
                         ):
+                            await asyncio.to_thread(self.store.refresh)
                             latest_target = await asyncio.to_thread(
                                 self.store.read_manifest, latest
                             )

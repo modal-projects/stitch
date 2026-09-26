@@ -192,9 +192,6 @@ def _boot_checkpoint(store_config: dict) -> tuple[str, int]:
     ):
         return miles_cfg.hf_checkpoint, 0
 
-    # Read the exports and the pointer from one Volume snapshot; a save ahead of
-    # latest is not eligible yet.
-    run_volume.reload()
     store = storage.create_store(
         store_config["stitch_store_backend"],
         local_root=RUN_DIR,
@@ -206,6 +203,9 @@ def _boot_checkpoint(store_config: dict) -> tuple[str, int]:
         return miles_cfg.hf_checkpoint, 0
     if latest.run_id != RUN_ID:
         raise ValueError(f"latest belongs to run {latest.run_id!r}, not {RUN_ID!r}")
+    # The export precedes its pointer. Reload after observing that commit point,
+    # ensuring the mounted snapshot includes the selected checkpoint.
+    store.refresh()
     export = newest_complete_export(
         RUN_DIR, save_hf=save_hf, latest_version=latest.version
     )

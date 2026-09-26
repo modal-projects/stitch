@@ -15,13 +15,18 @@ class Store:
     pointer / run-epoch coordination. Subclasses override every method."""
 
     def refresh(self) -> None:
-        """Make other hosts' writes visible (Volume reload; no-op if strongly consistent).
-        Call sequentially — a Volume reload must not run concurrently with itself; the
-        reconciler serializes it under its lock (``commit`` writes, by contrast, may overlap)."""
+        """Make published version bytes visible (Volume reload; no-op if strongly
+        consistent). Call sequentially — a Volume reload must not run concurrently with
+        itself; the reconciler serializes it under its lock (``commit`` writes, by
+        contrast, may overlap)."""
         raise NotImplementedError
 
     def read_pointer(self) -> VersionRef | None:
-        """The current ``latest`` pointer, or None if no run has been claimed."""
+        """Read the authoritative ``latest`` pointer, or None before a claim.
+
+        A consumer observes this commit point before refreshing the corresponding
+        version bytes. A pointer is published only after those bytes are durable.
+        """
         raise NotImplementedError
 
     def advance_pointer(self, ref: VersionRef) -> None:

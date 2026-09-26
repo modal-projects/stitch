@@ -376,7 +376,7 @@ def test_request_hook_min_lag() -> None:
         assert request["max_attempts"] == 900
 
 
-def test_request_hook_reads_shared_mount_without_reload() -> None:
+def test_request_hook_reads_pointer_without_reload() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         store = ModalVolumeStore(root, run_id="run-abc")
@@ -391,7 +391,7 @@ def test_request_hook_reads_shared_mount_without_reload() -> None:
 
         ModalVolumeStore.refresh = unexpected_refresh
         try:
-            args = _args(str(root), experiment_volume_name="weights")
+            args = _args(str(root))
             assert asyncio.run(pointer.get(args, ttl=0)) == 1
             store.advance_pointer(VersionRef("run-abc", 2))
             assert asyncio.run(pointer.get(args, ttl=0)) == 2

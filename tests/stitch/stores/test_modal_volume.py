@@ -9,8 +9,12 @@ from __future__ import annotations
 import json
 import tempfile
 from pathlib import Path
+from typing import BinaryIO
+
+import pytest
 
 from stitch.publish import publish_version
+from stitch.stores import modal_volume as modal_volume_module
 from stitch.stores.modal_volume import ModalVolumeStore
 from stitch.types import VersionKind, VersionRef
 
@@ -119,6 +123,55 @@ def test_runs_sharing_a_volume_have_independent_state() -> None:
         assert second.read_pointer() == VersionRef("run-b", 0)
         assert Path(first.materialize(VersionRef("run-a", 1))).is_dir()
         assert not Path(second.materialize(VersionRef("run-b", 1))).exists()
+
+
+class _Upload:
+    def __init__(self, files: dict[str, bytes]) -> None:
+        self.files = files
+
+    def __enter__(self) -> _Upload:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def put_file(self, source: BinaryIO, path: str) -> None:
+        self.files[path] = source.read()
+
+
+class _Volume:
+    def __init__(self) -> None:
+        self.files: dict[str, bytes] = {}
+        self.commits = 0
+
+    def batch_upload(self, *, force: bool = False) -> _Upload:
+        assert force
+        return _Upload(self.files)
+
+    def read_file(self, path: str):
+        if path not in self.files:
+            raise FileNotFoundError(path)
+        yield self.files[path]
+
+    def commit(self) -> None:
+        self.commits += 1
+
+
+def test_volume_pointer_uses_object_api(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    volume = _Volume()
+    monkeypatch.setattr(modal_volume_module, "_volume", lambda _name: volume)
+    root = tmp_path / "run-a"
+    store = ModalVolumeStore(root, run_id="run-a", volume_name="weights")
+
+    assert store.read_pointer() is None
+    store.advance_pointer(VersionRef("run-a", 7))
+
+    assert volume.files == {"run-a/latest": b"run-a/weight_v000007"}
+    assert volume.commits == 0
+    assert not (root / "latest").exists()
+    assert store.read_pointer() == VersionRef("run-a", 7)
 
 
 if __name__ == "__main__":
