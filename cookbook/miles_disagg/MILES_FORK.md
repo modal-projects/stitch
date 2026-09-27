@@ -5,27 +5,27 @@ Stitch installs an immutable Miles revision over a dated trainer image:
 ```python
 MILES_IMAGE_TAG = "radixark/miles:dev-202609250800"
 MILES_REPO_URL = "https://github.com/modal-projects/miles.git"
-MILES_REPO_REF = "3082b60e69e0528c9d4c7092a2514c00dcde4e59"
+MILES_REPO_REF = "2195082239065d89c7252652fd42510810b0dadc"
 ```
 
 The image supplies the compiled CUDA, Transformer Engine, and Megatron-LM
 environment. The source pin belongs to
 `modal-projects/miles:stitch-miles`: upstream Miles main at
-`41c5e38b94`, followed by reviewed changes that remain open upstream and the
-branch-only Modal SWE adapter. Stitch no longer patches Miles at container
-startup.
+`23d41d711f`, followed by seven reviewed changes that remain open upstream.
+Each upstream PR is represented by one commit; the branch carries no additional
+Miles-only integration code. Stitch no longer patches Miles at container startup.
 
 ## Carried behavior
 
-| Area | Upstream review | Responsibility |
-| --- | --- | --- |
-| Partial rollout groups | [#3702](https://github.com/radixark/miles/pull/3702) | Optionally retain completed trajectories from aborted groups when at least two survive, using dynamic global batch sizing. |
-| Resume and saving | [#2688](https://github.com/radixark/miles/pull/2688), [#3616](https://github.com/radixark/miles/pull/3616) | Preserve explicit resume selection and retain declared source-owned tensors. |
-| External fleet | [#3236](https://github.com/radixark/miles/pull/3236), [#3344](https://github.com/radixark/miles/pull/3344) | Treat one opaque URL as the rollout fleet and expose a request-policy hook with explicit arguments. |
-| Disk delta | [#3237](https://github.com/radixark/miles/pull/3237) | Match emitted tensor names, shapes, dtypes, and raw checkpoint layouts before XOR encoding. |
-| NVFP4 | [#3601](https://github.com/radixark/miles/pull/3601) | Adapt Qwen3.6 NVFP4 rollout checkpoints. |
-| Modal SWE | Branch-only | Provide the Modal Sandbox transport and verified mini-SWE agent adapter used by these recipes; upstream Miles does not ship this provider-specific example. |
-| Ray placement | [#3640](https://github.com/radixark/miles/pull/3640) | Resolve the Ray head once in the driver so head-pinned workers do not depend on worker-side dashboard access. |
+| Area | Upstream review | Branch commit | Responsibility |
+| --- | --- | --- | --- |
+| Checkpoint selection | [#2688](https://github.com/radixark/miles/pull/2688) | `b0e151d025` | Preserve explicit resume selection and isolate role-specific checkpoint selectors. |
+| Disk delta | [#3237](https://github.com/radixark/miles/pull/3237) | `bae73646de` | Match emitted tensor names, shapes, dtypes, and raw checkpoint layouts before XOR encoding. |
+| External fleet | [#3236](https://github.com/radixark/miles/pull/3236) | `8a92a48def` | Treat one independently managed rollout service as an opaque endpoint, publish its deltas, and overlap first-rollout generation with baseline capture. |
+| Request policy | [#3344](https://github.com/radixark/miles/pull/3344) | `499e77c60f` | Attach request-scoped admission and routing metadata at the session-server boundary. |
+| Session collection | [#3736](https://github.com/radixark/miles/pull/3736) | `ca84a9013c` | Keep sample materialization off the shared event loop and make the collection deadline configurable. |
+| Partial rollout groups | [#3702](https://github.com/radixark/miles/pull/3702) | `09109a4b86` | Optionally retain completed trajectories from aborted groups when at least two survive, using dynamic global batch sizing. |
+| Ray placement | [#3640](https://github.com/radixark/miles/pull/3640) | `2195082239` | Resolve hard head affinity from Ray's GCS-backed node table without depending on dashboard reachability. |
 
 The integration boundary is intentionally small:
 
@@ -47,7 +47,8 @@ the dated trainer image; Stitch does not patch Megatron at runtime.
    behavior.
 3. Use a dated image whose Megatron-LM, Transformer Engine, and CUDA libraries
    match that Miles revision.
-4. Run focused Miles tests for the external endpoint, request policy, disk
-   delta, HF export, data processing, and NVFP4 planning.
+4. Run focused Miles tests for checkpoint selection, the external endpoint,
+   request policy, disk delta, session collection, partial groups, and Ray head
+   placement.
 5. Validate fresh start, weight publication, mid-run replica join, and checkpoint
    resume end to end before advancing this immutable SHA.
