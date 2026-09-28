@@ -146,6 +146,7 @@ def create_store(
     volume_name: str | None = None,
     s3_root: str | None = None,
     s3_endpoint_url: str | None = None,
+    weight_view: str | None = None,
 ) -> Store:
     """Create a Store with one local layout regardless of its backing service.
 
@@ -154,7 +155,12 @@ def create_store(
     ``local_root``/``run_id`` plus the launch's ``--store-opt`` pairs.
     """
     if backend == MODAL_VOLUME:
-        return ModalVolumeStore(local_root, volume_name=volume_name, run_id=run_id)
+        return ModalVolumeStore(
+            local_root,
+            volume_name=volume_name,
+            run_id=run_id,
+            weight_view=weight_view,
+        )
     if backend == S3:
         if not s3_root:
             raise ValueError("s3_root is required for the S3 store")
@@ -163,5 +169,6 @@ def create_store(
             cache_dir=local_root,
             endpoint_url=s3_endpoint_url,
             run_id=run_id,
+            weight_view=weight_view,
         )
     raise ValueError(f"unsupported store backend: {backend!r}")

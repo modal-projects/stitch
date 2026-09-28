@@ -42,6 +42,7 @@ def start_sidecar(
     engine_health_timeout: float = 5.0,
     proxy_max_connections: int = 100,
     proxy_max_keepalive_connections: int = 20,
+    weight_view: str | None = None,
 ) -> subprocess.Popen:
     """Launch the versioned rollout proxy (the shared sidecar) beside sglang."""
     # Empty settings normalize to unset: only set options reach the factory.
@@ -52,6 +53,8 @@ def start_sidecar(
         store_options["s3_root"] = s3_root
     if s3_endpoint_url:
         store_options["s3_endpoint_url"] = s3_endpoint_url
+    if weight_view:
+        store_options["weight_view"] = weight_view
     config = SidecarConfig(
         host="0.0.0.0",
         port=sidecar_port,

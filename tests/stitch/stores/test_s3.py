@@ -130,11 +130,17 @@ class _FakeS3:
         return _Paginator()
 
 
-def _store(tmp_path: Path, client: _FakeS3 | None = None) -> S3Store:
+def _store(
+    tmp_path: Path,
+    client: _FakeS3 | None = None,
+    *,
+    weight_view: str | None = None,
+) -> S3Store:
     store = S3Store(
         "s3://bucket/experiments/run-x",
         cache_dir=tmp_path / "cache",
         run_id="run-x",
+        weight_view=weight_view,
     )
     store._client = client or _FakeS3()
     return store
@@ -221,6 +227,46 @@ def test_publish_manifest_and_materialize(tmp_path: Path) -> None:
         "bucket",
         "experiments/run-x/updates/weight_v000001/model-00001.safetensors",
     ) in store._client.objects
+
+
+def test_weight_views_publish_and_materialize_independently(tmp_path: Path) -> None:
+    client = _FakeS3()
+    fp8 = _store(tmp_path / "fp8", client, weight_view="fp8-e4m3")
+    nvfp4 = _store(tmp_path / "nvfp4", client, weight_view="nvfp4")
+    fp8.claim(VersionRef("run-x", 0))
+    nvfp4.claim(VersionRef("run-x", 0))
+
+    fp8_v1 = _write_version(tmp_path / "fp8-trainer", VersionRef("run-x", 1))
+    fp8_v2 = _write_version(
+        tmp_path / "fp8-trainer", VersionRef("run-x", 2), base=1
+    )
+    publish_version(fp8, None, fp8_v1, run_id="run-x")
+    publish_version(fp8, None, fp8_v2, run_id="run-x")
+
+    assert fp8.read_pointer() == VersionRef("run-x", 2)
+    assert nvfp4.read_pointer() == VersionRef("run-x", 0)
+
+    nvfp4_v1 = _write_version(
+        tmp_path / "nvfp4-trainer", VersionRef("run-x", 1)
+    )
+    publish_version(nvfp4, None, nvfp4_v1, run_id="run-x")
+    assert nvfp4.read_pointer() == VersionRef("run-x", 1)
+
+    fp8_dir = Path(fp8.materialize(VersionRef("run-x", 2)))
+    nvfp4_dir = Path(nvfp4.materialize(VersionRef("run-x", 1)))
+    assert fp8_dir == fp8.cache_dir / "updates" / "fp8-e4m3" / "weight_v000002"
+    assert nvfp4_dir == nvfp4.cache_dir / "updates" / "nvfp4" / "weight_v000001"
+    assert (fp8_dir.parent / "weight_v000001").is_dir()
+    assert not (fp8.cache_dir / "updates" / "nvfp4").exists()
+    assert not (nvfp4.cache_dir / "updates" / "fp8-e4m3").exists()
+    assert (
+        "bucket",
+        "experiments/run-x/updates/fp8-e4m3/weight_v000002/model-00001.safetensors",
+    ) in client.objects
+    assert (
+        "bucket",
+        "experiments/run-x/latest/fp8-e4m3",
+    ) in client.objects
 
 
 def test_distributed_uploads_form_one_verified_version(tmp_path: Path) -> None:

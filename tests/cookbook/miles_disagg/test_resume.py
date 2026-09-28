@@ -21,8 +21,9 @@ from cookbook.miles_disagg.resume import (
 _INDEX = "model.safetensors.index.json"
 
 
-def _published(version: int) -> dict[str, bytes]:
-    name = f"old/updates/weight_v{version:06d}/{_INDEX}"
+def _published(version: int, weight_view: str | None = None) -> dict[str, bytes]:
+    view = f"/{weight_view}" if weight_view is not None else ""
+    name = f"old/updates{view}/weight_v{version:06d}/{_INDEX}"
     return {name: b'{"metadata": {"version": "%06d"}}' % version}
 
 
@@ -192,6 +193,104 @@ def test_resolve_resume_point_rejects_path_like_run_id() -> None:
         )
 
 
+def test_resolve_multiview_resume_uses_only_selected_view_pointers() -> None:
+    volume = _Volume(
+        {
+            "old/latest/bf16": b"old/weight_v000040",
+            "old/latest/nvfp4": b"old/weight_v000040",
+            # An unselected failed view must not constrain this attempt.
+            "old/latest/fp8": b"old/weight_v000020",
+            "old/checkpoints/latest_checkpointed_iteration.txt": b"39",
+            "old/checkpoints/iter_0000039/state": b"checkpoint",
+        }
+    )
+
+    point = resolve_resume_point(
+        volume,
+        source_run_id="old",
+        save_hf=_Config.save_hf,
+        weight_views=("bf16", "nvfp4"),
+    )
+
+    assert (point.version, point.iteration) == (40, 39)
+    assert point.rollout_checkpoint is None
+
+
+def test_resolve_multiview_resume_chooses_the_newest_common_checkpoint() -> None:
+    volume = _Volume(
+        {
+            "old/latest/bf16": b"old/weight_v000040",
+            "old/latest/nvfp4": b"old/weight_v000025",
+            "old/checkpoints/latest_checkpointed_iteration.txt": b"39",
+            "old/checkpoints/iter_0000019/state": b"checkpoint",
+            "old/checkpoints/iter_0000039/state": b"checkpoint",
+        }
+    )
+
+    point = resolve_resume_point(
+        volume,
+        source_run_id="old",
+        save_hf=_Config.save_hf,
+        weight_views=("bf16", "nvfp4"),
+    )
+
+    assert (point.version, point.iteration) == (20, 19)
+
+
+def test_resolve_multiview_resume_completes_one_ahead_selected_view() -> None:
+    volume = _Volume(
+        {
+            "old/latest/bf16": b"old/weight_v000040",
+            "old/latest/nvfp4": b"old/weight_v000039",
+            "old/checkpoints/latest_checkpointed_iteration.txt": b"39",
+            "old/checkpoints/iter_0000039/state": b"checkpoint",
+            **_published(40, "nvfp4"),
+        }
+    )
+
+    point = resolve_resume_point(
+        volume,
+        source_run_id="old",
+        save_hf=_Config.save_hf,
+        weight_views=("bf16", "nvfp4"),
+    )
+
+    assert point.version == 40
+
+
+def test_resolve_multiview_resume_rejects_a_missing_selected_view() -> None:
+    volume = _Volume(
+        {
+            "old/latest/bf16": b"old/weight_v000040",
+            "old/checkpoints/latest_checkpointed_iteration.txt": b"39",
+            "old/checkpoints/iter_0000039/state": b"checkpoint",
+            "old/hf_checkpoints/weight_v000039/.complete": b"",
+        }
+    )
+
+    with pytest.raises(ValueError, match="nvfp4"):
+        resolve_resume_point(
+            volume,
+            source_run_id="old",
+            save_hf=_Config.save_hf,
+            weight_views=("bf16", "nvfp4"),
+        )
+
+
+def test_prepare_multiview_attempt_recovers_an_interrupted_initial_claim() -> None:
+    volume = _Volume({"old/latest/bf16": b"old/weight_v000000"})
+
+    point = prepare_attempt(
+        volume,
+        run_id="old",
+        save_hf=_Config.save_hf,
+        weight_views=("bf16", "nvfp4"),
+    )
+
+    assert point is None
+    assert volume.files == {"old/latest/bf16": b"old/weight_v000000"}
+
+
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
@@ -233,6 +332,13 @@ def test_validate_resume_requires_per_step_weight_updates() -> None:
         validate_resume_config(cfg)
 
 
+def test_validate_multiview_resume_does_not_require_a_single_rollout_export() -> None:
+    cfg = _Config()
+    cfg.save_hf = None
+
+    validate_resumable_config(cfg, weight_views=("bf16", "nvfp4"))
+
+
 def test_restore_resume_point_overwrites_trackers_but_preserves_updates() -> None:
     volume = _Volume(
         {
@@ -266,6 +372,24 @@ def test_restore_resume_point_rejects_a_checkpoint_ahead_of_latest() -> None:
 
     with pytest.raises(ValueError, match="newer than latest"):
         restore_resume_point(volume, point)
+
+
+def test_restore_multiview_resume_rewinds_only_selected_views() -> None:
+    volume = _Volume(
+        {
+            "run/latest/bf16": b"run/weight_v000042",
+            "run/latest/nvfp4": b"run/weight_v000041",
+            "run/latest/fp8": b"run/weight_v000017",
+        }
+    )
+    point = ResumePoint(40, 39, "run", "/trainer", "/rollout")
+
+    restore_resume_point(volume, point, weight_views=("bf16", "nvfp4"))
+
+    assert volume.files["run/latest/bf16"] == b"run/weight_v000040"
+    assert volume.files["run/latest/nvfp4"] == b"run/weight_v000040"
+    assert volume.files["run/latest/fp8"] == b"run/weight_v000017"
+    assert volume.files["run/checkpoints/latest_checkpointed_iteration.txt"] == b"39"
 
 
 def test_prepare_attempt_restores_the_newest_pair() -> None:

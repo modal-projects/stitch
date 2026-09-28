@@ -14,6 +14,7 @@ from typing import Any
 
 from cookbook.common.config import validate_serving_config
 from cookbook.miles_disagg import nvfp4
+from stitch.stores.base import validate_weight_view
 
 _MILES_SKIP = {"environment", "async_mode", "megatron_model_type"}
 # Fields miles reads as YAML files; inline dicts are materialized before launch.
@@ -110,8 +111,40 @@ def validate_recipe(recipe: Any) -> None:
     """Check checkpoint and deployment agreements before constructing Modal images."""
     cfg = recipe.miles
     validate_serving_config(recipe, gpus_per_engine=cfg.rollout_num_gpus_per_engine)
-    served = Path(recipe.ROLLOUT_CHECKPOINT_PATH)
     masters = Path(recipe.BF16_CHECKPOINT_PATH)
+    weight_views = dict(getattr(recipe, "ROLLOUT_WEIGHT_VIEWS", {}) or {})
+    if weight_views:
+        for name, checkpoint in weight_views.items():
+            validate_weight_view(name)
+            if not isinstance(checkpoint, (str, Path)) or not str(checkpoint):
+                raise TypeError(
+                    f"ROLLOUT_WEIGHT_VIEWS[{name!r}] must be a checkpoint path"
+                )
+        if Path(cfg.hf_checkpoint) != masters:
+            raise ValueError(
+                "mixed rollout weight views require miles.hf_checkpoint to be the BF16 checkpoint"
+            )
+        if getattr(cfg, "megatron_to_hf_mode", None) != "raw":
+            raise ValueError("mixed rollout weight views require raw HF export")
+        reference = getattr(recipe, "TORCH_DIST_CHECKPOINT_PATH", None)
+        ref_load = getattr(cfg, "ref_load", None)
+        if not reference or not ref_load or Path(ref_load) != Path(reference):
+            raise ValueError(
+                "Raw export requires miles.ref_load == TORCH_DIST_CHECKPOINT_PATH"
+            )
+        selected = {pool.weight_view for pool in recipe.modal.rollout_pools}
+        if None in selected or selected != set(weight_views):
+            raise ValueError(
+                "explicit rollout pools must select every configured weight view"
+            )
+        return
+
+    if any(pool.weight_view is not None for pool in recipe.modal.rollout_pools):
+        raise ValueError(
+            "rollout pools cannot select weight_view without ROLLOUT_WEIGHT_VIEWS"
+        )
+
+    served = Path(recipe.ROLLOUT_CHECKPOINT_PATH)
     if Path(cfg.hf_checkpoint) != served:
         raise ValueError("miles.hf_checkpoint must match ROLLOUT_CHECKPOINT_PATH")
     served_format = getattr(recipe, "SERVED_CHECKPOINT_FORMAT", "nvfp4")

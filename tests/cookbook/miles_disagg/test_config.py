@@ -75,6 +75,33 @@ def test_quantized_serving_cannot_overwrite_bf16_masters():
         validate_recipe(recipe)
 
 
+def test_mixed_rollout_views_use_generic_checkpoint_paths() -> None:
+    recipe = _recipe("qwen3_6_35b_a3b_heterogeneous_phase1")
+
+    validate_recipe(recipe)
+
+    assert recipe.ROLLOUT_WEIGHT_VIEWS == {
+        "fp8": recipe.FP8_CHECKPOINT_PATH,
+        "nvfp4": recipe.NVFP4_CHECKPOINT_PATH,
+    }
+
+
+def test_mixed_rollout_views_require_matching_pool_assignments() -> None:
+    recipe = _recipe("qwen3_6_35b_a3b_heterogeneous_phase1")
+    recipe.ROLLOUT_WEIGHT_VIEWS = {"fp8": recipe.FP8_CHECKPOINT_PATH}
+
+    with pytest.raises(ValueError, match="must select every configured weight view"):
+        validate_recipe(recipe)
+
+
+def test_mixed_rollout_view_name_must_be_a_safe_path_component() -> None:
+    recipe = _recipe("qwen3_6_35b_a3b_heterogeneous_phase1")
+    recipe.ROLLOUT_WEIGHT_VIEWS = {"../fp8": recipe.FP8_CHECKPOINT_PATH}
+
+    with pytest.raises(ValueError, match="invalid weight_view"):
+        validate_recipe(recipe)
+
+
 @pytest.mark.parametrize(
     "name", ["qwen3_6_35b_a3b_swebench_pro", "qwen3_6_35b_a3b_nvfp4"]
 )

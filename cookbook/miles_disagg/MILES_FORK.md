@@ -3,17 +3,17 @@
 Stitch installs an immutable Miles revision over a dated trainer image:
 
 ```python
-MILES_IMAGE_TAG = "radixark/miles:dev-202609250800"
+MILES_IMAGE_TAG = "radixark/miles:dev-202609270159"
 MILES_REPO_URL = "https://github.com/modal-projects/miles.git"
-MILES_REPO_REF = "2195082239065d89c7252652fd42510810b0dadc"
+MILES_REPO_REF = "997ed04cd53c881aa98fd20e142a941d64981bba"
 ```
 
 The image supplies the compiled CUDA, Transformer Engine, and Megatron-LM
 environment. The source pin belongs to
 `modal-projects/miles:stitch-miles`: upstream Miles main at
-`23d41d711f`, followed by seven reviewed changes that remain open upstream.
+`23d41d711f`, followed by eight reviewed integration changes.
 Each upstream PR is represented by one commit; the branch carries no additional
-Miles-only integration code. Stitch no longer patches Miles at container startup.
+runtime patches. Stitch no longer patches Miles at container startup.
 
 ## Carried behavior
 
@@ -26,6 +26,7 @@ Miles-only integration code. Stitch no longer patches Miles at container startup
 | Session collection | [#3736](https://github.com/radixark/miles/pull/3736) | `ca84a9013c` | Keep sample materialization off the shared event loop and make the collection deadline configurable. |
 | Partial rollout groups | [#3702](https://github.com/radixark/miles/pull/3702) | `09109a4b86` | Optionally retain completed trajectories from aborted groups when at least two survive, using dynamic global batch sizing. |
 | Ray placement | [#3640](https://github.com/radixark/miles/pull/3640) | `2195082239` | Resolve hard head affinity from Ray's GCS-backed node table without depending on dashboard reachability. |
+| Rollout weight views | Not yet upstreamed | `997ed04cd5` | Publish independent checkpoint-defined rollout precisions, attribute samples to their source view, and preserve checksum-verified per-view baselines across resume. |
 
 The integration boundary is intentionally small:
 

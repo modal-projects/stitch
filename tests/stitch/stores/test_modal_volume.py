@@ -20,9 +20,17 @@ from stitch.types import VersionKind, VersionRef
 
 
 def _write_version(
-    root: Path, ref: VersionRef, *, base: int | None = None, diff: str | None = None
+    root: Path,
+    ref: VersionRef,
+    *,
+    base: int | None = None,
+    diff: str | None = None,
+    weight_view: str | None = None,
 ) -> str:
-    d = root / "updates" / Path(ref.identity).name
+    d = root / "updates"
+    if weight_view is not None:
+        d /= weight_view
+    d /= Path(ref.identity).name
     d.mkdir(parents=True)
     meta: dict = {"version": ref.version}
     if diff:
@@ -125,6 +133,42 @@ def test_runs_sharing_a_volume_have_independent_state() -> None:
         assert not Path(second.materialize(VersionRef("run-b", 1))).exists()
 
 
+def test_weight_views_publish_independently(tmp_path: Path) -> None:
+    root = tmp_path / "run-a"
+    fp8 = ModalVolumeStore(root, run_id="run-a", weight_view="fp8-e4m3")
+    nvfp4 = ModalVolumeStore(root, run_id="run-a", weight_view="nvfp4")
+    fp8.claim(VersionRef("run-a", 0))
+    nvfp4.claim(VersionRef("run-a", 0))
+
+    for version in (1, 2):
+        fp8_dir = _write_version(
+            root,
+            VersionRef("run-a", version),
+            base=version - 1,
+            diff="xor",
+            weight_view="fp8-e4m3",
+        )
+        publish_version(fp8, None, fp8_dir, run_id="run-a")
+
+    assert fp8.read_pointer() == VersionRef("run-a", 2)
+    assert nvfp4.read_pointer() == VersionRef("run-a", 0)
+
+    nvfp4_dir = _write_version(
+        root,
+        VersionRef("run-a", 1),
+        base=0,
+        diff="xor",
+        weight_view="nvfp4",
+    )
+    publish_version(nvfp4, None, nvfp4_dir, run_id="run-a")
+
+    assert nvfp4.read_pointer() == VersionRef("run-a", 1)
+    target = Path(fp8.materialize(VersionRef("run-a", 2)))
+    assert target == root / "updates" / "fp8-e4m3" / "weight_v000002"
+    assert (target.parent / "weight_v000001").is_dir()
+    assert not (target.parent.parent / "nvfp4" / "weight_v000002").exists()
+
+
 class _Upload:
     def __init__(self, files: dict[str, bytes]) -> None:
         self.files = files
@@ -172,6 +216,25 @@ def test_volume_pointer_uses_object_api(
     assert volume.commits == 0
     assert not (root / "latest").exists()
     assert store.read_pointer() == VersionRef("run-a", 7)
+
+
+def test_volume_weight_view_uses_its_own_pointer_object(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    volume = _Volume()
+    monkeypatch.setattr(modal_volume_module, "_volume", lambda _name: volume)
+    store = ModalVolumeStore(
+        tmp_path / "run-a",
+        run_id="run-a",
+        volume_name="weights",
+        weight_view="fp8-e4m3",
+    )
+
+    store.advance_pointer(VersionRef("run-a", 3))
+
+    assert volume.files == {
+        "run-a/latest/fp8-e4m3": b"run-a/weight_v000003"
+    }
 
 
 if __name__ == "__main__":

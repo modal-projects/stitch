@@ -7,6 +7,8 @@ pointer methods; ``commit`` has a no-op default.
 
 from __future__ import annotations
 
+import re
+
 from stitch.types import PointerConflict, VersionManifest, VersionRef
 
 
@@ -63,7 +65,10 @@ class Store:
         """Return a local directory for the version.
 
         Download-backed stores materialize into a cache. Mounted stores assume
-        the caller has already made remote writes visible with ``refresh``.
+        the caller has already made remote writes visible with ``refresh``. The
+        returned directory's parent exposes the materialized version lineage as
+        ``weight_vNNNNNN`` siblings so an engine can fold every delta between its
+        local base and ``ref``.
         """
         raise NotImplementedError
 
@@ -71,3 +76,13 @@ class Store:
         """Durably flush this host's pending writes (e.g. one trainer rank's shard of a
         version). Default no-op — only a store whose writes aren't immediately durable
         (a Volume) needs it; the publish hook calls it on every rank."""
+
+
+_WEIGHT_VIEW = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+
+
+def validate_weight_view(value: str | None) -> str | None:
+    """Validate an optional weight-view name before using it as a path component."""
+    if value is not None and _WEIGHT_VIEW.fullmatch(value) is None:
+        raise ValueError(f"invalid weight_view: {value!r}")
+    return value

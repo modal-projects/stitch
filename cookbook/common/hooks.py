@@ -9,6 +9,7 @@ that owns the distributed publish protocol.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from pathlib import Path
@@ -22,6 +23,7 @@ from stitch.publisher import Publisher, TrainerComms
 from stitch.stores.base import Store
 
 from . import process, storage
+from .constants import STITCH_WEIGHT_VIEW_VERSIONS_HEADER
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +83,40 @@ async def gated_rollout_request_hook(
     weights beyond its lag bound."""
     args = SimpleNamespace(**hook_args)
     payload, headers = request["payload"], dict(request.get("headers") or {})
+    request["max_attempts"] = int(
+        getattr(
+            args,
+            "rollout_request_max_attempts",
+            request.get("max_attempts", 1),
+        )
+    )
+    request["retry_interval"] = float(
+        getattr(
+            args,
+            "rollout_request_retry_interval",
+            request.get("retry_interval", 1.0),
+        )
+    )
+    views = tuple(getattr(args, "rollout_weight_views", ()) or ())
+    if views:
+        versions = {}
+        for view in views:
+            view_args = SimpleNamespace(
+                **{
+                    **vars(args),
+                    "update_weight_disk_dir": str(
+                        Path(args.update_weight_disk_dir) / view
+                    ),
+                    "update_weight_view": view,
+                }
+            )
+            versions[view] = await _latest.get(view_args)
+        headers[STITCH_WEIGHT_VIEW_VERSIONS_HEADER] = json.dumps(
+            versions, separators=(",", ":")
+        )
+        request["headers"] = headers
+        return
+
     mode = str(getattr(args, "rollout_request_weight_version_mode", "min"))
 
     latest = exact = None
@@ -100,24 +136,10 @@ async def gated_rollout_request_hook(
         exact=exact,
     )
     request["headers"] = headers
-    request["max_attempts"] = int(
-        getattr(
-            args,
-            "rollout_request_max_attempts",
-            request.get("max_attempts", 1),
-        )
-    )
-    request["retry_interval"] = float(
-        getattr(
-            args,
-            "rollout_request_retry_interval",
-            request.get("retry_interval", 1.0),
-        )
-    )
 
 
 class _CachedPointer:
-    """TTL-cached ``latest`` version from the trainer's configured store.
+    """TTL-cached ``latest`` versions from the trainer's configured stores.
 
     The request gate reads the trainer host's mounted view, which the rank-zero
     publisher updates directly. Reloading that mount can fail while framework
@@ -126,32 +148,26 @@ class _CachedPointer:
     """
 
     def __init__(self) -> None:
-        self._version = 0
-        self._at = -1e9
-        self._store: Store | None = None
-        self._store_key: tuple[str | None, ...] | None = None
+        self._entries: dict[tuple[str | None, ...], tuple[Store, int, float]] = {}
 
     async def get(self, args: Any, ttl: float = 2.0) -> int:
-        store = self._store
         store_key = _store_key(args)
-        if store is None or self._store_key != store_key:
-            store = self._store = _store(args)
-            self._store_key = store_key
-            self._version = 0
-            self._at = -1e9
+        entry = self._entries.get(store_key)
+        store, version, at = entry or (_store(args), 0, -1e9)
         now = time.monotonic()
-        if now - self._at >= ttl:
+        if now - at >= ttl:
             try:
                 pointer = await asyncio.to_thread(store.read_pointer)
-                self._version = pointer.version if pointer else 0
+                version = pointer.version if pointer else 0
             except Exception:  # noqa: BLE001
                 logger.warning(
                     "gate: could not read latest; using cached %s",
-                    self._version,
+                    version,
                     exc_info=True,
                 )
-            self._at = time.monotonic()
-        return self._version
+            at = time.monotonic()
+        self._entries[store_key] = (store, version, at)
+        return version
 
 
 _latest = _CachedPointer()
@@ -166,6 +182,7 @@ def _store(args: Any) -> Store:
         volume_name=getattr(args, "experiment_volume_name", None) or None,
         s3_root=getattr(args, "stitch_s3_root", None) or None,
         s3_endpoint_url=getattr(args, "stitch_s3_endpoint_url", None) or None,
+        weight_view=getattr(args, "update_weight_view", None) or None,
     )
 
 
@@ -177,6 +194,7 @@ def _store_key(args: Any) -> tuple[str | None, ...]:
         getattr(args, "experiment_volume_name", None) or None,
         getattr(args, "stitch_s3_root", None) or None,
         getattr(args, "stitch_s3_endpoint_url", None) or None,
+        getattr(args, "update_weight_view", None) or None,
     )
 
 
@@ -187,6 +205,16 @@ def _pool(args: Any) -> Pool:
     classes = getattr(args, "rollout_modal_flash_server_cls_names", None)
     if classes:
         classes = list(classes)
+        view = getattr(args, "update_weight_view", None)
+        if view is not None:
+            by_view = getattr(
+                args, "rollout_modal_flash_server_cls_names_by_weight_view", None
+            )
+            if not isinstance(by_view, dict) or view not in by_view:
+                raise ValueError(
+                    f"no rollout pools are configured for weight view {view!r}"
+                )
+            classes = list(by_view[view])
         if len(classes) == 1:
             return ModalFlashPool(app, classes[0])
         router = getattr(args, "rollout_modal_flash_router_function", None)
@@ -205,6 +233,14 @@ def _transport_root(args: Any) -> str:
     if not write_dir:
         raise ValueError("update_weight_disk_dir is required")
     write_dir = Path(write_dir)
+    view = getattr(args, "update_weight_view", None)
+    if view is not None:
+        if write_dir.name != view or write_dir.parent.name != "updates":
+            raise ValueError(
+                "view-scoped update_weight_disk_dir must end in "
+                f"/updates/{view}: path={str(write_dir)!r}"
+            )
+        return str(write_dir.parent.parent)
     if write_dir.name != "updates":
         raise ValueError(
             f"update_weight_disk_dir must end in /updates: path={str(write_dir)!r}"

@@ -14,6 +14,7 @@ from cookbook.miles_disagg.configs import qwen3_4b_math
     "recipe",
     [
         "qwen3_4b_math",
+        "qwen3_6_35b_a3b_heterogeneous_phase1",
         "qwen3_6_35b_a3b_swebench_pro",
         "qwen3_6_35b_a3b_nvfp4",
         "glm5_3_nvfp4",

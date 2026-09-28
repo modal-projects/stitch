@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
-from stitch.stores.base import Store
+from stitch.stores.base import Store, validate_weight_view
 from stitch.types import PointerConflict, VersionManifest, VersionRef
 
 _POINTER = "latest"
@@ -59,6 +59,7 @@ class S3Store(Store):
         cache_dir: str | Path,
         run_id: str,
         endpoint_url: str | None = None,
+        weight_view: str | None = None,
     ) -> None:
         if not run_id:
             raise ValueError("run_id is required")
@@ -78,6 +79,7 @@ class S3Store(Store):
         self.cache_dir = Path(cache_dir)
         self.run_id = run_id
         self.endpoint_url = endpoint_url
+        self.weight_view = validate_weight_view(weight_view)
         self._client = None
 
     def refresh(self) -> None:
@@ -111,7 +113,7 @@ class S3Store(Store):
         try:
             self._s3().put_object(
                 Bucket=self.bucket,
-                Key=self._key(_POINTER),
+                Key=self._pointer_key,
                 Body=ref.identity.encode("utf-8"),
                 **condition,
             )
@@ -283,7 +285,7 @@ class S3Store(Store):
 
     def materialize(self, ref: VersionRef) -> str:
         self._check_ref(ref)
-        self._sync(self._key(_UPDATES), self.cache_dir / _UPDATES)
+        self._sync_updates()
         return str(self._version_dir(ref))
 
     def _check_ref(self, ref: VersionRef) -> None:
@@ -294,11 +296,24 @@ class S3Store(Store):
 
     def _version_dir(self, ref: VersionRef) -> Path:
         self._check_ref(ref)
-        return self.cache_dir / _UPDATES / Path(ref.identity).name
+        parts = [_UPDATES]
+        if self.weight_view is not None:
+            parts.append(self.weight_view)
+        return self.cache_dir.joinpath(*parts, Path(ref.identity).name)
 
     def _version_key(self, ref: VersionRef, *parts: str) -> str:
         self._check_ref(ref)
-        return self._key(_UPDATES, Path(ref.identity).name, *parts)
+        prefix = [_UPDATES]
+        if self.weight_view is not None:
+            prefix.append(self.weight_view)
+        return self._key(*prefix, Path(ref.identity).name, *parts)
+
+    @property
+    def _pointer_key(self) -> str:
+        parts = [_POINTER]
+        if self.weight_view is not None:
+            parts.append(self.weight_view)
+        return self._key(*parts)
 
     def _key(self, *parts: str) -> str:
         return "/".join(
@@ -315,7 +330,7 @@ class S3Store(Store):
     def _read_pointer_with_etag(self) -> tuple[VersionRef | None, str | None]:
         client = self._s3()
         try:
-            response = client.get_object(Bucket=self.bucket, Key=self._key(_POINTER))
+            response = client.get_object(Bucket=self.bucket, Key=self._pointer_key)
         except client.exceptions.NoSuchKey:
             return None, None
         text = response["Body"].read().decode("utf-8").strip()
@@ -327,10 +342,13 @@ class S3Store(Store):
         destination.parent.mkdir(parents=True, exist_ok=True)
         self._s3().download_file(self.bucket, key, str(destination))
 
-    def _sync(self, key_prefix: str, destination_root: Path) -> None:
-        """Mirror objects under ``key_prefix`` while retaining unchanged cache files."""
+    def _sync_updates(self) -> None:
+        """Mirror the selected update lineage while retaining unchanged files."""
         client = self._s3()
-        object_prefix = f"{key_prefix}/"
+        prefix = [_UPDATES]
+        if self.weight_view is not None:
+            prefix.append(self.weight_view)
+        object_prefix = f"{self._key(*prefix)}/"
         pages = client.get_paginator("list_objects_v2").paginate(
             Bucket=self.bucket, Prefix=object_prefix
         )
@@ -342,7 +360,7 @@ class S3Store(Store):
                 relative_path = Path(relative_key)
                 if relative_path.is_absolute() or ".." in relative_path.parts:
                     raise ValueError(f"unsafe S3 object key {obj['Key']!r}")
-                destination = destination_root / relative_path
+                destination = self.cache_dir.joinpath(*prefix, relative_path)
                 if destination.exists() and destination.stat().st_size == obj["Size"]:
                     continue
                 self._download(obj["Key"], destination)

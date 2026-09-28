@@ -23,6 +23,7 @@ class RolloutPoolConfig:
     gpus_per_engine: int
     target_inputs: int
     sglang_args: dict[str, str]
+    weight_view: str | None = None
     min_containers: int = 1
     max_containers: int | None = None
     memory_mib: tuple[int, int] | None = None

@@ -24,6 +24,7 @@ import importlib
 import os
 import time
 import uuid
+from collections.abc import Iterable
 from typing import Any
 
 from cookbook.miles_disagg.resume import read_trainer_call, validate_resumable_config
@@ -36,7 +37,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--resume-from",
         metavar="RUN_ID",
-        help="reuse RUN_ID; its trainer resumes from the newest complete checkpoint pair",
+        help=(
+            "reuse RUN_ID; resume from the newest complete checkpoint represented "
+            "by every selected rollout weight view"
+        ),
     )
     return parser
 
@@ -50,8 +54,9 @@ def main() -> None:
 
     from cookbook.common import launch
 
+    weight_views = getattr(exp, "ROLLOUT_WEIGHT_VIEWS", {}) or {}
     if args.resume_from is not None:
-        validate_resumable_config(exp.miles)
+        validate_resumable_config(exp.miles, weight_views=weight_views)
         os.environ["RUN_ID"] = args.resume_from
         run = importlib.import_module("cookbook.miles_disagg.app")
         _cancel_recorded_trainer_call(run)
@@ -59,7 +64,7 @@ def main() -> None:
     else:
         explicit = os.environ.get("RUN_ID")
         os.environ["RUN_ID"] = explicit or uuid.uuid4().hex[:8]
-        _warn_unless_resumable(exp.miles)
+        _warn_unless_resumable(exp.miles, weight_views=weight_views)
         run = importlib.import_module("cookbook.miles_disagg.app")
         if explicit is not None and launch.pool_reachable(run):
             raise SystemExit(
@@ -117,9 +122,9 @@ def _input_settled(node: Any) -> bool:
     )
 
 
-def _warn_unless_resumable(cfg: Any) -> None:
+def _warn_unless_resumable(cfg: Any, *, weight_views: Iterable[str] = ()) -> None:
     try:
-        validate_resumable_config(cfg)
+        validate_resumable_config(cfg, weight_views=weight_views)
     except ValueError as exc:
         print(
             f"WARNING: this config is not resumable ({exc}); "

@@ -23,6 +23,8 @@ RAY_PORT = 6379
 # Stable trajectory affinity at the rollout front door and within a Modal pool.
 MODAL_SESSION_ID_HEADER = "Modal-Session-ID"
 STITCH_SESSION_ID_HEADER = "X-Stitch-Session-ID"
+STITCH_ROLLOUT_SOURCE_HEADER = "X-Stitch-Rollout-Source"
+STITCH_WEIGHT_VIEW_VERSIONS_HEADER = "X-Stitch-Weight-View-Versions"
 
 # Timeouts.
 MINUTES = 60

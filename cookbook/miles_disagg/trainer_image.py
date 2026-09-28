@@ -19,9 +19,9 @@ from cookbook.common import trainer_image as common_trainer_image
 
 # Dated tag, never `latest`: Modal caches from_registry per tag string and won't re-pull
 # a moved mutable tag, so `latest` silently serves whatever was first pulled.
-MILES_IMAGE_TAG = "radixark/miles:dev-202609250800"
+MILES_IMAGE_TAG = "radixark/miles:dev-202609270159"
 MILES_REPO_URL = "https://github.com/modal-projects/miles.git"
-MILES_REPO_REF = "2195082239065d89c7252652fd42510810b0dadc"
+MILES_REPO_REF = "997ed04cd53c881aa98fd20e142a941d64981bba"
 
 MILES_ROOT = "/root/miles"
 # Source-only megatron.training must be on PYTHONPATH.

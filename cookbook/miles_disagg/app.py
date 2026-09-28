@@ -34,6 +34,7 @@ from cookbook.common.constants import (
     SGLANG_CACHE_PATH,
     SIDECAR_PORT,
     STITCH_PATH,
+    STITCH_ROLLOUT_SOURCE_HEADER,
     STITCH_SESSION_ID_HEADER,
 )
 from cookbook.miles_disagg import trainer_image
@@ -171,7 +172,12 @@ ROLLOUT_POOL_CONFIGS = modal_cfg.resolved_rollout_pools(
     default_target_inputs=DEFAULT_ROLLOUT_TARGET_INPUTS,
     default_sglang_args=DEFAULT_SGLANG_SERVER_ARGS,
 )
+ROLLOUT_WEIGHT_VIEWS = dict(getattr(exp, "ROLLOUT_WEIGHT_VIEWS", {}) or {})
 ROLLOUT_SERVER_NAMES = tuple(pool.name for pool in ROLLOUT_POOL_CONFIGS)
+ROLLOUT_SERVER_NAMES_BY_WEIGHT_VIEW = {
+    view: [pool.name for pool in ROLLOUT_POOL_CONFIGS if pool.weight_view == view]
+    for view in ROLLOUT_WEIGHT_VIEWS
+}
 ROLLOUT_SESSION_AFFINITY_HEADER = (
     MODAL_SESSION_ID_HEADER
     if len(ROLLOUT_SERVER_NAMES) == 1
@@ -179,9 +185,12 @@ ROLLOUT_SESSION_AFFINITY_HEADER = (
 )
 
 
-def _boot_checkpoint(store_config: dict) -> tuple[str, int]:
+def _boot_checkpoint(store_config: dict, weight_view: str | None) -> tuple[str, int]:
     """The checkpoint a replica boots and the version it serves it as: the run's
     newest complete export at or below ``latest``, else the base checkpoint."""
+    if weight_view is not None:
+        return str(ROLLOUT_WEIGHT_VIEWS[weight_view]), 0
+
     # TODO: support larger update intervals once saved checkpoints expose the
     # exact published weight version instead of only Miles' rollout ID.
     if (
@@ -220,7 +229,9 @@ class _RolloutServer:
         pool_config = self.rollout_pool_config
         STORE_DEPLOYMENT.bootstrap_credentials()
         store_config = STORE_DEPLOYMENT.hook_config(APP_NAME)
-        model_name, boot_version = _boot_checkpoint(store_config)
+        model_name, boot_version = _boot_checkpoint(
+            store_config, pool_config.weight_view
+        )
         server.serve_startup(
             self,
             model_name=model_name,
@@ -243,6 +254,7 @@ class _RolloutServer:
             run_id=RUN_ID,
             startup_timeout=SERVER_STARTUP_TIMEOUT,
             engine_health_timeout=getattr(exp, "SIDECAR_ENGINE_HEALTH_TIMEOUT", 5.0),
+            weight_view=pool_config.weight_view,
         )
 
     @modal.exit()
@@ -343,9 +355,18 @@ if len(ROLLOUT_POOL_CONFIGS) > 1:
     def rollout_router():
         from cookbook.common.rollout_router import create_app
 
+        sources = [
+            (
+                pool,
+                f"{pool.name}:{pool.weight_view}"
+                if pool.weight_view is not None
+                else pool.name,
+            )
+            for pool in ROLLOUT_POOL_CONFIGS
+        ]
         upstreams = {
-            name: modal.Server.from_name(APP_NAME, name).get_url()
-            for name in ROLLOUT_SERVER_NAMES
+            source: modal.Server.from_name(APP_NAME, pool.name).get_url()
+            for pool, source in sources
         }
         if any(url is None for url in upstreams.values()):
             raise RuntimeError("a heterogeneous rollout pool has no gateway URL")
@@ -353,6 +374,15 @@ if len(ROLLOUT_POOL_CONFIGS) > 1:
             {name: str(url) for name, url in upstreams.items()},
             affinity_header=STITCH_SESSION_ID_HEADER,
             upstream_affinity_header=MODAL_SESSION_ID_HEADER,
+            source_header=(
+                STITCH_ROLLOUT_SOURCE_HEADER if ROLLOUT_WEIGHT_VIEWS else None
+            ),
+            strict_affinity=bool(ROLLOUT_WEIGHT_VIEWS),
+            weight_views={
+                source: pool.weight_view
+                for pool, source in sources
+                if pool.weight_view is not None
+            },
         )
 
 
@@ -459,6 +489,7 @@ class Trainer:
                 run_volume,
                 run_id=RUN_ID,
                 save_hf=getattr(miles_cfg, "save_hf", None),
+                weight_views=ROLLOUT_WEIGHT_VIEWS,
             )
             if STORE_DEPLOYMENT.backend == storage.MODAL_VOLUME
             else None
@@ -470,11 +501,19 @@ class Trainer:
 
         cfg.rollout_endpoint_url = rollout_pool().gateway_url()
         cfg.rollout_session_affinity_header = ROLLOUT_SESSION_AFFINITY_HEADER
+        if ROLLOUT_WEIGHT_VIEWS:
+            cfg.rollout_source_header = STITCH_ROLLOUT_SOURCE_HEADER
         if resume_point is not None:
             cfg.load = resume_point.trainer_checkpoint
-            cfg.hf_checkpoint = resume_point.rollout_checkpoint
+            if resume_point.rollout_checkpoint is not None:
+                cfg.hf_checkpoint = resume_point.rollout_checkpoint
             cfg.exit_on_missing_checkpoint = True
             cfg.use_checkpoint_opt_param_scheduler = True
+        if ROLLOUT_WEIGHT_VIEWS:
+            cfg.update_weight_views = {
+                name: str(checkpoint)
+                for name, checkpoint in ROLLOUT_WEIGHT_VIEWS.items()
+            }
         boot_version = resume_point.version if resume_point is not None else 0
         # The external fleet already serves this version. Miles owns the next
         # publication number and must continue the same monotonic stream.
@@ -502,10 +541,14 @@ class Trainer:
             "rollout_modal_flash_app_name": APP_NAME,
             "rollout_modal_flash_server_cls_names": list(ROLLOUT_SERVER_NAMES),
             "rollout_modal_flash_router_function": ROLLOUT_ROUTER_FUNCTION,
+            "rollout_modal_flash_server_cls_names_by_weight_view": (
+                ROLLOUT_SERVER_NAMES_BY_WEIGHT_VIEW
+            ),
         }
         cfg.custom_rollout_request_hook_args = {
             **(getattr(cfg, "custom_rollout_request_hook_args", None) or {}),
             **run_config,
+            "rollout_weight_views": list(ROLLOUT_WEIGHT_VIEWS),
         }
         cfg.custom_config_path = custom_config
         launch.resolve_config(
@@ -519,10 +562,17 @@ class Trainer:
         # Claim the version already served by the pool before Miles publishes.
         from cookbook.common import hooks
 
-        hooks.claim_pool(
-            SimpleNamespace(**custom_config),
-            boot_version=boot_version,
-        )
+        if ROLLOUT_WEIGHT_VIEWS:
+            for view in ROLLOUT_WEIGHT_VIEWS:
+                hooks.claim_pool(
+                    SimpleNamespace(**custom_config, update_weight_view=view),
+                    boot_version=boot_version,
+                )
+        else:
+            hooks.claim_pool(
+                SimpleNamespace(**custom_config),
+                boot_version=boot_version,
+            )
         # Replicas ahead of the claimed pointer are exiting, so they are not floor.
         await_pool_ready(
             rollout_pool(),

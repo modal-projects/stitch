@@ -16,7 +16,7 @@ import tempfile
 from io import BytesIO
 from pathlib import Path
 
-from stitch.stores.base import Store
+from stitch.stores.base import Store, validate_weight_view
 from stitch.types import VersionManifest, VersionRef
 
 _POINTER = "latest"
@@ -29,12 +29,14 @@ class ModalVolumeStore(Store):
         *,
         run_id: str,
         volume_name: str | None = None,
+        weight_view: str | None = None,
     ) -> None:
         if not run_id:
             raise ValueError("run_id is required")
         self.root = Path(root)
         self.volume_name = volume_name
         self.run_id = run_id
+        self.weight_view = validate_weight_view(weight_view)
 
     def refresh(self) -> None:
         if self.volume_name:
@@ -50,7 +52,7 @@ class ModalVolumeStore(Store):
                 return None
             text = data.decode("utf-8").strip()
             return VersionRef.parse(text) if text else None
-        path = self.root / _POINTER
+        path = self._pointer_path
         if not path.exists():
             return None
         text = path.read_text(encoding="utf-8").strip()
@@ -68,7 +70,8 @@ class ModalVolumeStore(Store):
                 )
             return
         self.root.mkdir(parents=True, exist_ok=True)
-        _atomic_write(self.root / _POINTER, ref.identity)
+        self._pointer_path.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write(self._pointer_path, ref.identity)
 
     def claim(self, boot: VersionRef) -> None:
         if not boot.run_id:
@@ -109,11 +112,22 @@ class ModalVolumeStore(Store):
             raise ValueError(
                 f"store is scoped to run {self.run_id!r}, got {ref.run_id!r}"
             )
-        return self.root / "updates" / Path(ref.identity).name
+        parts = ["updates"]
+        if self.weight_view is not None:
+            parts.append(self.weight_view)
+        return self.root.joinpath(*parts, Path(ref.identity).name)
+
+    @property
+    def _pointer_path(self) -> Path:
+        path = self.root / _POINTER
+        return path / self.weight_view if self.weight_view is not None else path
 
     @property
     def _pointer_volume_path(self) -> str:
-        return f"{self.run_id}/{_POINTER}"
+        parts = [self.run_id, _POINTER]
+        if self.weight_view is not None:
+            parts.append(self.weight_view)
+        return "/".join(parts)
 
 
 def _volume(name: str):

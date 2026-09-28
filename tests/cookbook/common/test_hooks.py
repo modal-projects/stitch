@@ -21,9 +21,12 @@ from types import SimpleNamespace
 import pytest
 
 from cookbook.common import hooks
+from cookbook.common.constants import STITCH_WEIGHT_VIEW_VERSIONS_HEADER
 from stitch.stores.modal_volume import ModalVolumeStore
 from stitch.stores.s3 import S3Store
 from stitch.types import VersionRef
+
+_REAL_POOL = hooks._pool
 
 
 class _FakePool:
@@ -133,6 +136,21 @@ def _args(root: str, run_id: str = "run-abc", **extra):
 
 def _write_version(root: Path, ref: VersionRef) -> str:
     d = root / "updates" / Path(ref.identity).name
+    d.mkdir(parents=True)
+    (d / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {
+                "metadata": {"version": ref.version},
+                "weight_map": {"w": "model-00001.safetensors"},
+            }
+        )
+    )
+    (d / "model-00001.safetensors").write_bytes(b"weights")
+    return str(d)
+
+
+def _write_view_version(root: Path, ref: VersionRef, view: str) -> str:
+    d = root / "updates" / view / Path(ref.identity).name
     d.mkdir(parents=True)
     (d / "model.safetensors.index.json").write_text(
         json.dumps(
@@ -339,11 +357,59 @@ def test_claim_pool_preserves_resumed_boot_version() -> None:
         assert pool.woke == [VersionRef("run-abc", 119)]
 
 
+def test_view_hook_publishes_only_its_pointer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pool = _FakePool()
+    monkeypatch.setattr(hooks, "_pool", lambda _args: pool)
+    args = _args(str(tmp_path), update_weight_view="fp8-e4m3")
+    args.update_weight_disk_dir += "/fp8-e4m3"
+    hooks.claim_pool(args)
+    version_dir = _write_view_version(tmp_path, VersionRef("run-abc", 1), "fp8-e4m3")
+
+    hooks.commit_and_wake(args, version_dir)
+
+    assert ModalVolumeStore(
+        tmp_path, run_id="run-abc", weight_view="fp8-e4m3"
+    ).read_pointer() == VersionRef("run-abc", 1)
+    assert (tmp_path / "latest").is_dir()
+    assert not (tmp_path / "latest").is_file()
+    assert pool.woke == [VersionRef("run-abc", 0), VersionRef("run-abc", 1)]
+
+
+def test_view_hook_selects_only_matching_rollout_pools() -> None:
+    args = SimpleNamespace(
+        rollout_modal_flash_app_name="rollout-app",
+        rollout_modal_flash_server_cls_names=["Hopper", "Blackwell"],
+        rollout_modal_flash_server_cls_names_by_weight_view={
+            "fp8": ["Hopper"],
+            "nvfp4": ["Blackwell"],
+        },
+        rollout_modal_flash_router_function="rollout_router",
+        update_weight_view="nvfp4",
+    )
+
+    pool = _REAL_POOL(args)
+
+    assert pool.cls_name == "Blackwell"
+
+
 def test_store_rejects_a_non_updates_directory() -> None:
     with pytest.raises(ValueError, match="must end in /updates"):
         hooks._store(
             SimpleNamespace(
                 update_weight_disk_dir="/stitch/run-abc/deltas",
+                run_id="run-abc",
+            )
+        )
+
+
+def test_view_store_rejects_a_mismatched_directory() -> None:
+    with pytest.raises(ValueError, match="must end in /updates/fp8"):
+        hooks._store(
+            SimpleNamespace(
+                update_weight_disk_dir="/stitch/run-abc/updates/nvfp4",
+                update_weight_view="fp8",
                 run_id="run-abc",
             )
         )
@@ -374,6 +440,38 @@ def test_request_hook_min_lag() -> None:
             "exact_version": None,
         }
         assert request["max_attempts"] == 900
+
+
+def test_request_hook_reports_each_weight_views_latest_version() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        ModalVolumeStore(root, run_id="run-abc", weight_view="fp8").advance_pointer(
+            VersionRef("run-abc", 12)
+        )
+        ModalVolumeStore(root, run_id="run-abc", weight_view="nvfp4").advance_pointer(
+            VersionRef("run-abc", 10)
+        )
+        hooks._latest = hooks._CachedPointer()
+        request = {"payload": {}}
+
+        asyncio.run(
+            hooks.gated_rollout_request_hook(
+                vars(
+                    _args(
+                        str(root),
+                        rollout_weight_views=["fp8", "nvfp4"],
+                    )
+                ),
+                SimpleNamespace(session_id="session-1"),
+                request,
+            )
+        )
+
+        assert "weight_version" not in request["payload"]
+        assert json.loads(request["headers"][STITCH_WEIGHT_VIEW_VERSIONS_HEADER]) == {
+            "fp8": 12,
+            "nvfp4": 10,
+        }
 
 
 def test_request_hook_reads_pointer_without_reload() -> None:
