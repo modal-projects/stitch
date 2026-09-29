@@ -397,7 +397,7 @@ def test_qwen36_mimo_heterogeneous_base_is_uncorrected_grpo():
         for pool in pools.values()
     } == {
         "H100": (8, 12, 16, "24", "24"),
-        "H200": (16, 24, 64, "64", "64"),
+        "H200": (16, 24, 32, "32", "32"),
         "B200": (8, 12, 32, "32", "32"),
         "B300": (16, 24, 64, "64", "64"),
     }
