@@ -398,9 +398,9 @@ def test_qwen36_mimo_heterogeneous_base_is_uncorrected_grpo():
         for pool in pools.values()
     } == {
         "H100": (8, 12, 16, "24", "24"),
-        "H200": (16, 24, 32, "32", "32"),
+        "H200": (8, 12, 32, "32", "32"),
         "B200": (8, 12, 32, "32", "32"),
-        "B300": (16, 24, 64, "64", "64"),
+        "B300": (8, 12, 64, "64", "64"),
     }
     assert (
         sum(
@@ -426,7 +426,7 @@ def test_qwen36_mimo_heterogeneous_tis_is_a_thin_control():
         for pool in recipe.modal.rollout_pools
     )
     assert cfg.use_tis
-    assert cfg.num_rollout == 3
+    assert cfg.num_rollout == 10
     assert cfg.tis_clip_low == 0.5
     assert cfg.tis_clip == 2.0
     assert cfg.use_rollout_routing_replay
@@ -452,7 +452,7 @@ def test_qwen36_mimo_heterogeneous_score_centering_is_a_thin_control():
 
     assert recipe.modal is base.modal
     assert recipe.ROLLOUT_WEIGHT_VIEWS == base.ROLLOUT_WEIGHT_VIEWS
-    assert cfg.num_rollout == 3
+    assert cfg.num_rollout == 10
     assert cfg.loss_type == "score_centering"
     assert cfg.score_centering_top_k == 128
     assert cfg.score_centering_is == "none"
