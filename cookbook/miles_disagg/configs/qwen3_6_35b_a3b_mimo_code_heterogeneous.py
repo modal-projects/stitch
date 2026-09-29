@@ -5,7 +5,7 @@ from cookbook.common.constants import CHECKPOINTS_PATH, DATA_PATH
 from cookbook.miles_disagg import mimo_v2_6, swebench_config
 from cookbook.miles_disagg.config import MilesConfig
 
-APP_NAME = "stitch-qwen3-6-35b-mimo-code-heterogeneous"
+APP_NAME = "stitch-qwen36-mimo-hetero"
 EXPERIMENT_VOLUME_NAME = "stitch-miles-qwen3-6-35b-mimo-code-heterogeneous"
 
 SOURCE_MODEL = "Qwen/Qwen3.6-35B-A3B"
