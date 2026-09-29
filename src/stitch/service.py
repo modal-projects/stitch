@@ -12,6 +12,7 @@ demotes ``request`` to a required query param, 422-ing every call.
 
 import asyncio
 import contextlib
+import json
 import logging
 import time
 import uuid
@@ -63,6 +64,23 @@ class SidecarStatus(Protocol):
     async def startup(self) -> None: ...
 
     async def shutdown(self) -> None: ...
+
+
+def _render_json_response(
+    content: bytes,
+    engine: Engine,
+    served: VersionRef | None,
+    current: VersionRef | None,
+) -> bytes:
+    data = json.loads(content)
+    if isinstance(data, dict) and served is not None and current is not None:
+        engine.stamp_response(data, served, current)
+    return json.dumps(
+        data,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
 
 
 def create_app(
@@ -259,21 +277,24 @@ def create_app(
                         status_code=resp.status_code,
                         media_type=resp.headers.get("content-type") or None,
                     )
-                data = resp.json()
                 current = (
                     status.applied
                 )  # capture while still pinned, before a commit advances it
         except ConstraintUnmet as exc:
             return JSONResponse(exc.error, status_code=409)
 
-        if (
-            is_versioned
-            and isinstance(data, dict)
-            and served is not None
-            and current is not None
-        ):
-            engine.stamp_response(data, served, current)
-        return JSONResponse(data, status_code=resp.status_code)
+        body = await asyncio.to_thread(
+            _render_json_response,
+            resp.content,
+            engine,
+            served if is_versioned else None,
+            current if is_versioned else None,
+        )
+        return Response(
+            content=body,
+            status_code=resp.status_code,
+            media_type="application/json",
+        )
 
     return app
 

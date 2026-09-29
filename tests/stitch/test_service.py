@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
 from types import SimpleNamespace
 from typing import Any
 
@@ -260,6 +261,47 @@ def test_upstream_transport_failure_is_retryable_and_releases_admission(
     assert (
         records[0].exc_info is None
     )  # concise per-request signal, not a traceback storm
+
+
+def test_json_response_rendering_runs_off_event_loop(monkeypatch):
+    async def go():
+        class Upstream:
+            async def request(
+                self, _method: str, _url: str, **_kwargs: Any
+            ) -> httpx.Response:
+                return httpx.Response(
+                    200,
+                    content=b'{"choices":[],"payload":"large-response"}',
+                    headers={"content-type": "application/json"},
+                )
+
+        monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: Upstream())
+        sidecar = _GateSidecar(VersionRef("run", 3))
+        app = create_app(sidecar.gate, sidecar, _ProxyEngine())
+
+        event_loop_thread = threading.get_ident()
+        render_threads = []
+        original = stitch_service._render_json_response
+
+        def record_render_thread(*args):
+            render_threads.append(threading.get_ident())
+            return original(*args)
+
+        monkeypatch.setattr(
+            stitch_service, "_render_json_response", record_render_thread
+        )
+        status, headers, body = await _asgi_post(app, {})
+
+        assert status == 200
+        assert headers["content-type"] == "application/json"
+        assert render_threads and render_threads[0] != event_loop_thread
+        assert json.loads(body) == {
+            "choices": [],
+            "payload": "large-response",
+            "served_version": 3,
+        }
+
+    asyncio.run(go())
 
 
 def test_client_disconnect_cancels_aborts_and_releases_admission(monkeypatch):
