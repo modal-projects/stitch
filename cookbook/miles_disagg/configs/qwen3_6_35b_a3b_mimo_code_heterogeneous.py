@@ -53,18 +53,22 @@ AGENT_PROCESSES = 64
 AGENT_THREADS_PER_PROCESS = 32
 ROLLOUT_CONCURRENT_SAMPLES = AGENT_PROCESSES * AGENT_THREADS_PER_PROCESS
 GPUS_PER_NODE = 8
-ROLLOUT_MIN_NODES_PER_POOL = 2
-ROLLOUT_MAX_NODES_PER_POOL = 6
+ROLLOUT_MIN_NODES = {
+    "H100": 1,
+    "H200": 2,
+    "B200": 1,
+    "B300": 2,
+}
 ROLLOUT_TARGET_INPUTS = {
     "H100": 16,
     "H200": 64,
-    "B200": 64,
+    "B200": 32,
     "B300": 64,
 }
 ROLLOUT_MAX_RUNNING_REQUESTS = {
     "H100": 24,
     "H200": 64,
-    "B200": 64,
+    "B200": 32,
     "B300": 64,
 }
 
@@ -121,6 +125,7 @@ def _pool(
 ) -> RolloutPoolConfig:
     target_inputs = ROLLOUT_TARGET_INPUTS[gpu]
     gpus_per_engine = 1
+    min_containers = ROLLOUT_MIN_NODES[gpu] * GPUS_PER_NODE // gpus_per_engine
     return RolloutPoolConfig(
         name=name,
         gpu=gpu,
@@ -134,8 +139,8 @@ def _pool(
         ),
         weight_view=weight_view,
         environment=environment or {},
-        min_containers=ROLLOUT_MIN_NODES_PER_POOL * GPUS_PER_NODE // gpus_per_engine,
-        max_containers=ROLLOUT_MAX_NODES_PER_POOL * GPUS_PER_NODE // gpus_per_engine,
+        min_containers=min_containers,
+        max_containers=min_containers * 3 // 2,
     )
 
 

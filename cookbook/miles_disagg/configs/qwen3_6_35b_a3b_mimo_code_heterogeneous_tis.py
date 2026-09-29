@@ -47,7 +47,7 @@ modal = replace(
 
 
 class _Miles(base._Miles):
-    num_rollout = 5
+    num_rollout = 3
     rollout_top_p = 0.95
     rollout_top_k = 4096
 

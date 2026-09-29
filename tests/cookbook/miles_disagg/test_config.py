@@ -396,10 +396,10 @@ def test_qwen36_mimo_heterogeneous_base_is_uncorrected_grpo():
         )
         for pool in pools.values()
     } == {
-        "H100": (16, 48, 16, "24", "24"),
-        "H200": (16, 48, 64, "64", "64"),
-        "B200": (16, 48, 64, "64", "64"),
-        "B300": (16, 48, 64, "64", "64"),
+        "H100": (8, 12, 16, "24", "24"),
+        "H200": (16, 24, 64, "64", "64"),
+        "B200": (8, 12, 32, "32", "32"),
+        "B300": (16, 24, 64, "64", "64"),
     }
     assert (
         sum(
@@ -425,7 +425,7 @@ def test_qwen36_mimo_heterogeneous_tis_is_a_thin_control():
         for pool in recipe.modal.rollout_pools
     )
     assert cfg.use_tis
-    assert cfg.num_rollout == 5
+    assert cfg.num_rollout == 3
     assert cfg.tis_clip_low == 0.5
     assert cfg.tis_clip == 2.0
     assert cfg.use_rollout_routing_replay
