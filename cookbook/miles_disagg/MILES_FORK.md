@@ -5,7 +5,7 @@ Stitch installs an immutable Miles revision over a dated trainer image:
 ```python
 MILES_IMAGE_TAG = "radixark/miles:dev-202609231228"
 MILES_REPO_URL = "https://github.com/modal-projects/miles.git"
-MILES_REPO_REF = "3082b60e69e0528c9d4c7092a2514c00dcde4e59"
+MILES_REPO_REF = "78204b5ba7a73b95bc271a0052fc7bc2521ad18a"
 ```
 
 The image supplies the compiled CUDA, Transformer Engine, and Megatron-LM
@@ -22,6 +22,7 @@ startup.
 | Partial rollout groups | [#3702](https://github.com/radixark/miles/pull/3702) | Optionally retain completed trajectories from aborted groups when at least two survive, using dynamic global batch sizing. |
 | Resume and saving | [#2688](https://github.com/radixark/miles/pull/2688), [#3616](https://github.com/radixark/miles/pull/3616) | Preserve explicit resume selection and retain declared source-owned tensors. |
 | External fleet | [#3236](https://github.com/radixark/miles/pull/3236), [#3344](https://github.com/radixark/miles/pull/3344) | Treat one opaque URL as the rollout fleet and expose a request-policy hook with explicit arguments. |
+| Delta resume cleanup | [#3875](https://github.com/radixark/miles/pull/3875) | Preserve replay history through the resumed version and prune only the abandoned suffix. |
 | Disk delta | [#3237](https://github.com/radixark/miles/pull/3237) | Match emitted tensor names, shapes, dtypes, and raw checkpoint layouts before XOR encoding. |
 | NVFP4 | [#3601](https://github.com/radixark/miles/pull/3601) | Adapt Qwen3.6 NVFP4 rollout checkpoints. |
 | Modal SWE | Branch-only | Provide the Modal Sandbox transport and verified mini-SWE agent adapter used by these recipes; upstream Miles does not ship this provider-specific example. |
