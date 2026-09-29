@@ -347,6 +347,7 @@ def test_qwen36_mimo_heterogeneous_base_is_uncorrected_grpo():
 
     assert cfg.hf_checkpoint == str(recipe.BF16_CHECKPOINT_PATH)
     assert cfg.bf16
+    assert cfg.actor_num_nodes == 4
     assert not hasattr(cfg, "fp4_recipe")
     assert not hasattr(cfg, "te_precision_config_file")
     assert "OPEN_TRAINING_NVFP4_FAKE_QAT_FLAG" not in cfg.environment

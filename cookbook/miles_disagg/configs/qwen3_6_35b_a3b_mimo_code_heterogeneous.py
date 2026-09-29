@@ -213,7 +213,7 @@ class _Miles(MilesConfig):
     transformer_impl = "transformer_engine"
     bf16 = True
 
-    actor_num_nodes = 2
+    actor_num_nodes = 4
     actor_num_gpus_per_node = 8
     num_gpus_per_node = 8
     colocate = False
