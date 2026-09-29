@@ -496,3 +496,27 @@ def test_newest_complete_export_is_none_before_the_first_save(tmp_path) -> None:
         newest_complete_export(tmp_path, save_hf=_Config.save_hf, latest_version=9)
         is None
     )
+
+
+def test_newest_complete_export_selects_each_weight_view_independently(
+    tmp_path,
+) -> None:
+    for iteration, views in ((7, ("fp8", "nvfp4")), (19, ("fp8",)), (39, ("nvfp4",))):
+        export = tmp_path / _Config.save_hf.format(rollout_id=iteration)
+        for view in views:
+            checkpoint = export / view
+            checkpoint.mkdir(parents=True)
+            (checkpoint / ".complete").touch()
+
+    assert newest_complete_export(
+        tmp_path,
+        save_hf=_Config.save_hf,
+        latest_version=40,
+        weight_view="fp8",
+    ) == (20, tmp_path / "hf_checkpoints/weight_v000019/fp8")
+    assert newest_complete_export(
+        tmp_path,
+        save_hf=_Config.save_hf,
+        latest_version=40,
+        weight_view="nvfp4",
+    ) == (40, tmp_path / "hf_checkpoints/weight_v000039/nvfp4")

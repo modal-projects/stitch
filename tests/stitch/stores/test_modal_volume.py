@@ -232,9 +232,7 @@ def test_volume_weight_view_uses_its_own_pointer_object(
 
     store.advance_pointer(VersionRef("run-a", 3))
 
-    assert volume.files == {
-        "run-a/latest/fp8-e4m3": b"run-a/weight_v000003"
-    }
+    assert volume.files == {"run-a/latest/fp8-e4m3": b"run-a/weight_v000003"}
 
 
 if __name__ == "__main__":

@@ -1,9 +1,11 @@
 import importlib
+import os
 import sys
 from types import SimpleNamespace
 
 import pytest
 
+from cookbook.common import storage
 from cookbook.common.constants import KERNEL_CACHE_PATH
 from cookbook.miles_disagg import trainer_image
 from cookbook.miles_disagg.configs import qwen3_4b_math
@@ -14,7 +16,9 @@ from cookbook.miles_disagg.configs import qwen3_4b_math
     "recipe",
     [
         "qwen3_4b_math",
-        "qwen3_6_35b_a3b_heterogeneous_phase1",
+        "qwen3_6_35b_a3b_mimo_code",
+        "qwen3_6_35b_a3b_mimo_code_heterogeneous",
+        "qwen3_6_35b_a3b_mimo_code_heterogeneous_tis",
         "qwen3_6_35b_a3b_swebench_pro",
         "qwen3_6_35b_a3b_nvfp4",
         "glm5_3_nvfp4",
@@ -47,6 +51,123 @@ def test_trainer_mounts_kernel_cache_volume(monkeypatch):
     app = importlib.import_module("cookbook.miles_disagg.app")
 
     assert app.train_volumes[str(KERNEL_CACHE_PATH)].name == "kernel-cache"
+
+
+def test_rollout_pool_environment_is_applied_before_engine_start(monkeypatch):
+    monkeypatch.setenv("EXPERIMENT_CONFIG", "qwen3_6_35b_a3b_mimo_code_heterogeneous")
+    monkeypatch.setenv("RUN_ID", "test-run")
+    monkeypatch.delenv("STITCH_STORE_BACKEND", raising=False)
+    monkeypatch.delenv("MILES_LOCAL_DIR", raising=False)
+    monkeypatch.delitem(sys.modules, "cookbook.miles_disagg.app", raising=False)
+
+    app = importlib.import_module("cookbook.miles_disagg.app")
+    pool = next(pool for pool in app.ROLLOUT_POOL_CONFIGS if pool.environment)
+    actor = app._RolloutServer()
+    actor.rollout_pool_config = pool
+    monkeypatch.setattr(
+        app,
+        "STORE_DEPLOYMENT",
+        SimpleNamespace(
+            bootstrap_credentials=lambda: None,
+            hook_config=lambda _namespace: {"stitch_store_backend": "modal-volume"},
+        ),
+    )
+    monkeypatch.setattr(app, "_boot_checkpoint", lambda *_args: ("checkpoint", 0))
+    observed = {}
+
+    def serve_startup(*_args, **_kwargs):
+        observed.update({key: os.environ.get(key) for key in pool.environment})
+
+    monkeypatch.setattr(app.server, "serve_startup", serve_startup)
+
+    actor.startup()
+
+    assert observed == pool.environment
+
+
+def test_multi_view_pool_claims_use_view_scoped_update_directories(monkeypatch):
+    monkeypatch.setenv("EXPERIMENT_CONFIG", "qwen3_6_35b_a3b_mimo_code_heterogeneous")
+    monkeypatch.setenv("RUN_ID", "test-run")
+    monkeypatch.delenv("STITCH_STORE_BACKEND", raising=False)
+    monkeypatch.delenv("MILES_LOCAL_DIR", raising=False)
+    monkeypatch.delitem(sys.modules, "cookbook.miles_disagg.app", raising=False)
+
+    app = importlib.import_module("cookbook.miles_disagg.app")
+    claimed = []
+    monkeypatch.setattr(
+        "cookbook.common.hooks.claim_pool",
+        lambda args, *, boot_version: claimed.append((args, boot_version)),
+    )
+
+    app._claim_rollout_pools(
+        {"update_weight_disk_dir": str(app.UPDATES_DIR)}, boot_version=7
+    )
+
+    assert [args.update_weight_view for args, _ in claimed] == ["fp8", "nvfp4"]
+    assert [args.update_weight_disk_dir for args, _ in claimed] == [
+        str(app.UPDATES_DIR / "fp8"),
+        str(app.UPDATES_DIR / "nvfp4"),
+    ]
+    assert [version for _, version in claimed] == [7, 7]
+
+
+def test_multi_view_replica_boots_from_its_latest_complete_export(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("EXPERIMENT_CONFIG", "qwen3_6_35b_a3b_mimo_code_heterogeneous")
+    monkeypatch.setenv("RUN_ID", "test-run")
+    monkeypatch.delenv("STITCH_STORE_BACKEND", raising=False)
+    monkeypatch.delenv("MILES_LOCAL_DIR", raising=False)
+    monkeypatch.delitem(sys.modules, "cookbook.miles_disagg.app", raising=False)
+
+    app = importlib.import_module("cookbook.miles_disagg.app")
+    fp8 = tmp_path / "hf_checkpoints/weight_v000019/fp8"
+    fp8.mkdir(parents=True)
+    (fp8 / ".complete").touch()
+
+    store = SimpleNamespace(
+        read_pointer=lambda: app.VersionRef("test-run", 20),
+        refresh=lambda: None,
+    )
+    monkeypatch.setattr(app, "RUN_DIR", tmp_path)
+    monkeypatch.setattr(
+        app, "STORE_DEPLOYMENT", SimpleNamespace(backend=storage.MODAL_VOLUME)
+    )
+    monkeypatch.setattr(app.storage, "create_store", lambda *_args, **_kwargs: store)
+
+    assert app._boot_checkpoint(
+        {"stitch_store_backend": storage.MODAL_VOLUME}, "fp8"
+    ) == (
+        str(fp8),
+        20,
+    )
+
+
+def test_heterogeneous_readiness_is_checked_per_pool(monkeypatch):
+    monkeypatch.setenv("EXPERIMENT_CONFIG", "qwen3_6_35b_a3b_mimo_code_heterogeneous")
+    monkeypatch.setenv("RUN_ID", "test-run")
+    monkeypatch.delenv("STITCH_STORE_BACKEND", raising=False)
+    monkeypatch.delenv("MILES_LOCAL_DIR", raising=False)
+    monkeypatch.delitem(sys.modules, "cookbook.miles_disagg.app", raising=False)
+
+    app = importlib.import_module("cookbook.miles_disagg.app")
+    waits = []
+    monkeypatch.setattr(
+        app,
+        "await_pool_ready",
+        lambda pool, **kwargs: waits.append((pool.cls_name, kwargs)),
+    )
+
+    latest = app.VersionRef("test-run", 4)
+    app.await_rollout_ready(latest=latest)
+
+    assert waits == [
+        (
+            pool.name,
+            {"replica_floor": pool.min_containers, "latest": latest},
+        )
+        for pool in app.ROLLOUT_POOL_CONFIGS
+    ]
 
 
 @pytest.mark.parametrize("entrypoint", ["app", "prep_app"])

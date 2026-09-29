@@ -172,9 +172,9 @@ class _Miles(MilesConfig):
     custom_rollout_request_hook_args = {
         "rollout_request_weight_version_mode": "min",
         "rollout_request_weight_version_lag": 1,
-        "rollout_request_max_attempts": 1200,
-        "rollout_request_retry_interval": 1.0,
     }
+    rollout_request_max_attempts = 1200
+    rollout_request_retry_interval = 1.0
     miles_router_timeout = 300
 
     update_weights_interval = 1
@@ -194,8 +194,7 @@ class _Miles(MilesConfig):
     num_layers_at_end_in_bf16 = 12
     te_precision_config_file = nvfp4.routed_expert_precision()
 
-    rollout_health_check_first_wait = 600
-    tito_model = "glm47"
+    tito_model = "glm53"
     session_server_port = 30000
     session_server_workers = 64
 
@@ -215,10 +214,10 @@ class _Miles(MilesConfig):
     async_max_concurrent_samples = ROLLOUT_CONCURRENT_SAMPLES
     async_data_buffer_capacity_factor = 3.0
     async_unused_samples_handler = "drop"
+    keep_partial_groups_on_abort = True
     eval_interval = None
 
     use_rollout_routing_replay = True
-    use_fault_tolerance = True
 
     # 256 GPUs: TP4 * PP4 * CP8 * DP2. Four balanced DSA-valid stages start on
     # layers 1, 19, 39, and 59; CP8 keeps long-context activations sharded.
@@ -294,7 +293,6 @@ class _Miles(MilesConfig):
         **swebench_config.environment(
             sandbox_app="glm5-3-nvfp4-swebench-pro-sandbox",
             processes=48,
-            boot_concurrency_per_process=10,
         ),
         "NCCL_NVLS_ENABLE": "1",
         "INDEXER_ROPE_NEOX_STYLE": "0",

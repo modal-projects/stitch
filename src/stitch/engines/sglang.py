@@ -18,7 +18,7 @@ class SGLangEngine(Engine):
         *,
         delta_update_mode: Literal["disk", "cpu"] = "disk",
         control_timeout: float = 120.0,
-        health_timeout: float = 5.0,
+        health_timeout: float = 30.0,
         weight_staging_timeout: float = 3600.0,
         weight_update_timeout: float = 600.0,
     ) -> None:

@@ -17,7 +17,7 @@ serialized representation of the policy, such as BF16, FP8, MXFP8, or NVFP4.
 The first two algorithm experiments are:
 
 1. GRPO without R3 or importance-sampling correction.
-2. GRPO with ICEPOP and R3 as the established correction control.
+2. GRPO with TIS and R3 as the established correction control.
 
 A later experiment will reuse the same systems and configuration boundary.
 
@@ -109,6 +109,9 @@ Miles owns immutable update artifacts. Stitch owns mutable pointers:
 <run>/updates/fp8/weight_v000010/
 <run>/updates/nvfp4/weight_v000010/
 
+<run>/hf_checkpoints/weight_v000009/fp8/.complete
+<run>/hf_checkpoints/weight_v000009/nvfp4/.complete
+
 <run>/latest/fp8     # points to fp8 v10
 <run>/latest/nvfp4   # may still point to nvfp4 v9
 ```
@@ -116,6 +119,12 @@ Miles owns immutable update artifacts. Stitch owns mutable pointers:
 Each view directory is a normal instance of the existing single-view disk-delta
 layout. There is no parent transaction manifest, projection directory, or
 symlink lineage.
+
+Periodic HF saves use the same view encoders. A view's nested `.complete`
+marker is published only after the distributed checkpoint write succeeds, so a
+new replica may load that exact view and apply only its remaining delta tail.
+Without a complete saved view, the replica falls back to the static v0
+checkpoint and the full delta lineage.
 
 ## Phase 1: complete the primitives
 
@@ -151,6 +160,11 @@ representation merely to support disk views.
 The existing homogeneous path must remain unchanged when no view mapping is
 configured.
 
+When HF saving is enabled, reuse the same view iterator to write one complete
+HF checkpoint under `weight_vNNNNNN/<view>`. This is part of the multi-view
+policy: ordinary single-view `save_hf` keeps using `hf_checkpoint` as its target
+layout. Do not introduce a second generic checkpoint-layout option.
+
 ### 2. Miles: rollout-source attribution
 
 Use the existing session response path to copy the rollout source supplied by
@@ -158,8 +172,8 @@ the fleet router into sample metadata. This is transport metadata only; it must
 not affect reward, filtering, correction, or loss.
 
 Do not add a new mismatch-metrics primitive. Pure GRPO disables TIS and mismatch
-metrics. Corrected experiments use Miles' existing TIS/mismatch contract and
-ICEPOP hook. R3 remains independent replay data for discrete MoE routing.
+metrics. Corrected experiments use Miles' existing TIS/mismatch contract. R3
+remains independent replay data for discrete MoE routing.
 
 ### 3. Stitch: select one view per rollout pool
 
@@ -252,6 +266,9 @@ Unit tests must prove:
     selected view, rewinds only those view pointers, preserves their delta
     lineages, and rejects a converted baseline that disagrees with the durable
     checksums. An unselected incomplete view does not block resume.
+11. A replacement replica selects the newest complete HF checkpoint for its
+    own view at or below that view's pointer, and applies only the later deltas.
+    A nested marker is never visible before the distributed save commits.
 
 Rollout validation must then:
 
@@ -269,10 +286,10 @@ Rollout validation must then:
    serves its correctly identified prior version, then independently catches
    up.
 
-Phase 1 does not change SGLang, start a trainer, add per-view saved-checkpoint
-anchors, or add mid-run anchor selection. Resume reuses the existing trainer
-checkpoint and each selected view's immutable delta lineage; the short
-end-to-end phase validates that lifecycle.
+Phase 1 does not change SGLang or start a trainer. Resume reuses the existing
+trainer checkpoint and each selected view's immutable delta lineage; per-view
+HF checkpoints optimize replacement-replica catch-up without changing that
+lineage. The short end-to-end phase validates the combined lifecycle.
 
 ## Phase 2: rollout-only correctness and tuning
 
@@ -300,16 +317,13 @@ Create two experiment configs initially:
 1. A complete, standalone MiMo mixed-precision GRPO config. It must define its
    own model, data, preparation, fleet, trainer, checkpoint, and algorithm
    settings rather than inheriting from a SWE-bench recipe. It disables TIS,
-   mismatch metrics, ICEPOP, and R3.
-2. A thin ICEPOP + R3 control config that imports the standalone base and
+   mismatch metrics, and R3.
+2. A thin TIS + R3 control config that imports the standalone base and
    changes only the algorithm controls.
 
 The later experiment should be another thin variant of the standalone base so
 differences remain attributable to the algorithm rather than rollout topology
 or precision setup.
-
-ICEPOP is selected through the TIS correction interface; vanilla TIS and
-ICEPOP are alternative correction functions and are not enabled together.
 
 ## Phase 4: short end-to-end validation
 
@@ -321,8 +335,9 @@ only when:
   committed logical version;
 - when enabled, per-view mismatch metrics are finite and correctly attributed;
 - the pure-GRPO run has no correction-induced loss changes;
-- ICEPOP and R3 activate only in the control run;
-- one mid-run replica independently catches up through its configured view;
+- TIS and R3 activate only in the control run;
+- one mid-run replica boots from its latest complete view checkpoint and
+  independently applies the remaining delta tail;
 - a save and resume restores the BF16 trainer and restarts every rollout view
   from a correct version;
 - reward, abort, queue, staleness, and throughput metrics show no unexplained
@@ -331,7 +346,7 @@ only when:
 ## Phase 5: final runs
 
 Freeze converter settings, model revisions, sampling parameters, fleet layout,
-and checkpoint policy after the short validation. Run the pure-GRPO and
-ICEPOP + R3 experiments with identical systems settings and report results both
+and checkpoint policy after the short validation. Run the pure-GRPO and TIS +
+R3 experiments with identical systems settings and report results both
 globally and split by FP8 versus W4A16 rollout source. Add the later experiment
 only after these two controls are reproducible.

@@ -422,11 +422,7 @@ def test_request_hook_min_lag() -> None:
             VersionRef("run-abc", 10)
         )  # published latest
         hooks._latest = hooks._CachedPointer()  # fresh cache reading this store
-        args = _args(
-            str(root),
-            rollout_request_weight_version_lag=2,
-            rollout_request_max_attempts=900,
-        )
+        args = _args(str(root), rollout_request_weight_version_lag=2)
         request = {"payload": {}}
         asyncio.run(
             hooks.gated_rollout_request_hook(
@@ -439,7 +435,14 @@ def test_request_hook_min_lag() -> None:
             "min_version": 8,
             "exact_version": None,
         }
-        assert request["max_attempts"] == 900
+        assert request["max_attempts"] == 1
+        assert request["retry_interval"] == 1.0
+        assert set(request) == {
+            "payload",
+            "headers",
+            "max_attempts",
+            "retry_interval",
+        }
 
 
 def test_request_hook_reports_each_weight_views_latest_version() -> None:

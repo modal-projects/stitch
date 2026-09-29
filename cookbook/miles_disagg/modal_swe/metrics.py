@@ -7,9 +7,10 @@ aggregates environment/tool/verifier fields owned by the Modal adapter.
 from __future__ import annotations
 
 from collections import Counter
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from miles.utils.types import Sample
+if TYPE_CHECKING:
+    from miles.utils.types import Sample
 
 _AGENT_MEAN_ONLY_METRICS = {
     "agent_tool_input_over_64k_count",
@@ -111,6 +112,22 @@ def _request_metrics(samples: list[Sample], output: dict[str, Any]) -> None:
         and isinstance(segment.get("t1"), (int, float))
         and segment["t1"] >= segment["t0"]
     ]
+    server = [
+        float(segment["t1"] - segment["req_ts"])
+        for segment in lifecycle_segments
+        if isinstance(segment, dict)
+        and isinstance(segment.get("req_ts"), (int, float))
+        and isinstance(segment.get("t1"), (int, float))
+        and segment["t1"] >= segment["req_ts"]
+    ]
+    pre_backend = [
+        float(segment["t0"] - segment["req_ts"])
+        for segment in lifecycle_segments
+        if isinstance(segment, dict)
+        and isinstance(segment.get("req_ts"), (int, float))
+        and isinstance(segment.get("t0"), (int, float))
+        and segment["t0"] >= segment["req_ts"]
+    ]
     client = [
         float(duration)
         for sample in samples
@@ -121,9 +138,13 @@ def _request_metrics(samples: list[Sample], output: dict[str, Any]) -> None:
         if isinstance(duration, (int, float))
     ]
     _summary(output, "rollout_model/request_latency_seconds", backend)
+    _summary(output, "rollout_model/server_request_latency_seconds", server)
+    _summary(output, "rollout_model/pre_backend_latency_seconds", pre_backend)
     _summary(output, "rollout_model/client_request_latency_seconds", client)
 
     backend_seconds = sum(backend)
+    server_seconds = sum(server)
+    pre_backend_seconds = sum(pre_backend)
     client_seconds = sum(client)
     trainable_tokens = sum(sample.effective_response_length for sample in samples)
     unrecorded_requests = max(0, len(client) - len(backend))
@@ -131,6 +152,10 @@ def _request_metrics(samples: list[Sample], output: dict[str, Any]) -> None:
         {
             "rollout_model/request_count": len(backend),
             "rollout_model/request_total_seconds": backend_seconds,
+            "rollout_model/server_request_count": len(server),
+            "rollout_model/server_request_total_seconds": server_seconds,
+            "rollout_model/pre_backend_count": len(pre_backend),
+            "rollout_model/pre_backend_total_seconds": pre_backend_seconds,
             "rollout_model/client_request_count": len(client),
             "rollout_model/client_request_total_seconds": client_seconds,
             "rollout_model/client_minus_backend_seconds_signed": client_seconds
@@ -149,6 +174,33 @@ def _request_metrics(samples: list[Sample], output: dict[str, Any]) -> None:
     )
 
 
+def _routing_replay_metrics(samples: list[Sample], output: dict[str, Any]) -> None:
+    arrays = [
+        routed_experts
+        for sample in samples
+        if (routed_experts := sample.rollout_routed_experts) is not None
+    ]
+    if not arrays:
+        return
+
+    rows = [len(routed_experts) for routed_experts in arrays]
+    raw_bytes = [routed_experts.nbytes for routed_experts in arrays]
+    _summary(output, "rollout_r3/rows_per_sample", rows)
+    _summary(
+        output, "rollout_r3/raw_mib_per_sample", [size / 2**20 for size in raw_bytes]
+    )
+    output.update(
+        {
+            "rollout_r3/sample_count": len(arrays),
+            "rollout_r3/rows_total": sum(rows),
+            "rollout_r3/raw_bytes_total": sum(raw_bytes),
+            "rollout_r3/raw_bytes_per_row": (
+                sum(raw_bytes) / sum(rows) if sum(rows) else 0.0
+            ),
+        }
+    )
+
+
 def add_metrics(samples: list[Sample], output: dict[str, Any]) -> None:
     if not samples:
         return
@@ -160,6 +212,7 @@ def add_metrics(samples: list[Sample], output: dict[str, Any]) -> None:
         metric_prefix="rollout_session",
     )
     _request_metrics(samples, output)
+    _routing_replay_metrics(samples, output)
 
     known_statuses = {
         "Submitted",

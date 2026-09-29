@@ -185,11 +185,32 @@ ROLLOUT_SESSION_AFFINITY_HEADER = (
 )
 
 
+def _claim_rollout_pools(config: dict[str, Any], *, boot_version: int) -> None:
+    from cookbook.common import hooks
+
+    if not ROLLOUT_WEIGHT_VIEWS:
+        hooks.claim_pool(SimpleNamespace(**config), boot_version=boot_version)
+        return
+    for view in ROLLOUT_WEIGHT_VIEWS:
+        view_config = {
+            **config,
+            "update_weight_disk_dir": str(UPDATES_DIR / view),
+            "update_weight_view": view,
+        }
+        hooks.claim_pool(
+            SimpleNamespace(**view_config),
+            boot_version=boot_version,
+        )
+
+
 def _boot_checkpoint(store_config: dict, weight_view: str | None) -> tuple[str, int]:
     """The checkpoint a replica boots and the version it serves it as: the run's
     newest complete export at or below ``latest``, else the base checkpoint."""
-    if weight_view is not None:
-        return str(ROLLOUT_WEIGHT_VIEWS[weight_view]), 0
+    base_checkpoint = (
+        str(ROLLOUT_WEIGHT_VIEWS[weight_view])
+        if weight_view is not None
+        else miles_cfg.hf_checkpoint
+    )
 
     # TODO: support larger update intervals once saved checkpoints expose the
     # exact published weight version instead of only Miles' rollout ID.
@@ -199,26 +220,30 @@ def _boot_checkpoint(store_config: dict, weight_view: str | None) -> tuple[str, 
         or getattr(miles_cfg, "save_interval", None) is None
         or getattr(miles_cfg, "update_weights_interval", 1) != 1
     ):
-        return miles_cfg.hf_checkpoint, 0
+        return base_checkpoint, 0
 
     store = storage.create_store(
         store_config["stitch_store_backend"],
         local_root=RUN_DIR,
         run_id=RUN_ID,
         volume_name=exp.EXPERIMENT_VOLUME_NAME,
+        weight_view=weight_view,
     )
     latest = store.read_pointer()
     if latest is None:
-        return miles_cfg.hf_checkpoint, 0
+        return base_checkpoint, 0
     if latest.run_id != RUN_ID:
         raise ValueError(f"latest belongs to run {latest.run_id!r}, not {RUN_ID!r}")
     # The export precedes its pointer. Reload after observing that commit point,
     # ensuring the mounted snapshot includes the selected checkpoint.
     store.refresh()
     export = newest_complete_export(
-        RUN_DIR, save_hf=save_hf, latest_version=latest.version
+        RUN_DIR,
+        save_hf=save_hf,
+        latest_version=latest.version,
+        weight_view=weight_view,
     )
-    return (str(export[1]), export[0]) if export else (miles_cfg.hf_checkpoint, 0)
+    return (str(export[1]), export[0]) if export else (base_checkpoint, 0)
 
 
 class _RolloutServer:
@@ -227,6 +252,7 @@ class _RolloutServer:
     @modal.enter()
     def startup(self) -> None:
         pool_config = self.rollout_pool_config
+        os.environ.update(pool_config.environment)
         STORE_DEPLOYMENT.bootstrap_credentials()
         store_config = STORE_DEPLOYMENT.hook_config(APP_NAME)
         model_name, boot_version = _boot_checkpoint(
@@ -253,7 +279,7 @@ class _RolloutServer:
             flush_cache_on_commit=exp.SIDECAR_FLUSH_CACHE_ON_COMMIT,
             run_id=RUN_ID,
             startup_timeout=SERVER_STARTUP_TIMEOUT,
-            engine_health_timeout=getattr(exp, "SIDECAR_ENGINE_HEALTH_TIMEOUT", 5.0),
+            engine_health_timeout=getattr(exp, "SIDECAR_ENGINE_HEALTH_TIMEOUT", 30.0),
             weight_view=pool_config.weight_view,
         )
 
@@ -276,11 +302,7 @@ def _define_rollout_server(pool_config: Any) -> Any:
     globals()[pool_config.name] = cls
     decorated = app.server(
         name=pool_config.name,
-        image=(
-            server_image.env(pool_config.environment)
-            if pool_config.environment
-            else server_image
-        ),
+        image=server_image,
         gpu=pool_config.gpu_request(),
         cpu=modal_cfg.rollout_cpu,
         cloud=pool_config.cloud or modal_cfg.cloud,
@@ -346,11 +368,11 @@ if len(ROLLOUT_POOL_CONFIGS) > 1:
         cpu=2.0,
         memory=4096,
         min_containers=1,
-        max_containers=4,
+        max_containers=64,
         scaledown_window=15 * MINUTES,
         timeout=24 * 60 * MINUTES,
     )
-    @modal.concurrent(max_inputs=512, target_inputs=128)
+    @modal.concurrent(max_inputs=64, target_inputs=8)
     @modal.asgi_app()
     def rollout_router():
         from cookbook.common.rollout_router import create_app
@@ -368,6 +390,14 @@ if len(ROLLOUT_POOL_CONFIGS) > 1:
             source: modal.Server.from_name(APP_NAME, pool.name).get_url()
             for pool, source in sources
         }
+        upstream_weights = {
+            (
+                f"{pool.name}:{pool.weight_view}"
+                if pool.weight_view is not None
+                else pool.name
+            ): pool.min_containers * pool.target_inputs
+            for pool in ROLLOUT_POOL_CONFIGS
+        }
         if any(url is None for url in upstreams.values()):
             raise RuntimeError("a heterogeneous rollout pool has no gateway URL")
         return create_app(
@@ -383,6 +413,7 @@ if len(ROLLOUT_POOL_CONFIGS) > 1:
                 for pool, source in sources
                 if pool.weight_view is not None
             },
+            upstream_weights=upstream_weights,
         )
 
 
@@ -394,6 +425,16 @@ def rollout_pool() -> Pool:
         ROLLOUT_SERVER_NAMES,
         gateway_function=ROLLOUT_ROUTER_FUNCTION,
     )
+
+
+def await_rollout_ready(*, latest: VersionRef | None = None) -> None:
+    """Wait for each independently scaled pool to provide its own floor."""
+    for pool_config in ROLLOUT_POOL_CONFIGS:
+        await_pool_ready(
+            ModalFlashPool(APP_NAME, pool_config.name),
+            replica_floor=pool_config.min_containers,
+            latest=latest,
+        )
 
 
 # ── Trainer (miles on Ray) ────────────────────────────────────────────────────
@@ -550,6 +591,10 @@ class Trainer:
             **run_config,
             "rollout_weight_views": list(ROLLOUT_WEIGHT_VIEWS),
         }
+        if ROLLOUT_WEIGHT_VIEWS:
+            cfg.custom_rollout_request_hook_args[
+                "rollout_request_weight_version_mode"
+            ] = "none"
         cfg.custom_config_path = custom_config
         launch.resolve_config(
             cfg,
@@ -560,25 +605,7 @@ class Trainer:
         cmd = _build_train_cmd(cfg)
 
         # Claim the version already served by the pool before Miles publishes.
-        from cookbook.common import hooks
-
-        if ROLLOUT_WEIGHT_VIEWS:
-            for view in ROLLOUT_WEIGHT_VIEWS:
-                hooks.claim_pool(
-                    SimpleNamespace(**custom_config, update_weight_view=view),
-                    boot_version=boot_version,
-                )
-        else:
-            hooks.claim_pool(
-                SimpleNamespace(**custom_config),
-                boot_version=boot_version,
-            )
-        # Replicas ahead of the claimed pointer are exiting, so they are not floor.
-        await_pool_ready(
-            rollout_pool(),
-            replica_floor=modal_cfg.rollout_replica_floor,
-            latest=VersionRef(RUN_ID, boot_version),
-        )
+        _claim_rollout_pools(custom_config, boot_version=boot_version)
 
         resume_log = (
             f", checkpoint_version={resume_point.version}, "

@@ -7,7 +7,7 @@ dependencies = []
 
 [project.optional-dependencies]
 # httpx is the pool wake (pools/modal_flash.py).
-modal = ["modal>=1.5.4.dev11", "httpx"]
+modal = ["modal==1.5.5", "httpx"]
 s3 = ["boto3"]
 # fastapi + httpx only; Modal images install uvicorn separately.
 sglang = ["fastapi", "httpx"]
@@ -16,7 +16,7 @@ sglang = ["fastapi", "httpx"]
 dev = [
     "pytest",
     "ruff==0.15.1",
-    "modal>=1.5.4.dev11",
+    "modal==1.5.5",
     "fastapi",
     "httpx",
     "safetensors",

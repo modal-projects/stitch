@@ -57,6 +57,7 @@ class WeightUpdateSpec:
     tp_size: int = 4
     port: int = 8001
     max_compile_group_gb: int = 8
+    live_weight_checksums: bool = True
 
 
 def server_args_for_mode(
@@ -271,6 +272,7 @@ def run_delta_weight_update(
         "sample_id": sample_id,
         "tp_size": spec.tp_size,
         "hicache": "disabled",
+        "live_weight_checksums": spec.live_weight_checksums,
         "resources": _resource_snapshot(),
     }
 
@@ -356,12 +358,14 @@ def run_delta_weight_update(
         results["updates"] = []
         previous_version = 0
         previous_fingerprint = baseline_fingerprint
+        previous_checksums = None
         with httpx.Client(timeout=None, trust_env=False) as client:
-            previous_checksums = _weight_checksums(client, url)
-            results["base_weight_checksums"] = {
-                "ranks": len(previous_checksums["ranks"]),
-                "per_engine_checksum": previous_checksums["per_engine_checksum"],
-            }
+            if spec.live_weight_checksums:
+                previous_checksums = _weight_checksums(client, url)
+                results["base_weight_checksums"] = {
+                    "ranks": len(previous_checksums["ranks"]),
+                    "per_engine_checksum": previous_checksums["per_engine_checksum"],
+                }
             for target_version in target_versions:
                 update: dict[str, Any] = {
                     "from_version": previous_version,
@@ -454,15 +458,21 @@ def run_delta_weight_update(
                     fingerprint_logprobs=fingerprint_logprobs,
                 )
                 update.update(post_commit)
-                current_checksums = _weight_checksums(client, url)
-                update["live_weight_checksums"] = _validate_weight_checksums(
-                    previous_checksums,
-                    current_checksums,
-                    expected_ranks=spec.tp_size,
-                    require_draft_weights=bool(
-                        spec.server_args.get("--speculative-algorithm")
-                    ),
-                )
+                current_checksums = None
+                if spec.live_weight_checksums:
+                    if previous_checksums is None:
+                        raise AssertionError(
+                            "previous weight checksums are unavailable"
+                        )
+                    current_checksums = _weight_checksums(client, url)
+                    update["live_weight_checksums"] = _validate_weight_checksums(
+                        previous_checksums,
+                        current_checksums,
+                        expected_ranks=spec.tp_size,
+                        require_draft_weights=bool(
+                            spec.server_args.get("--speculative-algorithm")
+                        ),
+                    )
                 results["updates"].append(update)
                 previous_version = target_version
                 previous_checksums = current_checksums
@@ -496,17 +506,25 @@ def run_delta_weight_update(
                     "failed preparation changed the served version: "
                     f"{failure_fingerprint['weight_version']!r}"
                 )
-            failure_checksums = _weight_checksums(client, url)
-            if (
-                failure_checksums["per_engine_checksum"]
-                != previous_checksums["per_engine_checksum"]
-            ):
-                raise RuntimeError("failed preparation changed live weights")
+            if spec.live_weight_checksums:
+                if previous_checksums is None:
+                    raise AssertionError("previous weight checksums are unavailable")
+                failure_checksums = _weight_checksums(client, url)
+                if (
+                    failure_checksums["per_engine_checksum"]
+                    != previous_checksums["per_engine_checksum"]
+                ):
+                    raise RuntimeError("failed preparation changed live weights")
+            else:
+                _compare_fingerprints([previous_fingerprint, failure_fingerprint])
             results["preparation_failure"] = {
                 "target_version": failure_version,
                 "error": failure_message,
                 "served_version": failure_fingerprint["weight_version"],
-                "live_weights_unchanged": True,
+                "live_weights_unchanged": (
+                    True if spec.live_weight_checksums else None
+                ),
+                "fingerprint_unchanged": not spec.live_weight_checksums,
             }
 
         final_version = target_versions[-1]
@@ -553,25 +571,29 @@ def run_delta_weight_update(
             time.perf_counter() - clean_load_started,
             6,
         )
-        with httpx.Client(timeout=None, trust_env=False) as client:
-            reference_checksums = _weight_checksums(client, url)
-        if reference_checksums["ranks"] != final_live_checksums["ranks"]:
-            results["clean_native_load_checksum_differences"] = (
-                _weight_checksum_differences(
-                    final_live_checksums,
-                    reference_checksums,
+        reference_checksums = None
+        if spec.live_weight_checksums:
+            if final_live_checksums is None:
+                raise AssertionError("final live weight checksums are unavailable")
+            with httpx.Client(timeout=None, trust_env=False) as client:
+                reference_checksums = _weight_checksums(client, url)
+            if reference_checksums["ranks"] != final_live_checksums["ranks"]:
+                results["clean_native_load_checksum_differences"] = (
+                    _weight_checksum_differences(
+                        final_live_checksums,
+                        reference_checksums,
+                    )
                 )
-            )
-            raise RuntimeError(
-                "clean native load rank checksums differ from live weights"
-            )
-        if (
-            reference_checksums["per_engine_checksum"]
-            != final_live_checksums["per_engine_checksum"]
-        ):
-            raise RuntimeError(
-                "clean native load engine checksum differs from live weights"
-            )
+                raise RuntimeError(
+                    "clean native load rank checksums differ from live weights"
+                )
+            if (
+                reference_checksums["per_engine_checksum"]
+                != final_live_checksums["per_engine_checksum"]
+            ):
+                raise RuntimeError(
+                    "clean native load engine checksum differs from live weights"
+                )
         reference_fingerprints = [
             _fingerprint(url, fingerprint_logprobs=fingerprint_logprobs)
             for _ in range(2)
@@ -589,8 +611,14 @@ def run_delta_weight_update(
         results["clean_native_load"] = {
             "checkpoint_dir": reference_checkpoint_dir,
             "weight_version": reference_fingerprint["weight_version"],
-            "per_engine_checksum": reference_checksums["per_engine_checksum"],
-            "matches_live_weight_checksums": True,
+            "per_engine_checksum": (
+                reference_checksums["per_engine_checksum"]
+                if reference_checksums is not None
+                else None
+            ),
+            "matches_live_weight_checksums": (
+                True if reference_checksums is not None else None
+            ),
             "repeat_fingerprint": reference_repeat,
             **_fingerprint_hashes(reference_fingerprint),
         }

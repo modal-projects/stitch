@@ -119,6 +119,15 @@ timed_out = False
 output_limited = False
 
 
+def drain_available():
+    for key, _ in selector.select(timeout=0):
+        chunk = os.read(key.fd, 1 << 16)
+        if chunk:
+            captures[key.fd].add(chunk)
+        else:
+            selector.unregister(key.fileobj)
+
+
 def stop_process_group():
     try:
         os.killpg(process.pid, signal.SIGTERM)
@@ -140,6 +149,8 @@ while selector.get_map():
     if not timed_out and remaining <= 0:
         timed_out = True
         stop_process_group()
+        drain_available()
+        break
     wait_seconds = 0.25 if (timed_out or output_limited) else min(0.25, max(0.0, remaining))
     for key, _ in selector.select(timeout=wait_seconds):
         chunk = os.read(key.fd, 1 << 16)
@@ -154,6 +165,15 @@ while selector.get_map():
                 stop_process_group()
         else:
             selector.unregister(key.fileobj)
+    if output_limited:
+        drain_available()
+        break
+    if process.poll() is not None:
+        # A detached descendant may inherit these pipes after the command shell
+        # exits. Its lifetime is not part of this command, so retain only bytes
+        # already available instead of waiting indefinitely for descendant EOF.
+        drain_available()
+        break
 return_code = process.wait()
 remote_seconds = time.monotonic() - started
 stdout_capture = captures[process.stdout.fileno()]
@@ -501,7 +521,7 @@ class ModalSWEEnvironment:
                 )
             command_bytes = shell_command.encode("utf-8", errors="surrogateescape")
             process = self.sandbox.exec(
-                "python",
+                "python3",
                 "-c",
                 _BOUNDED_COMMAND_RUNNER,
                 str(_OUTPUT_HEAD_BYTES),

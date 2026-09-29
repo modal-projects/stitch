@@ -76,5 +76,6 @@ def test_serve_startup_owns_weight_staging_args(
     else:
         assert args["--weight-update-local-checkpoint-dir"] == expected_local_dir
     assert sidecar_args["flush_cache_on_commit"] is True
+    assert sidecar_args["engine_health_timeout"] == 30.0
     assert sidecar_args["proxy_max_connections"] == 256
     assert sidecar_args["proxy_max_keepalive_connections"] == 64

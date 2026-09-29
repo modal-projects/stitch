@@ -88,6 +88,20 @@ _configure_dependency_logging()
 _REWARD_START = "__MILES_SWEGYM_REWARD_START__"
 _REWARD_END = "__MILES_SWEGYM_REWARD_END__"
 _VERIFIER_LOG_TAIL_CHARS = 4000
+_MIMO_CODE_SYSTEM_TEMPLATE = """\
+You are an agent, your current working directory is {{cwd}}.
+
+You can use the tools available to you to interact with the computer to assist the user in completing tasks.
+"""
+_MIMO_CODE_INSTANCE_TEMPLATE = """\
+Fix the following issue:
+
+{{task}}
+
+When you are finished, run this exact command to end the episode:
+
+echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
+"""
 _PYTEST_REPORTER = """\
 def pytest_runtest_logreport(report):
     if report.when == "call":
@@ -157,6 +171,18 @@ Please try a different command that produces less output.
 """
 
 
+def _agent_prompt_overrides() -> dict[str, str]:
+    profile = os.getenv("MODAL_SWE_AGENT_PROFILE", "swebench")
+    if profile == "swebench":
+        return {}
+    if profile == "mimo-code-bash":
+        return {
+            "system_template": _MIMO_CODE_SYSTEM_TEMPLATE,
+            "instance_template": _MIMO_CODE_INSTANCE_TEMPLATE,
+        }
+    raise ValueError(f"Unknown Modal SWE agent profile: {profile!r}")
+
+
 def _task_dir(metadata: dict[str, Any]) -> Path:
     explicit = metadata.get("task_dir")
     instance_id = metadata.get("instance_id")
@@ -221,14 +247,14 @@ def _prepare_environment(
 
 
 def _parse_reward(output: str) -> float | None:
-    lines = output.splitlines()
-    try:
-        start = lines.index(_REWARD_START) + 1
-        end = lines.index(_REWARD_END, start)
-    except ValueError:
+    start = output.rfind(_REWARD_START)
+    if start < 0:
         return None
-
-    raw = "\n".join(lines[start:end]).strip()
+    start += len(_REWARD_START)
+    end = output.find(_REWARD_END, start)
+    if end < 0:
+        return None
+    raw = output[start:end].strip()
     if not raw:
         return None
 
@@ -787,6 +813,38 @@ def _attach_client_model_timings(
     return metrics
 
 
+def _model_token_metrics(messages: list[dict[str, Any]]) -> dict[str, int]:
+    """Summarize API usage from the responses retained by mini-swe-agent."""
+    prompt_tokens: list[int] = []
+    completion_tokens: list[int] = []
+    for message in messages:
+        extra = message.get("extra")
+        if not isinstance(extra, dict):
+            continue
+        response = extra.get("response")
+        if not isinstance(response, dict):
+            continue
+        usage = response.get("usage")
+        if not isinstance(usage, dict):
+            continue
+        prompt = usage.get("prompt_tokens")
+        completion = usage.get("completion_tokens")
+        if isinstance(prompt, int) and not isinstance(prompt, bool) and prompt >= 0:
+            prompt_tokens.append(prompt)
+        if (
+            isinstance(completion, int)
+            and not isinstance(completion, bool)
+            and completion >= 0
+        ):
+            completion_tokens.append(completion)
+    return {
+        "model_prompt_tokens_total": sum(prompt_tokens),
+        "model_prompt_tokens_max": max(prompt_tokens, default=0),
+        "model_completion_tokens_total": sum(completion_tokens),
+        "model_completion_tokens_max": max(completion_tokens, default=0),
+    }
+
+
 def _instrument_model_requests(
     model: Any,
     durations: list[float],
@@ -896,15 +954,9 @@ def _run_episode_sync(
     task_cwd = _task_cwd(metadata)
     verifier_timeout = _verifier_timeout(task_dir, int(settings["verify_timeout"]))
     started = time.perf_counter()
-    boot_semaphore = _sandbox_boot_semaphore()
-    set_phase("sandbox_boot_queue")
-    boot_slot_held = False
     env: ModalSWEEnvironment | None = None
 
     try:
-        while not boot_semaphore.acquire(timeout=0.1):
-            _raise_if_cancelled(cancelled)
-        boot_slot_held = True
         _raise_if_cancelled(cancelled)
         set_phase("sandbox_boot")
         env = ModalSWEEnvironment(
@@ -920,8 +972,6 @@ def _run_episode_sync(
         set_phase("sandbox_setup")
         _prepare_environment(env, task_dir)
         _raise_if_cancelled(cancelled)
-        boot_semaphore.release()
-        boot_slot_held = False
         set_phase("agent_setup")
         agent_start_snapshot = _EnvironmentSnapshot.capture(env)
         config = get_config_from_spec("swebench")
@@ -950,6 +1000,7 @@ def _run_episode_sync(
         }
         agent_config = {
             **config.get("agent", {}),
+            **_agent_prompt_overrides(),
             "step_limit": int(os.getenv("MODAL_SWE_MAX_STEPS", "100")),
             "wall_time_limit_seconds": int(settings["episode_timeout"]),
             "cost_limit": 0.0,
@@ -1185,6 +1236,7 @@ def _run_episode_sync(
             agent_snapshot=agent_snapshot,
         )
         agent_metrics["turns"] = agent.n_calls
+        agent_metrics.update(_model_token_metrics(agent.messages))
         agent_metrics["eval_time"] = verify_time
         agent_metrics["context_limit_exceeded"] = int(context_limit_exceeded)
         agent_metrics["generation_limit_exceeded"] = int(generation_limit_exceeded)
@@ -1240,26 +1292,9 @@ def _run_episode_sync(
             **(env.lifecycle_diagnostics() if env is not None else {}),
         )
     finally:
-        if boot_slot_held:
-            boot_semaphore.release()
         set_phase("cleanup")
         if env is not None:
             _stop_environment(env)
-
-
-@cache
-def _sandbox_boot_semaphore() -> threading.BoundedSemaphore:
-    """Bound per-controller startup pressure without capping active episodes."""
-    default = max(1, _threads_per_agent_process())
-    limit = int(
-        os.getenv("MODAL_SWE_SANDBOX_BOOT_CONCURRENCY_PER_PROCESS", str(default))
-    )
-    if limit <= 0:
-        raise ValueError(
-            "MODAL_SWE_SANDBOX_BOOT_CONCURRENCY_PER_PROCESS must be positive, "
-            f"got {limit}"
-        )
-    return threading.BoundedSemaphore(limit)
 
 
 def _threads_per_agent_process() -> int:

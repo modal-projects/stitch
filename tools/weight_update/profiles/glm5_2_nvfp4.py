@@ -67,7 +67,7 @@ TRAINER_EXTRA_PIP_PACKAGES = (
     "harbor[modal,huggingface]==0.20.0",
     "mini-swe-agent==2.4.5",
     "swebench==4.1.0",
-    "modal==1.5.3",
+    "modal==1.5.5",
 )
 TRAINER_IMAGE_RUN_COMMANDS = (
     "uv pip install --system --break-system-packages flashinfer-python==0.6.15.post1",
@@ -197,6 +197,7 @@ DELTA_SOURCE_DIR = f"{DELTA_MOUNT}/{DELTA_ID}"
 LOCAL_TARGET_CHECKPOINT_DIR = "/local-checkpoint/glm5-2-nvfp4/target"
 LOCAL_CANONICAL_CHECKPOINT_DIR = "/local-checkpoint/glm5-2-nvfp4/canonical"
 SGLANG_CACHE_PATH = "/root/.cache/sglang"
+_REPO_ROOT = Path(__file__).resolve().parents[3] if modal.is_local() else Path("/root")
 
 app = modal.App(APP_NAME)
 hf_cache_volume = modal.Volume.from_name(
@@ -221,7 +222,7 @@ prep_image = trainer_image.build_trainer_image(
     extra_pip_packages=TRAINER_EXTRA_PIP_PACKAGES,
     image_run_commands=TRAINER_IMAGE_RUN_COMMANDS,
 ).add_local_dir(
-    str(Path(__file__).resolve().parents[2]),
+    str(_REPO_ROOT / "tools"),
     remote_path="/root/tools",
     ignore=["**/__pycache__", "**/*.pyc"],
 )
@@ -231,7 +232,7 @@ serving_image = build_serving_image(
     extra_env=SGLANG_SERVER_ENV,
     runtime=DEFAULT_SGLANG_RUNTIME,
 ).add_local_dir(
-    str(Path(__file__).resolve().parents[2]),
+    str(_REPO_ROOT / "tools"),
     remote_path="/root/tools",
     ignore=["**/__pycache__", "**/*.pyc"],
 )

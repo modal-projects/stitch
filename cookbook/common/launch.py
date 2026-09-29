@@ -69,10 +69,14 @@ def spawn_on_pool(run: Any) -> Any:
 def _await_floor_and_spawn(run: Any) -> Any:
     from stitch.service import await_pool_ready
 
-    await_pool_ready(
-        run.rollout_pool(),
-        replica_floor=run.modal_cfg.rollout_replica_floor,
-    )
+    await_ready = getattr(run, "await_rollout_ready", None)
+    if await_ready is None:
+        await_pool_ready(
+            run.rollout_pool(),
+            replica_floor=run.modal_cfg.rollout_replica_floor,
+        )
+    else:
+        await_ready()
     return run.spawn_train()
 
 

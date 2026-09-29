@@ -10,11 +10,10 @@ APP_NAME = "stitch-qwen3-6-35b-nvfp4"
 EXPERIMENT_VOLUME_NAME = "stitch-miles-qwen3-6-35b-nvfp4"
 SOURCE_MODEL = "Qwen/Qwen3.6-35B-A3B"
 SOURCE_REVISION = "995ad96eacd98c81ed38be0c5b274b04031597b0"
-BF16_CHECKPOINT_PATH = CHECKPOINTS_PATH / "qwen3-6-35b-a3b-995ad96e-bf16-unpacked"
-ROLLOUT_CHECKPOINT_PATH = CHECKPOINTS_PATH / "qwen3-6-35b-a3b-995ad96e-nvfp4-mse"
-TORCH_DIST_CHECKPOINT_PATH = (
-    CHECKPOINTS_PATH / "qwen3-6-35b-a3b-995ad96e-torch-dist-tp2-ep8"
-)
+CHECKPOINT_ROOT = CHECKPOINTS_PATH / "qwen3-6-35b-a3b"
+BF16_CHECKPOINT_PATH = CHECKPOINT_ROOT / "bf16-nvfp4-mse"
+ROLLOUT_CHECKPOINT_PATH = CHECKPOINT_ROOT / "nvfp4-mse"
+TORCH_DIST_CHECKPOINT_PATH = CHECKPOINT_ROOT / "torch-dist-nvfp4-mse-tp2-ep8"
 SERVED_CHECKPOINT_FORMAT = "nvfp4"
 CHECKPOINT_PREP_REQUIRES_GPU = True
 UNPACK_FUSED_EXPERTS = True
@@ -102,6 +101,7 @@ class _Miles(MilesConfig):
     # This recipe serves and trains only the target model; the source checkpoint's
     # optional MTP block is neither part of the rollout model nor the RL objective.
     mtp_num_layers = 0
+    hf_export_source_tensor_prefixes = ["model.visual.", "mtp."]
     extra_high_precision_layers_hf = [".shared_expert."]
     extra_high_precision_layers_megatron = [
         ".shared_experts.linear_fc1",
@@ -132,12 +132,10 @@ class _Miles(MilesConfig):
     custom_rollout_request_hook_args = {
         "rollout_request_weight_version_mode": "min",
         "rollout_request_weight_version_lag": 1,
-        "rollout_request_max_attempts": 1200,
-        "rollout_request_retry_interval": 1.0,
     }
+    rollout_request_max_attempts = 1200
+    rollout_request_retry_interval = 1.0
     miles_router_timeout = 300
-    # Preserve source-owned modules that the target-only trainer does not instantiate.
-    hf_export_source_tensor_prefixes = ["model.visual.", "mtp."]
 
     update_weights_interval = 1
     update_weight_transfer_mode = "disk-delta"
@@ -146,7 +144,7 @@ class _Miles(MilesConfig):
     update_weight_buffer_size = 2 * 1024**3
     custom_update_weight_post_write_path = "cookbook.common.hooks.commit_and_wake"
 
-    tito_model = "qwen35"
+    tito_model = "qwen36"
     session_server_port = 30000
     session_server_workers = 8
 
@@ -166,12 +164,10 @@ class _Miles(MilesConfig):
     # Buffer at most two completed learner batches while training is busy.
     async_data_buffer_capacity_factor = 2.0
     async_unused_samples_handler = "drop"
+    keep_partial_groups_on_abort = True
     eval_interval = None
 
     use_rollout_routing_replay = True
-    use_fault_tolerance = True
-    # Allow cold-start generation to settle before the first health probe.
-    rollout_health_check_first_wait = 600
 
     tensor_model_parallel_size = 2
     sequence_parallel = True
@@ -182,6 +178,7 @@ class _Miles(MilesConfig):
     distributed_timeout_minutes = 60
     moe_token_dispatcher_type = "alltoall"
     use_dynamic_batch_size = True
+    use_dynamic_global_batch_size = True
     max_tokens_per_gpu = 4096
     log_probs_max_tokens_per_gpu = 4096
     log_probs_chunk_size = 8192

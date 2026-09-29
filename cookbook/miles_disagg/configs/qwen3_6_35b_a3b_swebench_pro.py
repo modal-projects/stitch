@@ -10,13 +10,10 @@ APP_NAME = "stitch-qwen3-6-35b-swebench-pro"
 EXPERIMENT_VOLUME_NAME = "stitch-miles-qwen3-6-35b-swebench-pro"
 SOURCE_MODEL = "Qwen/Qwen3.6-35B-A3B"
 SOURCE_REVISION = "995ad96eacd98c81ed38be0c5b274b04031597b0"
-BF16_CHECKPOINT_PATH = (
-    CHECKPOINTS_PATH / "qwen3-6-35b-a3b-995ad96e-bf16-unpacked-native"
-)
+CHECKPOINT_ROOT = CHECKPOINTS_PATH / "qwen3-6-35b-a3b"
+BF16_CHECKPOINT_PATH = CHECKPOINT_ROOT / "bf16"
 ROLLOUT_CHECKPOINT_PATH = BF16_CHECKPOINT_PATH
-TORCH_DIST_CHECKPOINT_PATH = (
-    CHECKPOINTS_PATH / "qwen3-6-35b-a3b-995ad96e-torch-dist-bf16-tp2-ep8"
-)
+TORCH_DIST_CHECKPOINT_PATH = CHECKPOINT_ROOT / "torch-dist-bf16-tp2-ep8"
 SERVED_CHECKPOINT_FORMAT = "bf16"
 CHECKPOINT_PREP_REQUIRES_GPU = False
 UNPACK_FUSED_EXPERTS = True
@@ -180,9 +177,9 @@ class _Miles(MilesConfig):
     custom_rollout_request_hook_args = {
         "rollout_request_weight_version_mode": "min",
         "rollout_request_weight_version_lag": 1,
-        "rollout_request_max_attempts": 1200,
-        "rollout_request_retry_interval": 1.0,
     }
+    rollout_request_max_attempts = 1200
+    rollout_request_retry_interval = 1.0
     miles_router_timeout = 1800
 
     update_weights_interval = 1
@@ -215,8 +212,6 @@ class _Miles(MilesConfig):
     eval_interval = None
 
     use_rollout_routing_replay = True
-    use_fault_tolerance = True
-    rollout_health_check_first_wait = 600
 
     tensor_model_parallel_size = 2
     sequence_parallel = True

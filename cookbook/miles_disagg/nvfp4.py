@@ -2,6 +2,9 @@
 
 from typing import Any, Literal
 
+_WEIGHT_ENCODING_ENV_PREFIXES = ("NVTE_NVFP4_",)
+_WEIGHT_ENCODING_ENV_NAMES = {"NVTE_USE_FAST_MATH"}
+
 
 def environments(
     *, error_mode: Literal["MAE", "MSE"]
@@ -50,6 +53,34 @@ def validate_environments(recipe: Any) -> None:
                 raise ValueError(
                     f"{name}[{key!r}] must be {value!r} for this NVFP4 recipe"
                 )
+
+
+def validate_weight_encoding(recipe: Any) -> None:
+    """Require offline conversion and live export to encode identical NVFP4 bytes.
+
+    Serving execution (for example W4A4 versus W4A16) belongs to each rollout
+    pool and is intentionally outside this check.
+    """
+    prep = getattr(recipe, "PREP_ENV", {})
+    training = recipe.miles.environment
+    names = {
+        name
+        for environment in (prep, training)
+        for name in environment
+        if name in _WEIGHT_ENCODING_ENV_NAMES
+        or name.startswith(_WEIGHT_ENCODING_ENV_PREFIXES)
+    }
+    if not names:
+        raise ValueError("NVFP4 rollout views require an explicit encoding environment")
+    mismatches = {
+        name: (prep.get(name), training.get(name))
+        for name in names
+        if prep.get(name) != training.get(name)
+    }
+    if mismatches:
+        raise ValueError(
+            f"PREP_ENV and miles.environment disagree on NVFP4 encoding: {mismatches}"
+        )
 
 
 def routed_expert_precision() -> dict:

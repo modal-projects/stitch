@@ -5,13 +5,13 @@ Stitch installs an immutable Miles revision over a dated trainer image:
 ```python
 MILES_IMAGE_TAG = "radixark/miles:dev-202609270159"
 MILES_REPO_URL = "https://github.com/modal-projects/miles.git"
-MILES_REPO_REF = "997ed04cd53c881aa98fd20e142a941d64981bba"
+MILES_REPO_REF = "9ae659f43e5748ce3b95c66fe690c551e7b04145"
 ```
 
 The image supplies the compiled CUDA, Transformer Engine, and Megatron-LM
 environment. The source pin belongs to
 `modal-projects/miles:stitch-miles`: upstream Miles main at
-`23d41d711f`, followed by eight reviewed integration changes.
+`23d41d711f`, followed by eleven reviewed integration changes.
 Each upstream PR is represented by one commit; the branch carries no additional
 runtime patches. Stitch no longer patches Miles at container startup.
 
@@ -26,7 +26,10 @@ runtime patches. Stitch no longer patches Miles at container startup.
 | Session collection | [#3736](https://github.com/radixark/miles/pull/3736) | `ca84a9013c` | Keep sample materialization off the shared event loop and make the collection deadline configurable. |
 | Partial rollout groups | [#3702](https://github.com/radixark/miles/pull/3702) | `09109a4b86` | Optionally retain completed trajectories from aborted groups when at least two survive, using dynamic global batch sizing. |
 | Ray placement | [#3640](https://github.com/radixark/miles/pull/3640) | `2195082239` | Resolve hard head affinity from Ray's GCS-backed node table without depending on dashboard reachability. |
-| Rollout weight views | Not yet upstreamed | `997ed04cd5` | Publish independent checkpoint-defined rollout precisions, attribute samples to their source view, and preserve checksum-verified per-view baselines across resume. |
+| Canonical FP8 encoding | Not yet upstreamed | `ca9ff704b7` | Use the checkpoint's FP8 block representation for live exports and delta generation. |
+| FP8 quantization scope | Not yet upstreamed | `44a3e34dd9` | Keep visual, non-matrix, and block-untileable weights in their checkpoint-defined high precision. |
+| Rollout weight views | Not yet upstreamed | `b3120d048e` | Publish independent checkpoint-defined rollout precisions, attribute samples to their source view, and preserve checksum-verified per-view baselines across resume. |
+| Rollout checkpoint views | Not yet upstreamed | `9ae659f43e` | Save one complete HF checkpoint per rollout precision, preserving checkpoint-owned tensors that are absent from the trainer model. |
 
 The integration boundary is intentionally small:
 

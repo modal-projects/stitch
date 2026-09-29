@@ -15,6 +15,7 @@ try:
     from cookbook.miles_disagg.modal_swe import agent as agent_function_module
     from cookbook.miles_disagg.modal_swe.agent import (
         _OBSERVATION_TEMPLATE,
+        _agent_prompt_overrides,
         _AgentWorker,
         _attach_client_model_timings,
         _environment_metrics,
@@ -27,10 +28,10 @@ try:
         _is_infrastructure_error,
         _is_sandbox_not_found_error,
         _is_truncated_generation_error,
+        _model_token_metrics,
         _parse_reward,
         _prepare_environment,
         _RayAgentWorkerPool,
-        _sandbox_boot_semaphore,
         _task_cwd,
         pick_latest_leaf,
         postprocess_samples,
@@ -66,6 +67,47 @@ def test_swebench_callbacks_resolve_from_the_cookbook() -> None:
         "session_sample_postprocessor_path",
     ):
         assert callable(load_function(config[key]))
+
+
+def test_mimo_code_profile_uses_minimal_task_prompt(monkeypatch) -> None:
+    monkeypatch.setenv("MODAL_SWE_AGENT_PROFILE", "mimo-code-bash")
+
+    config = _agent_prompt_overrides()
+
+    assert "Fix the following issue" in config["instance_template"]
+    assert "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" in config["instance_template"]
+    assert "patch" not in config["instance_template"].lower()
+    assert "DO NOT MODIFY" not in config["instance_template"]
+
+
+def test_unknown_agent_profile_fails_before_rollout(monkeypatch) -> None:
+    monkeypatch.setenv("MODAL_SWE_AGENT_PROFILE", "unknown")
+
+    with pytest.raises(ValueError, match="Unknown Modal SWE agent profile"):
+        _agent_prompt_overrides()
+
+
+def test_model_token_metrics_summarize_retained_response_usage() -> None:
+    messages = [
+        {
+            "extra": {
+                "response": {"usage": {"prompt_tokens": 100, "completion_tokens": 20}}
+            }
+        },
+        {"role": "tool", "content": "output"},
+        {
+            "extra": {
+                "response": {"usage": {"prompt_tokens": 180, "completion_tokens": 30}}
+            }
+        },
+    ]
+
+    assert _model_token_metrics(messages) == {
+        "model_prompt_tokens_total": 280,
+        "model_prompt_tokens_max": 180,
+        "model_completion_tokens_total": 50,
+        "model_completion_tokens_max": 30,
+    }
 
 
 def _run_bounded(
@@ -368,16 +410,6 @@ def test_infrastructure_failure_preserves_root_cause_metadata():
     ]
 
 
-def test_sandbox_boot_concurrency_is_bounded_per_controller(monkeypatch):
-    _sandbox_boot_semaphore.cache_clear()
-    monkeypatch.setenv("MODAL_SWE_SANDBOX_BOOT_CONCURRENCY_PER_PROCESS", "1")
-    semaphore = _sandbox_boot_semaphore()
-    assert semaphore.acquire(blocking=False)
-    assert not semaphore.acquire(blocking=False)
-    semaphore.release()
-    _sandbox_boot_semaphore.cache_clear()
-
-
 @pytest.mark.asyncio
 async def test_reward_hook_returns_verifier_reward():
     sample = Sample(metadata={"reward": 1.0})
@@ -580,6 +612,17 @@ def test_reward_parser_rejects_non_binary_values(reward):
     assert _parse_reward(output) is None
 
 
+def test_reward_parser_accepts_marker_after_terminal_control_sequence():
+    output = (
+        "test output\x1b[?1049l\x1b[23;0;0t"
+        "__MILES_SWEGYM_REWARD_START__\n"
+        "0\n"
+        "__MILES_SWEGYM_REWARD_END__\n"
+    )
+
+    assert _parse_reward(output) == 0.0
+
+
 def test_bounded_runner_preserves_small_stdout_stderr_and_return_code():
     result = _run_bounded("printf stdout; printf stderr >&2; exit 7")
 
@@ -656,6 +699,18 @@ def test_bounded_runner_enforces_deadline_and_keeps_partial_output():
     assert result.timed_out
     assert result.output == "started"
     assert result.remote_seconds < 5
+
+
+def test_bounded_runner_does_not_wait_for_detached_descendant_pipes():
+    result = _run_bounded(
+        "setsid sh -c 'sleep 30' & printf parent-done",
+        timeout=5,
+    )
+
+    assert result.return_code == 0
+    assert result.output == "parent-done"
+    assert not result.timed_out
+    assert result.remote_seconds < 2
 
 
 def test_bounded_runner_streams_commands_larger_than_modal_cmd_limit():

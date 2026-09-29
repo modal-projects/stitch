@@ -7,7 +7,7 @@ TRAINER_PACKAGES = (
     "harbor[modal,huggingface]==0.20.0",
     "mini-swe-agent==2.4.5",
     "swebench==4.1.0",
-    "modal==1.5.3",
+    "modal==1.5.5",
 )
 
 
@@ -46,7 +46,6 @@ def environment(
     sandbox_app: str,
     processes: int,
     threads_per_process: int = 16,
-    boot_concurrency_per_process: int = 4,
 ) -> dict[str, str]:
     return {
         "PYTHONPATH": "/root:/root/Megatron-LM:/root/miles",
@@ -70,7 +69,4 @@ def environment(
         "MODAL_SWE_MEMORY_MIB": "2048",
         "MODAL_SWE_AGENT_PROCESSES": str(processes),
         "MODAL_SWE_AGENT_THREADS_PER_PROCESS": str(threads_per_process),
-        "MODAL_SWE_SANDBOX_BOOT_CONCURRENCY_PER_PROCESS": str(
-            boot_concurrency_per_process
-        ),
     }

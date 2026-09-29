@@ -319,7 +319,11 @@ def _read_pointers(
 
 
 def newest_complete_export(
-    run_dir: Path, *, save_hf: str, latest_version: int
+    run_dir: Path,
+    *,
+    save_hf: str,
+    latest_version: int,
+    weight_view: str | None = None,
 ) -> tuple[int, Path] | None:
     """The newest complete export at or below ``latest_version``, from a mounted
     run directory — the checkpoint a booting replica should load.
@@ -328,8 +332,12 @@ def newest_complete_export(
     """
     exports = []
     export_root = run_dir / PurePosixPath(_validate_save_hf_template(save_hf)).parent
-    for marker in export_root.glob("*/.complete"):
-        export = marker.parent
+    marker_pattern = (
+        "*/.complete" if weight_view is None else f"*/{weight_view}/.complete"
+    )
+    for marker in export_root.glob(marker_pattern):
+        checkpoint = marker.parent
+        export = checkpoint if weight_view is None else checkpoint.parent
         try:
             iteration = VersionRef.parse(export.name).version
         except ValueError:
@@ -337,7 +345,7 @@ def newest_complete_export(
         if export != run_dir / save_hf.format(rollout_id=iteration):
             continue
         if (version := export_version(iteration)) <= latest_version:
-            exports.append((version, export))
+            exports.append((version, checkpoint))
     return max(exports) if exports else None
 
 

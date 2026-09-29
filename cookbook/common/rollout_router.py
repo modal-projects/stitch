@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import json
+import math
 import uuid
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
@@ -16,14 +17,32 @@ _RETRYABLE_STATUS = {404, 409, 429, 502, 503, 504}
 
 
 def ordered_upstreams(
-    upstreams: Mapping[str, str], affinity_key: str
+    upstreams: Mapping[str, str],
+    affinity_key: str,
+    *,
+    weights: Mapping[str, float] | None = None,
 ) -> list[tuple[str, str]]:
-    """Rendezvous-hash one session across a changing set of rollout pools."""
+    """Weighted-rendezvous-hash one session across rollout pools."""
 
-    def score(name: str) -> bytes:
-        return hashlib.blake2b(
+    weights = weights or {}
+    unknown = set(weights) - set(upstreams)
+    if unknown:
+        raise ValueError(
+            f"rollout router weights name unknown pools: {sorted(unknown)}"
+        )
+
+    resolved_weights = {name: float(weights.get(name, 1.0)) for name in upstreams}
+    if any(
+        not math.isfinite(weight) or weight <= 0 for weight in resolved_weights.values()
+    ):
+        raise ValueError("rollout router weights must be finite and positive")
+
+    def score(name: str) -> float:
+        digest = hashlib.blake2b(
             f"{affinity_key}\0{name}".encode(), digest_size=16
         ).digest()
+        uniform = (int.from_bytes(digest, "big") + 1) / (2**128 + 1)
+        return math.log(uniform) / resolved_weights[name]
 
     return sorted(upstreams.items(), key=lambda item: score(item[0]), reverse=True)
 
@@ -36,6 +55,7 @@ def create_app(
     source_header: str | None = None,
     strict_affinity: bool = False,
     weight_views: Mapping[str, str] | None = None,
+    upstream_weights: Mapping[str, float] | None = None,
     request_timeout: float = 3600.0,
 ):
     """Create an ASGI proxy that gives Miles one endpoint for several GPU pools."""
@@ -110,7 +130,11 @@ def create_app(
         }
         if upstream_affinity_header is not None:
             headers[upstream_affinity_header] = affinity_key
-        ordered = ordered_upstreams(normalized, affinity_key)
+        ordered = ordered_upstreams(
+            normalized,
+            affinity_key,
+            weights=upstream_weights,
+        )
         if strict_affinity:
             ordered = ordered[:1]
 

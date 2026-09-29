@@ -37,6 +37,9 @@ def _rollout_server_args(recipe):
     "name",
     [
         "qwen3_4b_math",
+        "qwen3_6_35b_a3b_mimo_code_heterogeneous",
+        "qwen3_6_35b_a3b_mimo_code_heterogeneous_tis",
+        "qwen3_6_35b_a3b_mimo_code",
         "qwen3_6_35b_a3b_swebench_pro",
         "qwen3_6_35b_a3b_nvfp4",
         "glm5_3_nvfp4",
@@ -76,7 +79,7 @@ def test_quantized_serving_cannot_overwrite_bf16_masters():
 
 
 def test_mixed_rollout_views_use_generic_checkpoint_paths() -> None:
-    recipe = _recipe("qwen3_6_35b_a3b_heterogeneous_phase1")
+    recipe = _recipe("qwen3_6_35b_a3b_mimo_code_heterogeneous")
 
     validate_recipe(recipe)
 
@@ -87,7 +90,7 @@ def test_mixed_rollout_views_use_generic_checkpoint_paths() -> None:
 
 
 def test_mixed_rollout_views_require_matching_pool_assignments() -> None:
-    recipe = _recipe("qwen3_6_35b_a3b_heterogeneous_phase1")
+    recipe = _recipe("qwen3_6_35b_a3b_mimo_code_heterogeneous")
     recipe.ROLLOUT_WEIGHT_VIEWS = {"fp8": recipe.FP8_CHECKPOINT_PATH}
 
     with pytest.raises(ValueError, match="must select every configured weight view"):
@@ -95,7 +98,7 @@ def test_mixed_rollout_views_require_matching_pool_assignments() -> None:
 
 
 def test_mixed_rollout_view_name_must_be_a_safe_path_component() -> None:
-    recipe = _recipe("qwen3_6_35b_a3b_heterogeneous_phase1")
+    recipe = _recipe("qwen3_6_35b_a3b_mimo_code_heterogeneous")
     recipe.ROLLOUT_WEIGHT_VIEWS = {"../fp8": recipe.FP8_CHECKPOINT_PATH}
 
     with pytest.raises(ValueError, match="invalid weight_view"):
@@ -103,7 +106,12 @@ def test_mixed_rollout_view_name_must_be_a_safe_path_component() -> None:
 
 
 @pytest.mark.parametrize(
-    "name", ["qwen3_6_35b_a3b_swebench_pro", "qwen3_6_35b_a3b_nvfp4"]
+    "name",
+    [
+        "qwen3_6_35b_a3b_mimo_code",
+        "qwen3_6_35b_a3b_swebench_pro",
+        "qwen3_6_35b_a3b_nvfp4",
+    ],
 )
 def test_qwen36_target_only_recipe_omits_mtp_from_training_and_conversion(name):
     recipe = _recipe(name)
@@ -113,7 +121,64 @@ def test_qwen36_target_only_recipe_omits_mtp_from_training_and_conversion(name):
     assert all(
         "--speculative-algorithm" not in args for args in _rollout_server_args(recipe)
     )
-    assert "mtp." in recipe.miles.hf_export_source_tensor_prefixes
+    assert recipe.miles.hf_export_source_tensor_prefixes == [
+        "model.visual.",
+        "mtp.",
+    ]
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "qwen3_6_35b_a3b_mimo_code",
+        "qwen3_6_35b_a3b_swebench_pro",
+        "qwen3_6_35b_a3b_nvfp4",
+    ],
+)
+def test_qwen36_recipes_use_qwen36_tito_template(name):
+    assert _recipe(name).miles.tito_model == "qwen36"
+
+
+def test_glm53_recipe_uses_glm53_tito_template():
+    assert _recipe("glm5_3_nvfp4").miles.tito_model == "glm53"
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "qwen3_4b_math",
+        "qwen3_6_35b_a3b_mimo_code",
+        "qwen3_6_35b_a3b_swebench_pro",
+        "qwen3_6_35b_a3b_nvfp4",
+        "glm5_3_nvfp4",
+    ],
+)
+def test_request_retry_policy_uses_miles_transport_arguments(name):
+    cfg = _recipe(name).miles
+
+    assert cfg.rollout_request_max_attempts > 1
+    assert cfg.rollout_request_retry_interval == 1.0
+    assert "rollout_request_max_attempts" not in cfg.custom_rollout_request_hook_args
+    assert "rollout_request_retry_interval" not in cfg.custom_rollout_request_hook_args
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "qwen3_4b_math",
+        "qwen3_6_35b_a3b_mimo_code",
+        "qwen3_6_35b_a3b_swebench_pro",
+        "qwen3_6_35b_a3b_nvfp4",
+        "glm5_3_nvfp4",
+    ],
+)
+def test_grouped_agentic_recipes_retain_usable_partial_groups(name):
+    cfg = _recipe(name).miles
+
+    assert cfg.keep_partial_groups_on_abort
+    assert cfg.use_dynamic_global_batch_size
+    assert not getattr(cfg, "use_fault_tolerance", False)
+    assert not hasattr(cfg, "rollout_health_check_first_wait")
 
 
 def test_qwen36_bf16_swebench_recipe_sizes_async_rollout_to_the_fleet():
@@ -172,6 +237,207 @@ def test_qwen36_bf16_swebench_recipe_sizes_async_rollout_to_the_fleet():
     )
     assert (
         cfg.custom_rollout_request_hook_args["rollout_request_weight_version_lag"] == 1
+    )
+
+
+def test_qwen36_mimo_code_uses_validated_context_and_code_tasks():
+    recipe = _recipe("qwen3_6_35b_a3b_mimo_code")
+    cfg = recipe.miles
+
+    assert cfg.prompt_data.endswith("/mimo-v2-6-rl-oss/code.jsonl")
+    assert cfg.max_seq_len == 262_144
+    assert cfg.rollout_top_p == 0.95
+    assert cfg.rollout_top_k == 1024
+    assert cfg.rollout_max_response_len == 32_768
+    assert cfg.rollout_batch_size == 64
+    assert cfg.n_samples_per_prompt == 8
+    assert cfg.global_batch_size == 512
+    assert cfg.num_rollout == 10
+    assert cfg.context_parallel_size == 2
+    assert cfg.max_tokens_per_gpu == 16_384
+    assert cfg.log_probs_max_tokens_per_gpu == 16_384
+    assert cfg.use_tis
+    assert (
+        cfg.custom_tis_function_path
+        == "miles.backends.training_utils.loss_hub.corrections.icepop_function"
+    )
+    assert cfg.tis_clip_low == 0.5
+    assert cfg.tis_clip == 5.0
+    assert cfg.environment["MODAL_SWE_MAX_STEPS"] == "500"
+    assert cfg.environment["MODAL_SWE_EPISODE_TIMEOUT"] == "4800"
+    assert cfg.environment["MODAL_SWE_MODEL_REQUEST_TIMEOUT"] == "3600"
+    assert cfg.miles_router_timeout == 3600
+    assert cfg.environment["MODAL_SWE_EXEC_TIMEOUT"] == "300"
+    assert cfg.environment["MODAL_SWE_AGENT_PROFILE"] == "mimo-code-bash"
+    assert cfg.environment["MODAL_SWE_AGENT_PROCESSES"] == "64"
+    assert cfg.environment["MODAL_SWE_AGENT_THREADS_PER_PROCESS"] == "32"
+    assert "MODAL_SWE_SANDBOX_BOOT_CONCURRENCY_PER_PROCESS" not in cfg.environment
+    assert cfg.async_max_concurrent_samples == 2048
+    assert cfg.sglang_server_concurrency == 2048
+    assert cfg.session_server_workers == 64
+    assert cfg.session_samples_timeout == 600
+    assert len(recipe.modal.rollout_pools) == 4
+    assert {pool.gpu for pool in recipe.modal.rollout_pools} == {
+        "H100",
+        "H200",
+        "B200",
+        "B300",
+    }
+    assert {
+        pool.gpu: (pool.min_containers, pool.max_containers)
+        for pool in recipe.modal.rollout_pools
+    } == {
+        "H100": (32, 48),
+        "H200": (64, 96),
+        "B200": (32, 48),
+        "B300": (32, 48),
+    }
+    assert {pool.gpu: pool.gpus_per_engine for pool in recipe.modal.rollout_pools} == {
+        "H100": 2,
+        "H200": 1,
+        "B200": 1,
+        "B300": 1,
+    }
+    assert {pool.gpu: pool.target_inputs for pool in recipe.modal.rollout_pools} == {
+        "H100": 16,
+        "H200": 8,
+        "B200": 16,
+        "B300": 16,
+    }
+    assert (
+        sum(
+            pool.min_containers * pool.target_inputs
+            for pool in recipe.modal.rollout_pools
+        )
+        == cfg.sglang_server_concurrency
+    )
+    assert {
+        pool.gpu: pool.sglang_args["--tp"] for pool in recipe.modal.rollout_pools
+    } == {
+        "H100": "2",
+        "H200": "1",
+        "B200": "1",
+        "B300": "1",
+    }
+    assert all(
+        pool.sglang_args["--context-length"] == "262144"
+        for pool in recipe.modal.rollout_pools
+    )
+    assert all(
+        pool.sglang_args["--kv-cache-dtype"] == "fp8_e4m3"
+        for pool in recipe.modal.rollout_pools
+    )
+    assert all(
+        pool.sglang_args["--max-running-requests"] == "24"
+        for pool in recipe.modal.rollout_pools
+    )
+    assert all(
+        pool.sglang_args["--cuda-graph-max-bs-decode"] == "24"
+        for pool in recipe.modal.rollout_pools
+    )
+
+
+def test_qwen36_mimo_heterogeneous_base_is_uncorrected_grpo():
+    recipe = _recipe("qwen3_6_35b_a3b_mimo_code_heterogeneous")
+    cfg = recipe.miles
+
+    validate_recipe(recipe)
+    validate_resumable_config(cfg, weight_views=recipe.ROLLOUT_WEIGHT_VIEWS)
+
+    assert cfg.hf_checkpoint == str(recipe.BF16_CHECKPOINT_PATH)
+    assert cfg.bf16
+    assert not hasattr(cfg, "fp4_recipe")
+    assert not hasattr(cfg, "te_precision_config_file")
+    assert "OPEN_TRAINING_NVFP4_FAKE_QAT_FLAG" not in cfg.environment
+    assert recipe.ROLLOUT_WEIGHT_VIEWS == {
+        "fp8": recipe.FP8_CHECKPOINT_PATH,
+        "nvfp4": recipe.NVFP4_CHECKPOINT_PATH,
+    }
+    assert cfg.rollout_top_p == 1.0
+    assert cfg.rollout_top_k == -1
+    assert cfg.advantage_estimator == "grpo"
+    assert not cfg.use_tis
+    assert not cfg.get_mismatch_metrics
+    assert cfg.custom_tis_function_path is None
+    assert not cfg.use_rollout_routing_replay
+    assert all(
+        "--enable-return-routed-experts" not in pool.sglang_args
+        for pool in recipe.modal.rollout_pools
+    )
+
+    pools = {pool.name: pool for pool in recipe.modal.rollout_pools}
+    assert {
+        name: (pool.gpu, pool.gpus_per_engine, pool.weight_view)
+        for name, pool in pools.items()
+    } == {
+        "ServerH100FP8": ("H100", 1, "fp8"),
+        "ServerH200FP8": ("H200", 1, "fp8"),
+        "ServerB200NVFP4W4A16": ("B200", 1, "nvfp4"),
+        "ServerB300NVFP4W4A16": ("B300", 1, "nvfp4"),
+    }
+    assert all(
+        "--quantization" not in pool.sglang_args
+        and "--moe-runner-backend" not in pool.sglang_args
+        for name, pool in pools.items()
+        if "FP8" in name
+    )
+    for name in ("ServerB200NVFP4W4A16", "ServerB300NVFP4W4A16"):
+        pool = pools[name]
+        assert pool.sglang_args["--quantization"] == "modelopt_fp4"
+        assert pool.sglang_args["--moe-runner-backend"] == "flashinfer_cutedsl"
+        assert pool.environment == {"SGLANG_FLASHINFER_CUTEDSL_NVFP4_W4A16": "1"}
+    assert {
+        pool.gpu: (
+            pool.min_containers,
+            pool.max_containers,
+            pool.target_inputs,
+            pool.sglang_args["--max-running-requests"],
+            pool.sglang_args["--cuda-graph-max-bs-decode"],
+        )
+        for pool in pools.values()
+    } == {
+        "H100": (16, 48, 16, "24", "24"),
+        "H200": (16, 48, 64, "64", "64"),
+        "B200": (16, 48, 64, "64", "64"),
+        "B300": (16, 48, 64, "64", "64"),
+    }
+    assert (
+        sum(
+            pool.min_containers * pool.target_inputs
+            for pool in recipe.modal.rollout_pools
+        )
+        >= cfg.sglang_server_concurrency
+        == cfg.async_max_concurrent_samples
+    )
+
+
+def test_qwen36_mimo_heterogeneous_tis_is_a_thin_control():
+    base = _recipe("qwen3_6_35b_a3b_mimo_code_heterogeneous")
+    recipe = _recipe("qwen3_6_35b_a3b_mimo_code_heterogeneous_tis")
+    cfg = recipe.miles
+
+    validate_recipe(recipe)
+    validate_resumable_config(cfg, weight_views=recipe.ROLLOUT_WEIGHT_VIEWS)
+
+    assert recipe.ROLLOUT_WEIGHT_VIEWS == base.ROLLOUT_WEIGHT_VIEWS
+    assert all(
+        pool.sglang_args.get("--enable-return-routed-experts") == ""
+        for pool in recipe.modal.rollout_pools
+    )
+    assert cfg.use_tis
+    assert cfg.num_rollout == 5
+    assert cfg.tis_clip_low == 0.5
+    assert cfg.tis_clip == 2.0
+    assert cfg.use_rollout_routing_replay
+    assert not cfg.get_mismatch_metrics
+    assert cfg.custom_tis_function_path is None
+    assert cfg.rollout_top_p == 0.95
+    assert cfg.rollout_top_k == 4096
+    assert base.miles.rollout_top_p == 1.0
+    assert base.miles.rollout_top_k == -1
+    assert all(
+        pool.sglang_args["--sampling-mask-max-tokens"] == "8192"
+        for pool in recipe.modal.rollout_pools
     )
 
 

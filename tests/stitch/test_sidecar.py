@@ -118,6 +118,7 @@ def test_from_argv_fills_unflagged_fields_with_defaults() -> None:
         ]
     )
     assert parsed == _MINIMAL
+    assert parsed.engine_health_timeout == 30.0
 
 
 def test_disk_mode_requires_local_checkpoint_dir() -> None:

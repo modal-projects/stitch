@@ -544,7 +544,7 @@ wheels = [
 
 [[package]]
 name = "modal"
-version = "1.5.4.dev11"
+version = "1.5.5"
 source = { registry = "https://modal-labs-459781239556.d.codeartifact.us-east-1.amazonaws.com/pypi/modal-pypi/simple/" }
 dependencies = [
     { name = "aiohttp" },
@@ -561,9 +561,9 @@ dependencies = [
     { name = "typing-extensions" },
     { name = "watchfiles" },
 ]
-sdist = { url = "https://modal-labs-459781239556.d.codeartifact.us-east-1.amazonaws.com/pypi/modal-pypi/simple/modal/1.5.4.dev11/modal-1.5.4.dev11.tar.gz", hash = "sha256:64ce19f28f5136d07f5fbd8438ad8644b682ba0799be2c58b03f684fc2001cb9", size = 852557, upload-time = "2026-08-02T00:56:40.476Z" }
+sdist = { url = "https://modal-labs-459781239556.d.codeartifact.us-east-1.amazonaws.com/pypi/modal-pypi/simple/modal/1.5.5/modal-1.5.5.tar.gz", hash = "sha256:30df363ed1898cc3d91a09ff3f95c38ab043f6b6294011b01085312c6a0ac777", size = 870356, upload-time = "2026-08-28T19:51:34.881Z" }
 wheels = [
-    { url = "https://modal-labs-459781239556.d.codeartifact.us-east-1.amazonaws.com/pypi/modal-pypi/simple/modal/1.5.4.dev11/modal-1.5.4.dev11-py3-none-any.whl", hash = "sha256:fe8ac9c7c14887e240ad4d1d283505f39a0c9894c70ecf3691c620fdb1a9d0f6", size = 968325, upload-time = "2026-08-02T00:56:38.891Z" },
+    { url = "https://modal-labs-459781239556.d.codeartifact.us-east-1.amazonaws.com/pypi/modal-pypi/simple/modal/1.5.5/modal-1.5.5-py3-none-any.whl", hash = "sha256:8d10d3ee09818aaba1973b73ce2521ab8961b63a29b5b52e3ff0d25e7a74808e", size = 985163, upload-time = "2026-08-28T19:51:32.404Z" },
 ]
 
 [[package]]
@@ -1111,7 +1111,7 @@ requires-dist = [
     { name = "fastapi", marker = "extra == 'sglang'" },
     { name = "httpx", marker = "extra == 'modal'" },
     { name = "httpx", marker = "extra == 'sglang'" },
-    { name = "modal", marker = "extra == 'modal'", specifier = ">=1.5.4.dev11" },
+    { name = "modal", marker = "extra == 'modal'", specifier = "==1.5.5" },
 ]
 provides-extras = ["modal", "s3", "sglang"]
 
@@ -1119,7 +1119,7 @@ provides-extras = ["modal", "s3", "sglang"]
 dev = [
     { name = "fastapi" },
     { name = "httpx" },
-    { name = "modal", specifier = ">=1.5.4.dev11" },
+    { name = "modal", specifier = "==1.5.5" },
     { name = "pytest" },
     { name = "ruff", specifier = "==0.15.1" },
     { name = "safetensors" },

@@ -237,18 +237,14 @@ def test_weight_views_publish_and_materialize_independently(tmp_path: Path) -> N
     nvfp4.claim(VersionRef("run-x", 0))
 
     fp8_v1 = _write_version(tmp_path / "fp8-trainer", VersionRef("run-x", 1))
-    fp8_v2 = _write_version(
-        tmp_path / "fp8-trainer", VersionRef("run-x", 2), base=1
-    )
+    fp8_v2 = _write_version(tmp_path / "fp8-trainer", VersionRef("run-x", 2), base=1)
     publish_version(fp8, None, fp8_v1, run_id="run-x")
     publish_version(fp8, None, fp8_v2, run_id="run-x")
 
     assert fp8.read_pointer() == VersionRef("run-x", 2)
     assert nvfp4.read_pointer() == VersionRef("run-x", 0)
 
-    nvfp4_v1 = _write_version(
-        tmp_path / "nvfp4-trainer", VersionRef("run-x", 1)
-    )
+    nvfp4_v1 = _write_version(tmp_path / "nvfp4-trainer", VersionRef("run-x", 1))
     publish_version(nvfp4, None, nvfp4_v1, run_id="run-x")
     assert nvfp4.read_pointer() == VersionRef("run-x", 1)
 

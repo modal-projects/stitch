@@ -39,7 +39,7 @@ def start_sidecar(
     commit_mode: str,
     flush_cache_on_commit: bool = False,
     debug_requests: bool = False,
-    engine_health_timeout: float = 5.0,
+    engine_health_timeout: float = 30.0,
     proxy_max_connections: int = 100,
     proxy_max_keepalive_connections: int = 20,
     weight_view: str | None = None,

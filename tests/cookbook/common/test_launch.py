@@ -45,3 +45,15 @@ def test_deploy_pool_waits_for_readiness_before_spawning(monkeypatch) -> None:
         ("ready", "app-run", {"replica_floor": 32}),
         "spawn",
     ]
+
+
+def test_deploy_pool_uses_run_specific_readiness(monkeypatch) -> None:
+    events = []
+    run = SimpleNamespace(
+        app=SimpleNamespace(deploy=lambda: events.append("deploy")),
+        await_rollout_ready=lambda: events.append("ready"),
+        spawn_train=lambda: events.append("spawn") or "call",
+    )
+
+    assert launch.deploy_pool_and_spawn(run) == "call"
+    assert events == ["deploy", "ready", "spawn"]

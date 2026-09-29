@@ -52,9 +52,18 @@ uv run --extra modal modal run -e "$MODAL_ENVIRONMENT" \
 
 uv run --extra modal modal run -e "$MODAL_ENVIRONMENT" \
   -m tools.fleet.app::traffic --pool-app "$POOL_APP" \
-  --shape agentic --concurrency 32 --duration 1800 --tag demo
+  --shape rl_agentic --concurrency 32 --duration 1800 \
+  --context-limit 262144 --tag demo
 ```
 
 The traffic probe records end-to-end latency rather than time to first token;
 its synthetic workload and sampled version polling are diagnostic signals, not
-CI thresholds.
+CI thresholds. ``rl_agentic`` models a long-lived code-agent session: its
+cacheable context grows for 40--80 turns and tool time separates successive
+generations. Sweep concurrency per replica until aggregate completion throughput
+flattens or queueing, retractions, or latency rise sharply, then validate the
+winner in a short real training run.
+For an equal-hash heterogeneous fleet, set each pool's minimum replicas to
+``ceil(total active sessions / pool count / measured sessions per replica)``;
+this gives every pool comparable admission capacity despite different TP and GPU
+throughput.

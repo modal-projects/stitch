@@ -63,7 +63,7 @@ class SidecarConfig:
     reconcile_interval: float = 5.0
     watchdog_interval: float = 5.0
     watchdog_failure_threshold: int = 3
-    engine_health_timeout: float = 5.0
+    engine_health_timeout: float = 30.0
     proxy_max_connections: int = 100
     proxy_max_keepalive_connections: int = 20
 
@@ -198,7 +198,7 @@ def _sidecar_parser() -> argparse.ArgumentParser:
     )  # 0 disables the periodic re-check
     p.add_argument("--watchdog-interval", type=float, default=5.0)
     p.add_argument("--watchdog-failure-threshold", type=int, default=3)
-    p.add_argument("--engine-health-timeout", type=float, default=5.0)
+    p.add_argument("--engine-health-timeout", type=float, default=30.0)
     p.add_argument("--proxy-max-connections", type=int, default=100)
     p.add_argument("--proxy-max-keepalive-connections", type=int, default=20)
     p.add_argument("--local-checkpoint-dir")

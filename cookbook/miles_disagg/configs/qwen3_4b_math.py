@@ -104,9 +104,9 @@ class _Miles(MilesConfig):
     custom_rollout_request_hook_args = {
         "rollout_request_weight_version_mode": "exact",
         "rollout_request_weight_version_lag": 0,
-        "rollout_request_max_attempts": 240,
-        "rollout_request_retry_interval": 1.0,
     }
+    rollout_request_max_attempts = 240
+    rollout_request_retry_interval = 1.0
     miles_router_timeout = 600
 
     update_weights_interval = 1
@@ -135,6 +135,7 @@ class _Miles(MilesConfig):
     rollout_temperature = 1.0
     rollout_top_p = 1.0
     rollout_top_k = -1
+    keep_partial_groups_on_abort = True
 
     save_interval = 20
     save_hf = "hf_checkpoints/weight_v{rollout_id:06d}"
@@ -152,6 +153,7 @@ class _Miles(MilesConfig):
     context_parallel_size = 1
     seq_length = 8192
     use_dynamic_batch_size = True
+    use_dynamic_global_batch_size = True
     max_tokens_per_gpu = 8192
     recompute_granularity = "full"
     recompute_method = "uniform"

@@ -17,13 +17,14 @@ import asyncio
 import json
 import random
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 AFFINITY_HEADER = "Modal-Session-ID"  # what the cookbook configs use
 RETRY_409_SLEEP = 1.0
 RETRY_409_LIMIT = 120
+READY_TIMEOUT = 30 * 60
 _WORDS = (
     "the model weights version pool replica delta chain anchor policy rollout "
     "context token prefill decode publish commit stage pointer session request"
@@ -36,9 +37,43 @@ class Shape:
     max_tokens: tuple[int, int]
     turns: tuple[int, int] = (1, 1)
     tool_tokens: tuple[int, int] = (0, 0)  # per-turn context growth (agentic)
+    think_seconds: tuple[float, float] = (0.0, 0.0)
+    top_p: float = 1.0
+    top_k: int = -1
+    return_routed_experts: bool = False
+    return_sampling_mask: bool = False
+    track_token_ids: bool = False
+    ignore_eos: bool = False
 
+
+_RL_AGENTIC = Shape(
+    prompt_tokens=(2_000, 8_000),
+    max_tokens=(192, 512),
+    turns=(40, 80),
+    tool_tokens=(250, 2_000),
+    think_seconds=(1.5, 4.0),
+    top_p=0.95,
+    top_k=1024,
+    return_routed_experts=True,
+    track_token_ids=True,
+)
+
+_REPLAY_ABLATION = Shape(
+    prompt_tokens=(2_048, 2_048),
+    max_tokens=(512, 512),
+    top_p=0.95,
+    top_k=4096,
+    track_token_ids=True,
+    ignore_eos=True,
+)
 
 SHAPES: dict[str, Shape] = {
+    # Equal physical decode work for controlled precision/backend comparisons.
+    "fixed_decode": Shape(
+        prompt_tokens=(1_024, 1_024),
+        max_tokens=(2_048, 2_048),
+        ignore_eos=True,
+    ),
     "long_decode": Shape(prompt_tokens=(200, 800), max_tokens=(4096, 12288)),
     "long_prefill": Shape(prompt_tokens=(8_000, 24_000), max_tokens=(256, 1024)),
     "agentic": Shape(
@@ -46,6 +81,18 @@ SHAPES: dict[str, Shape] = {
         max_tokens=(256, 1536),
         turns=(4, 12),
         tool_tokens=(500, 4_000),
+    ),
+    # Calibrated to long code-agent episodes: many short generations over a
+    # growing, cacheable conversation with time spent in tools between turns.
+    "rl_agentic": _RL_AGENTIC,
+    "rl_agentic_no_r3": replace(_RL_AGENTIC, return_routed_experts=False),
+    "replay_control": _REPLAY_ABLATION,
+    "replay_r3": replace(_REPLAY_ABLATION, return_routed_experts=True),
+    "replay_tis": replace(_REPLAY_ABLATION, return_sampling_mask=True),
+    "replay_tis_r3": replace(
+        _REPLAY_ABLATION,
+        return_sampling_mask=True,
+        return_routed_experts=True,
     ),
 }
 MIXED_WEIGHTS = {"long_decode": 0.4, "long_prefill": 0.2, "agentic": 0.4}
@@ -65,6 +112,7 @@ async def run(
     gateway: str,
     model: str,
     *,
+    affinity_header: str = AFFINITY_HEADER,
     shape: str = "mixed",
     concurrency: int = 16,
     duration: float = 600.0,
@@ -78,8 +126,10 @@ async def run(
 
     rows: list[dict[str, Any]] = []
     floor = _VersionFloor(gateway) if lag is not None else None
-    deadline = time.time() + duration
     async with httpx.AsyncClient(timeout=3600.0, trust_env=False) as client:
+        await _wait_for_ready(client, gateway)
+        started = time.time()
+        deadline = started + duration
         if floor:
             await floor.start(client)
         workers = [
@@ -94,6 +144,7 @@ async def run(
                     floor,
                     lag,
                     context_limit,
+                    affinity_header,
                     i,
                     random.Random(seed + i),
                 )
@@ -107,7 +158,21 @@ async def run(
         p = Path(out_path)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text("".join(json.dumps(r) + "\n" for r in rows))
-    return summarize(rows)
+    return summarize(rows, elapsed=time.time() - started)
+
+
+async def _wait_for_ready(client, gateway: str) -> None:  # noqa: ANN001
+    deadline = time.monotonic() + READY_TIMEOUT
+    while True:
+        try:
+            response = await client.get(f"{gateway}/server_info", timeout=10.0)
+            if response.status_code == 200 and response.json().get("ready") is True:
+                return
+        except Exception:  # noqa: BLE001 — readiness is retried until the deadline
+            pass
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"rollout pool did not become ready: {gateway}")
+        await asyncio.sleep(1.0)
 
 
 async def _worker(
@@ -120,6 +185,7 @@ async def _worker(
     floor,
     lag,
     context_limit,
+    affinity_header,
     worker_id,
     rng,
 ) -> None:  # noqa: ANN001
@@ -141,33 +207,40 @@ async def _worker(
             floor,
             lag,
             context_limit,
+            affinity_header,
+            deadline,
             session_id=f"w{worker_id}-{n}",
         )
         n += 1
 
 
 async def _session(
-    client, gateway, model, name, spec, rng, rows, floor, lag, context_limit, session_id
+    client,
+    gateway,
+    model,
+    name,
+    spec,
+    rng,
+    rows,
+    floor,
+    lag,
+    context_limit,
+    affinity_header,
+    deadline,
+    session_id,
 ) -> None:  # noqa: ANN001
     prompt_tokens = min(
         rng.randint(*spec.prompt_tokens), context_limit - max(spec.max_tokens) - 256
     )
     messages = [{"role": "user", "content": _filler(rng, prompt_tokens)}]
-    headers = {AFFINITY_HEADER: session_id}
+    headers = {affinity_header: session_id}
+    checkpoint_token_ids: list[int] = []
     for turn in range(rng.randint(*spec.turns)):
+        if time.time() >= deadline:
+            break
         max_tokens = rng.randint(*spec.max_tokens)
         if _estimate_tokens(messages) + max_tokens + 256 > context_limit:
             break  # the session has outgrown the engine's context window
-        payload: dict[str, Any] = {
-            "model": model,
-            "messages": messages,
-            "max_tokens": max_tokens,
-            "temperature": 0.8,
-        }
-        if floor is not None and floor.version is not None:
-            payload["weight_version"] = {
-                "min_version": max(0, floor.version - (lag or 0))
-            }
         row = {
             "t": time.time(),
             "shape": name,
@@ -175,6 +248,46 @@ async def _session(
             "turn": turn,
             "retries_409": 0,
         }
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": 0.8,
+            "top_p": spec.top_p,
+            "top_k": spec.top_k,
+            "ignore_eos": spec.ignore_eos,
+        }
+        prompt_token_ids = None
+        if spec.track_token_ids:
+            try:
+                prompt_token_ids = await _tokenize(
+                    client, gateway, model, messages, headers
+                )
+            except Exception as exc:  # noqa: BLE001 — one failed session is a probe result
+                row["error"] = f"tokenize: {type(exc).__name__}: {exc}"[:200]
+                rows.append(row)
+                return
+            payload.update(
+                logprobs=True,
+                return_meta_info=True,
+            )
+        if spec.return_routed_experts:
+            payload.update(
+                return_routed_experts=True,
+                routed_experts_start_len=max(
+                    0,
+                    min(
+                        len(checkpoint_token_ids) - 1,
+                        _common_prefix_len(checkpoint_token_ids, prompt_token_ids),
+                    ),
+                ),
+            )
+        if spec.return_sampling_mask:
+            payload["return_sampling_mask"] = True
+        if floor is not None and floor.version is not None:
+            payload["weight_version"] = {
+                "min_version": max(0, floor.version - (lag or 0))
+            }
         data = await _post_with_retry(
             client, f"{gateway}/v1/chat/completions", payload, headers, row
         )
@@ -187,9 +300,21 @@ async def _session(
             straddled=data.get("weight_version_start")
             != data.get("weight_version_end"),
         )
-        content = (data.get("choices") or [{}])[0].get("message", {}).get(
-            "content"
-        ) or ""
+        choice = (data.get("choices") or [{}])[0]
+        content = choice.get("message", {}).get("content") or ""
+        usage = data.get("usage") or {}
+        row.update(
+            prompt_tokens=usage.get("prompt_tokens"),
+            completion_tokens=usage.get("completion_tokens"),
+        )
+        if spec.track_token_ids:
+            output_token_logprobs = (choice.get("meta_info") or {}).get(
+                "output_token_logprobs", ()
+            )
+            checkpoint_token_ids = [
+                *(prompt_token_ids or ()),
+                *(item[1] for item in output_token_logprobs),
+            ]
         messages.append({"role": "assistant", "content": content})
         if spec.tool_tokens[
             1
@@ -200,8 +325,33 @@ async def _session(
                     "content": f"tool result:\n{_filler(rng, rng.randint(*spec.tool_tokens))}\ncontinue.",
                 }
             )
+            await asyncio.sleep(rng.uniform(*spec.think_seconds))
         else:
             break
+
+
+async def _tokenize(client, gateway, model, messages, headers) -> list[int]:  # noqa: ANN001
+    for attempt in range(5):
+        try:
+            response = await client.post(
+                f"{gateway}/tokenize",
+                json={"model": model, "messages": messages},
+                headers=headers,
+            )
+            response.raise_for_status()
+            return response.json()["tokens"]
+        except Exception:  # noqa: BLE001 — transient transport failure is retryable
+            if attempt == 4:
+                raise
+            await asyncio.sleep(1.0)
+    raise AssertionError("unreachable")
+
+
+def _common_prefix_len(left: list[int], right: list[int]) -> int:
+    for index, (left_token, right_token) in enumerate(zip(left, right, strict=False)):
+        if left_token != right_token:
+            return index
+    return min(len(left), len(right))
 
 
 async def _post_with_retry(client, url, payload, headers, row) -> dict[str, Any] | None:  # noqa: ANN001
@@ -217,10 +367,29 @@ async def _post_with_retry(client, url, payload, headers, row) -> dict[str, Any]
             await asyncio.sleep(RETRY_409_SLEEP)
             continue
         row.update(latency=time.time() - start, status=resp.status_code)
+        row["response_bytes"] = len(resp.content)
         if resp.status_code != 200:
             row["error"] = resp.text[:200]
             return None
-        return resp.json()
+        parse_started = time.perf_counter()
+        data = resp.json()
+        row["json_parse_s"] = time.perf_counter() - parse_started
+        choices = data.get("choices") or ()
+        if (
+            choices
+            and (e2e_latency := (choices[0].get("meta_info") or {}).get("e2e_latency"))
+            is not None
+        ):
+            row["sglang_e2e_latency_s"] = e2e_latency
+        if choices:
+            meta_info = choices[0].get("meta_info") or {}
+            supports = meta_info.get("output_token_sampling_mask") or ()
+            row["sampling_mask_ids"] = sum(len(support) for support in supports)
+            routed_experts = meta_info.get("routed_experts")
+            row["routed_experts_bytes_base64"] = (
+                len(routed_experts) if routed_experts is not None else 0
+            )
+        return data
     row.update(latency=time.time() - start, error="409 retry budget exhausted")
     return None
 
@@ -254,17 +423,47 @@ class _VersionFloor:
             self._task.cancel()
 
 
-def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
+def summarize(
+    rows: list[dict[str, Any]], *, elapsed: float | None = None
+) -> dict[str, Any]:
     by_shape: dict[str, list[dict[str, Any]]] = {}
     for r in rows:
         by_shape.setdefault(r["shape"], []).append(r)
     out: dict[str, Any] = {"requests": len(rows)}
+    if elapsed is not None:
+        prompt_tokens = sum(r.get("prompt_tokens") or 0 for r in rows)
+        completion_tokens = sum(r.get("completion_tokens") or 0 for r in rows)
+        successful_requests = sum(r.get("status") == 200 for r in rows)
+        out.update(
+            elapsed_s=elapsed,
+            successful_requests=successful_requests,
+            requests_per_s=successful_requests / elapsed,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            completion_tokens_per_s=completion_tokens / elapsed,
+            total_tokens_per_s=(prompt_tokens + completion_tokens) / elapsed,
+        )
     for name, rs in sorted(by_shape.items()):
         lat = sorted(r["latency"] for r in rs if "latency" in r)
+        response_bytes = [r["response_bytes"] for r in rs if "response_bytes" in r]
+        json_parse_seconds = [r["json_parse_s"] for r in rs if "json_parse_s" in r]
+        sglang_seconds = [
+            r["sglang_e2e_latency_s"] for r in rs if "sglang_e2e_latency_s" in r
+        ]
+        sampling_mask_ids = [r.get("sampling_mask_ids", 0) for r in rs]
+        routed_experts_bytes = [r.get("routed_experts_bytes_base64", 0) for r in rs]
         out[name] = {
             "n": len(rs),
             "latency_p50": lat[len(lat) // 2] if lat else None,
             "latency_p95": lat[int(len(lat) * 0.95)] if lat else None,
+            "response_bytes_total": sum(response_bytes),
+            "response_bytes_per_request": (
+                sum(response_bytes) / len(response_bytes) if response_bytes else None
+            ),
+            "json_parse_seconds_total": sum(json_parse_seconds),
+            "sglang_e2e_seconds_total": sum(sglang_seconds),
+            "sampling_mask_ids_total": sum(sampling_mask_ids),
+            "routed_experts_bytes_base64_total": sum(routed_experts_bytes),
             "straddled": sum(bool(r.get("straddled")) for r in rs),
             "retries_409": sum(r.get("retries_409", 0) for r in rs),
             "errors": sum("error" in r for r in rs),

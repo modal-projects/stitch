@@ -44,6 +44,19 @@ def test_removing_pool_only_moves_sessions_assigned_to_it() -> None:
             assert after == before
 
 
+def test_weighted_rendezvous_routes_in_proportion_to_pool_capacity() -> None:
+    upstreams = {"small": "https://small", "large": "https://large"}
+    weights = {"small": 1.0, "large": 4.0}
+
+    selected = [
+        ordered_upstreams(upstreams, str(index), weights=weights)[0][0]
+        for index in range(10_000)
+    ]
+
+    large_ratio = selected.count("large") / len(selected)
+    assert 0.78 < large_ratio < 0.82
+
+
 def test_proxy_fails_over_when_modal_pool_endpoint_is_not_ready(
     monkeypatch: Any,
 ) -> None:
