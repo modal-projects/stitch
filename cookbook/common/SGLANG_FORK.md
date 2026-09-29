@@ -14,7 +14,7 @@ DEFAULT_SGLANG_RUNTIME = SGLangRuntime(
     image="lmsysorg/sglang:v0.5.20",
     repository="https://github.com/modal-projects/sglang.git",
     branch="stitch-sglang-v0.5.20",
-    commit="1256513b488bc3b66c4d0b72f28d83642398519e",
+    commit="cbc0988c10e831005f7fa0cf5952305e4b632a3a",
 )
 ```
 
@@ -26,6 +26,13 @@ The branch is upstream v0.5.20 plus four independently reviewable layers:
 | Verified materialization | Apply and fold complete XOR delta lineages in canonical checkpoint space, verify the published checksum, and durably materialize disk targets. |
 | CPU staging | Build bounded rank-ready host images while serving, optionally keep the canonical checkpoint on local NVMe, then commit every runtime storage in place. |
 | Serving correctness | Preserve request aborts, routed-expert state, and sampling masks across data-parallel and speculative paths, and surface scheduler-process failures. |
+
+Two upstream SGLang changes are backported after these layers: support-mode
+sampling logprobs aligned with each returned sampling-mask row, and array-based
+sampling-mask transport. The former provides the behavior distribution needed
+by score-centered training; the latter avoids materializing the same numeric
+rows as Python objects at every serving boundary. Both changes are already
+merged upstream and are expected in SGLang v0.5.21.
 
 The branch history keeps these physical responsibilities in separate commits;
 the immutable pin above is the executable definition of the stack.
