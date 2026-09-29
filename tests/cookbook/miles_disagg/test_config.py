@@ -456,6 +456,7 @@ def test_qwen36_mimo_heterogeneous_score_centering_is_a_thin_control():
     assert cfg.loss_type == "score_centering"
     assert cfg.score_centering_top_k == 128
     assert cfg.score_centering_is == "none"
+    assert not cfg.skip_actor_forward_only
     assert cfg.use_rollout_logprobs
     assert cfg.disable_grpo_std_normalization
     assert cfg.calculate_per_token_loss

@@ -34,6 +34,7 @@ modal = base.modal
 class _Miles(base._Miles):
     num_rollout = 3
 
+    skip_actor_forward_only = False
     loss_type = "score_centering"
     score_centering_top_k = 128
     score_centering_is = "none"
