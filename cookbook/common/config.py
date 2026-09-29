@@ -11,7 +11,17 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 # ``"X+"`` is Modal's tier floor: that class or better (e.g. "B200+" = B200 or B300).
-GPUType = Literal["H100", "H200", "B200", "B200+", "B300", "A100"]
+GPUType = Literal[
+    "H100",
+    "H100!",
+    "H200",
+    "B200",
+    "B200+",
+    "B300",
+    "A100",
+    "A100-80GB",
+    "RTX-PRO-6000",
+]
 
 
 @dataclass(frozen=True, kw_only=True)

@@ -16,6 +16,7 @@ FP8_CHECKPOINT_PATH = CHECKPOINT_ROOT / "fp8"
 NVFP4_CHECKPOINT_PATH = CHECKPOINT_ROOT / "nvfp4-w4a16"
 ROLLOUT_CHECKPOINT_PATH = BF16_CHECKPOINT_PATH
 ROLLOUT_WEIGHT_VIEWS = {
+    "bf16": BF16_CHECKPOINT_PATH,
     "fp8": FP8_CHECKPOINT_PATH,
     "nvfp4": NVFP4_CHECKPOINT_PATH,
 }
@@ -50,38 +51,47 @@ SGLANG_DELTA_UPDATE_MODE = "cpu"
 DATASET_PATH = DATA_PATH / "mimo-v2-6-rl-oss"
 MAX_SEQ_LEN = 262_144
 AGENT_PROCESSES = 64
-AGENT_THREADS_PER_PROCESS = 18
+AGENT_THREADS_PER_PROCESS = 27
 ROLLOUT_CONCURRENT_SAMPLES = AGENT_PROCESSES * AGENT_THREADS_PER_PROCESS
-GPUS_PER_NODE = 8
-ROLLOUT_MIN_NODES = {
-    "H100": 1,
-    "H200": 1,
-    "B200": 1,
-    "B300": 1,
+ROLLOUT_MIN_GPUS = {
+    "A100-80GB": 16,
+    "H100!": 8,
+    "H200": 8,
+    "B200": 8,
+    "B300": 8,
+    "RTX-PRO-6000": 8,
 }
 ROLLOUT_TARGET_INPUTS = {
-    "H100": 16,
+    "A100-80GB": 6,
+    "H100!": 16,
     "H200": 32,
     "B200": 32,
     "B300": 64,
+    "RTX-PRO-6000": 6,
 }
 ROLLOUT_MAX_RUNNING_REQUESTS = {
-    "H100": 24,
+    "A100-80GB": 8,
+    "H100!": 24,
     "H200": 32,
     "B200": 32,
     "B300": 64,
+    "RTX-PRO-6000": 8,
 }
 
 
 def _server_args(
     *,
+    tp: int,
     attention_backend: str,
     max_running_requests: int,
+    linear_attention_backend: str = "flashinfer",
+    kv_cache_dtype: str = "fp8_e4m3",
+    mem_fraction_static: float = 0.7,
     quantization: str | None = None,
     moe_runner_backend: str | None = None,
 ) -> dict[str, str]:
     args = {
-        "--tp": "1",
+        "--tp": str(tp),
         "--dtype": "bfloat16",
         "--load-format": "safetensors",
         "--weight-loader-drop-cache-after-load": "",
@@ -91,12 +101,12 @@ def _server_args(
         "--tool-call-parser": "qwen3_coder",
         "--context-length": str(MAX_SEQ_LEN),
         "--attention-backend": attention_backend,
-        "--linear-attn-prefill-backend": "flashinfer",
-        "--linear-attn-decode-backend": "flashinfer",
+        "--linear-attn-prefill-backend": linear_attention_backend,
+        "--linear-attn-decode-backend": linear_attention_backend,
         "--mamba-ssm-dtype": "bfloat16",
         "--mamba-radix-cache-strategy": "extra_buffer",
-        "--kv-cache-dtype": "fp8_e4m3",
-        "--mem-fraction-static": "0.7",
+        "--kv-cache-dtype": kv_cache_dtype,
+        "--mem-fraction-static": str(mem_fraction_static),
         "--chunked-prefill-size": "8192",
         "--max-running-requests": str(max_running_requests),
         "--cuda-graph-max-bs-decode": str(max_running_requests),
@@ -119,21 +129,31 @@ def _pool(
     gpu: str,
     weight_view: str,
     attention_backend: str,
+    gpus_per_engine: int = 1,
+    target_inputs: int | None = None,
+    max_running_requests: int | None = None,
+    linear_attention_backend: str = "flashinfer",
+    kv_cache_dtype: str = "fp8_e4m3",
+    mem_fraction_static: float = 0.7,
     quantization: str | None = None,
     moe_runner_backend: str | None = None,
     environment: dict[str, str] | None = None,
 ) -> RolloutPoolConfig:
-    target_inputs = ROLLOUT_TARGET_INPUTS[gpu]
-    gpus_per_engine = 1
-    min_containers = ROLLOUT_MIN_NODES[gpu] * GPUS_PER_NODE // gpus_per_engine
+    target_inputs = target_inputs or ROLLOUT_TARGET_INPUTS[gpu]
+    max_running_requests = max_running_requests or ROLLOUT_MAX_RUNNING_REQUESTS[gpu]
+    min_containers = ROLLOUT_MIN_GPUS[gpu] // gpus_per_engine
     return RolloutPoolConfig(
         name=name,
         gpu=gpu,
         gpus_per_engine=gpus_per_engine,
         target_inputs=target_inputs,
         sglang_args=_server_args(
+            tp=gpus_per_engine,
             attention_backend=attention_backend,
-            max_running_requests=ROLLOUT_MAX_RUNNING_REQUESTS[gpu],
+            max_running_requests=max_running_requests,
+            linear_attention_backend=linear_attention_backend,
+            kv_cache_dtype=kv_cache_dtype,
+            mem_fraction_static=mem_fraction_static,
             quantization=quantization,
             moe_runner_backend=moe_runner_backend,
         ),
@@ -144,13 +164,81 @@ def _pool(
     )
 
 
+A100_POOL = _pool(
+    name="ServerA100BF16TP2",
+    gpu="A100-80GB",
+    gpus_per_engine=2,
+    weight_view="bf16",
+    attention_backend="flashinfer",
+    linear_attention_backend="triton",
+    kv_cache_dtype="bfloat16",
+    mem_fraction_static=0.65,
+    moe_runner_backend="triton",
+)
+RTX_PRO_6000_POOL = _pool(
+    name="ServerRTXPRO6000BF16TP2",
+    gpu="RTX-PRO-6000",
+    gpus_per_engine=2,
+    weight_view="bf16",
+    attention_backend="trtllm_mha",
+    kv_cache_dtype="bfloat16",
+    mem_fraction_static=0.7,
+    moe_runner_backend="triton",
+)
+
+
+# BF16 reads twice the FP8 expert bytes per decode step, so each BF16 GPU takes
+# half the routing load of its low-precision sibling. The 71.8 GB checkpoint
+# needs TP2 on H100. Triton is the MoE runner validated for BF16 staged updates.
+BF16_POOLS = (
+    _pool(
+        name="ServerH100BF16TP2",
+        gpu="H100!",
+        gpus_per_engine=2,
+        weight_view="bf16",
+        attention_backend="fa3",
+        target_inputs=16,
+        max_running_requests=24,
+        moe_runner_backend="triton",
+    ),
+    _pool(
+        name="ServerH200BF16",
+        gpu="H200",
+        weight_view="bf16",
+        attention_backend="fa3",
+        target_inputs=16,
+        max_running_requests=24,
+        moe_runner_backend="triton",
+    ),
+    _pool(
+        name="ServerB200BF16",
+        gpu="B200",
+        weight_view="bf16",
+        attention_backend="trtllm_mha",
+        target_inputs=16,
+        max_running_requests=24,
+        moe_runner_backend="triton",
+    ),
+    _pool(
+        name="ServerB300BF16",
+        gpu="B300",
+        weight_view="bf16",
+        attention_backend="trtllm_mha",
+        target_inputs=32,
+        max_running_requests=48,
+        moe_runner_backend="triton",
+    ),
+)
+
+
 modal = ModalConfig(
     gpu="B300",
     rollout_cpu=64.0,
     rollout_pools=(
+        # A100_POOL,  # Enable when A100-80GB capacity is available.
         _pool(
             name="ServerH100FP8",
-            gpu="H100",
+            gpu="H100!",
             weight_view="fp8",
             attention_backend="fa3",
         ),
@@ -178,6 +266,8 @@ modal = ModalConfig(
             moe_runner_backend="flashinfer_cutedsl",
             environment={"SGLANG_FLASHINFER_CUTEDSL_NVFP4_W4A16": "1"},
         ),
+        *BF16_POOLS,
+        # RTX_PRO_6000_POOL,  # Enable when RTX PRO 6000 capacity is available.
     ),
     trainer_cpu=(64.0, 256.0),
     trainer_memory_mib=(1_048_576, 3_145_728),
@@ -248,7 +338,7 @@ class _Miles(MilesConfig):
     num_rollout = 500
     save_interval = 20
     save_hf = "hf_checkpoints/weight_v{rollout_id:06d}"
-    rollout_batch_size = 64
+    rollout_batch_size = 128
     n_samples_per_prompt = 8
     global_batch_size = rollout_batch_size * n_samples_per_prompt
     rollout_temperature = 1.0

@@ -104,12 +104,17 @@ def test_multi_view_pool_claims_use_view_scoped_update_directories(monkeypatch):
         {"update_weight_disk_dir": str(app.UPDATES_DIR)}, boot_version=7
     )
 
-    assert [args.update_weight_view for args, _ in claimed] == ["fp8", "nvfp4"]
+    assert [args.update_weight_view for args, _ in claimed] == [
+        "bf16",
+        "fp8",
+        "nvfp4",
+    ]
     assert [args.update_weight_disk_dir for args, _ in claimed] == [
+        str(app.UPDATES_DIR / "bf16"),
         str(app.UPDATES_DIR / "fp8"),
         str(app.UPDATES_DIR / "nvfp4"),
     ]
-    assert [version for _, version in claimed] == [7, 7]
+    assert [version for _, version in claimed] == [7, 7, 7]
 
 
 def test_multi_view_replica_boots_from_its_latest_complete_export(

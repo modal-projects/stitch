@@ -85,6 +85,7 @@ def test_mixed_rollout_views_use_generic_checkpoint_paths() -> None:
     validate_recipe(recipe)
 
     assert recipe.ROLLOUT_WEIGHT_VIEWS == {
+        "bf16": recipe.BF16_CHECKPOINT_PATH,
         "fp8": recipe.FP8_CHECKPOINT_PATH,
         "nvfp4": recipe.NVFP4_CHECKPOINT_PATH,
     }
@@ -352,6 +353,7 @@ def test_qwen36_mimo_heterogeneous_base_is_uncorrected_grpo():
     assert not hasattr(cfg, "te_precision_config_file")
     assert "OPEN_TRAINING_NVFP4_FAKE_QAT_FLAG" not in cfg.environment
     assert recipe.ROLLOUT_WEIGHT_VIEWS == {
+        "bf16": recipe.BF16_CHECKPOINT_PATH,
         "fp8": recipe.FP8_CHECKPOINT_PATH,
         "nvfp4": recipe.NVFP4_CHECKPOINT_PATH,
     }
@@ -372,10 +374,14 @@ def test_qwen36_mimo_heterogeneous_base_is_uncorrected_grpo():
         name: (pool.gpu, pool.gpus_per_engine, pool.weight_view)
         for name, pool in pools.items()
     } == {
-        "ServerH100FP8": ("H100", 1, "fp8"),
+        "ServerH100FP8": ("H100!", 1, "fp8"),
         "ServerH200FP8": ("H200", 1, "fp8"),
         "ServerB200NVFP4W4A16": ("B200", 1, "nvfp4"),
         "ServerB300NVFP4W4A16": ("B300", 1, "nvfp4"),
+        "ServerH100BF16TP2": ("H100!", 2, "bf16"),
+        "ServerH200BF16": ("H200", 1, "bf16"),
+        "ServerB200BF16": ("B200", 1, "bf16"),
+        "ServerB300BF16": ("B300", 1, "bf16"),
     }
     assert all(
         "--quantization" not in pool.sglang_args
@@ -388,21 +394,65 @@ def test_qwen36_mimo_heterogeneous_base_is_uncorrected_grpo():
         assert pool.sglang_args["--quantization"] == "modelopt_fp4"
         assert pool.sglang_args["--moe-runner-backend"] == "flashinfer_cutedsl"
         assert pool.environment == {"SGLANG_FLASHINFER_CUTEDSL_NVFP4_W4A16": "1"}
+    for pool in recipe.BF16_POOLS:
+        assert pools[pool.name] is pool
+        assert "--quantization" not in pool.sglang_args
+        assert pool.sglang_args["--moe-runner-backend"] == "triton"
+        assert pool.sglang_args["--kv-cache-dtype"] == "fp8_e4m3"
+    assert all(
+        pool.sglang_args["--kv-cache-dtype"] == "fp8_e4m3" for pool in pools.values()
+    )
     assert {
-        pool.gpu: (
+        name: (
             pool.min_containers,
             pool.max_containers,
             pool.target_inputs,
             pool.sglang_args["--max-running-requests"],
             pool.sglang_args["--cuda-graph-max-bs-decode"],
         )
-        for pool in pools.values()
+        for name, pool in pools.items()
     } == {
-        "H100": (8, 12, 16, "24", "24"),
-        "H200": (8, 12, 32, "32", "32"),
-        "B200": (8, 12, 32, "32", "32"),
-        "B300": (8, 12, 64, "64", "64"),
+        "ServerH100FP8": (8, 12, 16, "24", "24"),
+        "ServerH200FP8": (8, 12, 32, "32", "32"),
+        "ServerB200NVFP4W4A16": (8, 12, 32, "32", "32"),
+        "ServerB300NVFP4W4A16": (8, 12, 64, "64", "64"),
+        "ServerH100BF16TP2": (4, 6, 16, "24", "24"),
+        "ServerH200BF16": (8, 12, 16, "24", "24"),
+        "ServerB200BF16": (8, 12, 16, "24", "24"),
+        "ServerB300BF16": (8, 12, 32, "48", "48"),
     }
+    assert {
+        gpu: sum(
+            pool.min_containers * pool.gpus_per_engine
+            for pool in pools.values()
+            if pool.gpu == gpu
+        )
+        for gpu in ("H100!", "H200", "B200", "B300")
+    } == {"H100!": 16, "H200": 16, "B200": 16, "B300": 16}
+    a100 = recipe.A100_POOL
+    assert a100.name not in pools
+    assert (a100.gpu, a100.gpus_per_engine, a100.weight_view) == (
+        "A100-80GB",
+        2,
+        "bf16",
+    )
+    assert (a100.min_containers, a100.max_containers, a100.target_inputs) == (
+        8,
+        12,
+        6,
+    )
+    assert a100.sglang_args["--kv-cache-dtype"] == "bfloat16"
+    assert a100.sglang_args["--moe-runner-backend"] == "triton"
+    rtx = recipe.RTX_PRO_6000_POOL
+    assert rtx.name not in pools
+    assert (rtx.gpu, rtx.gpus_per_engine, rtx.weight_view) == (
+        "RTX-PRO-6000",
+        2,
+        "bf16",
+    )
+    assert (rtx.min_containers, rtx.max_containers, rtx.target_inputs) == (4, 6, 6)
+    assert rtx.sglang_args["--kv-cache-dtype"] == "bfloat16"
+    assert rtx.sglang_args["--moe-runner-backend"] == "triton"
     assert (
         sum(
             pool.min_containers * pool.target_inputs
@@ -411,6 +461,13 @@ def test_qwen36_mimo_heterogeneous_base_is_uncorrected_grpo():
         >= cfg.sglang_server_concurrency
         == cfg.async_max_concurrent_samples
     )
+    assert (cfg.rollout_batch_size, cfg.n_samples_per_prompt) == (128, 8)
+    assert cfg.global_batch_size == 1024
+    # Miles sizes the fully-async buffer as factor * rollout_batch_size groups.
+    assert cfg.async_data_buffer_capacity_factor * cfg.rollout_batch_size == 256
+    assert cfg.sglang_server_concurrency == 64 * 27 == 1728
+    assert cfg.environment["MODAL_SWE_AGENT_PROCESSES"] == "64"
+    assert cfg.environment["MODAL_SWE_AGENT_THREADS_PER_PROCESS"] == "27"
 
 
 def test_qwen36_mimo_heterogeneous_tis_is_a_thin_control():
@@ -427,7 +484,7 @@ def test_qwen36_mimo_heterogeneous_tis_is_a_thin_control():
         for pool in recipe.modal.rollout_pools
     )
     assert cfg.use_tis
-    assert cfg.num_rollout == 10
+    assert cfg.num_rollout == base.miles.num_rollout == 500
     assert cfg.tis_clip_low == 0.5
     assert cfg.tis_clip == 2.0
     assert cfg.use_rollout_routing_replay
@@ -453,7 +510,7 @@ def test_qwen36_mimo_heterogeneous_score_centering_is_a_thin_control():
 
     assert recipe.modal is base.modal
     assert recipe.ROLLOUT_WEIGHT_VIEWS == base.ROLLOUT_WEIGHT_VIEWS
-    assert cfg.num_rollout == 10
+    assert cfg.num_rollout == base.miles.num_rollout == 500
     assert cfg.loss_type == "score_centering"
     assert cfg.score_centering_top_k == 128
     assert cfg.score_centering_is == "none"
