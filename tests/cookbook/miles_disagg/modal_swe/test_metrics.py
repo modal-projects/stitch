@@ -5,6 +5,7 @@ import pytest
 from cookbook.miles_disagg.modal_swe.metrics import (
     _request_metrics,
     _routing_replay_metrics,
+    _training_batch_composition_metrics,
 )
 
 
@@ -73,3 +74,26 @@ def test_routing_replay_metrics_report_incremental_raw_volume():
     assert output["rollout_r3/rows_total"] == 8
     assert output["rollout_r3/raw_bytes_total"] == 8 * 2 * 4 * 4
     assert output["rollout_r3/raw_bytes_per_row"] == 2 * 4 * 4
+
+
+def test_training_batch_composition_metrics_count_final_samples():
+    samples = [
+        SimpleNamespace(metadata={"rollout_source": "ServerH100FP8:fp8"}),
+        SimpleNamespace(metadata={"rollout_source": "ServerH100FP8:fp8"}),
+        SimpleNamespace(metadata={"rollout_source": "ServerB300NVFP4W4A16:nvfp4"}),
+        SimpleNamespace(metadata={}),
+    ]
+    output = {}
+
+    _training_batch_composition_metrics(samples, output)
+
+    assert output["rollout/training_batch/sample_count"] == 4
+    assert output["rollout/training_batch/ServerH100FP8:fp8/sample_count"] == 2
+    assert output["rollout/training_batch/ServerH100FP8:fp8/sample_percentage"] == 50.0
+    assert output["rollout/training_batch/ServerB300NVFP4W4A16:nvfp4/sample_count"] == 1
+    assert (
+        output["rollout/training_batch/ServerB300NVFP4W4A16:nvfp4/sample_percentage"]
+        == 25.0
+    )
+    assert output["rollout/training_batch/unknown/sample_count"] == 1
+    assert output["rollout/training_batch/unknown/sample_percentage"] == 25.0

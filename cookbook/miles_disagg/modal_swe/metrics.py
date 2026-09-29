@@ -201,6 +201,20 @@ def _routing_replay_metrics(samples: list[Sample], output: dict[str, Any]) -> No
     )
 
 
+def _training_batch_composition_metrics(
+    samples: list[Sample], output: dict[str, Any]
+) -> None:
+    output["rollout/training_batch/sample_count"] = len(samples)
+    sources = Counter(
+        str(sample.metadata.get("rollout_source") or "unknown") for sample in samples
+    )
+    for source, count in sources.items():
+        safe_source = source.replace("/", "_").replace(" ", "_")
+        prefix = f"rollout/training_batch/{safe_source}"
+        output[f"{prefix}/sample_count"] = count
+        output[f"{prefix}/sample_percentage"] = 100 * count / len(samples)
+
+
 def add_metrics(samples: list[Sample], output: dict[str, Any]) -> None:
     if not samples:
         return
@@ -213,6 +227,7 @@ def add_metrics(samples: list[Sample], output: dict[str, Any]) -> None:
     )
     _request_metrics(samples, output)
     _routing_replay_metrics(samples, output)
+    _training_batch_composition_metrics(samples, output)
 
     known_statuses = {
         "Submitted",
