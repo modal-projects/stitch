@@ -18,6 +18,7 @@ from cookbook.miles_disagg.configs import qwen3_4b_math
         "qwen3_4b_math",
         "qwen3_6_35b_a3b_mimo_code",
         "qwen3_6_35b_a3b_mimo_code_heterogeneous",
+        "qwen3_6_35b_a3b_mimo_code_heterogeneous_score_centering",
         "qwen3_6_35b_a3b_mimo_code_heterogeneous_tis",
         "qwen3_6_35b_a3b_swebench_pro",
         "qwen3_6_35b_a3b_nvfp4",

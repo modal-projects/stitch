@@ -38,6 +38,7 @@ def _rollout_server_args(recipe):
     [
         "qwen3_4b_math",
         "qwen3_6_35b_a3b_mimo_code_heterogeneous",
+        "qwen3_6_35b_a3b_mimo_code_heterogeneous_score_centering",
         "qwen3_6_35b_a3b_mimo_code_heterogeneous_tis",
         "qwen3_6_35b_a3b_mimo_code",
         "qwen3_6_35b_a3b_swebench_pro",
@@ -439,6 +440,29 @@ def test_qwen36_mimo_heterogeneous_tis_is_a_thin_control():
         pool.sglang_args["--sampling-mask-max-tokens"] == "8192"
         for pool in recipe.modal.rollout_pools
     )
+
+
+def test_qwen36_mimo_heterogeneous_score_centering_is_a_thin_control():
+    base = _recipe("qwen3_6_35b_a3b_mimo_code_heterogeneous")
+    recipe = _recipe("qwen3_6_35b_a3b_mimo_code_heterogeneous_score_centering")
+    cfg = recipe.miles
+
+    validate_recipe(recipe)
+    validate_resumable_config(cfg, weight_views=recipe.ROLLOUT_WEIGHT_VIEWS)
+
+    assert recipe.modal is base.modal
+    assert recipe.ROLLOUT_WEIGHT_VIEWS == base.ROLLOUT_WEIGHT_VIEWS
+    assert cfg.num_rollout == 3
+    assert cfg.loss_type == "score_centering"
+    assert cfg.score_centering_top_k == 128
+    assert cfg.score_centering_is == "none"
+    assert cfg.use_rollout_logprobs
+    assert cfg.disable_grpo_std_normalization
+    assert cfg.calculate_per_token_loss
+    assert cfg.rollout_top_p == 0.95
+    assert cfg.rollout_top_k == 64
+    assert not cfg.use_tis
+    assert not cfg.use_rollout_routing_replay
 
 
 @pytest.mark.parametrize("ref_load", [None, "/checkpoints/another-model-torch-dist"])
