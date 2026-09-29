@@ -5,13 +5,13 @@ Stitch installs an immutable Miles revision over a dated trainer image:
 ```python
 MILES_IMAGE_TAG = "radixark/miles:dev-202609290439"
 MILES_REPO_URL = "https://github.com/modal-projects/miles.git"
-MILES_REPO_REF = "871c7a189213c17024d490a3d02ffbc57f712e18"
+MILES_REPO_REF = "b2656a4059e723228f14e72ea6a48eadd07af29a"
 ```
 
 The image supplies the compiled CUDA, Transformer Engine, and Megatron-LM
 environment. The source pin belongs to
 `modal-projects/miles:stitch-miles`: upstream Miles main at
-`3439ec7513`, followed by thirteen reviewed integration changes.
+`3439ec7513`, followed by fourteen reviewed integration changes.
 Each upstream PR is represented by one commit; the branch carries no additional
 runtime patches. Stitch no longer patches Miles at container startup.
 
@@ -32,6 +32,7 @@ runtime patches. Stitch no longer patches Miles at container startup.
 | Rollout weight views | Not yet upstreamed | `46f5ec0004` | Publish independent checkpoint-defined rollout precisions, attribute samples to their source view, and preserve checksum-verified per-view baselines across resume. |
 | Rollout checkpoint views | Not yet upstreamed | `5ba5e1cab6` | Save one complete HF checkpoint per rollout precision, preserving checkpoint-owned tensors that are absent from the trainer model. |
 | Score-centered policy gradients | Not yet upstreamed | `871c7a1892` | Preserve sampler candidate probabilities through native and session rollouts and train with score centering plus optional truncated or masked importance weights. |
+| Parallel score-centering validation | Not yet upstreamed | `b2656a4059` | Run the unchanged per-sample candidate checks on a bounded thread pool, raising the same first-in-order error as the serial loop. |
 
 The integration boundary is intentionally small:
 
