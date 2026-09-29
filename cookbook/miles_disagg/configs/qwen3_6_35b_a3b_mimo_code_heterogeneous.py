@@ -330,6 +330,7 @@ class _Miles(MilesConfig):
             threads_per_process=AGENT_THREADS_PER_PROCESS,
         ),
         **NVFP4_ENCODING_ENV,
+        "OMP_NUM_THREADS": "1",
         "NVTE_FP8_BLOCK_SCALING_FP32_SCALES": "1",
         "MODAL_SWE_TASKS_DIR": f"{DATASET_PATH}/tasks/code",
         "MODAL_SWE_AGENT_PROFILE": "mimo-code-bash",
