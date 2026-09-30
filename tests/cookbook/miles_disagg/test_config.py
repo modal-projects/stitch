@@ -633,7 +633,7 @@ def test_hetero_recipes_change_only_their_algorithm():
         == "miles.backends.training_utils.loss_hub.corrections.icepop_function"
     )
     assert (icepop.tis_clip_low, icepop.tis_clip) == (0.2, 5.0)
-    assert (icepop.rollout_top_p, icepop.rollout_top_k) == (0.95, 4096)
+    assert (icepop.rollout_top_p, icepop.rollout_top_k) == (0.97, 4096)
     assert icepop.disable_grpo_std_normalization
     assert icepop.skip_actor_forward_only and not icepop.use_rollout_logprobs
     assert icepop.prompt_mean_loss and not icepop.calculate_per_token_loss
@@ -649,7 +649,7 @@ def test_hetero_recipes_change_only_their_algorithm():
         assert cfg.disable_grpo_std_normalization and cfg.calculate_per_token_loss
         assert not getattr(cfg, "prompt_mean_loss", False)
         # The recorded candidates must cover the whole realized support.
-        assert (cfg.rollout_top_p, cfg.rollout_top_k) == (0.95, 64)
+        assert (cfg.rollout_top_p, cfg.rollout_top_k) == (0.97, 64)
         assert cfg.rollout_top_k <= cfg.score_centering_top_k
     # Score centering composed with IcePop's masked weights.
     assert (sc.score_centering_is, sc_mis.score_centering_is) == ("none", "mis")

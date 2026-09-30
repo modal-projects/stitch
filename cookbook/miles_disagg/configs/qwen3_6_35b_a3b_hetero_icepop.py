@@ -19,7 +19,7 @@ EXPERIMENT_VOLUME_NAME = APP_NAME
 
 
 class _Miles(HeteroMiles):
-    rollout_top_p = 0.95
+    rollout_top_p = 0.97
     # Only bounds the returned support; top-p sets it in practice.
     rollout_top_k = 4096
     disable_grpo_std_normalization = True
