@@ -592,6 +592,15 @@ def test_hetero_recipes_share_the_fleet_data_and_run_shape(name):
     )
     assert cfg.wandb_group == cfg.prometheus_run_name == f"qwen36-hetero-{slug}"
     assert cfg.environment["MODAL_SWE_SANDBOX_APP"] == "stitch-qwen36-hetero-sandbox"
+    # Views that finish encoding together share one commit round, and the first wave
+    # of sessions starts over five minutes rather than at once. The trainer checkpoint
+    # is written synchronously: an async writer would hold files open on the mount
+    # each publish reloads.
+    assert not getattr(cfg, "async_save", False)
+    assert cfg.custom_update_weight_post_write_views_path == (
+        "cookbook.common.hooks.commit_and_wake_views"
+    )
+    assert cfg.environment["MODAL_SWE_START_RAMP_SECONDS"] == "300"
     # A replayed support must fit the engine's mask, with room for ties at the cutoff.
     if cfg.rollout_top_k > 0:
         assert all(

@@ -345,6 +345,10 @@ class HeteroMiles(MilesConfig):
     update_weight_delta_checksum = "xxh3-128"
     update_weight_buffer_size = 2 * 1024**3
     custom_update_weight_post_write_path = "cookbook.common.hooks.commit_and_wake"
+    # One commit round publishes all three views of an update.
+    custom_update_weight_post_write_views_path = (
+        "cookbook.common.hooks.commit_and_wake_views"
+    )
 
     tito_model = "qwen36"
     session_server_port = 30000
@@ -445,6 +449,9 @@ class HeteroMiles(MilesConfig):
         "MODAL_SWE_MODEL_REQUEST_TIMEOUT": "3600",
         "MODAL_SWE_EXEC_TIMEOUT": "300",
         "MODAL_SWE_MEMORY_MIB": "8192",
+        # Spread the first wave of sessions over five minutes; starting them all at
+        # once clustered gateway errors and aborted requests in the first ~45 min.
+        "MODAL_SWE_START_RAMP_SECONDS": "300",
     }
 
     def prepare_data(self) -> None:

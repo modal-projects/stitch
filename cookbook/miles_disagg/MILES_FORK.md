@@ -5,13 +5,13 @@ Stitch installs an immutable Miles revision over a dated trainer image:
 ```python
 MILES_IMAGE_TAG = "radixark/miles:dev-202609290439"
 MILES_REPO_URL = "https://github.com/modal-projects/miles.git"
-MILES_REPO_REF = "4aa180e9502d057cf3733593a82a513cea25f645"
+MILES_REPO_REF = "c96c327f32383c1160b99f58f53ad48f8f0aa265"
 ```
 
 The image supplies the compiled CUDA, Transformer Engine, and Megatron-LM
 environment. The source pin belongs to
 `modal-projects/miles:stitch-miles-hetero`, the heterogeneous-RL experiment branch:
-upstream Miles main at `3439ec7513`, followed by twenty reviewed integration changes.
+upstream Miles main at `3439ec7513`, followed by twenty-one reviewed integration changes.
 `stitch-miles` tracks the pin on Stitch main.
 Each upstream PR is represented by one commit; the branch carries no additional
 runtime patches. Stitch no longer patches Miles at container startup.
@@ -36,10 +36,11 @@ runtime patches. Stitch no longer patches Miles at container startup.
 | Parallel score-centering validation | Not yet upstreamed | `b2656a4059` | Run the unchanged per-sample candidate checks on a bounded thread pool, raising the same first-in-order error as the serial loop. |
 | Drain during weight publication | Not yet upstreamed | `c802bb390e` | Optionally convert the next fully-async batch while the weight update publishes, measuring its staleness against the version that update publishes. |
 | Per-view mismatch diagnostics | Not yet upstreamed | `8448a2896b` | Report train-vs-rollout logprob difference and KL per rollout weight view, leaving the loss and existing metrics unchanged. |
-| Mismatch diagnostics by staleness | Not yet upstreamed | `19459cde3c` | Split train-vs-rollout mismatch by the version lag between a sample's generation and the batch's training version. |
-| Mismatch diagnostics per rollout pool | Not yet upstreamed | `d09c5900b7` | Split the train-vs-rollout mismatch diagnostics by the rollout source (pool and view) each sample came from, listed by `--rollout-sources`, all detached from the loss. |
-| Prompt-mean loss and router freezing | Not yet upstreamed | `255ecedc2b` | Add `--prompt-mean-loss` (a token mean within each prompt's rollouts, then an equal-weight mean over prompts) and `--freeze-moe-router` (MoE router weights stay at their initial values). |
-| Core mismatch split | Not yet upstreamed | `4aa180e950` | Report the mismatch split as KL and the share of tokens outside a [1/5, 5] trainer/sampler ratio, token-weighted whatever the loss aggregation, with no per-sample loop or host sync. |
+| Prompt-mean loss and router freezing | Not yet upstreamed | `9f40167078` | Add `--prompt-mean-loss` (a token mean within each prompt's rollouts, then an equal-weight mean over prompts) and `--freeze-moe-router` (MoE router weights stay at their initial values). |
+| Mismatch split by source and staleness | Not yet upstreamed | `e5d495e581` | Report the mismatch as KL and the share of tokens outside a [1/5, 5] trainer/sampler ratio, for all tokens and per view, per rollout source (`--rollout-sources`) and per version-lag bucket; token-weighted whatever the loss aggregation, with no per-sample loop or host sync. |
+| Canonical view exports | Not yet upstreamed | `f9559086ee` | Export each rollout view in its canonical checkpoint layout, as its deltas are, so a replica booted from an export can apply the deltas that follow it. |
+| Joint view publication | Not yet upstreamed | `0f09a4da66` | Publish rollout views that finish encoding together with one `--custom-update-weight-post-write-views-path` call, so one commit round covers them; no view waits for another. |
+| Weight-sync timing | Not yet upstreamed | `c96c327f32` | Log where each weight sync's time goes (bucket production, conversion wait, pinned buffers, GPU-to-CPU copy, diff/compress workers); log lines only. |
 
 The integration boundary is intentionally small:
 
