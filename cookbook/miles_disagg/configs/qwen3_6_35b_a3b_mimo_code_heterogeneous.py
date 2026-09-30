@@ -77,6 +77,19 @@ ROLLOUT_MAX_RUNNING_REQUESTS = {
     "B300": 64,
     "RTX-PRO-6000": 8,
 }
+# Host RAM per engine: measured steady state (CPU staging holds the canonical
+# checkpoint plus rank images) + 50%. BF16 TP2 peaked at 150 GiB during a v1->v9
+# catch-up. The 512 GiB limit leaves room to burst.
+ROLLOUT_MEMORY_REQUEST_GIB = {
+    ("bf16", 1): 216,
+    ("bf16", 2): 224,
+    ("fp8", 1): 120,
+    ("nvfp4", 1): 88,
+}
+ROLLOUT_MEMORY_LIMIT_GIB = 512
+# Weight staging uses ~5 cores even with 64 available, and catch-up time matched
+# at 10 and 64 cores. Ten cores per engine lets every host class pack a full node.
+ROLLOUT_CPU = 10.0
 
 
 def _server_args(
@@ -158,6 +171,10 @@ def _pool(
             moe_runner_backend=moe_runner_backend,
         ),
         weight_view=weight_view,
+        memory_mib=(
+            ROLLOUT_MEMORY_REQUEST_GIB[weight_view, gpus_per_engine] * 1024,
+            ROLLOUT_MEMORY_LIMIT_GIB * 1024,
+        ),
         environment=environment or {},
         min_containers=min_containers,
         max_containers=min_containers * 3 // 2,
@@ -233,7 +250,7 @@ BF16_POOLS = (
 
 modal = ModalConfig(
     gpu="B300",
-    rollout_cpu=64.0,
+    rollout_cpu=ROLLOUT_CPU,
     rollout_pools=(
         # A100_POOL,  # Enable when A100-80GB capacity is available.
         _pool(

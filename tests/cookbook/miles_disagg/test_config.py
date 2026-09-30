@@ -461,6 +461,22 @@ def test_qwen36_mimo_heterogeneous_base_is_uncorrected_grpo():
         >= cfg.sglang_server_concurrency
         == cfg.async_max_concurrent_samples
     )
+    assert recipe.modal.rollout_cpu == 10.0
+    assert {
+        name: tuple(size // 1024 for size in pool.memory_mib)
+        for name, pool in pools.items()
+    } == {
+        "ServerH100FP8": (120, 512),
+        "ServerH200FP8": (120, 512),
+        "ServerB200NVFP4W4A16": (88, 512),
+        "ServerB300NVFP4W4A16": (88, 512),
+        "ServerH100BF16TP2": (224, 512),
+        "ServerH200BF16": (216, 512),
+        "ServerB200BF16": (216, 512),
+        "ServerB300BF16": (216, 512),
+    }
+    assert recipe.A100_POOL.memory_mib == recipe.RTX_PRO_6000_POOL.memory_mib
+    assert recipe.A100_POOL.memory_mib == (224 * 1024, 512 * 1024)
     assert (cfg.rollout_batch_size, cfg.n_samples_per_prompt) == (128, 8)
     assert cfg.global_batch_size == 1024
     # Miles sizes the fully-async buffer as factor * rollout_batch_size groups.
