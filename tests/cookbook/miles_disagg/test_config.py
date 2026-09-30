@@ -423,14 +423,14 @@ def test_qwen36_mimo_heterogeneous_base_is_uncorrected_grpo():
         )
         for name, pool in pools.items()
     } == {
-        "ServerH100FP8": (8, 12, 16, "24", "24"),
-        "ServerH200FP8": (8, 12, 32, "32", "32"),
-        "ServerB200NVFP4W4A16": (8, 12, 32, "32", "32"),
-        "ServerB300NVFP4W4A16": (8, 12, 48, "64", "64"),
-        "ServerA100BF16TP2": (4, 6, 12, "16", "16"),
-        "ServerRTXPRO6000BF16TP2": (4, 6, 12, "16", "16"),
-        "ServerH100BF16TP2": (4, 6, 32, "48", "48"),
-        "ServerH200BF16": (8, 12, 16, "24", "24"),
+        "ServerH100FP8": (8, 8, 16, "24", "24"),
+        "ServerH200FP8": (8, 8, 32, "32", "32"),
+        "ServerB200NVFP4W4A16": (8, 8, 32, "32", "32"),
+        "ServerB300NVFP4W4A16": (8, 8, 48, "64", "64"),
+        "ServerA100BF16TP2": (4, 4, 12, "16", "16"),
+        "ServerRTXPRO6000BF16TP2": (4, 4, 12, "16", "16"),
+        "ServerH100BF16TP2": (4, 4, 32, "48", "48"),
+        "ServerH200BF16": (8, 8, 16, "24", "24"),
     }
     # Every pool gets the same 8-GPU floor.
     assert {pool.min_containers * pool.gpus_per_engine for pool in pools.values()} == {
@@ -464,6 +464,8 @@ def test_qwen36_mimo_heterogeneous_base_is_uncorrected_grpo():
     assert cfg.max_seq_len == 262_144
     assert cfg.context_parallel_size == 4
     assert cfg.save_interval == 10
+    assert cfg.environment["PYTORCH_CUDA_ALLOC_CONF"] == "expandable_segments:True"
+    assert cfg.fully_async_drain_during_weight_update
     # Miles sizes the fully-async buffer as factor * rollout_batch_size groups.
     assert cfg.async_data_buffer_capacity_factor * cfg.rollout_batch_size == 256
     assert cfg.sglang_server_concurrency == 64 * 21 == 1344
@@ -481,7 +483,7 @@ def test_qwen36_mimo_heterogeneous_tis_is_a_thin_control():
 
     assert recipe.ROLLOUT_WEIGHT_VIEWS == base.ROLLOUT_WEIGHT_VIEWS
     assert all(
-        pool.sglang_args.get("--enable-return-routed-experts") == ""
+        "--enable-return-routed-experts" not in pool.sglang_args
         for pool in recipe.modal.rollout_pools
     )
     assert cfg.use_tis
@@ -489,7 +491,7 @@ def test_qwen36_mimo_heterogeneous_tis_is_a_thin_control():
     assert (cfg.context_parallel_size, cfg.save_interval) == (4, 10)
     assert cfg.tis_clip_low == 0.5
     assert cfg.tis_clip == 2.0
-    assert cfg.use_rollout_routing_replay
+    assert not cfg.use_rollout_routing_replay
     assert not cfg.get_mismatch_metrics
     assert cfg.custom_tis_function_path is None
     assert cfg.rollout_top_p == 0.95

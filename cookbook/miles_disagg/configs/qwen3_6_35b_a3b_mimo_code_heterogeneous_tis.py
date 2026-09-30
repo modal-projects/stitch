@@ -1,4 +1,4 @@
-"""TIS and routing-replay control for heterogeneous low-precision rollout."""
+"""TIS control for heterogeneous low-precision rollout (no routing replay)."""
 
 from dataclasses import replace
 
@@ -37,7 +37,6 @@ modal = replace(
             pool,
             sglang_args={
                 **pool.sglang_args,
-                "--enable-return-routed-experts": "",
                 "--sampling-mask-max-tokens": "8192",
             },
         )
@@ -53,7 +52,7 @@ class _Miles(base._Miles):
     use_tis = True
     tis_clip_low = 0.5
     tis_clip = 2.0
-    use_rollout_routing_replay = True
+    use_rollout_routing_replay = False
 
     wandb_group = "qwen3-6-35b-mimo-code-heterogeneous-tis"
     prometheus_run_name = wandb_group

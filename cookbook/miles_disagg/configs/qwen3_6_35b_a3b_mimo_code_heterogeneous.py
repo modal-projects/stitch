@@ -179,7 +179,9 @@ def _pool(
         ),
         environment=environment or {},
         min_containers=min_containers,
-        max_containers=min_containers * 3 // 2,
+        # A fixed fleet: scaling past the floor and back down kills live sessions,
+        # and router weights are fixed at startup. Resize with update_autoscaler.
+        max_containers=min_containers,
     )
 
 
@@ -370,6 +372,8 @@ class _Miles(MilesConfig):
     max_weight_staleness = None
     async_max_concurrent_samples = ROLLOUT_CONCURRENT_SAMPLES
     async_data_buffer_capacity_factor = 2.0
+    # Convert the next batch while the three weight views publish.
+    fully_async_drain_during_weight_update = True
     async_unused_samples_handler = "drop"
     keep_partial_groups_on_abort = True
     eval_interval = None
@@ -445,6 +449,9 @@ class _Miles(MilesConfig):
         **NVFP4_ENCODING_ENV,
         "OMP_NUM_THREADS": "1",
         "NVTE_FP8_BLOCK_SCALING_FP32_SCALES": "1",
+        # Long episodes leave the B300 caching allocator fragmented; every arm
+        # logged OOM-and-retry on 16-29 GB allocations at CP=2.
+        "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
         "MODAL_SWE_TASKS_DIR": f"{DATASET_PATH}/tasks/code",
         "MODAL_SWE_AGENT_PROFILE": "mimo-code-bash",
         "MODAL_SWE_MAX_STEPS": "500",
