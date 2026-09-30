@@ -6,10 +6,15 @@ aggregates environment/tool/verifier fields owned by the Modal adapter.
 
 from __future__ import annotations
 
+import gzip
 import heapq
 import json
 import logging
+import os
+import random
+from array import array
 from collections import Counter, defaultdict
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -43,10 +48,21 @@ _KNOWN_EXIT_STATUSES = {
 }
 # The agent never produced a parseable action; a format collapse shows up here first.
 _FORMAT_ERROR_STATUSES = {"FormatError", "RepeatedFormatError"}
-# Per step, a few trajectories are kept so a collapse can be read, not just measured.
+# Every step keeps a readable slice of the batch: its best and worst trajectories and
+# a few whole GRPO groups, every attempt at one task side by side.
 _SAMPLE_DUMP_PER_END = 2
-_SAMPLE_DUMP_CHARS = 2_000
-_ASSISTANT_TURN_MARKER = "<|im_start|>assistant"
+_SAMPLE_DUMP_GROUPS = 2
+# Whole-batch dumps are converted and written off the drain path, one at a time.
+_BATCH_WRITER = ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="rollout-batch-dump"
+)
+_BATCH_LAYOUT = {
+    "trajectories.jsonl.gz": "one record per sample, in batch order",
+    "tokens.int32": "every sample's full token sequence, concatenated; sample i has num_tokens[i]",
+    "rollout_log_probs.float32": "sampler log-probs over each sample's last response_length tokens",
+    "loss_mask.uint8": "loss mask over the same response tokens",
+    "byte_order": "little-endian",
+}
 
 _AGENT_MEAN_ONLY_METRICS = {
     "agent_tool_input_over_64k_count",
@@ -411,61 +427,160 @@ def add_metrics(
     ) / len(samples)
 
 
-def _last_assistant_text(sample: Sample) -> str:
-    text = str(getattr(sample, "response", "") or "")
-    return text.rsplit(_ASSISTANT_TURN_MARKER, 1)[-1][:_SAMPLE_DUMP_CHARS]
+def _weight_versions(sample: Sample) -> list[int]:
+    spans = getattr(sample, "all_weight_version_spans", None) or []
+    return sorted({int(span.version) for span in spans if str(span.version).isdigit()})
 
 
-def _dump_samples(
-    rollout_id: int,
-    args: Any,
-    samples: list[Sample],
-    *,
-    reward_key: str | None = None,
-) -> None:
-    """Write the batch's best and worst trajectories next to the run's checkpoints.
+def _trajectory(
+    rollout_id: int, sample: Sample, reward_key: str | None, picks: list[str]
+) -> dict[str, Any]:
+    agent_metrics = sample.metadata.get("agent_metrics") or {}
+    return {
+        "rollout_id": rollout_id,
+        "picks": picks,
+        "index": getattr(sample, "index", None),
+        "group_index": getattr(sample, "group_index", None),
+        "rollout_source": sample.metadata.get("rollout_source"),
+        "weight_versions": _weight_versions(sample),
+        "reward": _raw_reward(sample, reward_key),
+        "exit_status": sample.metadata.get("exit_status"),
+        "turns": agent_metrics.get("turns"),
+        "num_tokens": len(getattr(sample, "tokens", None) or ()),
+        "response_length": getattr(sample, "response_length", None),
+        "prompt": getattr(sample, "prompt", None),
+        "response": getattr(sample, "response", None),
+    }
 
-    The run directory is the parent of Miles' ``--save`` directory on the mounted run
-    volume, which Stitch commits with every weight publication. A failed write only
-    loses the dump, never the step.
-    """
-    save = getattr(args, "save", None)
-    if not save:
-        return
+
+def _write_atomically(path: Path, write) -> None:
+    """Write through a temporary name, so a volume commit never sees a partial file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    partial = path.with_name(path.name + ".partial")
+    with open(partial, "wb") as handle:
+        write(handle)
+    os.replace(partial, path)
+
+
+def _write_trajectories(path: Path, records: list[dict[str, Any]]) -> None:
+    def write(handle) -> None:
+        with gzip.GzipFile(fileobj=handle, mode="wb", compresslevel=1) as gz:
+            for record in records:
+                gz.write((json.dumps(record, default=str) + "\n").encode())
+
+    _write_atomically(path, write)
+
+
+def _step_picks(samples: list[Sample], rollout_id: int, reward_key: str | None):
+    """Positions of the batch's best and worst trajectories and of a few whole groups."""
+    picks: dict[int, list[str]] = defaultdict(list)
     scored = [
         (reward, position)
         for position, sample in enumerate(samples)
         if (reward := _raw_reward(sample, reward_key)) is not None
     ]
-    picks = {position for _, position in heapq.nlargest(_SAMPLE_DUMP_PER_END, scored)}
-    picks |= {position for _, position in heapq.nsmallest(_SAMPLE_DUMP_PER_END, scored)}
-    rows = []
-    for position in sorted(picks):
-        sample = samples[position]
-        agent_metrics = sample.metadata.get("agent_metrics") or {}
-        rows.append(
-            {
-                "rollout_id": rollout_id,
-                "index": sample.index,
-                "group_index": getattr(sample, "group_index", None),
-                "rollout_source": sample.metadata.get("rollout_source"),
-                "exit_status": sample.metadata.get("exit_status"),
-                "reward": _raw_reward(sample, reward_key),
-                "response_length": getattr(sample, "response_length", None),
-                "turns": agent_metrics.get("turns"),
-                "last_assistant": _last_assistant_text(sample),
-            }
-        )
-    if not rows:
-        return
-    path = Path(save).parent / "rollout_samples" / f"rollout_{rollout_id:06d}.jsonl"
+    for _, position in heapq.nlargest(_SAMPLE_DUMP_PER_END, scored):
+        picks[position].append("best")
+    for _, position in heapq.nsmallest(_SAMPLE_DUMP_PER_END, scored):
+        picks[position].append("worst")
+    groups: dict[Any, list[int]] = defaultdict(list)
+    for position, sample in enumerate(samples):
+        if (group := getattr(sample, "group_index", None)) is not None:
+            groups[group].append(position)
+    # Seeded by the step, so a replayed step keeps the same groups.
+    chosen = random.Random(rollout_id).sample(
+        sorted(groups), k=min(_SAMPLE_DUMP_GROUPS, len(groups))
+    )
+    for group in chosen:
+        for position in groups[group]:
+            picks[position].append("group")
+    return picks
+
+
+def _write_batch(directory: Path, records: list[dict], sequences: list[tuple]) -> None:
+    """Write one whole batch: readable trajectories plus its token-level arrays."""
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("".join(json.dumps(row, default=str) + "\n" for row in rows))
-    except OSError:
-        logger.warning(
-            "could not write the rollout sample dump to %s", path, exc_info=True
+        _write_trajectories(directory / "trajectories.jsonl.gz", records)
+        tokens, log_probs, loss_mask = array("i"), array("f"), array("B")
+        for sample_tokens, response_length, sample_log_probs, sample_mask in sequences:
+            tokens.extend(sample_tokens)
+            log_probs.extend(
+                sample_log_probs
+                if sample_log_probs is not None
+                and len(sample_log_probs) == response_length
+                else [float("nan")] * response_length
+            )
+            loss_mask.extend(
+                sample_mask if sample_mask is not None else [1] * response_length
+            )
+        for name, values in (
+            ("tokens.int32", tokens),
+            ("rollout_log_probs.float32", log_probs),
+            ("loss_mask.uint8", loss_mask),
+        ):
+            _write_atomically(directory / name, values.tofile)
+        _write_atomically(
+            directory / "layout.json",
+            lambda handle: handle.write(json.dumps(_BATCH_LAYOUT, indent=1).encode()),
         )
+    except (OSError, OverflowError, TypeError, ValueError):
+        logger.warning(
+            "could not write the rollout batch to %s", directory, exc_info=True
+        )
+
+
+def _dump_rollout_history(
+    rollout_id: int,
+    args: Any,
+    samples: list[Sample],
+    *,
+    reward_key: str | None = None,
+) -> Future | None:
+    """Save this step's slice of the rollout history next to the run's checkpoints.
+
+    Every step writes ``rollout_samples/rollout_NNNNNN.jsonl.gz``: the best and worst
+    trajectories and a few whole GRPO groups, in full. Every ``save_interval`` steps
+    also writes the whole batch to ``rollout_batches/rollout_NNNNNN/``, readable and as
+    token arrays. That batch trains right after a checkpoint, so the checkpoint
+    rescores it exactly offline. The run directory is the parent of Miles' ``--save``
+    directory on the run volume, which every trainer host commits with each weight
+    publication. A failed write only loses the dump, never the step.
+    """
+    save = getattr(args, "save", None)
+    if not save:
+        return None
+    run_dir = Path(save).parent
+    picks = _step_picks(samples, rollout_id, reward_key)
+    records = [
+        _trajectory(rollout_id, samples[position], reward_key, labels)
+        for position, labels in sorted(picks.items())
+    ]
+    try:
+        if records:
+            _write_trajectories(
+                run_dir / "rollout_samples" / f"rollout_{rollout_id:06d}.jsonl.gz",
+                records,
+            )
+    except OSError:
+        logger.warning("could not write the rollout sample dump", exc_info=True)
+    interval = getattr(args, "save_interval", None)
+    if not interval or rollout_id % interval:
+        return None
+    # Snapshot references now; conversion and compression run off the drain path.
+    batch = [
+        _trajectory(rollout_id, sample, reward_key, ["batch"]) for sample in samples
+    ]
+    sequences = [
+        (
+            list(getattr(sample, "tokens", None) or ()),
+            int(getattr(sample, "response_length", 0) or 0),
+            getattr(sample, "rollout_log_probs", None),
+            getattr(sample, "loss_mask", None),
+        )
+        for sample in samples
+    ]
+    directory = run_dir / "rollout_batches" / f"rollout_{rollout_id:06d}"
+    return _BATCH_WRITER.submit(_write_batch, directory, batch, sequences)
 
 
 def log_rollout_data(
@@ -480,7 +595,7 @@ def log_rollout_data(
     if rollout_extra_metrics is not None and samples:
         reward_key = getattr(args, "reward_key", None)
         add_metrics(samples, rollout_extra_metrics, reward_key=reward_key)
-        _dump_samples(rollout_id, args, samples, reward_key=reward_key)
+        _dump_rollout_history(rollout_id, args, samples, reward_key=reward_key)
         # Exact vectors are needed only for the aggregate above. Do not carry
         # hundreds of per-turn floats per trajectory into trainer object-store
         # payloads after their p50/p90/max/count totals have been recorded.

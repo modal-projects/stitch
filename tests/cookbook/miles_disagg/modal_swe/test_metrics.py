@@ -1,9 +1,13 @@
+import gzip
 import json
+import math
+from array import array
 from types import SimpleNamespace
 
 import pytest
 
 from cookbook.miles_disagg.modal_swe.metrics import (
+    _dump_rollout_history,
     _per_source_metrics,
     _request_metrics,
     _routing_replay_metrics,
@@ -253,18 +257,27 @@ def test_per_source_metrics_split_format_errors_by_pool_and_view():
     assert not any("/exit_status/" in key for key in output)
 
 
-def _dump_sample(reward, index, *, source="ServerH100FP8:fp8", response=""):
+def _dump_sample(
+    reward, index, *, group=None, source="ServerH100FP8:fp8", response="", **fields
+):
     return _sample(
         source,
         reward=reward,
-        group=0,
+        group=index if group is None else group,
         index=index,
+        prompt=f"task {index}",
         response=response,
         response_length=len(response),
         effective_response_length=1,
         rollout_routed_experts=None,
         metadata={"exit_status": "Submitted", "agent_metrics": {"turns": 2}},
+        **fields,
     )
+
+
+def _read_jsonl_gz(path):
+    with gzip.open(path, "rt") as handle:
+        return [json.loads(line) for line in handle]
 
 
 def test_rollout_log_hook_reports_a_global_format_error_ratio(tmp_path):
@@ -279,34 +292,97 @@ def test_rollout_log_hook_reports_a_global_format_error_ratio(tmp_path):
     assert metrics["rollout_agent/format_error_ratio"] == 0.5
 
 
-def test_rollout_log_hook_dumps_the_best_and_worst_trajectories(tmp_path):
-    long_turn = "x" * 3_000
+def test_every_step_keeps_the_best_and_worst_trajectories_in_full(tmp_path):
+    long_episode = "<|im_start|>assistant\nfirst<|im_end|>" + "x" * 30_000
     samples = [
-        _dump_sample(
-            reward,
-            index,
-            response=f"<|im_start|>assistant\nfirst<|im_end|><|im_start|>assistant\n{long_turn}",
-        )
+        _dump_sample(reward, index, response=long_episode)
         for index, reward in enumerate([0.5, 1.0, 0.0, 0.9, 0.1, 0.4])
+    ]
+    samples[1].all_weight_version_spans = [
+        SimpleNamespace(version="4"),
+        SimpleNamespace(version="3"),
     ]
 
     log_rollout_data(
         7, SimpleNamespace(save=str(tmp_path / "run" / "checkpoints")), samples, {}, 0.0
     )
 
-    rows = [
-        json.loads(line)
-        for line in (tmp_path / "run" / "rollout_samples" / "rollout_000007.jsonl")
-        .read_text()
-        .splitlines()
+    rows = _read_jsonl_gz(
+        tmp_path / "run" / "rollout_samples" / "rollout_000007.jsonl.gz"
+    )
+    labelled = {row["index"]: row["picks"] for row in rows}
+    # Two highest (1.0, 0.9) and two lowest (0.0, 0.1) rewards, plus two whole groups.
+    assert {i for i, picks in labelled.items() if "best" in picks} == {1, 3}
+    assert {i for i, picks in labelled.items() if "worst" in picks} == {2, 4}
+    assert sum("group" in picks for picks in labelled.values()) == 2
+    best = next(row for row in rows if row["index"] == 1)
+    assert best["rollout_id"] == 7
+    assert best["rollout_source"] == "ServerH100FP8:fp8"
+    assert best["weight_versions"] == [3, 4]
+    assert (best["prompt"], best["response"]) == ("task 1", long_episode)
+    assert (best["exit_status"], best["turns"], best["reward"]) == ("Submitted", 2, 1.0)
+
+
+def test_every_step_keeps_whole_groups_chosen_by_the_step(tmp_path):
+    samples = [
+        _dump_sample(float(i % 2), i, group=i // 4, response="r") for i in range(20)
     ]
-    # Two highest (1.0, 0.9) and two lowest (0.0, 0.1) rewards, in batch order.
-    assert [row["index"] for row in rows] == [1, 2, 3, 4]
-    assert {row["rollout_id"] for row in rows} == {7}
-    assert rows[0]["exit_status"] == "Submitted"
-    assert rows[0]["rollout_source"] == "ServerH100FP8:fp8"
-    # Only the last assistant turn is kept, capped at 2,000 characters.
-    assert rows[0]["last_assistant"] == ("\n" + long_turn)[:2_000]
+    args = SimpleNamespace(save=str(tmp_path / "run" / "checkpoints"))
+    dumps = tmp_path / "run" / "rollout_samples"
+
+    log_rollout_data(3, args, samples, {}, 0.0)
+    log_rollout_data(3, args, samples, {}, 0.0)
+
+    rows = _read_jsonl_gz(dumps / "rollout_000003.jsonl.gz")
+    grouped = [row for row in rows if "group" in row["picks"]]
+    groups = {row["group_index"] for row in grouped}
+    # Two groups, every member of each, and the same ones when the step replays.
+    assert len(groups) == 2 and len(grouped) == 8
+    assert not list(dumps.glob("*.partial"))
+
+
+def test_checkpoint_steps_keep_the_whole_batch_readable_and_as_tokens(tmp_path):
+    samples = [
+        _dump_sample(
+            float(i),
+            i,
+            response="r" * 3,
+            tokens=[10 * i + t for t in range(5)],
+            rollout_log_probs=[-0.5, -1.0, -1.5],
+            loss_mask=[1, 0, 1],
+        )
+        for i in range(3)
+    ]
+    samples[2].rollout_log_probs = None
+    args = SimpleNamespace(save=str(tmp_path / "run" / "checkpoints"), save_interval=10)
+
+    assert _dump_rollout_history(7, args, samples) is None
+    _dump_rollout_history(20, args, samples).result()
+
+    batches = tmp_path / "run" / "rollout_batches"
+    assert [path.name for path in batches.iterdir()] == ["rollout_000020"]
+    batch = batches / "rollout_000020"
+    rows = _read_jsonl_gz(batch / "trajectories.jsonl.gz")
+    assert [row["index"] for row in rows] == [0, 1, 2]
+    assert all(row["picks"] == ["batch"] for row in rows)
+    assert [(row["num_tokens"], row["response_length"]) for row in rows] == [(5, 3)] * 3
+
+    def values(name, code):
+        loaded = array(code)
+        loaded.frombytes((batch / name).read_bytes())
+        return loaded.tolist()
+
+    assert values("tokens.int32", "i") == [
+        10 * i + t for i in range(3) for t in range(5)
+    ]
+    assert values("loss_mask.uint8", "B") == [1, 0, 1] * 3
+    log_probs = values("rollout_log_probs.float32", "f")
+    assert log_probs[:6] == [-0.5, -1.0, -1.5] * 2
+    # A sample without sampler log-probs keeps its place as NaN.
+    assert all(math.isnan(value) for value in log_probs[6:])
+    assert (
+        json.loads((batch / "layout.json").read_text())["byte_order"] == "little-endian"
+    )
 
 
 def test_rollout_log_hook_skips_the_dump_without_a_run_directory(tmp_path):
