@@ -426,10 +426,10 @@ def test_qwen36_mimo_heterogeneous_base_is_uncorrected_grpo():
         "ServerH100FP8": (8, 12, 16, "24", "24"),
         "ServerH200FP8": (8, 12, 32, "32", "32"),
         "ServerB200NVFP4W4A16": (8, 12, 32, "32", "32"),
-        "ServerB300NVFP4W4A16": (8, 12, 64, "64", "64"),
-        "ServerA100BF16TP2": (4, 6, 6, "8", "8"),
-        "ServerRTXPRO6000BF16TP2": (4, 6, 6, "8", "8"),
-        "ServerH100BF16TP2": (4, 6, 16, "24", "24"),
+        "ServerB300NVFP4W4A16": (8, 12, 48, "64", "64"),
+        "ServerA100BF16TP2": (4, 6, 12, "16", "16"),
+        "ServerRTXPRO6000BF16TP2": (4, 6, 12, "16", "16"),
+        "ServerH100BF16TP2": (4, 6, 32, "48", "48"),
         "ServerH200BF16": (8, 12, 16, "24", "24"),
     }
     # Every pool gets the same 8-GPU floor.
@@ -441,7 +441,7 @@ def test_qwen36_mimo_heterogeneous_base_is_uncorrected_grpo():
             pool.min_containers * pool.target_inputs
             for pool in recipe.modal.rollout_pools
         )
-        == 1392
+        == 1376
         >= cfg.sglang_server_concurrency
         == cfg.async_max_concurrent_samples
     )

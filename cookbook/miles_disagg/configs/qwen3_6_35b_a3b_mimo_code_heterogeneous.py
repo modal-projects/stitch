@@ -61,21 +61,23 @@ ROLLOUT_MIN_GPUS = {
     "B300": 8,
     "RTX-PRO-6000": 8,
 }
+# Sessions per engine. Picked so per-request decode speed and turn latency
+# match H200 FP8 at 32 (~90 tok/s per request) under MiMo-calibrated agent traffic.
 ROLLOUT_TARGET_INPUTS = {
-    "A100-80GB": 6,
+    "A100-80GB": 12,
     "H100!": 16,
     "H200": 32,
     "B200": 32,
-    "B300": 64,
-    "RTX-PRO-6000": 6,
+    "B300": 48,
+    "RTX-PRO-6000": 12,
 }
 ROLLOUT_MAX_RUNNING_REQUESTS = {
-    "A100-80GB": 8,
+    "A100-80GB": 16,
     "H100!": 24,
     "H200": 32,
     "B200": 32,
     "B300": 64,
-    "RTX-PRO-6000": 8,
+    "RTX-PRO-6000": 16,
 }
 # Host RAM per engine: measured steady state (CPU staging holds the canonical
 # checkpoint plus rank images) + 50%. BF16 TP2 peaked at 150 GiB during a v1->v9
@@ -213,8 +215,8 @@ HOPPER_BF16_POOLS = (
         gpus_per_engine=2,
         weight_view="bf16",
         attention_backend="fa3",
-        target_inputs=16,
-        max_running_requests=24,
+        target_inputs=32,
+        max_running_requests=48,
         moe_runner_backend="triton",
     ),
     _pool(
