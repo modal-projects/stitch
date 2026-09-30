@@ -149,6 +149,25 @@ def test_multi_view_replica_boots_from_its_latest_complete_export(
     )
 
 
+def test_heterogeneous_rollout_sources_name_every_pool_and_its_view(monkeypatch):
+    monkeypatch.setenv("EXPERIMENT_CONFIG", "qwen3_6_35b_a3b_mimo_code_heterogeneous")
+    monkeypatch.setenv("RUN_ID", "test-run")
+    monkeypatch.delenv("STITCH_STORE_BACKEND", raising=False)
+    monkeypatch.delenv("MILES_LOCAL_DIR", raising=False)
+    monkeypatch.delitem(sys.modules, "cookbook.miles_disagg.app", raising=False)
+
+    app = importlib.import_module("cookbook.miles_disagg.app")
+
+    # Miles matches each sample's reported source against this list, so both must
+    # name every pool, and the view after the last colon must be the pool's view.
+    assert list(app.ROLLOUT_SOURCES) == list(app.ROLLOUT_SERVER_NAMES)
+    for pool in app.ROLLOUT_POOL_CONFIGS:
+        source = app.ROLLOUT_SOURCES[pool.name]
+        assert source == f"{pool.name}:{pool.weight_view}"
+        assert source.rsplit(":", 1)[1] in app.ROLLOUT_WEIGHT_VIEWS
+    assert len(set(app.ROLLOUT_SOURCES.values())) == len(app.ROLLOUT_POOL_CONFIGS)
+
+
 def test_heterogeneous_readiness_is_checked_per_pool(monkeypatch):
     monkeypatch.setenv("EXPERIMENT_CONFIG", "qwen3_6_35b_a3b_mimo_code_heterogeneous")
     monkeypatch.setenv("RUN_ID", "test-run")

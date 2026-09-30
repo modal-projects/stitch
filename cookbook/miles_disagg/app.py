@@ -174,6 +174,14 @@ ROLLOUT_POOL_CONFIGS = modal_cfg.resolved_rollout_pools(
 )
 ROLLOUT_WEIGHT_VIEWS = dict(getattr(exp, "ROLLOUT_WEIGHT_VIEWS", {}) or {})
 ROLLOUT_SERVER_NAMES = tuple(pool.name for pool in ROLLOUT_POOL_CONFIGS)
+# The source the router reports for each pool's samples. The trainer splits its
+# train-vs-rollout diagnostics by the same names.
+ROLLOUT_SOURCES = {
+    pool.name: (
+        f"{pool.name}:{pool.weight_view}" if pool.weight_view is not None else pool.name
+    )
+    for pool in ROLLOUT_POOL_CONFIGS
+}
 ROLLOUT_SERVER_NAMES_BY_WEIGHT_VIEW = {
     view: [pool.name for pool in ROLLOUT_POOL_CONFIGS if pool.weight_view == view]
     for view in ROLLOUT_WEIGHT_VIEWS
@@ -377,26 +385,13 @@ if len(ROLLOUT_POOL_CONFIGS) > 1:
     def rollout_router():
         from cookbook.common.rollout_router import create_app
 
-        sources = [
-            (
-                pool,
-                f"{pool.name}:{pool.weight_view}"
-                if pool.weight_view is not None
-                else pool.name,
-            )
-            for pool in ROLLOUT_POOL_CONFIGS
-        ]
+        sources = [(pool, ROLLOUT_SOURCES[pool.name]) for pool in ROLLOUT_POOL_CONFIGS]
         upstreams = {
             source: modal.Server.from_name(APP_NAME, pool.name).get_url()
             for pool, source in sources
         }
         upstream_weights = {
-            (
-                f"{pool.name}:{pool.weight_view}"
-                if pool.weight_view is not None
-                else pool.name
-            ): pool.min_containers * pool.target_inputs
-            for pool in ROLLOUT_POOL_CONFIGS
+            source: pool.min_containers * pool.target_inputs for pool, source in sources
         }
         if any(url is None for url in upstreams.values()):
             raise RuntimeError("a heterogeneous rollout pool has no gateway URL")
@@ -551,6 +546,7 @@ class Trainer:
         cfg.rollout_session_affinity_header = ROLLOUT_SESSION_AFFINITY_HEADER
         if ROLLOUT_WEIGHT_VIEWS:
             cfg.rollout_source_header = STITCH_ROLLOUT_SOURCE_HEADER
+            cfg.rollout_sources = list(ROLLOUT_SOURCES.values())
         if resume_point is not None:
             cfg.load = resume_point.trainer_checkpoint
             if resume_point.rollout_checkpoint is not None:
@@ -598,10 +594,6 @@ class Trainer:
             **run_config,
             "rollout_weight_views": list(ROLLOUT_WEIGHT_VIEWS),
         }
-        if ROLLOUT_WEIGHT_VIEWS:
-            cfg.custom_rollout_request_hook_args[
-                "rollout_request_weight_version_mode"
-            ] = "none"
         cfg.custom_config_path = custom_config
         launch.resolve_config(
             cfg,
