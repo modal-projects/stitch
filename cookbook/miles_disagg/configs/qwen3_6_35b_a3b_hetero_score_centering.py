@@ -13,6 +13,13 @@ EXPERIMENT_VOLUME_NAME = APP_NAME
 
 
 class ScoreCenteringMiles(HeteroMiles):
+    # Top-p sampling bounded by top-k; the recorded candidates must cover the whole
+    # realized support, so they exceed top-k to leave room for ties at the cutoff.
+    rollout_top_p = 0.95
+    rollout_top_k = 64
+    # REINFORCE with group-centered rewards and a token-mean loss, as in the paper.
+    disable_grpo_std_normalization = True
+    calculate_per_token_loss = True
     loss_type = "score_centering"
     score_centering_top_k = 128
     score_centering_is = "none"

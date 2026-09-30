@@ -553,7 +553,7 @@ def _hetero(name):
 
 
 @pytest.mark.parametrize("name", _HETERO_RECIPES)
-def test_hetero_recipes_share_the_fleet_sampler_and_run_shape(name):
+def test_hetero_recipes_share_the_fleet_data_and_run_shape(name):
     recipe = _hetero(name)
     base = import_module("cookbook.miles_disagg.configs.qwen3_6_35b_a3b_hetero")
     cfg = recipe.miles
@@ -563,13 +563,8 @@ def test_hetero_recipes_share_the_fleet_sampler_and_run_shape(name):
 
     assert recipe.modal is base.modal
     assert recipe.ROLLOUT_WEIGHT_VIEWS == base.ROLLOUT_WEIGHT_VIEWS
-    assert (cfg.rollout_top_p, cfg.rollout_top_k, cfg.rollout_temperature) == (
-        0.95,
-        64,
-        1.0,
-    )
+    assert cfg.rollout_temperature == 1.0
     assert cfg.advantage_estimator == "grpo"
-    assert cfg.disable_grpo_std_normalization
     assert cfg.prompt_data.endswith("/mimo-v2-6-rl-oss/code.jsonl")
     assert not cfg.use_rollout_routing_replay
     assert (
@@ -597,6 +592,12 @@ def test_hetero_recipes_share_the_fleet_sampler_and_run_shape(name):
     )
     assert cfg.wandb_group == cfg.prometheus_run_name == f"qwen36-hetero-{slug}"
     assert cfg.environment["MODAL_SWE_SANDBOX_APP"] == "stitch-qwen36-hetero-sandbox"
+    # A replayed support must fit the engine's mask, with room for ties at the cutoff.
+    if cfg.rollout_top_k > 0:
+        assert all(
+            int(pool.sglang_args["--sampling-mask-max-tokens"]) > cfg.rollout_top_k
+            for pool in recipe.modal.rollout_pools
+        )
     # Modal caps Volume and app names at 64 characters; the app name also carries a run id.
     assert len(recipe.APP_NAME) + len("-r01") < 64
 
@@ -611,13 +612,16 @@ def test_hetero_recipes_have_their_own_app_volume_and_wandb_group():
 def test_hetero_recipes_change_only_their_algorithm():
     grpo, icepop, sc, sc_mis = (_hetero(name).miles for name in _HETERO_RECIPES)
 
-    # Every recipe but IcePop averages the loss over all tokens and trains the router.
+    # Only IcePop freezes the router.
     for cfg in (grpo, sc, sc_mis):
-        assert cfg.calculate_per_token_loss
-        assert not getattr(cfg, "prompt_mean_loss", False)
         assert not getattr(cfg, "freeze_moe_router", False)
 
-    # Naive GRPO: one update per batch at ratio 1, no importance weights.
+    # Naive GRPO: full-vocabulary sampling, std-normalized group advantages, each
+    # sample's token mean averaged over samples, one update per batch at ratio 1.
+    assert (grpo.rollout_top_p, grpo.rollout_top_k) == (1.0, -1)
+    assert not getattr(grpo, "disable_grpo_std_normalization", False)
+    assert not getattr(grpo, "calculate_per_token_loss", False)
+    assert not getattr(grpo, "prompt_mean_loss", False)
     assert getattr(grpo, "loss_type", None) is None
     assert (grpo.use_tis, grpo.use_rollout_logprobs) == (False, False)
     assert grpo.skip_actor_forward_only
@@ -629,6 +633,8 @@ def test_hetero_recipes_change_only_their_algorithm():
         == "miles.backends.training_utils.loss_hub.corrections.icepop_function"
     )
     assert (icepop.tis_clip_low, icepop.tis_clip) == (0.2, 5.0)
+    assert (icepop.rollout_top_p, icepop.rollout_top_k) == (0.95, 4096)
+    assert icepop.disable_grpo_std_normalization
     assert icepop.skip_actor_forward_only and not icepop.use_rollout_logprobs
     assert icepop.prompt_mean_loss and not icepop.calculate_per_token_loss
     assert icepop.freeze_moe_router
@@ -639,6 +645,12 @@ def test_hetero_recipes_change_only_their_algorithm():
         assert (cfg.loss_type, cfg.score_centering_top_k) == ("score_centering", 128)
         assert cfg.use_rollout_logprobs and not cfg.skip_actor_forward_only
         assert not cfg.use_tis
+        # REINFORCE with group-centered rewards and a token-mean loss.
+        assert cfg.disable_grpo_std_normalization and cfg.calculate_per_token_loss
+        assert not getattr(cfg, "prompt_mean_loss", False)
+        # The recorded candidates must cover the whole realized support.
+        assert (cfg.rollout_top_p, cfg.rollout_top_k) == (0.95, 64)
+        assert cfg.rollout_top_k <= cfg.score_centering_top_k
     # Score centering composed with IcePop's masked weights.
     assert (sc.score_centering_is, sc_mis.score_centering_is) == ("none", "mis")
     assert (sc_mis.score_centering_mis_low, sc_mis.score_centering_mis_high) == (

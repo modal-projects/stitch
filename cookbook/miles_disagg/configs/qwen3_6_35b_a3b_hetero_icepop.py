@@ -1,5 +1,7 @@
 """IcePop on the heterogeneous fleet, after MiMo-V2.6's large-scale RL recipe without R3.
 
+- Top-p sampling whose support the trainer replays, and group-mean advantages
+  without std normalization.
 - Masked importance sampling against the sampler's support-replayed probabilities:
   each token's policy-gradient term is weighted by its detached trainer/sampler
   ratio, and tokens whose ratio leaves [0.2, 5] are dropped. The bounds are
@@ -17,6 +19,10 @@ EXPERIMENT_VOLUME_NAME = APP_NAME
 
 
 class _Miles(HeteroMiles):
+    rollout_top_p = 0.95
+    # Only bounds the returned support; top-p sets it in practice.
+    rollout_top_k = 4096
+    disable_grpo_std_normalization = True
     use_tis = True
     custom_tis_function_path = (
         "miles.backends.training_utils.loss_hub.corrections.icepop_function"

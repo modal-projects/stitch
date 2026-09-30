@@ -6,10 +6,10 @@ therefore samples from its own approximation of the BF16 trainer's policy. Every
 request still asks its replica for the latest published weights of its precision,
 but no sample is dropped for its age.
 
-This base holds the fleet, the trainer and the data shared by every recipe: sampling
-with top-p 0.95 / top-k 64 whose support the trainer replays, and group-centered
-advantages without std normalization. Each algorithm recipe inherits it and names
-its own app, volume and W&B group:
+This base holds the fleet, the trainer and the data, and is itself naive GRPO:
+full-vocabulary sampling, group advantages normalized by the group's std, and each
+sample's token-mean loss averaged over samples. Each algorithm recipe inherits it,
+sets its own sampling and objective, and names its own app, volume and W&B group:
 
 - ``qwen3_6_35b_a3b_hetero_grpo``: naive GRPO.
 - ``qwen3_6_35b_a3b_hetero_icepop``: IcePop, prompt-mean loss, frozen MoE router.
@@ -107,6 +107,9 @@ ROLLOUT_MEMORY_LIMIT_GIB = 512
 # Weight staging uses ~5 cores even with 64 available, and catch-up time matched
 # at 10 and 64 cores. Ten cores per engine lets every host class pack a full node.
 ROLLOUT_CPU = 10.0
+# Sampling support an engine can return per token when a recipe replays it: room for
+# top-k 4096 plus ties at the cutoff, which can keep more than top-k tokens.
+SAMPLING_MASK_MAX_TOKENS = 8192
 
 
 def _server_args(
@@ -140,6 +143,7 @@ def _server_args(
         "--chunked-prefill-size": "8192",
         "--max-running-requests": str(max_running_requests),
         "--cuda-graph-max-bs-decode": str(max_running_requests),
+        "--sampling-mask-max-tokens": str(SAMPLING_MASK_MAX_TOKENS),
         "--enable-metrics": "",
         "--enable-metrics-for-all-schedulers": "",
         "--decode-log-interval": "1000",
@@ -354,10 +358,8 @@ class HeteroMiles(MilesConfig):
     n_samples_per_prompt = 8
     global_batch_size = rollout_batch_size * n_samples_per_prompt
     rollout_temperature = 1.0
-    # The trainer replays this support; SGLang returns up to 4096 support tokens
-    # per sampled token by default, well above top-k.
-    rollout_top_p = 0.95
-    rollout_top_k = 64
+    rollout_top_p = 1.0
+    rollout_top_k = -1
     rollout_max_response_len = 32_768
     max_seq_len = MAX_SEQ_LEN
     # Unbounded staleness: no sample is dropped for its age.
@@ -401,8 +403,6 @@ class HeteroMiles(MilesConfig):
     # One optimizer step per rollout batch against the trainer's own detached
     # log-probs: ratio 1, no off-policy correction.
     advantage_estimator = "grpo"
-    disable_grpo_std_normalization = True
-    calculate_per_token_loss = True
     skip_actor_forward_only = True
     use_rollout_logprobs = False
     use_tis = False
