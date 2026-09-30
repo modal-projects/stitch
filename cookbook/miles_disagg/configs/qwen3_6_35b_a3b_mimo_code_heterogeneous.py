@@ -357,7 +357,7 @@ class _Miles(MilesConfig):
     session_samples_timeout = 600
 
     num_rollout = 500
-    save_interval = 20
+    save_interval = 10
     save_hf = "hf_checkpoints/weight_v{rollout_id:06d}"
     rollout_batch_size = 128
     n_samples_per_prompt = 8
@@ -379,7 +379,9 @@ class _Miles(MilesConfig):
     tensor_model_parallel_size = 2
     sequence_parallel = True
     pipeline_model_parallel_size = 1
-    context_parallel_size = 2
+    # Dynamic batching cannot split one sample, so CP alone bounds the tokens a
+    # GPU holds for the longest episode: 262K / 4 = 64K. CP=2 OOMed at ~194K.
+    context_parallel_size = 4
     expert_model_parallel_size = 8
     expert_tensor_parallel_size = 1
     distributed_timeout_minutes = 60

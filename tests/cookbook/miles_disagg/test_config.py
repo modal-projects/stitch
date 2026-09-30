@@ -461,6 +461,9 @@ def test_qwen36_mimo_heterogeneous_base_is_uncorrected_grpo():
     }
     assert (cfg.rollout_batch_size, cfg.n_samples_per_prompt) == (128, 8)
     assert cfg.global_batch_size == 1024
+    assert cfg.max_seq_len == 262_144
+    assert cfg.context_parallel_size == 4
+    assert cfg.save_interval == 10
     # Miles sizes the fully-async buffer as factor * rollout_batch_size groups.
     assert cfg.async_data_buffer_capacity_factor * cfg.rollout_batch_size == 256
     assert cfg.sglang_server_concurrency == 64 * 21 == 1344
@@ -483,6 +486,7 @@ def test_qwen36_mimo_heterogeneous_tis_is_a_thin_control():
     )
     assert cfg.use_tis
     assert cfg.num_rollout == base.miles.num_rollout == 500
+    assert (cfg.context_parallel_size, cfg.save_interval) == (4, 10)
     assert cfg.tis_clip_low == 0.5
     assert cfg.tis_clip == 2.0
     assert cfg.use_rollout_routing_replay
@@ -509,6 +513,7 @@ def test_qwen36_mimo_heterogeneous_score_centering_is_a_thin_control():
     assert recipe.modal is base.modal
     assert recipe.ROLLOUT_WEIGHT_VIEWS == base.ROLLOUT_WEIGHT_VIEWS
     assert cfg.num_rollout == base.miles.num_rollout == 500
+    assert (cfg.context_parallel_size, cfg.save_interval) == (4, 10)
     assert cfg.loss_type == "score_centering"
     assert cfg.score_centering_top_k == 128
     assert cfg.score_centering_is == "none"
