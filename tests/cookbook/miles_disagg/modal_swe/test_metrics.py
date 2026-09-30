@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -220,9 +221,13 @@ def test_per_source_metrics_tolerate_a_bare_sample():
 
     assert output == {
         "rollout/by_source/unknown/sample_count": 1,
+        "rollout/by_source/unknown/exit_status/unknown_ratio": 1.0,
         "rollout/by_source/unknown/infra_error_ratio": 0.0,
+        "rollout/by_source/unknown/format_error_ratio": 0.0,
         "rollout/by_view/unknown/sample_count": 1,
+        "rollout/by_view/unknown/exit_status/unknown_ratio": 1.0,
         "rollout/by_view/unknown/infra_error_ratio": 0.0,
+        "rollout/by_view/unknown/format_error_ratio": 0.0,
     }
 
 
@@ -255,3 +260,102 @@ def test_rollout_log_hook_reports_per_view_metrics():
     assert metrics["rollout/by_view/fp8/turns_mean"] == 3.0
     assert metrics["rollout/by_view/nvfp4/raw_reward_mean"] == 0.0
     assert metrics["rollout/by_view/fp8/within_prompt_reward_delta_mean"] == 0.5
+
+
+def test_per_source_metrics_split_exit_statuses_by_view():
+    samples = [
+        _sample("ServerH100FP8:fp8", metadata={"exit_status": "RepeatedFormatError"}),
+        _sample("ServerH200FP8:fp8", metadata={"exit_status": "Submitted"}),
+        _sample("ServerB300NVFP4W4A16:nvfp4", metadata={"exit_status": "FormatError"}),
+        _sample("ServerH200BF16:bf16", metadata={"exit_status": "made-up status"}),
+    ]
+    output = {}
+
+    _per_source_metrics(samples, output)
+
+    assert output["rollout/by_view/fp8/exit_status/RepeatedFormatError_ratio"] == 0.5
+    assert output["rollout/by_view/fp8/exit_status/Submitted_ratio"] == 0.5
+    assert output["rollout/by_view/fp8/format_error_ratio"] == 0.5
+    assert output["rollout/by_view/nvfp4/format_error_ratio"] == 1.0
+    assert output["rollout/by_source/ServerH100FP8:fp8/format_error_ratio"] == 1.0
+    # Unknown statuses fold into "other", as in the global ratios.
+    assert output["rollout/by_view/bf16/exit_status/other_ratio"] == 1.0
+    assert output["rollout/by_view/bf16/format_error_ratio"] == 0.0
+
+
+def _dump_sample(reward, index, *, source="ServerH100FP8:fp8", response=""):
+    return _sample(
+        source,
+        reward=reward,
+        group=0,
+        index=index,
+        response=response,
+        response_length=len(response),
+        effective_response_length=1,
+        rollout_routed_experts=None,
+        metadata={"exit_status": "Submitted", "agent_metrics": {"turns": 2}},
+    )
+
+
+def test_rollout_log_hook_reports_a_global_format_error_ratio(tmp_path):
+    samples = [_dump_sample(0.0, 0), _dump_sample(1.0, 1)]
+    samples[0].metadata["exit_status"] = "RepeatedFormatError"
+    metrics = {}
+
+    log_rollout_data(
+        3, SimpleNamespace(save=str(tmp_path / "checkpoints")), samples, metrics, 0.0
+    )
+
+    assert metrics["rollout_agent/format_error_ratio"] == 0.5
+
+
+def test_rollout_log_hook_dumps_the_best_and_worst_trajectories(tmp_path):
+    long_turn = "x" * 3_000
+    samples = [
+        _dump_sample(
+            reward,
+            index,
+            response=f"<|im_start|>assistant\nfirst<|im_end|><|im_start|>assistant\n{long_turn}",
+        )
+        for index, reward in enumerate([0.5, 1.0, 0.0, 0.9, 0.1, 0.4])
+    ]
+
+    log_rollout_data(
+        7, SimpleNamespace(save=str(tmp_path / "run" / "checkpoints")), samples, {}, 0.0
+    )
+
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "run" / "rollout_samples" / "rollout_000007.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+    # Two highest (1.0, 0.9) and two lowest (0.0, 0.1) rewards, in batch order.
+    assert [row["index"] for row in rows] == [1, 2, 3, 4]
+    assert {row["rollout_id"] for row in rows} == {7}
+    assert rows[0]["exit_status"] == "Submitted"
+    assert rows[0]["rollout_source"] == "ServerH100FP8:fp8"
+    # Only the last assistant turn is kept, capped at 2,000 characters.
+    assert rows[0]["last_assistant"] == ("\n" + long_turn)[:2_000]
+
+
+def test_rollout_log_hook_skips_the_dump_without_a_run_directory(tmp_path):
+    samples = [_dump_sample(1.0, 0)]
+
+    assert log_rollout_data(0, SimpleNamespace(save=None), samples, {}, 0.0) is False
+    assert not any(tmp_path.iterdir())
+
+
+def test_a_failed_dump_never_fails_the_step(tmp_path):
+    blocker = tmp_path / "run"
+    blocker.write_text("not a directory")
+    samples = [_dump_sample(1.0, 0)]
+    metrics = {}
+
+    assert (
+        log_rollout_data(
+            0, SimpleNamespace(save=str(blocker / "checkpoints")), samples, metrics, 0.0
+        )
+        is False
+    )
+    assert metrics["rollout_agent/format_error_ratio"] == 0.0

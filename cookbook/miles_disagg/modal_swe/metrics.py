@@ -6,11 +6,47 @@ aggregates environment/tool/verifier fields owned by the Modal adapter.
 
 from __future__ import annotations
 
+import heapq
+import json
+import logging
 from collections import Counter, defaultdict
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from miles.utils.types import Sample
+
+logger = logging.getLogger(__name__)
+
+_KNOWN_EXIT_STATUSES = {
+    "Submitted",
+    "LimitsExceeded",
+    "TimeExceeded",
+    "RepeatedFormatError",
+    "FormatError",
+    "UserInterruption",
+    "completed",
+    "command_timeout",
+    "verifier_timeout",
+    "verifier_infra_error",
+    "sandbox_not_found",
+    "agent_error",
+    "sandbox_infra_error",
+    "session_record_timeout",
+    "session_record_request_error",
+    "session_sample_collection_error",
+    "session_create_error",
+    "agent_function_exception",
+    "no_model_calls",
+    "prompt_exceeds_max_seq_len",
+    "unknown",
+}
+# The agent never produced a parseable action; a format collapse shows up here first.
+_FORMAT_ERROR_STATUSES = {"FormatError", "RepeatedFormatError"}
+# Per step, a few trajectories are kept so a collapse can be read, not just measured.
+_SAMPLE_DUMP_PER_END = 2
+_SAMPLE_DUMP_CHARS = 2_000
+_ASSISTANT_TURN_MARKER = "<|im_start|>assistant"
 
 _AGENT_MEAN_ONLY_METRICS = {
     "agent_tool_input_over_64k_count",
@@ -221,6 +257,11 @@ def _training_batch_composition_metrics(
         output[f"{prefix}/sample_percentage"] = 100 * count / len(samples)
 
 
+def _exit_status(sample: Sample) -> str:
+    status = str(sample.metadata.get("exit_status", "unknown"))
+    return status if status in _KNOWN_EXIT_STATUSES else "other"
+
+
 def _metric_name(value: str) -> str:
     return value.replace("/", "_").replace(" ", "_")
 
@@ -285,12 +326,14 @@ def _per_source_metrics(
     )
 
     groups: dict[str, dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
+    group_statuses: dict[str, Counter[str]] = defaultdict(Counter)
     for sample, reward, (low, high) in zip(samples, rewards, versions, strict=True):
         agent_metrics = sample.metadata.get("agent_metrics") or {}
         source = str(sample.metadata.get("rollout_source") or "unknown")
         view = source.rsplit(":", 1)[1] if ":" in source else "unknown"
         group = getattr(sample, "group_index", None)
         completion_tokens = _number(agent_metrics.get("model_completion_tokens_total"))
+        status = _exit_status(sample)
         values = {
             "raw_reward_mean": reward,
             "within_prompt_reward_delta_mean": (
@@ -299,6 +342,7 @@ def _per_source_metrics(
                 else None
             ),
             "infra_error_ratio": float(bool(agent_metrics.get("infra_error"))),
+            "format_error_ratio": float(status in _FORMAT_ERROR_STATUSES),
             "response_length_mean": _number(getattr(sample, "response_length", None)),
             "turns_mean": _number(agent_metrics.get("turns")),
             "total_time_mean": _number(agent_metrics.get("total_time")),
@@ -324,12 +368,17 @@ def _per_source_metrics(
             f"rollout/by_source/{_metric_name(source)}",
             f"rollout/by_view/{_metric_name(view)}",
         ):
+            group_statuses[prefix][status] += 1
             for name, value in values.items():
                 if value is not None:
                     groups[prefix][name].append(value)
 
     for prefix, metrics in groups.items():
         output[f"{prefix}/sample_count"] = len(metrics["infra_error_ratio"])
+        for status, count in group_statuses[prefix].items():
+            output[f"{prefix}/exit_status/{_metric_name(status)}_ratio"] = count / len(
+                metrics["infra_error_ratio"]
+            )
         for name, values in metrics.items():
             if name.endswith(("_mean", "_ratio")):
                 output[f"{prefix}/{name}"] = sum(values) / len(values)
@@ -361,37 +410,13 @@ def add_metrics(
     _training_batch_composition_metrics(samples, output)
     _per_source_metrics(samples, output, reward_key=reward_key)
 
-    known_statuses = {
-        "Submitted",
-        "LimitsExceeded",
-        "TimeExceeded",
-        "RepeatedFormatError",
-        "FormatError",
-        "UserInterruption",
-        "completed",
-        "command_timeout",
-        "verifier_timeout",
-        "verifier_infra_error",
-        "sandbox_not_found",
-        "agent_error",
-        "sandbox_infra_error",
-        "session_record_timeout",
-        "session_record_request_error",
-        "session_sample_collection_error",
-        "session_create_error",
-        "agent_function_exception",
-        "no_model_calls",
-        "prompt_exceeds_max_seq_len",
-        "unknown",
-    }
-    statuses = Counter(
-        status if status in known_statuses else "other"
-        for sample in samples
-        for status in [str(sample.metadata.get("exit_status", "unknown"))]
-    )
+    statuses = Counter(_exit_status(sample) for sample in samples)
     for status, count in statuses.items():
         safe_status = status.replace("/", "_").replace(" ", "_")
         output[f"rollout_agent/exit_status/{safe_status}_ratio"] = count / len(samples)
+    output["rollout_agent/format_error_ratio"] = sum(
+        statuses[status] for status in _FORMAT_ERROR_STATUSES
+    ) / len(samples)
 
     agent_metrics = [sample.metadata.get("agent_metrics") or {} for sample in samples]
     verifier_return_codes = [
@@ -413,6 +438,63 @@ def add_metrics(
     ) / len(samples)
 
 
+def _last_assistant_text(sample: Sample) -> str:
+    text = str(getattr(sample, "response", "") or "")
+    return text.rsplit(_ASSISTANT_TURN_MARKER, 1)[-1][:_SAMPLE_DUMP_CHARS]
+
+
+def _dump_samples(
+    rollout_id: int,
+    args: Any,
+    samples: list[Sample],
+    *,
+    reward_key: str | None = None,
+) -> None:
+    """Write the batch's best and worst trajectories next to the run's checkpoints.
+
+    The run directory is the parent of Miles' ``--save`` directory on the mounted run
+    volume, which Stitch commits with every weight publication. A failed write only
+    loses the dump, never the step.
+    """
+    save = getattr(args, "save", None)
+    if not save:
+        return
+    scored = [
+        (reward, position)
+        for position, sample in enumerate(samples)
+        if (reward := _raw_reward(sample, reward_key)) is not None
+    ]
+    picks = {position for _, position in heapq.nlargest(_SAMPLE_DUMP_PER_END, scored)}
+    picks |= {position for _, position in heapq.nsmallest(_SAMPLE_DUMP_PER_END, scored)}
+    rows = []
+    for position in sorted(picks):
+        sample = samples[position]
+        agent_metrics = sample.metadata.get("agent_metrics") or {}
+        rows.append(
+            {
+                "rollout_id": rollout_id,
+                "index": sample.index,
+                "group_index": getattr(sample, "group_index", None),
+                "rollout_source": sample.metadata.get("rollout_source"),
+                "exit_status": sample.metadata.get("exit_status"),
+                "reward": _raw_reward(sample, reward_key),
+                "response_length": getattr(sample, "response_length", None),
+                "turns": agent_metrics.get("turns"),
+                "last_assistant": _last_assistant_text(sample),
+            }
+        )
+    if not rows:
+        return
+    path = Path(save).parent / "rollout_samples" / f"rollout_{rollout_id:06d}.jsonl"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("".join(json.dumps(row, default=str) + "\n" for row in rows))
+    except OSError:
+        logger.warning(
+            "could not write the rollout sample dump to %s", path, exc_info=True
+        )
+
+
 def log_rollout_data(
     rollout_id: int,
     args,
@@ -421,13 +503,11 @@ def log_rollout_data(
     rollout_time: float,
 ) -> bool:
     """Extend the standard Miles rollout log; returning False preserves it."""
-    del rollout_id, rollout_time
+    del rollout_time
     if rollout_extra_metrics is not None and samples:
-        add_metrics(
-            samples,
-            rollout_extra_metrics,
-            reward_key=getattr(args, "reward_key", None),
-        )
+        reward_key = getattr(args, "reward_key", None)
+        add_metrics(samples, rollout_extra_metrics, reward_key=reward_key)
+        _dump_samples(rollout_id, args, samples, reward_key=reward_key)
         # Exact vectors are needed only for the aggregate above. Do not carry
         # hundreds of per-turn floats per trajectory into trainer object-store
         # payloads after their p50/p90/max/count totals have been recorded.
