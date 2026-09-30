@@ -522,7 +522,14 @@ class Trainer:
             # Returning here would exit this container under its Ray node.
             ray_cluster.hold_worker_node(self.master_addr, ray_port=RAY_PORT)
             return
+        try:
+            self._train_head(cfg)
+        finally:
+            # Workers hold their nodes while this Ray head answers. Stop it so a
+            # failed attempt releases the whole gang and Modal can retry it.
+            ray_cluster.stop_ray_node()
 
+    def _train_head(self, cfg: MilesConfig) -> None:
         # Warm containers may enter during an active attempt. Only an actual
         # training call may rewind its tracker, before any actor reads the mount.
         resume_point = (

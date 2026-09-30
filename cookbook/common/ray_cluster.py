@@ -151,9 +151,29 @@ def reload_volumes_on_nodes(volume_ids: list[str], *, n_nodes: int) -> None:
         ).remote(volume_ids)
         for node_id in sorted(nodes)
     ]
-    refreshed = ray.get(pending, timeout=RAY_WORKER_JOIN_TIMEOUT)
+    ready, not_ready = ray.wait(
+        pending, num_returns=len(pending), timeout=RAY_WORKER_JOIN_TIMEOUT
+    )
+    if not_ready:
+        stuck = sorted(
+            node_id
+            for node_id, ref in zip(sorted(nodes), pending, strict=True)
+            if ref in not_ready
+        )
+        addresses = {node["NodeID"]: node["NodeManagerAddress"] for node in ray.nodes()}
+        raise RuntimeError(
+            f"volume reload did not finish within {RAY_WORKER_JOIN_TIMEOUT}s on "
+            f"{len(stuck)}/{len(nodes)} Ray nodes: "
+            + ", ".join(f"{node_id[:12]}@{addresses.get(node_id)}" for node_id in stuck)
+        )
+    refreshed = ray.get(ready)
     if set(refreshed) != nodes:
         raise RuntimeError("training volumes were not refreshed on every Ray node")
+
+
+def stop_ray_node() -> None:
+    """Stop this node's Ray processes; worker nodes then see the head go and release."""
+    subprocess.run(["ray", "stop", "--force"], check=False, timeout=120)
 
 
 def start_ray_node(
