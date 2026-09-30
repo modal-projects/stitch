@@ -610,7 +610,6 @@ _STUDY_ARMS = (
     "a3_score_centering",
     "a4_score_centering_tis",
     "b1_grpo_bf16",
-    "b2_grpo_low_staleness",
 )
 
 
@@ -647,6 +646,13 @@ def test_hetero_study_arms_share_one_sampler_and_objective_shape(arm):
     assert cfg.context_parallel_size == 4
     assert cfg.fully_async_drain_during_weight_update
     assert cfg.log_rollout_mismatch_diagnostics
+    # Unbounded staleness: no age filter, but every request still asks for the
+    # latest published weights of its precision.
+    assert cfg.max_weight_staleness is None
+    assert (
+        cfg.custom_rollout_request_hook_args["rollout_request_weight_version_mode"]
+        == "min"
+    )
     assert cfg.wandb_group == f"qwen3-6-35b-mimo-code-hetero-{arm.replace('_', '-')}"
     # Modal caps Volume names at 64 characters; the app name also carries a run id.
     assert len(recipe.EXPERIMENT_VOLUME_NAME) < 64
@@ -677,10 +683,9 @@ def test_hetero_study_estimators_differ_only_where_named():
     assert a4.score_centering_tis_clip == 2.0
 
 
-def test_hetero_study_controls_change_only_the_fleet_or_staleness():
+def test_hetero_study_bf16_reference_changes_only_the_fleet():
     a1 = _study_arm("a1_grpo")
     b1 = _study_arm("b1_grpo_bf16")
-    b2 = _study_arm("b2_grpo_low_staleness")
 
     # B1: one homogeneous BF16 B300 pool that can route every A1 session.
     assert b1.ROLLOUT_WEIGHT_VIEWS == {"bf16": a1.BF16_CHECKPOINT_PATH}
@@ -705,23 +710,8 @@ def test_hetero_study_controls_change_only_the_fleet_or_staleness():
     )
     assert b1.modal.rollout_pools != a1.modal.rollout_pools
 
-    # B2: A1's fleet with one batch in flight and a half-batch buffer.
-    assert b2.modal is a1.modal
-    assert (
-        b2.miles.async_max_concurrent_samples
-        == b2.miles.sglang_server_concurrency
-        == 1024
-    )
-    assert b2.miles.environment["MODAL_SWE_AGENT_THREADS_PER_PROCESS"] == "16"
-    assert int(b2.miles.environment["MODAL_SWE_AGENT_PROCESSES"]) * 16 == 1024
-    assert b2.miles.async_data_buffer_capacity_factor == 0.5
-    groups_in_flight = (
-        b2.miles.async_max_concurrent_samples // b2.miles.n_samples_per_prompt
-    )
-    assert groups_in_flight == b2.miles.rollout_batch_size
-
     # Everything else is A1's.
-    for control in (b1.miles, b2.miles):
+    for control in (b1.miles,):
         for field in (
             "loss_type",
             "use_tis",
