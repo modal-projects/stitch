@@ -265,7 +265,10 @@ Unit tests must prove:
 10. Resume chooses the newest saved trainer version represented by every
     selected view, rewinds only those view pointers, preserves their delta
     lineages, and rejects a converted baseline that disagrees with the durable
-    checksums. An unselected incomplete view does not block resume.
+    checksums. An unselected incomplete view does not block resume. A save at N
+    is eligible only once some selected pointer reached vN+1, since that publish
+    committed every trainer host; a view still at vN must hold every file of its
+    vN+1 delta.
 11. A replacement replica selects the newest complete HF checkpoint for its
     own view at or below that view's pointer, and applies only the later deltas.
     A nested marker is never visible before the distributed save commits.

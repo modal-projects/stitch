@@ -120,7 +120,10 @@ ready. Repeating the command creates a separate run and checkpoint lineage.
 
 Recovery is automatic: the Miles trainer runs under Modal retries, and every
 attempt re-derives its resume state from the run volume — the newest saved
-Megatron checkpoint whose Hugging Face export is complete and published. A
+Megatron checkpoint whose Hugging Face export is complete and published. A save
+counts only once a pointer has reached the version published after it: that
+publish commits every trainer host, so before it another host's shards may not
+be durable, and resume uses the previous save instead. A
 preempted or crashed trainer resumes on its own, without a launcher attached
 and without redeploying the pool; replicas serving abandoned versions exit and
 their replacements boot from the restored checkpoint. If the checkpoint is

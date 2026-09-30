@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -21,10 +22,18 @@ from cookbook.miles_disagg.resume import (
 _INDEX = "model.safetensors.index.json"
 
 
-def _published(version: int, weight_view: str | None = None) -> dict[str, bytes]:
+def _published(
+    version: int, weight_view: str | None = None, *, with_files: bool = True
+) -> dict[str, bytes]:
+    """A published delta: its index and, unless ``with_files`` is False, the file it names."""
     view = f"/{weight_view}" if weight_view is not None else ""
-    name = f"old/updates{view}/weight_v{version:06d}/{_INDEX}"
-    return {name: b'{"metadata": {"version": "%06d"}}' % version}
+    root = f"old/updates{view}/weight_v{version:06d}"
+    shard = "model-00000-of-00001.safetensors"
+    index = {"metadata": {"version": f"{version:06d}"}, "weight_map": {"w": shard}}
+    files = {f"{root}/{_INDEX}": json.dumps(index).encode()}
+    if with_files:
+        files[f"{root}/{shard}"] = b"delta"
+    return files
 
 
 class _Volume:
@@ -146,16 +155,90 @@ def test_resolve_resume_point_does_not_select_checkpoint_ahead_of_latest() -> No
 def test_resolve_resume_point_rejects_a_mislabeled_publication() -> None:
     volume = _Volume(
         {
-            "old/latest": b"old/weight_v000119",
+            "old/latest/bf16": b"old/weight_v000120",
+            "old/latest/nvfp4": b"old/weight_v000119",
             "old/checkpoints/latest_checkpointed_iteration.txt": b"119\n",
             "old/checkpoints/iter_0000119/state": b"checkpoint",
-            "old/hf_checkpoints/weight_v000119/.complete": b"",
-            f"old/updates/weight_v000120/{_INDEX}": b'{"metadata": {"version": "0007"}}',
+            f"old/updates/nvfp4/weight_v000120/{_INDEX}": b'{"metadata": {"version": "0007"}}',
         }
     )
 
     with pytest.raises(ValueError, match="identifies v7, not v120"):
-        resolve_resume_point(volume, source_run_id="old", save_hf=_Config.save_hf)
+        resolve_resume_point(
+            volume,
+            source_run_id="old",
+            save_hf=_Config.save_hf,
+            weight_views=("bf16", "nvfp4"),
+        )
+
+
+def test_resolve_resume_point_needs_a_publish_after_the_save() -> None:
+    """Only the publish round after a save commits every host, so a save whose
+    next version no pointer reached may be missing shards: use the save before."""
+    volume = _Volume(
+        {
+            "old/latest": b"old/weight_v000119",
+            "old/checkpoints/latest_checkpointed_iteration.txt": b"119\n",
+            "old/checkpoints/iter_0000099/state": b"checkpoint",
+            "old/checkpoints/iter_0000119/state": b"checkpoint",
+            "old/hf_checkpoints/weight_v000099/.complete": b"",
+            "old/hf_checkpoints/weight_v000119/.complete": b"",
+            # Rank 0's delta can be durable before any other host committed.
+            **_published(120),
+        }
+    )
+
+    resolved = resolve_resume_point(
+        volume, source_run_id="old", save_hf=_Config.save_hf
+    )
+
+    assert (resolved.version, resolved.iteration) == (100, 99)
+
+
+def test_resolve_multiview_resume_needs_some_view_published_past_the_save() -> None:
+    volume = _Volume(
+        {
+            "old/latest/bf16": b"old/weight_v000039",
+            "old/latest/nvfp4": b"old/weight_v000039",
+            "old/checkpoints/latest_checkpointed_iteration.txt": b"39",
+            "old/checkpoints/iter_0000019/state": b"checkpoint",
+            "old/checkpoints/iter_0000039/state": b"checkpoint",
+            **_published(40, "bf16"),
+            **_published(40, "nvfp4"),
+        }
+    )
+
+    point = resolve_resume_point(
+        volume,
+        source_run_id="old",
+        save_hf=_Config.save_hf,
+        weight_views=("bf16", "nvfp4"),
+    )
+
+    assert (point.version, point.iteration) == (20, 19)
+
+
+def test_resolve_multiview_resume_skips_a_one_ahead_view_missing_delta_files() -> None:
+    volume = _Volume(
+        {
+            "old/latest/bf16": b"old/weight_v000040",
+            "old/latest/nvfp4": b"old/weight_v000039",
+            "old/checkpoints/latest_checkpointed_iteration.txt": b"39",
+            "old/checkpoints/iter_0000019/state": b"checkpoint",
+            "old/checkpoints/iter_0000039/state": b"checkpoint",
+            # nvfp4's v40 index is durable, but not the file it names.
+            **_published(40, "nvfp4", with_files=False),
+        }
+    )
+
+    point = resolve_resume_point(
+        volume,
+        source_run_id="old",
+        save_hf=_Config.save_hf,
+        weight_views=("bf16", "nvfp4"),
+    )
+
+    assert (point.version, point.iteration) == (20, 19)
 
 
 def test_resolve_resume_point_skips_iteration_zero() -> None:
@@ -407,6 +490,27 @@ def test_prepare_attempt_restores_the_newest_pair() -> None:
     assert point is not None and (point.version, point.iteration) == (8, 7)
     assert volume.files["old/latest"] == b"old/weight_v000008"
     assert volume.files["old/checkpoints/latest_checkpointed_iteration.txt"] == b"7"
+
+
+def test_prepare_attempt_restarts_from_scratch_when_the_only_save_is_unproven() -> None:
+    volume = _Volume(
+        {
+            "old/latest/bf16": b"old/weight_v000019",
+            "old/latest/nvfp4": b"old/weight_v000019",
+            "old/checkpoints/latest_checkpointed_iteration.txt": b"19",
+            "old/checkpoints/iter_0000019/state": b"checkpoint",
+            **_published(20, "bf16"),
+            **_published(20, "nvfp4"),
+        }
+    )
+
+    point = prepare_attempt(
+        volume, run_id="old", save_hf=_Config.save_hf, weight_views=("bf16", "nvfp4")
+    )
+
+    assert point is None
+    assert volume.files["old/latest/bf16"] == b"old/weight_v000000"
+    assert volume.files["old/latest/nvfp4"] == b"old/weight_v000000"
 
 
 def test_prepare_attempt_restarts_from_scratch_before_the_first_pair() -> None:

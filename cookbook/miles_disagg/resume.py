@@ -75,7 +75,14 @@ def resolve_resume_point(
     save_hf: str | None,
     weight_views: Iterable[str] = (),
 ) -> ResumePoint:
-    """Resolve the newest trainer checkpoint represented by the rollout state."""
+    """Resolve the newest trainer checkpoint represented by the rollout state.
+
+    A save at N is durable on every trainer host only after the publish round that
+    follows it: that round commits every host's mount before it advances any pointer
+    to vN+1. So N is eligible only once some selected pointer reached vN+1. Rank 0
+    alone writes a delta, so a one-ahead delta proves nothing about the other hosts'
+    checkpoint shards; without such a pointer the previous save is used instead.
+    """
     if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", source_run_id) is None:
         raise ValueError(f"invalid resume run id: {source_run_id!r}")
 
@@ -114,6 +121,8 @@ def resolve_resume_point(
     for iteration in sorted(iterations, reverse=True):
         version = export_version(iteration)
         if any(version > pointer.version + 1 for pointer in pointers.values()):
+            continue
+        if not any(pointer.version >= version for pointer in pointers.values()):
             continue
         hf_root = None
         if save_hf is not None:
@@ -162,16 +171,24 @@ def _check_published_version(
     version: int,
     weight_view: str | None = None,
 ) -> None:
-    """Require ``updates/weight_vNNNNNN`` to exist and identify itself as ``version``."""
+    """Require ``updates/weight_vNNNNNN`` to identify itself as ``version`` and hold
+    every file its index names. The trainer writes each delta file by atomic rename,
+    so a file that is present is complete."""
     update_root = run_root / "updates"
     if weight_view is not None:
         update_root /= weight_view
-    index_path = update_root / f"{WEIGHT_PREFIX}{version:06d}"
-    index_path /= "model.safetensors.index.json"
+    version_dir = update_root / f"{WEIGHT_PREFIX}{version:06d}"
+    index_path = version_dir / "model.safetensors.index.json"
     index = json.loads(_read_volume_file(volume, str(index_path)))
     published = int((index.get("metadata") or {})["version"])
     if published != version:
         raise ValueError(f"{index_path} identifies v{published}, not v{version}")
+    present = {
+        PurePosixPath(entry.path).name
+        for entry in volume.iterdir(str(version_dir), recursive=False)
+    }
+    if missing := sorted(set((index.get("weight_map") or {}).values()) - present):
+        raise FileNotFoundError(f"{version_dir} is missing {', '.join(missing)}")
 
 
 def prepare_attempt(
