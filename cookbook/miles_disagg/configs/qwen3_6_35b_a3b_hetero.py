@@ -1,12 +1,26 @@
-"""Qwen3.6-35B-A3B BF16 GRPO with heterogeneous low-precision rollout."""
+"""Qwen3.6-35B-A3B RL on MiMo code tasks with a heterogeneous rollout fleet.
+
+Each GPU type serves the precision and kernels that suit it: FP8 on H100 and H200,
+NVFP4 (W4A16) on B200 and B300, BF16 on A100, RTX PRO 6000, H100 and H200. Every pool
+therefore samples from its own approximation of the BF16 trainer's policy. Every
+request still asks its replica for the latest published weights of its precision,
+but no sample is dropped for its age.
+
+This base holds the fleet, the trainer and the data shared by every recipe: sampling
+with top-p 0.95 / top-k 64 whose support the trainer replays, and group-centered
+advantages without std normalization. Each algorithm recipe inherits it and names
+its own app, volume and W&B group:
+
+- ``qwen3_6_35b_a3b_hetero_grpo``: naive GRPO.
+- ``qwen3_6_35b_a3b_hetero_icepop``: IcePop, prompt-mean loss, frozen MoE router.
+- ``qwen3_6_35b_a3b_hetero_score_centering``: score centering.
+- ``qwen3_6_35b_a3b_hetero_score_centering_mis``: score centering with IcePop's weights.
+"""
 
 from cookbook.common.config import ModalConfig, RolloutPoolConfig
 from cookbook.common.constants import CHECKPOINTS_PATH, DATA_PATH
 from cookbook.miles_disagg import mimo_v2_6, swebench_config
 from cookbook.miles_disagg.config import MilesConfig
-
-APP_NAME = "stitch-qwen36-mimo-hetero"
-EXPERIMENT_VOLUME_NAME = "stitch-miles-qwen3-6-35b-mimo-code-heterogeneous"
 
 SOURCE_MODEL = "Qwen/Qwen3.6-35B-A3B"
 SOURCE_REVISION = "995ad96eacd98c81ed38be0c5b274b04031597b0"
@@ -49,6 +63,7 @@ SIDECAR_FLUSH_CACHE_ON_COMMIT = False
 SGLANG_DELTA_UPDATE_MODE = "cpu"
 
 DATASET_PATH = DATA_PATH / "mimo-v2-6-rl-oss"
+SANDBOX_APP_NAME = "stitch-qwen36-hetero-sandbox"
 MAX_SEQ_LEN = 262_144
 AGENT_PROCESSES = 64
 AGENT_THREADS_PER_PROCESS = 21
@@ -185,74 +200,6 @@ def _pool(
     )
 
 
-A100_POOL = _pool(
-    name="ServerA100BF16TP2",
-    gpu="A100-80GB",
-    gpus_per_engine=2,
-    weight_view="bf16",
-    attention_backend="flashinfer",
-    linear_attention_backend="triton",
-    mem_fraction_static=0.65,
-    moe_runner_backend="triton",
-)
-RTX_PRO_6000_POOL = _pool(
-    name="ServerRTXPRO6000BF16TP2",
-    gpu="RTX-PRO-6000",
-    gpus_per_engine=2,
-    weight_view="bf16",
-    # trtllm_mha on SM120 rejects fp8 KV; flashinfer supports it.
-    attention_backend="flashinfer",
-    mem_fraction_static=0.7,
-    moe_runner_backend="triton",
-)
-
-
-# BF16 reads twice the FP8 expert bytes per decode step, so each BF16 GPU takes
-# half the routing load of its low-precision sibling. The 71.8 GB checkpoint
-# needs TP2 on H100. Triton is the MoE runner validated for BF16 staged updates.
-HOPPER_BF16_POOLS = (
-    _pool(
-        name="ServerH100BF16TP2",
-        gpu="H100!",
-        gpus_per_engine=2,
-        weight_view="bf16",
-        attention_backend="fa3",
-        target_inputs=32,
-        max_running_requests=48,
-        moe_runner_backend="triton",
-    ),
-    _pool(
-        name="ServerH200BF16",
-        gpu="H200",
-        weight_view="bf16",
-        attention_backend="fa3",
-        target_inputs=16,
-        max_running_requests=24,
-        moe_runner_backend="triton",
-    ),
-)
-BLACKWELL_BF16_POOLS = (
-    _pool(
-        name="ServerB200BF16",
-        gpu="B200",
-        weight_view="bf16",
-        attention_backend="trtllm_mha",
-        target_inputs=16,
-        max_running_requests=24,
-        moe_runner_backend="triton",
-    ),
-    _pool(
-        name="ServerB300BF16",
-        gpu="B300",
-        weight_view="bf16",
-        attention_backend="trtllm_mha",
-        target_inputs=32,
-        max_running_requests=48,
-        moe_runner_backend="triton",
-    ),
-)
-
-
 modal = ModalConfig(
     gpu="B300",
     rollout_cpu=ROLLOUT_CPU,
@@ -287,10 +234,49 @@ modal = ModalConfig(
             moe_runner_backend="flashinfer_cutedsl",
             environment={"SGLANG_FLASHINFER_CUTEDSL_NVFP4_W4A16": "1"},
         ),
-        A100_POOL,
-        RTX_PRO_6000_POOL,
-        *HOPPER_BF16_POOLS,
-        # *BLACKWELL_BF16_POOLS,  # Blackwell serves NVFP4 only.
+        # BF16 reads twice the FP8 expert bytes per decode step, so each BF16 GPU
+        # takes half the routing load of its low-precision sibling. The 71.8 GB
+        # checkpoint needs TP2 below 141 GB. Triton is the MoE runner validated for
+        # BF16 staged updates.
+        _pool(
+            name="ServerA100BF16TP2",
+            gpu="A100-80GB",
+            gpus_per_engine=2,
+            weight_view="bf16",
+            attention_backend="flashinfer",
+            # FlashInfer's linear attention needs SM90+.
+            linear_attention_backend="triton",
+            mem_fraction_static=0.65,
+            moe_runner_backend="triton",
+        ),
+        _pool(
+            name="ServerRTXPRO6000BF16TP2",
+            gpu="RTX-PRO-6000",
+            gpus_per_engine=2,
+            weight_view="bf16",
+            # trtllm_mha on SM120 rejects fp8 KV; flashinfer supports it.
+            attention_backend="flashinfer",
+            moe_runner_backend="triton",
+        ),
+        _pool(
+            name="ServerH100BF16TP2",
+            gpu="H100!",
+            gpus_per_engine=2,
+            weight_view="bf16",
+            attention_backend="fa3",
+            target_inputs=32,
+            max_running_requests=48,
+            moe_runner_backend="triton",
+        ),
+        _pool(
+            name="ServerH200BF16",
+            gpu="H200",
+            weight_view="bf16",
+            attention_backend="fa3",
+            target_inputs=16,
+            max_running_requests=24,
+            moe_runner_backend="triton",
+        ),
     ),
     trainer_cpu=(64.0, 256.0),
     trainer_memory_mib=(1_048_576, 3_145_728),
@@ -313,7 +299,9 @@ modal = ModalConfig(
 )
 
 
-class _Miles(MilesConfig):
+class HeteroMiles(MilesConfig):
+    """Naive GRPO on the heterogeneous fleet; recipes override only what they change."""
+
     megatron_model_type = "qwen3.6-35B-A3B"
     async_mode = True
 
@@ -335,13 +323,14 @@ class _Miles(MilesConfig):
     rollout_endpoint_url = None
     sglang_server_concurrency = ROLLOUT_CONCURRENT_SAMPLES
 
+    # Every request asks its replica for the latest published weights of the
+    # replica's precision: the hook sends each view's latest version and the
+    # router pins it as the request's minimum, so a replica still catching up
+    # answers 409 and the request retries.
     custom_rollout_request_hook_path = (
         "cookbook.common.hooks.gated_rollout_request_hook"
     )
-    custom_rollout_request_hook_args = {
-        "rollout_request_weight_version_mode": "min",
-        "rollout_request_weight_version_lag": 1,
-    }
+    custom_rollout_request_hook_args = {"rollout_request_weight_version_mode": "min"}
     rollout_request_max_attempts = 1200
     rollout_request_retry_interval = 1.0
     miles_router_timeout = 3600
@@ -365,10 +354,13 @@ class _Miles(MilesConfig):
     n_samples_per_prompt = 8
     global_batch_size = rollout_batch_size * n_samples_per_prompt
     rollout_temperature = 1.0
-    rollout_top_p = 1.0
-    rollout_top_k = -1
+    # The trainer replays this support; SGLang returns up to 4096 support tokens
+    # per sampled token by default, well above top-k.
+    rollout_top_p = 0.95
+    rollout_top_k = 64
     rollout_max_response_len = 32_768
     max_seq_len = MAX_SEQ_LEN
+    # Unbounded staleness: no sample is dropped for its age.
     max_weight_staleness = None
     async_max_concurrent_samples = ROLLOUT_CONCURRENT_SAMPLES
     async_data_buffer_capacity_factor = 2.0
@@ -377,8 +369,6 @@ class _Miles(MilesConfig):
     async_unused_samples_handler = "drop"
     keep_partial_groups_on_abort = True
     eval_interval = None
-
-    use_rollout_routing_replay = False
 
     tensor_model_parallel_size = 2
     sequence_parallel = True
@@ -408,18 +398,17 @@ class _Miles(MilesConfig):
     overlap_cpu_optimizer_d2h_h2d = True
     use_precision_aware_optimizer = True
 
+    # One optimizer step per rollout batch against the trainer's own detached
+    # log-probs: ratio 1, no off-policy correction.
     advantage_estimator = "grpo"
+    disable_grpo_std_normalization = True
+    calculate_per_token_loss = True
     skip_actor_forward_only = True
     use_rollout_logprobs = False
     use_tis = False
-    get_mismatch_metrics = False
-    custom_tis_function_path = None
-    tis_clip_low = None
-    tis_clip = None
+    use_rollout_routing_replay = False
     kl_coef = 0.0
     use_kl_loss = False
-    kl_loss_coef = None
-    kl_loss_type = None
     observe_training_entropy = True
     entropy_coef = 0.0
     eps_clip = 0.2
@@ -434,23 +423,20 @@ class _Miles(MilesConfig):
 
     use_wandb = True
     wandb_project = "fully-async-rl-modal"
-    wandb_group = "qwen3-6-35b-mimo-code-heterogeneous-grpo"
     disable_wandb_random_suffix = True
     use_prometheus = True
     prometheus_port = 9090
-    prometheus_run_name = wandb_group
 
     environment = {
         **swebench_config.environment(
-            sandbox_app="qwen3-6-35b-mimo-code-heterogeneous-sandbox",
+            sandbox_app=SANDBOX_APP_NAME,
             processes=AGENT_PROCESSES,
             threads_per_process=AGENT_THREADS_PER_PROCESS,
         ),
         **NVFP4_ENCODING_ENV,
         "OMP_NUM_THREADS": "1",
         "NVTE_FP8_BLOCK_SCALING_FP32_SCALES": "1",
-        # Long episodes leave the B300 caching allocator fragmented; every arm
-        # logged OOM-and-retry on 16-29 GB allocations at CP=2.
+        # Long episodes leave the B300 caching allocator fragmented.
         "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
         "MODAL_SWE_TASKS_DIR": f"{DATASET_PATH}/tasks/code",
         "MODAL_SWE_AGENT_PROFILE": "mimo-code-bash",
@@ -465,6 +451,7 @@ class _Miles(MilesConfig):
         mimo_v2_6.prepare_mimo_v2_6(DATASET_PATH)
 
 
-arguments = swebench_config.arguments()
-arguments["prompt_data"] = f"{DATASET_PATH}/code.jsonl"
-miles = _Miles(**arguments)
+def arguments() -> dict:
+    values = swebench_config.arguments()
+    values["prompt_data"] = f"{DATASET_PATH}/code.jsonl"
+    return values

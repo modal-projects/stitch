@@ -243,20 +243,6 @@ def _routing_replay_metrics(samples: list[Sample], output: dict[str, Any]) -> No
     )
 
 
-def _training_batch_composition_metrics(
-    samples: list[Sample], output: dict[str, Any]
-) -> None:
-    output["rollout/training_batch/sample_count"] = len(samples)
-    sources = Counter(
-        str(sample.metadata.get("rollout_source") or "unknown") for sample in samples
-    )
-    for source, count in sources.items():
-        safe_source = source.replace("/", "_").replace(" ", "_")
-        prefix = f"rollout/training_batch/{safe_source}"
-        output[f"{prefix}/sample_count"] = count
-        output[f"{prefix}/sample_percentage"] = 100 * count / len(samples)
-
-
 def _exit_status(sample: Sample) -> str:
     status = str(sample.metadata.get("exit_status", "unknown"))
     return status if status in _KNOWN_EXIT_STATUSES else "other"
@@ -282,11 +268,11 @@ def _raw_reward(sample: Sample, reward_key: str | None) -> float | None:
     return _number(reward)
 
 
-def _weight_version_range(sample: Sample) -> tuple[int | None, int | None]:
-    """Oldest and newest numeric generation versions, as Miles' staleness reads them."""
+def _oldest_weight_version(sample: Sample) -> int | None:
+    """Oldest numeric generation version, as Miles' staleness reads it."""
     spans = getattr(sample, "all_weight_version_spans", None) or []
     versions = [int(span.version) for span in spans if str(span.version).isdigit()]
-    return (min(versions), max(versions)) if versions else (None, None)
+    return min(versions) if versions else None
 
 
 def _per_source_metrics(
@@ -300,10 +286,9 @@ def _per_source_metrics(
     A prompt's samples land on different pools, so the within-prompt delta (a
     sample's reward minus its prompt's mean in this batch) separates a pool's
     effect from prompt difficulty. Staleness is the per-sample form of Miles'
-    group staleness: the drain's version minus the sample's oldest (or, for
-    post-generation, newest) generation version. Miles filters aborted
-    trajectories before this hook, so ``infra_error_ratio`` counts only the
-    failures that still reach training.
+    group staleness: the drain's version minus the sample's oldest generation
+    version. Miles filters aborted trajectories before this hook, so
+    ``infra_error_ratio`` counts only the failures that still reach training.
     """
     rewards = [_raw_reward(sample, reward_key) for sample in samples]
     prompt_rewards: dict[Any, list[float]] = defaultdict(list)
@@ -317,23 +302,23 @@ def _per_source_metrics(
         if len(values) >= 2
     }
 
-    versions = [_weight_version_range(sample) for sample in samples]
+    oldest = [_oldest_weight_version(sample) for sample in samples]
     # Miles reports max_staleness = drain version - oldest version in the batch.
     max_staleness = _number(output.get("rollout/fully_async/max_staleness"))
-    oldest = [low for low, _ in versions if low is not None]
+    versioned = [version for version in oldest if version is not None]
     current_version = (
-        max_staleness + min(oldest) if max_staleness is not None and oldest else None
+        max_staleness + min(versioned)
+        if max_staleness is not None and versioned
+        else None
     )
 
     groups: dict[str, dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
-    group_statuses: dict[str, Counter[str]] = defaultdict(Counter)
-    for sample, reward, (low, high) in zip(samples, rewards, versions, strict=True):
+    for sample, reward, low in zip(samples, rewards, oldest, strict=True):
         agent_metrics = sample.metadata.get("agent_metrics") or {}
         source = str(sample.metadata.get("rollout_source") or "unknown")
         view = source.rsplit(":", 1)[1] if ":" in source else "unknown"
         group = getattr(sample, "group_index", None)
         completion_tokens = _number(agent_metrics.get("model_completion_tokens_total"))
-        status = _exit_status(sample)
         values = {
             "raw_reward_mean": reward,
             "within_prompt_reward_delta_mean": (
@@ -342,18 +327,12 @@ def _per_source_metrics(
                 else None
             ),
             "infra_error_ratio": float(bool(agent_metrics.get("infra_error"))),
-            "format_error_ratio": float(status in _FORMAT_ERROR_STATUSES),
+            "format_error_ratio": float(_exit_status(sample) in _FORMAT_ERROR_STATUSES),
             "response_length_mean": _number(getattr(sample, "response_length", None)),
             "turns_mean": _number(agent_metrics.get("turns")),
-            "total_time_mean": _number(agent_metrics.get("total_time")),
             "staleness_mean": (
                 current_version - low
                 if current_version is not None and low is not None
-                else None
-            ),
-            "post_generation_staleness_mean": (
-                current_version - high
-                if current_version is not None and high is not None
                 else None
             ),
             # Paired per sample so the speed ratio never mixes in untimed tokens.
@@ -368,17 +347,12 @@ def _per_source_metrics(
             f"rollout/by_source/{_metric_name(source)}",
             f"rollout/by_view/{_metric_name(view)}",
         ):
-            group_statuses[prefix][status] += 1
             for name, value in values.items():
                 if value is not None:
                     groups[prefix][name].append(value)
 
     for prefix, metrics in groups.items():
         output[f"{prefix}/sample_count"] = len(metrics["infra_error_ratio"])
-        for status, count in group_statuses[prefix].items():
-            output[f"{prefix}/exit_status/{_metric_name(status)}_ratio"] = count / len(
-                metrics["infra_error_ratio"]
-            )
         for name, values in metrics.items():
             if name.endswith(("_mean", "_ratio")):
                 output[f"{prefix}/{name}"] = sum(values) / len(values)
@@ -407,7 +381,6 @@ def add_metrics(
     )
     _request_metrics(samples, output)
     _routing_replay_metrics(samples, output)
-    _training_batch_composition_metrics(samples, output)
     _per_source_metrics(samples, output, reward_key=reward_key)
 
     statuses = Counter(_exit_status(sample) for sample in samples)

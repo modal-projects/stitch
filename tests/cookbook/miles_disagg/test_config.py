@@ -37,9 +37,10 @@ def _rollout_server_args(recipe):
     "name",
     [
         "qwen3_4b_math",
-        "qwen3_6_35b_a3b_mimo_code_heterogeneous",
-        "qwen3_6_35b_a3b_mimo_code_heterogeneous_score_centering",
-        "qwen3_6_35b_a3b_mimo_code_heterogeneous_tis",
+        "qwen3_6_35b_a3b_hetero_grpo",
+        "qwen3_6_35b_a3b_hetero_icepop",
+        "qwen3_6_35b_a3b_hetero_score_centering",
+        "qwen3_6_35b_a3b_hetero_score_centering_mis",
         "qwen3_6_35b_a3b_mimo_code",
         "qwen3_6_35b_a3b_swebench_pro",
         "qwen3_6_35b_a3b_nvfp4",
@@ -80,7 +81,7 @@ def test_quantized_serving_cannot_overwrite_bf16_masters():
 
 
 def test_mixed_rollout_views_use_generic_checkpoint_paths() -> None:
-    recipe = _recipe("qwen3_6_35b_a3b_mimo_code_heterogeneous")
+    recipe = _recipe("qwen3_6_35b_a3b_hetero_grpo")
 
     validate_recipe(recipe)
 
@@ -92,7 +93,7 @@ def test_mixed_rollout_views_use_generic_checkpoint_paths() -> None:
 
 
 def test_mixed_rollout_views_require_matching_pool_assignments() -> None:
-    recipe = _recipe("qwen3_6_35b_a3b_mimo_code_heterogeneous")
+    recipe = _recipe("qwen3_6_35b_a3b_hetero_grpo")
     recipe.ROLLOUT_WEIGHT_VIEWS = {"fp8": recipe.FP8_CHECKPOINT_PATH}
 
     with pytest.raises(ValueError, match="must select every configured weight view"):
@@ -100,7 +101,7 @@ def test_mixed_rollout_views_require_matching_pool_assignments() -> None:
 
 
 def test_mixed_rollout_view_name_must_be_a_safe_path_component() -> None:
-    recipe = _recipe("qwen3_6_35b_a3b_mimo_code_heterogeneous")
+    recipe = _recipe("qwen3_6_35b_a3b_hetero_grpo")
     recipe.ROLLOUT_WEIGHT_VIEWS = {"../fp8": recipe.FP8_CHECKPOINT_PATH}
 
     with pytest.raises(ValueError, match="invalid weight_view"):
@@ -339,8 +340,8 @@ def test_qwen36_mimo_code_uses_validated_context_and_code_tasks():
     )
 
 
-def test_qwen36_mimo_heterogeneous_base_is_uncorrected_grpo():
-    recipe = _recipe("qwen3_6_35b_a3b_mimo_code_heterogeneous")
+def test_qwen36_hetero_fleet_and_trainer():
+    recipe = _recipe("qwen3_6_35b_a3b_hetero_grpo")
     cfg = recipe.miles
 
     validate_recipe(recipe)
@@ -357,12 +358,6 @@ def test_qwen36_mimo_heterogeneous_base_is_uncorrected_grpo():
         "fp8": recipe.FP8_CHECKPOINT_PATH,
         "nvfp4": recipe.NVFP4_CHECKPOINT_PATH,
     }
-    assert cfg.rollout_top_p == 1.0
-    assert cfg.rollout_top_k == -1
-    assert cfg.advantage_estimator == "grpo"
-    assert not cfg.use_tis
-    assert not cfg.get_mismatch_metrics
-    assert cfg.custom_tis_function_path is None
     assert not cfg.use_rollout_routing_replay
     assert all(
         "--enable-return-routed-experts" not in pool.sglang_args
@@ -410,9 +405,6 @@ def test_qwen36_mimo_heterogeneous_base_is_uncorrected_grpo():
     assert pools["ServerA100BF16TP2"].sglang_args["--linear-attn-decode-backend"] == (
         "triton"
     )
-    # Blackwell BF16 stays defined but disabled; Blackwell serves NVFP4 only.
-    for pool in recipe.BLACKWELL_BF16_POOLS:
-        assert pool.name not in pools
     assert {
         name: (
             pool.min_containers,
@@ -471,62 +463,6 @@ def test_qwen36_mimo_heterogeneous_base_is_uncorrected_grpo():
     assert cfg.sglang_server_concurrency == 64 * 21 == 1344
     assert cfg.environment["MODAL_SWE_AGENT_PROCESSES"] == "64"
     assert cfg.environment["MODAL_SWE_AGENT_THREADS_PER_PROCESS"] == "21"
-
-
-def test_qwen36_mimo_heterogeneous_tis_is_a_thin_control():
-    base = _recipe("qwen3_6_35b_a3b_mimo_code_heterogeneous")
-    recipe = _recipe("qwen3_6_35b_a3b_mimo_code_heterogeneous_tis")
-    cfg = recipe.miles
-
-    validate_recipe(recipe)
-    validate_resumable_config(cfg, weight_views=recipe.ROLLOUT_WEIGHT_VIEWS)
-
-    assert recipe.ROLLOUT_WEIGHT_VIEWS == base.ROLLOUT_WEIGHT_VIEWS
-    assert all(
-        "--enable-return-routed-experts" not in pool.sglang_args
-        for pool in recipe.modal.rollout_pools
-    )
-    assert cfg.use_tis
-    assert cfg.num_rollout == base.miles.num_rollout == 500
-    assert (cfg.context_parallel_size, cfg.save_interval) == (4, 10)
-    assert cfg.tis_clip_low == 0.5
-    assert cfg.tis_clip == 2.0
-    assert not cfg.use_rollout_routing_replay
-    assert not cfg.get_mismatch_metrics
-    assert cfg.custom_tis_function_path is None
-    assert cfg.rollout_top_p == 0.95
-    assert cfg.rollout_top_k == 4096
-    assert base.miles.rollout_top_p == 1.0
-    assert base.miles.rollout_top_k == -1
-    assert all(
-        pool.sglang_args["--sampling-mask-max-tokens"] == "8192"
-        for pool in recipe.modal.rollout_pools
-    )
-
-
-def test_qwen36_mimo_heterogeneous_score_centering_is_a_thin_control():
-    base = _recipe("qwen3_6_35b_a3b_mimo_code_heterogeneous")
-    recipe = _recipe("qwen3_6_35b_a3b_mimo_code_heterogeneous_score_centering")
-    cfg = recipe.miles
-
-    validate_recipe(recipe)
-    validate_resumable_config(cfg, weight_views=recipe.ROLLOUT_WEIGHT_VIEWS)
-
-    assert recipe.modal is base.modal
-    assert recipe.ROLLOUT_WEIGHT_VIEWS == base.ROLLOUT_WEIGHT_VIEWS
-    assert cfg.num_rollout == base.miles.num_rollout == 500
-    assert (cfg.context_parallel_size, cfg.save_interval) == (4, 10)
-    assert cfg.loss_type == "score_centering"
-    assert cfg.score_centering_top_k == 128
-    assert cfg.score_centering_is == "none"
-    assert not cfg.skip_actor_forward_only
-    assert cfg.use_rollout_logprobs
-    assert cfg.disable_grpo_std_normalization
-    assert cfg.calculate_per_token_loss
-    assert cfg.rollout_top_p == 0.95
-    assert cfg.rollout_top_k == 64
-    assert not cfg.use_tis
-    assert not cfg.use_rollout_routing_replay
 
 
 @pytest.mark.parametrize("ref_load", [None, "/checkpoints/another-model-torch-dist"])
@@ -604,34 +540,35 @@ def test_mapping_arguments_are_encoded_as_json() -> None:
     assert json.loads(args[index + 1]) == {"minimum_version": 7, "retry": True}
 
 
-_STUDY_ARMS = (
-    "a1_grpo",
-    "a2_icepop",
-    "a3_score_centering",
-    "a4_score_centering_mis",
+_HETERO_RECIPES = (
+    "grpo",
+    "icepop",
+    "score_centering",
+    "score_centering_mis",
 )
 
 
-def _study_arm(arm):
-    return import_module(
-        f"cookbook.miles_disagg.configs.qwen3_6_35b_a3b_mimo_code_hetero_{arm}"
-    )
+def _hetero(name):
+    return _recipe(f"qwen3_6_35b_a3b_hetero_{name}")
 
 
-@pytest.mark.parametrize("arm", _STUDY_ARMS)
-def test_hetero_study_arms_share_one_sampler_and_objective_shape(arm):
-    """The fleet, data, sampler and run shape every arm's recipe starts from."""
-    recipe = _study_arm(arm)
+@pytest.mark.parametrize("name", _HETERO_RECIPES)
+def test_hetero_recipes_share_the_fleet_sampler_and_run_shape(name):
+    recipe = _hetero(name)
+    base = import_module("cookbook.miles_disagg.configs.qwen3_6_35b_a3b_hetero")
     cfg = recipe.miles
 
     validate_recipe(recipe)
     validate_resumable_config(cfg, weight_views=recipe.ROLLOUT_WEIGHT_VIEWS)
 
+    assert recipe.modal is base.modal
+    assert recipe.ROLLOUT_WEIGHT_VIEWS == base.ROLLOUT_WEIGHT_VIEWS
     assert (cfg.rollout_top_p, cfg.rollout_top_k, cfg.rollout_temperature) == (
         0.95,
         64,
         1.0,
     )
+    assert cfg.advantage_estimator == "grpo"
     assert cfg.disable_grpo_std_normalization
     assert cfg.prompt_data.endswith("/mimo-v2-6-rl-oss/code.jsonl")
     assert not cfg.use_rollout_routing_replay
@@ -643,61 +580,68 @@ def test_hetero_study_arms_share_one_sampler_and_objective_shape(arm):
     assert (cfg.num_rollout, cfg.save_interval, cfg.lr) == (500, 10, 1e-6)
     assert cfg.context_parallel_size == 4
     assert cfg.fully_async_drain_during_weight_update
-    assert cfg.log_rollout_mismatch_diagnostics
     # Unbounded staleness: no age filter, but every request still asks for the
     # latest published weights of its precision.
     assert cfg.max_weight_staleness is None
-    assert (
-        cfg.custom_rollout_request_hook_args["rollout_request_weight_version_mode"]
-        == "min"
+    assert cfg.custom_rollout_request_hook_path == (
+        "cookbook.common.hooks.gated_rollout_request_hook"
     )
-    assert cfg.wandb_group == f"qwen3-6-35b-mimo-code-hetero-{arm.replace('_', '-')}"
-    # Modal caps Volume names at 64 characters; the app name also carries a run id.
-    assert len(recipe.EXPERIMENT_VOLUME_NAME) < 64
+    assert cfg.custom_rollout_request_hook_args == {
+        "rollout_request_weight_version_mode": "min"
+    }
+    slug = name.replace("_", "-")
+    assert (
+        recipe.APP_NAME
+        == recipe.EXPERIMENT_VOLUME_NAME
+        == f"stitch-qwen36-hetero-{slug}"
+    )
+    assert cfg.wandb_group == cfg.prometheus_run_name == f"qwen36-hetero-{slug}"
+    assert cfg.environment["MODAL_SWE_SANDBOX_APP"] == "stitch-qwen36-hetero-sandbox"
+    # Modal caps Volume and app names at 64 characters; the app name also carries a run id.
     assert len(recipe.APP_NAME) + len("-r01") < 64
 
 
-def test_hetero_study_arms_have_their_own_app_volume_and_wandb_group():
-    recipes = [_study_arm(arm) for arm in _STUDY_ARMS]
+def test_hetero_recipes_have_their_own_app_volume_and_wandb_group():
+    recipes = [_hetero(name) for name in _HETERO_RECIPES]
     for field in ("APP_NAME", "EXPERIMENT_VOLUME_NAME"):
         assert len({getattr(recipe, field) for recipe in recipes}) == len(recipes)
     assert len({recipe.miles.wandb_group for recipe in recipes}) == len(recipes)
 
 
-def test_hetero_study_arm_recipes():
-    a1, a2, a3, a4 = (_study_arm(arm).miles for arm in _STUDY_ARMS[:4])
+def test_hetero_recipes_change_only_their_algorithm():
+    grpo, icepop, sc, sc_mis = (_hetero(name).miles for name in _HETERO_RECIPES)
 
-    # Every recipe but A2 averages the loss over all tokens and trains the router.
-    for recipe in (a1, a3, a4):
-        assert recipe.calculate_per_token_loss
-        assert not getattr(recipe, "prompt_mean_loss", False)
-        assert not getattr(recipe, "freeze_moe_router", False)
+    # Every recipe but IcePop averages the loss over all tokens and trains the router.
+    for cfg in (grpo, sc, sc_mis):
+        assert cfg.calculate_per_token_loss
+        assert not getattr(cfg, "prompt_mean_loss", False)
+        assert not getattr(cfg, "freeze_moe_router", False)
 
-    # A1 has no correction: one update per batch at ratio 1, no importance weights.
-    assert getattr(a1, "loss_type", None) is None
-    assert (a1.use_tis, a1.use_rollout_logprobs) == (False, False)
-    assert a1.skip_actor_forward_only
-    # A2 weights each token by its trainer/sampler ratio and drops it outside [0.2, 5].
-    assert a2.use_tis
+    # Naive GRPO: one update per batch at ratio 1, no importance weights.
+    assert getattr(grpo, "loss_type", None) is None
+    assert (grpo.use_tis, grpo.use_rollout_logprobs) == (False, False)
+    assert grpo.skip_actor_forward_only
+    # IcePop weights each token by its trainer/sampler ratio and drops it outside
+    # [0.2, 5], with prompt-mean aggregation and a frozen MoE router.
+    assert icepop.use_tis
     assert (
-        a2.custom_tis_function_path
+        icepop.custom_tis_function_path
         == "miles.backends.training_utils.loss_hub.corrections.icepop_function"
     )
-    assert (a2.tis_clip_low, a2.tis_clip) == (0.2, 5.0)
-    assert a2.skip_actor_forward_only and not a2.use_rollout_logprobs
-    # ... with prompt-mean aggregation and a frozen MoE router.
-    assert a2.prompt_mean_loss and not a2.calculate_per_token_loss
-    assert a2.freeze_moe_router
-    args = a2.cli_args()
+    assert (icepop.tis_clip_low, icepop.tis_clip) == (0.2, 5.0)
+    assert icepop.skip_actor_forward_only and not icepop.use_rollout_logprobs
+    assert icepop.prompt_mean_loss and not icepop.calculate_per_token_loss
+    assert icepop.freeze_moe_router
+    args = icepop.cli_args()
     assert "--prompt-mean-loss" in args and "--freeze-moe-router" in args
     assert "--calculate-per-token-loss" not in args
-    for sc in (a3, a4):
-        assert (sc.loss_type, sc.score_centering_top_k) == ("score_centering", 128)
-        assert sc.use_rollout_logprobs and not sc.skip_actor_forward_only
-        assert not sc.use_tis
-    # A4 composes score centering with A2's masked importance weights.
-    assert (a3.score_centering_is, a4.score_centering_is) == ("none", "mis")
-    assert (a4.score_centering_mis_low, a4.score_centering_mis_high) == (
-        a2.tis_clip_low,
-        a2.tis_clip,
+    for cfg in (sc, sc_mis):
+        assert (cfg.loss_type, cfg.score_centering_top_k) == ("score_centering", 128)
+        assert cfg.use_rollout_logprobs and not cfg.skip_actor_forward_only
+        assert not cfg.use_tis
+    # Score centering composed with IcePop's masked weights.
+    assert (sc.score_centering_is, sc_mis.score_centering_is) == ("none", "mis")
+    assert (sc_mis.score_centering_mis_low, sc_mis.score_centering_mis_high) == (
+        icepop.tis_clip_low,
+        icepop.tis_clip,
     )

@@ -17,9 +17,10 @@ from cookbook.miles_disagg.configs import qwen3_4b_math
     [
         "qwen3_4b_math",
         "qwen3_6_35b_a3b_mimo_code",
-        "qwen3_6_35b_a3b_mimo_code_heterogeneous",
-        "qwen3_6_35b_a3b_mimo_code_heterogeneous_score_centering",
-        "qwen3_6_35b_a3b_mimo_code_heterogeneous_tis",
+        "qwen3_6_35b_a3b_hetero_grpo",
+        "qwen3_6_35b_a3b_hetero_icepop",
+        "qwen3_6_35b_a3b_hetero_score_centering",
+        "qwen3_6_35b_a3b_hetero_score_centering_mis",
         "qwen3_6_35b_a3b_swebench_pro",
         "qwen3_6_35b_a3b_nvfp4",
         "glm5_3_nvfp4",
@@ -55,7 +56,7 @@ def test_trainer_mounts_kernel_cache_volume(monkeypatch):
 
 
 def test_rollout_pool_environment_is_applied_before_engine_start(monkeypatch):
-    monkeypatch.setenv("EXPERIMENT_CONFIG", "qwen3_6_35b_a3b_mimo_code_heterogeneous")
+    monkeypatch.setenv("EXPERIMENT_CONFIG", "qwen3_6_35b_a3b_hetero_grpo")
     monkeypatch.setenv("RUN_ID", "test-run")
     monkeypatch.delenv("STITCH_STORE_BACKEND", raising=False)
     monkeypatch.delenv("MILES_LOCAL_DIR", raising=False)
@@ -87,7 +88,7 @@ def test_rollout_pool_environment_is_applied_before_engine_start(monkeypatch):
 
 
 def test_multi_view_pool_claims_use_view_scoped_update_directories(monkeypatch):
-    monkeypatch.setenv("EXPERIMENT_CONFIG", "qwen3_6_35b_a3b_mimo_code_heterogeneous")
+    monkeypatch.setenv("EXPERIMENT_CONFIG", "qwen3_6_35b_a3b_hetero_grpo")
     monkeypatch.setenv("RUN_ID", "test-run")
     monkeypatch.delenv("STITCH_STORE_BACKEND", raising=False)
     monkeypatch.delenv("MILES_LOCAL_DIR", raising=False)
@@ -120,7 +121,7 @@ def test_multi_view_pool_claims_use_view_scoped_update_directories(monkeypatch):
 def test_multi_view_replica_boots_from_its_latest_complete_export(
     monkeypatch, tmp_path
 ):
-    monkeypatch.setenv("EXPERIMENT_CONFIG", "qwen3_6_35b_a3b_mimo_code_heterogeneous")
+    monkeypatch.setenv("EXPERIMENT_CONFIG", "qwen3_6_35b_a3b_hetero_grpo")
     monkeypatch.setenv("RUN_ID", "test-run")
     monkeypatch.delenv("STITCH_STORE_BACKEND", raising=False)
     monkeypatch.delenv("MILES_LOCAL_DIR", raising=False)
@@ -150,7 +151,7 @@ def test_multi_view_replica_boots_from_its_latest_complete_export(
 
 
 def test_heterogeneous_rollout_sources_name_every_pool_and_its_view(monkeypatch):
-    monkeypatch.setenv("EXPERIMENT_CONFIG", "qwen3_6_35b_a3b_mimo_code_heterogeneous")
+    monkeypatch.setenv("EXPERIMENT_CONFIG", "qwen3_6_35b_a3b_hetero_grpo")
     monkeypatch.setenv("RUN_ID", "test-run")
     monkeypatch.delenv("STITCH_STORE_BACKEND", raising=False)
     monkeypatch.delenv("MILES_LOCAL_DIR", raising=False)
@@ -169,7 +170,7 @@ def test_heterogeneous_rollout_sources_name_every_pool_and_its_view(monkeypatch)
 
 
 def test_heterogeneous_readiness_is_checked_per_pool(monkeypatch):
-    monkeypatch.setenv("EXPERIMENT_CONFIG", "qwen3_6_35b_a3b_mimo_code_heterogeneous")
+    monkeypatch.setenv("EXPERIMENT_CONFIG", "qwen3_6_35b_a3b_hetero_grpo")
     monkeypatch.setenv("RUN_ID", "test-run")
     monkeypatch.delenv("STITCH_STORE_BACKEND", raising=False)
     monkeypatch.delenv("MILES_LOCAL_DIR", raising=False)

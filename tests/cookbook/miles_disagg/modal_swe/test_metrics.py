@@ -7,7 +7,6 @@ from cookbook.miles_disagg.modal_swe.metrics import (
     _per_source_metrics,
     _request_metrics,
     _routing_replay_metrics,
-    _training_batch_composition_metrics,
     log_rollout_data,
 )
 
@@ -90,29 +89,6 @@ def test_routing_replay_metrics_report_incremental_raw_volume():
     assert output["rollout_r3/rows_total"] == 8
     assert output["rollout_r3/raw_bytes_total"] == 8 * 2 * 4 * 4
     assert output["rollout_r3/raw_bytes_per_row"] == 2 * 4 * 4
-
-
-def test_training_batch_composition_metrics_count_final_samples():
-    samples = [
-        SimpleNamespace(metadata={"rollout_source": "ServerH100FP8:fp8"}),
-        SimpleNamespace(metadata={"rollout_source": "ServerH100FP8:fp8"}),
-        SimpleNamespace(metadata={"rollout_source": "ServerB300NVFP4W4A16:nvfp4"}),
-        SimpleNamespace(metadata={}),
-    ]
-    output = {}
-
-    _training_batch_composition_metrics(samples, output)
-
-    assert output["rollout/training_batch/sample_count"] == 4
-    assert output["rollout/training_batch/ServerH100FP8:fp8/sample_count"] == 2
-    assert output["rollout/training_batch/ServerH100FP8:fp8/sample_percentage"] == 50.0
-    assert output["rollout/training_batch/ServerB300NVFP4W4A16:nvfp4/sample_count"] == 1
-    assert (
-        output["rollout/training_batch/ServerB300NVFP4W4A16:nvfp4/sample_percentage"]
-        == 25.0
-    )
-    assert output["rollout/training_batch/unknown/sample_count"] == 1
-    assert output["rollout/training_batch/unknown/sample_percentage"] == 25.0
 
 
 def test_per_source_metrics_group_by_pool_and_view():
@@ -204,9 +180,7 @@ def test_per_source_metrics_staleness_uses_the_drain_version():
     _per_source_metrics(samples, output)
 
     assert output["rollout/by_view/fp8/staleness_mean"] == 4
-    assert output["rollout/by_view/fp8/post_generation_staleness_mean"] == 2
     assert output["rollout/by_view/nvfp4/staleness_mean"] == 1
-    assert output["rollout/by_view/nvfp4/post_generation_staleness_mean"] == 0
     assert "rollout/by_view/bf16/staleness_mean" not in output
 
     unversioned = {}
@@ -221,11 +195,9 @@ def test_per_source_metrics_tolerate_a_bare_sample():
 
     assert output == {
         "rollout/by_source/unknown/sample_count": 1,
-        "rollout/by_source/unknown/exit_status/unknown_ratio": 1.0,
         "rollout/by_source/unknown/infra_error_ratio": 0.0,
         "rollout/by_source/unknown/format_error_ratio": 0.0,
         "rollout/by_view/unknown/sample_count": 1,
-        "rollout/by_view/unknown/exit_status/unknown_ratio": 1.0,
         "rollout/by_view/unknown/infra_error_ratio": 0.0,
         "rollout/by_view/unknown/format_error_ratio": 0.0,
     }
@@ -262,7 +234,7 @@ def test_rollout_log_hook_reports_per_view_metrics():
     assert metrics["rollout/by_view/fp8/within_prompt_reward_delta_mean"] == 0.5
 
 
-def test_per_source_metrics_split_exit_statuses_by_view():
+def test_per_source_metrics_split_format_errors_by_pool_and_view():
     samples = [
         _sample("ServerH100FP8:fp8", metadata={"exit_status": "RepeatedFormatError"}),
         _sample("ServerH200FP8:fp8", metadata={"exit_status": "Submitted"}),
@@ -273,14 +245,12 @@ def test_per_source_metrics_split_exit_statuses_by_view():
 
     _per_source_metrics(samples, output)
 
-    assert output["rollout/by_view/fp8/exit_status/RepeatedFormatError_ratio"] == 0.5
-    assert output["rollout/by_view/fp8/exit_status/Submitted_ratio"] == 0.5
     assert output["rollout/by_view/fp8/format_error_ratio"] == 0.5
     assert output["rollout/by_view/nvfp4/format_error_ratio"] == 1.0
     assert output["rollout/by_source/ServerH100FP8:fp8/format_error_ratio"] == 1.0
-    # Unknown statuses fold into "other", as in the global ratios.
-    assert output["rollout/by_view/bf16/exit_status/other_ratio"] == 1.0
     assert output["rollout/by_view/bf16/format_error_ratio"] == 0.0
+    # Exit statuses are reported only for the whole batch.
+    assert not any("/exit_status/" in key for key in output)
 
 
 def _dump_sample(reward, index, *, source="ServerH100FP8:fp8", response=""):
