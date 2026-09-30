@@ -10,8 +10,9 @@ MILES_REPO_REF = "4aa180e9502d057cf3733593a82a513cea25f645"
 
 The image supplies the compiled CUDA, Transformer Engine, and Megatron-LM
 environment. The source pin belongs to
-`modal-projects/miles:stitch-miles`: upstream Miles main at
-`3439ec7513`, followed by twenty reviewed integration changes.
+`modal-projects/miles:stitch-miles-hetero`, the heterogeneous-RL experiment branch:
+upstream Miles main at `3439ec7513`, followed by twenty reviewed integration changes.
+`stitch-miles` tracks the pin on Stitch main.
 Each upstream PR is represented by one commit; the branch carries no additional
 runtime patches. Stitch no longer patches Miles at container startup.
 
