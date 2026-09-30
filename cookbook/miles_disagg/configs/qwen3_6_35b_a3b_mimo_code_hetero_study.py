@@ -7,9 +7,9 @@ leaves staleness unbounded: every request still asks its replica for the latest
 published weights of its precision, but no sample is dropped for its age.
 
 Every arm trains the same model on the same fleet and data, samples with top-p 0.95 /
-top-k 64 and replays that support on the trainer, and uses group-centered advantages
-without std normalization and a per-token loss, so arms differ only in the off-policy
-estimator. B1 is an optional homogeneous BF16 reference.
+top-k 64 and replays that support on the trainer, and starts from group-centered
+advantages without std normalization. On top of that, each arm is one self-contained
+recipe for training off-policy: naive GRPO, IcePop, and score centering.
 
 Arm modules take everything they don't override from here, and this module takes the
 rest from the heterogeneous base recipe.
@@ -38,6 +38,7 @@ class GrpoMiles(base._Miles):
     rollout_top_p = 0.95
     rollout_top_k = 64
     disable_grpo_std_normalization = True
+    # A token mean over the whole batch; recipes may choose another aggregation.
     calculate_per_token_loss = True
     # Detached mismatch diagnostics: ratio tails, sequence log-ratio, advantages.
     log_rollout_mismatch_diagnostics = True

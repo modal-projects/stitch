@@ -606,10 +606,9 @@ def test_mapping_arguments_are_encoded_as_json() -> None:
 
 _STUDY_ARMS = (
     "a1_grpo",
-    "a2_tis",
+    "a2_icepop",
     "a3_score_centering",
-    "a4_score_centering_tis",
-    "b1_grpo_bf16",
+    "a4_score_centering_mis",
 )
 
 
@@ -621,7 +620,7 @@ def _study_arm(arm):
 
 @pytest.mark.parametrize("arm", _STUDY_ARMS)
 def test_hetero_study_arms_share_one_sampler_and_objective_shape(arm):
-    """Arms may differ in their estimator, fleet or staleness, never in these."""
+    """The fleet, data, sampler and run shape every arm's recipe starts from."""
     recipe = _study_arm(arm)
     cfg = recipe.miles
 
@@ -634,7 +633,6 @@ def test_hetero_study_arms_share_one_sampler_and_objective_shape(arm):
         1.0,
     )
     assert cfg.disable_grpo_std_normalization
-    assert cfg.calculate_per_token_loss
     assert cfg.prompt_data.endswith("/mimo-v2-6-rl-oss/code.jsonl")
     assert not cfg.use_rollout_routing_replay
     assert (
@@ -666,56 +664,40 @@ def test_hetero_study_arms_have_their_own_app_volume_and_wandb_group():
     assert len({recipe.miles.wandb_group for recipe in recipes}) == len(recipes)
 
 
-def test_hetero_study_estimators_differ_only_where_named():
+def test_hetero_study_arm_recipes():
     a1, a2, a3, a4 = (_study_arm(arm).miles for arm in _STUDY_ARMS[:4])
+
+    # Every recipe but A2 averages the loss over all tokens and trains the router.
+    for recipe in (a1, a3, a4):
+        assert recipe.calculate_per_token_loss
+        assert not getattr(recipe, "prompt_mean_loss", False)
+        assert not getattr(recipe, "freeze_moe_router", False)
 
     # A1 has no correction: one update per batch at ratio 1, no importance weights.
     assert getattr(a1, "loss_type", None) is None
     assert (a1.use_tis, a1.use_rollout_logprobs) == (False, False)
     assert a1.skip_actor_forward_only
-    assert (a2.use_tis, a2.tis_clip_low, a2.tis_clip) == (True, 0.5, 2.0)
+    # A2 weights each token by its trainer/sampler ratio and drops it outside [0.2, 5].
+    assert a2.use_tis
+    assert (
+        a2.custom_tis_function_path
+        == "miles.backends.training_utils.loss_hub.corrections.icepop_function"
+    )
+    assert (a2.tis_clip_low, a2.tis_clip) == (0.2, 5.0)
     assert a2.skip_actor_forward_only and not a2.use_rollout_logprobs
+    # ... with prompt-mean aggregation and a frozen MoE router.
+    assert a2.prompt_mean_loss and not a2.calculate_per_token_loss
+    assert a2.freeze_moe_router
+    args = a2.cli_args()
+    assert "--prompt-mean-loss" in args and "--freeze-moe-router" in args
+    assert "--calculate-per-token-loss" not in args
     for sc in (a3, a4):
         assert (sc.loss_type, sc.score_centering_top_k) == ("score_centering", 128)
         assert sc.use_rollout_logprobs and not sc.skip_actor_forward_only
         assert not sc.use_tis
-    assert (a3.score_centering_is, a4.score_centering_is) == ("none", "tis")
-    assert a4.score_centering_tis_clip == 2.0
-
-
-def test_hetero_study_bf16_reference_changes_only_the_fleet():
-    a1 = _study_arm("a1_grpo")
-    b1 = _study_arm("b1_grpo_bf16")
-
-    # B1: one homogeneous BF16 B300 pool that can route every A1 session.
-    assert b1.ROLLOUT_WEIGHT_VIEWS == {"bf16": a1.BF16_CHECKPOINT_PATH}
-    [pool] = b1.modal.rollout_pools
-    assert (pool.name, pool.gpu, pool.weight_view, pool.gpus_per_engine) == (
-        "ServerB300BF16",
-        "B300",
-        "bf16",
-        1,
+    # A4 composes score centering with A2's masked importance weights.
+    assert (a3.score_centering_is, a4.score_centering_is) == ("none", "mis")
+    assert (a4.score_centering_mis_low, a4.score_centering_mis_high) == (
+        a2.tis_clip_low,
+        a2.tis_clip,
     )
-    assert pool.min_containers == pool.max_containers
-    assert pool.sglang_args["--dtype"] == "bfloat16"
-    assert pool.sglang_args["--kv-cache-dtype"] == "auto"
-    assert (
-        pool.min_containers * pool.target_inputs
-        >= b1.miles.async_max_concurrent_samples
-    )
-    assert (
-        b1.miles.async_max_concurrent_samples
-        == a1.miles.async_max_concurrent_samples
-        == 1344
-    )
-    assert b1.modal.rollout_pools != a1.modal.rollout_pools
-
-    # Everything else is A1's.
-    for control in (b1.miles,):
-        for field in (
-            "loss_type",
-            "use_tis",
-            "use_rollout_logprobs",
-            "skip_actor_forward_only",
-        ):
-            assert getattr(control, field, None) == getattr(a1.miles, field, None)
