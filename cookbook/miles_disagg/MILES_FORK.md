@@ -5,13 +5,13 @@ Stitch installs an immutable Miles revision over a dated trainer image:
 ```python
 MILES_IMAGE_TAG = "radixark/miles:dev-202609290439"
 MILES_REPO_URL = "https://github.com/modal-projects/miles.git"
-MILES_REPO_REF = "8448a2896ba81229a3a373ee7c5bbb61692dc0d5"
+MILES_REPO_REF = "19459cde3c68dac891657cc5e0f3a043ef414297"
 ```
 
 The image supplies the compiled CUDA, Transformer Engine, and Megatron-LM
 environment. The source pin belongs to
 `modal-projects/miles:stitch-miles`: upstream Miles main at
-`3439ec7513`, followed by sixteen reviewed integration changes.
+`3439ec7513`, followed by seventeen reviewed integration changes.
 Each upstream PR is represented by one commit; the branch carries no additional
 runtime patches. Stitch no longer patches Miles at container startup.
 
@@ -35,6 +35,7 @@ runtime patches. Stitch no longer patches Miles at container startup.
 | Parallel score-centering validation | Not yet upstreamed | `b2656a4059` | Run the unchanged per-sample candidate checks on a bounded thread pool, raising the same first-in-order error as the serial loop. |
 | Drain during weight publication | Not yet upstreamed | `c802bb390e` | Optionally convert the next fully-async batch while the weight update publishes, measuring its staleness against the version that update publishes. |
 | Per-view mismatch diagnostics | Not yet upstreamed | `8448a2896b` | Report train-vs-rollout logprob difference and KL per rollout weight view, leaving the loss and existing metrics unchanged. |
+| Mismatch diagnostics by staleness and tails | Not yet upstreamed | `19459cde3c` | Split train-vs-rollout mismatch by version lag, and optionally log token-ratio tails, chi-square, sequence-level log-ratio and advantage statistics, all detached from the loss. |
 
 The integration boundary is intentionally small:
 
