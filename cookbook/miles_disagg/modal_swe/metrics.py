@@ -6,7 +6,7 @@ aggregates environment/tool/verifier fields owned by the Modal adapter.
 
 from __future__ import annotations
 
-from collections import Counter
+from collections import Counter, defaultdict
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -97,21 +97,27 @@ def _summarize_sample_metadata(
         )
 
 
-def _request_metrics(samples: list[Sample], output: dict[str, Any]) -> None:
-    lifecycle_segments = []
-    for sample in samples:
-        lifecycle = sample.metadata.get("lifecycle", [])
-        lifecycle_segments.extend(
-            lifecycle if isinstance(lifecycle, list) else [lifecycle]
-        )
-    backend = [
+def _lifecycle_segments(sample: Sample) -> list[Any]:
+    lifecycle = sample.metadata.get("lifecycle", [])
+    return lifecycle if isinstance(lifecycle, list) else [lifecycle]
+
+
+def _backend_seconds(segments: list[Any]) -> list[float]:
+    return [
         float(segment["t1"] - segment["t0"])
-        for segment in lifecycle_segments
+        for segment in segments
         if isinstance(segment, dict)
         and isinstance(segment.get("t0"), (int, float))
         and isinstance(segment.get("t1"), (int, float))
         and segment["t1"] >= segment["t0"]
     ]
+
+
+def _request_metrics(samples: list[Sample], output: dict[str, Any]) -> None:
+    lifecycle_segments = [
+        segment for sample in samples for segment in _lifecycle_segments(sample)
+    ]
+    backend = _backend_seconds(lifecycle_segments)
     server = [
         float(segment["t1"] - segment["req_ts"])
         for segment in lifecycle_segments
@@ -215,7 +221,132 @@ def _training_batch_composition_metrics(
         output[f"{prefix}/sample_percentage"] = 100 * count / len(samples)
 
 
-def add_metrics(samples: list[Sample], output: dict[str, Any]) -> None:
+def _metric_name(value: str) -> str:
+    return value.replace("/", "_").replace(" ", "_")
+
+
+def _number(value: Any) -> float | None:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    return None
+
+
+def _raw_reward(sample: Sample, reward_key: str | None) -> float | None:
+    """The reward Miles averages into ``episode_raw_reward``."""
+    if "raw_reward" in sample.metadata:
+        return _number(sample.metadata["raw_reward"])
+    reward = getattr(sample, "reward", None)
+    if reward_key and isinstance(reward, dict):
+        reward = reward.get(reward_key)
+    return _number(reward)
+
+
+def _weight_version_range(sample: Sample) -> tuple[int | None, int | None]:
+    """Oldest and newest numeric generation versions, as Miles' staleness reads them."""
+    spans = getattr(sample, "all_weight_version_spans", None) or []
+    versions = [int(span.version) for span in spans if str(span.version).isdigit()]
+    return (min(versions), max(versions)) if versions else (None, None)
+
+
+def _per_source_metrics(
+    samples: list[Sample],
+    output: dict[str, Any],
+    *,
+    reward_key: str | None = None,
+) -> None:
+    """Split the batch by serving pool and by weight view (precision).
+
+    A prompt's samples land on different pools, so the within-prompt delta (a
+    sample's reward minus its prompt's mean in this batch) separates a pool's
+    effect from prompt difficulty. Staleness is the per-sample form of Miles'
+    group staleness: the drain's version minus the sample's oldest (or, for
+    post-generation, newest) generation version. Miles filters aborted
+    trajectories before this hook, so ``infra_error_ratio`` counts only the
+    failures that still reach training.
+    """
+    rewards = [_raw_reward(sample, reward_key) for sample in samples]
+    prompt_rewards: dict[Any, list[float]] = defaultdict(list)
+    for sample, reward in zip(samples, rewards, strict=True):
+        group = getattr(sample, "group_index", None)
+        if reward is not None and group is not None:
+            prompt_rewards[group].append(reward)
+    prompt_means = {
+        group: sum(values) / len(values)
+        for group, values in prompt_rewards.items()
+        if len(values) >= 2
+    }
+
+    versions = [_weight_version_range(sample) for sample in samples]
+    # Miles reports max_staleness = drain version - oldest version in the batch.
+    max_staleness = _number(output.get("rollout/fully_async/max_staleness"))
+    oldest = [low for low, _ in versions if low is not None]
+    current_version = (
+        max_staleness + min(oldest) if max_staleness is not None and oldest else None
+    )
+
+    groups: dict[str, dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
+    for sample, reward, (low, high) in zip(samples, rewards, versions, strict=True):
+        agent_metrics = sample.metadata.get("agent_metrics") or {}
+        source = str(sample.metadata.get("rollout_source") or "unknown")
+        view = source.rsplit(":", 1)[1] if ":" in source else "unknown"
+        group = getattr(sample, "group_index", None)
+        completion_tokens = _number(agent_metrics.get("model_completion_tokens_total"))
+        values = {
+            "raw_reward_mean": reward,
+            "within_prompt_reward_delta_mean": (
+                reward - prompt_means[group]
+                if reward is not None and group in prompt_means
+                else None
+            ),
+            "infra_error_ratio": float(bool(agent_metrics.get("infra_error"))),
+            "response_length_mean": _number(getattr(sample, "response_length", None)),
+            "turns_mean": _number(agent_metrics.get("turns")),
+            "total_time_mean": _number(agent_metrics.get("total_time")),
+            "staleness_mean": (
+                current_version - low
+                if current_version is not None and low is not None
+                else None
+            ),
+            "post_generation_staleness_mean": (
+                current_version - high
+                if current_version is not None and high is not None
+                else None
+            ),
+            # Paired per sample so the speed ratio never mixes in untimed tokens.
+            "completion_tokens": completion_tokens,
+            "backend_seconds": (
+                sum(_backend_seconds(_lifecycle_segments(sample)))
+                if completion_tokens is not None
+                else None
+            ),
+        }
+        for prefix in (
+            f"rollout/by_source/{_metric_name(source)}",
+            f"rollout/by_view/{_metric_name(view)}",
+        ):
+            for name, value in values.items():
+                if value is not None:
+                    groups[prefix][name].append(value)
+
+    for prefix, metrics in groups.items():
+        output[f"{prefix}/sample_count"] = len(metrics["infra_error_ratio"])
+        for name, values in metrics.items():
+            if name.endswith(("_mean", "_ratio")):
+                output[f"{prefix}/{name}"] = sum(values) / len(values)
+        # Pooled over the group's requests, so long episodes weigh by their time.
+        seconds = sum(metrics["backend_seconds"])
+        if metrics["completion_tokens"] and seconds > 0:
+            output[f"{prefix}/completion_tokens_per_backend_request_second"] = (
+                sum(metrics["completion_tokens"]) / seconds
+            )
+
+
+def add_metrics(
+    samples: list[Sample],
+    output: dict[str, Any],
+    *,
+    reward_key: str | None = None,
+) -> None:
     if not samples:
         return
     _numeric_agent_metrics(samples, output)
@@ -228,6 +359,7 @@ def add_metrics(samples: list[Sample], output: dict[str, Any]) -> None:
     _request_metrics(samples, output)
     _routing_replay_metrics(samples, output)
     _training_batch_composition_metrics(samples, output)
+    _per_source_metrics(samples, output, reward_key=reward_key)
 
     known_statuses = {
         "Submitted",
@@ -289,9 +421,13 @@ def log_rollout_data(
     rollout_time: float,
 ) -> bool:
     """Extend the standard Miles rollout log; returning False preserves it."""
-    del rollout_id, args, rollout_time
+    del rollout_id, rollout_time
     if rollout_extra_metrics is not None and samples:
-        add_metrics(samples, rollout_extra_metrics)
+        add_metrics(
+            samples,
+            rollout_extra_metrics,
+            reward_key=getattr(args, "reward_key", None),
+        )
         # Exact vectors are needed only for the aggregate above. Do not carry
         # hundreds of per-turn floats per trajectory into trainer object-store
         # payloads after their p50/p90/max/count totals have been recorded.
