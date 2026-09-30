@@ -1310,6 +1310,33 @@ def _agent_process_count() -> int:
     return int(os.getenv("MODAL_SWE_AGENT_PROCESSES", "1"))
 
 
+class _StartRamp:
+    """Spreads the first wave of episodes over ``MODAL_SWE_START_RAMP_SECONDS``.
+
+    A fresh rollout process starts every concurrent session at once, so all of
+    them create sandboxes and prefill their prompts together. Episode ``i`` of the
+    first wave (one per concurrent session) instead waits ``ramp * i / wave``;
+    later episodes, which replace finished ones, start at once.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._started = 0
+
+    def next_delay(self) -> float:
+        ramp = float(os.getenv("MODAL_SWE_START_RAMP_SECONDS", "0"))
+        wave = _agent_process_count() * _threads_per_agent_process()
+        with self._lock:
+            index = self._started
+            self._started += 1
+        if ramp <= 0 or index >= wave:
+            return 0.0
+        return ramp * index / wave
+
+
+_start_ramp = _StartRamp()
+
+
 @cache
 def _local_agent_executor() -> ThreadPoolExecutor:
     return ThreadPoolExecutor(
@@ -1648,6 +1675,8 @@ async def run(
 ) -> dict[str, Any] | None:
     """Run one repository-repair episode without blocking the rollout event loop."""
     del kwargs
+    if (delay := _start_ramp.next_delay()) > 0:
+        await asyncio.sleep(delay)
     queued_at = time.perf_counter()
     payload = {
         "base_url": base_url,

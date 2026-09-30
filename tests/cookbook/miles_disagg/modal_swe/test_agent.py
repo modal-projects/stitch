@@ -32,6 +32,7 @@ try:
         _parse_reward,
         _prepare_environment,
         _RayAgentWorkerPool,
+        _StartRamp,
         _task_cwd,
         pick_latest_leaf,
         postprocess_samples,
@@ -1079,3 +1080,20 @@ def test_only_recognized_external_failures_are_infrastructure():
     assert _is_infrastructure_error(service_error_type("temporarily unavailable"))
     assert _is_infrastructure_error(litellm_timeout_type("request expired"))
     assert not _is_infrastructure_error(RuntimeError("adapter invariant broke"))
+
+
+def test_start_ramp_spreads_only_the_first_wave(monkeypatch) -> None:
+    monkeypatch.setenv("MODAL_SWE_START_RAMP_SECONDS", "300")
+    monkeypatch.setenv("MODAL_SWE_AGENT_PROCESSES", "2")
+    monkeypatch.setenv("MODAL_SWE_AGENT_THREADS_PER_PROCESS", "2")
+    ramp = _StartRamp()
+
+    # One delay per concurrent session, evenly over the ramp; replacements start at once.
+    assert [ramp.next_delay() for _ in range(6)] == [0.0, 75.0, 150.0, 225.0, 0.0, 0.0]
+
+
+def test_start_ramp_is_off_by_default(monkeypatch) -> None:
+    monkeypatch.delenv("MODAL_SWE_START_RAMP_SECONDS", raising=False)
+    ramp = _StartRamp()
+
+    assert [ramp.next_delay() for _ in range(3)] == [0.0, 0.0, 0.0]
