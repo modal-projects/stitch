@@ -19,7 +19,7 @@ from typing import Any
 from stitch.pools.base import Pool
 from stitch.pools.modal_flash import ModalFlashFleet, ModalFlashPool
 from stitch.publish import constrain_request
-from stitch.publisher import Publisher, TrainerComms
+from stitch.publisher import Publisher, TrainerComms, publish_together
 from stitch.stores.base import Store
 
 from . import process, storage
@@ -57,6 +57,31 @@ def commit_and_wake(args: Any, published_dir: str, rollout_engines: Any = None) 
     """
     del rollout_engines
     _publisher(args).publish(published_dir)
+
+
+def commit_and_wake_views(
+    args: Any, published_dirs: dict[str, str], rollout_engines: Any = None
+) -> None:
+    """Publish every rollout weight view of one update together.
+
+    ``published_dirs`` maps each view to its ``weight_vNNNNNN`` directory. One round
+    of host commits covers every view before any pointer advances; see
+    :func:`stitch.publisher.publish_together`.
+    """
+    del rollout_engines
+    publishers = {view: _publisher(_view_args(args, view)) for view in published_dirs}
+    publish_together(publishers, published_dirs)
+
+
+def _view_args(args: Any, view: str) -> SimpleNamespace:
+    """The hook arguments one weight view's store and pool are built from."""
+    return SimpleNamespace(
+        **{
+            **vars(args),
+            "update_weight_disk_dir": str(Path(args.update_weight_disk_dir) / view),
+            "update_weight_view": view,
+        }
+    )
 
 
 def claim_pool(args: Any, *, boot_version: int = 0) -> None:

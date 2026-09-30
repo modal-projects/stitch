@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import traceback
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -213,3 +214,79 @@ class Publisher:
         ]
         if errors:
             raise RuntimeError(f"{phase} failed:\n" + "\n".join(errors))
+
+
+def publish_together(
+    publishers: Mapping[str, Publisher], published_dirs: Mapping[str, str]
+) -> None:
+    """Publish several rollout views of one trainer version with one commit round.
+
+    ``publishers`` and ``published_dirs`` share one key per view. With a shared
+    mount, a single round of host-leader commits makes every view's files durable
+    before rank 0 publishes each view from one refreshed mount, so each view's
+    pointer still moves only after its bytes, and after every other view's bytes
+    too. Upload stores keep publishing view by view.
+    """
+    names = list(published_dirs)
+    if not names:
+        return
+    if set(names) != set(publishers):
+        raise ValueError("publish_together needs one publisher per published view")
+    if any(isinstance(publishers[name]._store, S3Store) for name in names):
+        for name in names:
+            publishers[name].publish(published_dirs[name])
+        return
+
+    first = publishers[names[0]]
+    pending = {}
+    for name in names:
+        publisher, published_dir = publishers[name], published_dirs[name]
+        directory = Path(published_dir).name
+        if not directory.startswith(WEIGHT_PREFIX):
+            raise ValueError(f"{published_dir!r} is not a weight version directory")
+        target = VersionRef.parse(f"{publisher._run_id}/{directory}")
+        already_published, expected = publisher._pointer_snapshot(target)
+        if already_published:
+            logger.warning(
+                "%s is already published; leaving it immutable", published_dir
+            )
+            continue
+        decide_pointer_move(expected, target)
+        pending[name] = published_dir
+    if not pending:
+        return
+
+    commit_error = None
+    if first._comms.is_host_leader():
+        try:
+            for store in _distinct_mounts(publishers[name]._store for name in pending):
+                store.commit()
+        except Exception:  # noqa: BLE001
+            commit_error = f"rank {first._comms.rank()}:\n{traceback.format_exc()}"
+    first._raise_gathered_failures("checkpoint commit", commit_error)
+
+    publish_error = None
+    if first._comms.rank() in (None, 0):
+        try:
+            for store in _distinct_mounts(publishers[name]._store for name in pending):
+                store.refresh()
+            for name, published_dir in pending.items():
+                publisher = publishers[name]
+                publish_version(
+                    publisher._store,
+                    publisher._pool,
+                    published_dir,
+                    run_id=publisher._run_id,
+                )
+        except Exception:  # noqa: BLE001
+            publish_error = f"rank 0:\n{traceback.format_exc()}"
+    first._raise_gathered_failures("checkpoint publication", publish_error)
+
+
+def _distinct_mounts(stores) -> list[Store]:
+    """One store per backing mount: a commit or reload covers every view on it."""
+    distinct: dict[Any, Store] = {}
+    for store in stores:
+        volume = getattr(store, "volume_name", None)
+        distinct.setdefault((type(store), volume) if volume else id(store), store)
+    return list(distinct.values())

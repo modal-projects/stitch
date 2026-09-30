@@ -377,6 +377,30 @@ def test_view_hook_publishes_only_its_pointer(
     assert pool.woke == [VersionRef("run-abc", 0), VersionRef("run-abc", 1)]
 
 
+def test_views_hook_publishes_every_view_pointer_and_its_pools(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    views = ("bf16", "fp8", "nvfp4")
+    pools = {view: _FakePool() for view in views}
+    monkeypatch.setattr(hooks, "_pool", lambda args: pools[args.update_weight_view])
+    args = _args(str(tmp_path))
+    version_dirs = {
+        view: _write_view_version(tmp_path, VersionRef("run-abc", 1), view)
+        for view in views
+    }
+
+    hooks.commit_and_wake_views(args, version_dirs, rollout_engines=[])
+
+    for view in views:
+        assert ModalVolumeStore(
+            tmp_path, run_id="run-abc", weight_view=view
+        ).read_pointer() == VersionRef("run-abc", 1)
+        assert pools[view].woke == [VersionRef("run-abc", 1)]
+    # The shared arguments are read, never rewritten for one view.
+    assert args.update_weight_disk_dir == str(tmp_path / "updates")
+    assert not hasattr(args, "update_weight_view")
+
+
 def test_view_hook_selects_only_matching_rollout_pools() -> None:
     args = SimpleNamespace(
         rollout_modal_flash_app_name="rollout-app",

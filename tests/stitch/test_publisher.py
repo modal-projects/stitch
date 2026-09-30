@@ -7,6 +7,7 @@ what a real collective would return — every rank sees every gathered value.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import io
 import json
@@ -17,7 +18,8 @@ from pathlib import Path
 import pytest
 
 from stitch import publisher
-from stitch.publisher import Publisher, TrainerComms
+from stitch.publisher import Publisher, TrainerComms, publish_together
+from stitch.stores import modal_volume
 from stitch.stores.modal_volume import ModalVolumeStore
 from stitch.stores.s3 import S3Store, UploadReceipt
 from stitch.types import PointerRewind, VersionRef
@@ -418,3 +420,225 @@ if __name__ == "__main__":
         t()
         print(f"  ok  {t.__name__}")
     print(f"publisher harness: {len(tests)} PASS")
+
+
+# ── several rollout views of one version ──────────────────────────────────────
+VIEWS = ("bf16", "fp8", "nvfp4")
+
+
+class _FakeVolume:
+    """A Modal Volume backed by a local dir, recording commits and reloads."""
+
+    def __init__(self, root: Path, events: list[str]) -> None:
+        self._root = root
+        self._events = events
+
+    def commit(self) -> None:
+        self._events.append("commit")
+
+    def reload(self) -> None:
+        self._events.append("refresh")
+
+    def read_file(self, path: str):
+        target = self._root / path
+        if not target.is_file():
+            raise FileNotFoundError(path)
+        yield target.read_bytes()
+
+    @contextlib.contextmanager
+    def batch_upload(self, force: bool = False):
+        uploads: list[tuple[str, bytes]] = []
+
+        class _Upload:
+            def put_file(self, data, path: str) -> None:
+                uploads.append((path, data.read()))
+
+        yield _Upload()
+        for path, data in uploads:
+            (self._root / path).parent.mkdir(parents=True, exist_ok=True)
+            (self._root / path).write_bytes(data)
+
+
+@pytest.fixture
+def shared_volume(monkeypatch, tmp_path: Path):
+    """Every view's store on one volume, as the heterogeneous fleet mounts them."""
+    events: list[str] = []
+    volume = _FakeVolume(tmp_path, events)
+    monkeypatch.setattr(modal_volume, "_volume", lambda _name: volume)
+    stores = {
+        view: ModalVolumeStore(
+            tmp_path / "run-abc",
+            run_id="run-abc",
+            volume_name="experiment",
+            weight_view=view,
+        )
+        for view in VIEWS
+    }
+    return tmp_path / "run-abc", stores, events
+
+
+def _write_view_versions(root: Path, version: int) -> dict[str, str]:
+    dirs = {}
+    for view in VIEWS:
+        d = root / "updates" / view / f"weight_v{version:06d}"
+        d.mkdir(parents=True)
+        (d / "model.safetensors.index.json").write_text(
+            json.dumps(
+                {
+                    "metadata": {"version": version},
+                    "weight_map": {"w": "model-00001.safetensors"},
+                }
+            )
+        )
+        (d / "model-00001.safetensors").write_bytes(b"weights")
+        dirs[view] = str(d)
+    return dirs
+
+
+def _record_publishes(monkeypatch, events: list[str]) -> None:
+    original = publisher.publish_version
+
+    def record(store, pool, version_dir, *, run_id):
+        events.append(f"publish {store.weight_view}")
+        return original(store, pool, version_dir, run_id=run_id)
+
+    monkeypatch.setattr(publisher, "publish_version", record)
+
+
+def test_publish_together_commits_the_shared_mount_once_for_every_view(
+    shared_volume, monkeypatch
+) -> None:
+    root, stores, events = shared_volume
+    pool = _FakePool()
+    publishers = {
+        view: Publisher(store, pool, run_id="run-abc") for view, store in stores.items()
+    }
+    _record_publishes(monkeypatch, events)
+
+    publish_together(publishers, _write_view_versions(root, 1))
+
+    # One host commit and one reload cover all three views before any pointer moves;
+    # each publish still commits its own manifest ahead of its pointer.
+    assert events == [
+        "commit",
+        "refresh",
+        "publish bf16",
+        "commit",
+        "publish fp8",
+        "commit",
+        "publish nvfp4",
+        "commit",
+    ]
+    assert all(
+        store.read_pointer() == VersionRef("run-abc", 1) for store in stores.values()
+    )
+    assert pool.woke == [VersionRef("run-abc", 1)] * len(VIEWS)
+
+
+def test_publish_together_joins_every_collective_off_rank_zero(shared_volume) -> None:
+    root, stores, events = shared_volume
+    gathered: list[str] = []
+
+    def gather_with_rank_zero(value):
+        gathered.append("gather")
+        if isinstance(value, tuple) and len(value) == 4:
+            return [(True, False, None, None), value]
+        return [value]
+
+    comms = _RecordingComms(rank=1, is_host_leader=False, gather=gather_with_rank_zero)
+    publishers = {
+        view: Publisher(store, _FakePool(), run_id="run-abc", comms=comms)
+        for view, store in stores.items()
+    }
+
+    publish_together(publishers, _write_view_versions(root, 1))
+
+    assert events == []  # neither a host leader nor rank 0
+    # One pointer snapshot per view, then one commit round and one publish round.
+    assert len(gathered) == len(VIEWS) + 2
+    assert all(store.read_pointer() is None for store in stores.values())
+
+
+def test_publish_together_leaves_an_already_published_view_immutable(
+    shared_volume, monkeypatch
+) -> None:
+    root, stores, events = shared_volume
+    stores["fp8"].advance_pointer(VersionRef("run-abc", 1))
+    publishers = {
+        view: Publisher(store, _FakePool(), run_id="run-abc")
+        for view, store in stores.items()
+    }
+    _record_publishes(monkeypatch, events)
+
+    publish_together(publishers, _write_view_versions(root, 1))
+
+    assert [event for event in events if event.startswith("publish")] == [
+        "publish bf16",
+        "publish nvfp4",
+    ]
+    assert all(
+        store.read_pointer() == VersionRef("run-abc", 1) for store in stores.values()
+    )
+
+
+def test_publish_together_skips_every_side_effect_when_all_views_are_published(
+    shared_volume,
+) -> None:
+    root, stores, events = shared_volume
+    for store in stores.values():
+        store.advance_pointer(VersionRef("run-abc", 1))
+    publishers = {
+        view: Publisher(store, _FakePool(), run_id="run-abc")
+        for view, store in stores.items()
+    }
+
+    publish_together(publishers, _write_view_versions(root, 1))
+
+    assert events == []
+
+
+def test_publish_together_rejects_a_rewind_before_any_commit(shared_volume) -> None:
+    root, stores, events = shared_volume
+
+    def gather_with_rank_zero(value):
+        if isinstance(value, tuple) and len(value) == 4:
+            return [(True, False, VersionRef("run-abc", 5), None), value]
+        return [value]
+
+    comms = _RecordingComms(rank=7, gather=gather_with_rank_zero)
+    publishers = {
+        view: Publisher(store, _FakePool(), run_id="run-abc", comms=comms)
+        for view, store in stores.items()
+    }
+
+    with pytest.raises(PointerRewind):
+        publish_together(publishers, _write_view_versions(root, 3))
+    assert events == []
+
+
+def test_publish_together_needs_one_publisher_per_view(shared_volume) -> None:
+    root, stores, _ = shared_volume
+    publishers = {"bf16": Publisher(stores["bf16"], None, run_id="run-abc")}
+
+    with pytest.raises(ValueError, match="one publisher per published view"):
+        publish_together(publishers, _write_view_versions(root, 1))
+
+
+def test_publish_together_publishes_upload_stores_view_by_view(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        client = _FakeS3()
+        published: list[str] = []
+        monkeypatch.setattr(
+            Publisher,
+            "publish",
+            lambda self, published_dir: published.append(published_dir),
+        )
+        publishers = {
+            view: Publisher(_s3_store(Path(tmp), client), None, run_id="run-abc")
+            for view in VIEWS
+        }
+        dirs = {view: f"/updates/{view}/weight_v000001" for view in VIEWS}
+
+        publish_together(publishers, dirs)
+
+        assert published == list(dirs.values())
