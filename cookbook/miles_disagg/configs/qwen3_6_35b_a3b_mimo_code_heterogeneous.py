@@ -51,10 +51,10 @@ SGLANG_DELTA_UPDATE_MODE = "cpu"
 DATASET_PATH = DATA_PATH / "mimo-v2-6-rl-oss"
 MAX_SEQ_LEN = 262_144
 AGENT_PROCESSES = 64
-AGENT_THREADS_PER_PROCESS = 27
+AGENT_THREADS_PER_PROCESS = 21
 ROLLOUT_CONCURRENT_SAMPLES = AGENT_PROCESSES * AGENT_THREADS_PER_PROCESS
 ROLLOUT_MIN_GPUS = {
-    "A100-80GB": 16,
+    "A100-80GB": 8,
     "H100!": 8,
     "H200": 8,
     "B200": 8,
@@ -188,7 +188,6 @@ A100_POOL = _pool(
     weight_view="bf16",
     attention_backend="flashinfer",
     linear_attention_backend="triton",
-    kv_cache_dtype="bfloat16",
     mem_fraction_static=0.65,
     moe_runner_backend="triton",
 )
@@ -197,8 +196,8 @@ RTX_PRO_6000_POOL = _pool(
     gpu="RTX-PRO-6000",
     gpus_per_engine=2,
     weight_view="bf16",
-    attention_backend="trtllm_mha",
-    kv_cache_dtype="bfloat16",
+    # trtllm_mha on SM120 rejects fp8 KV; flashinfer supports it.
+    attention_backend="flashinfer",
     mem_fraction_static=0.7,
     moe_runner_backend="triton",
 )
@@ -207,7 +206,7 @@ RTX_PRO_6000_POOL = _pool(
 # BF16 reads twice the FP8 expert bytes per decode step, so each BF16 GPU takes
 # half the routing load of its low-precision sibling. The 71.8 GB checkpoint
 # needs TP2 on H100. Triton is the MoE runner validated for BF16 staged updates.
-BF16_POOLS = (
+HOPPER_BF16_POOLS = (
     _pool(
         name="ServerH100BF16TP2",
         gpu="H100!",
@@ -227,6 +226,8 @@ BF16_POOLS = (
         max_running_requests=24,
         moe_runner_backend="triton",
     ),
+)
+BLACKWELL_BF16_POOLS = (
     _pool(
         name="ServerB200BF16",
         gpu="B200",
@@ -252,7 +253,6 @@ modal = ModalConfig(
     gpu="B300",
     rollout_cpu=ROLLOUT_CPU,
     rollout_pools=(
-        # A100_POOL,  # Enable when A100-80GB capacity is available.
         _pool(
             name="ServerH100FP8",
             gpu="H100!",
@@ -283,8 +283,10 @@ modal = ModalConfig(
             moe_runner_backend="flashinfer_cutedsl",
             environment={"SGLANG_FLASHINFER_CUTEDSL_NVFP4_W4A16": "1"},
         ),
-        *BF16_POOLS,
-        # RTX_PRO_6000_POOL,  # Enable when RTX PRO 6000 capacity is available.
+        A100_POOL,
+        RTX_PRO_6000_POOL,
+        *HOPPER_BF16_POOLS,
+        # *BLACKWELL_BF16_POOLS,  # Blackwell serves NVFP4 only.
     ),
     trainer_cpu=(64.0, 256.0),
     trainer_memory_mib=(1_048_576, 3_145_728),

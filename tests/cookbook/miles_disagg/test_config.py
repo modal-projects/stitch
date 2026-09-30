@@ -378,10 +378,10 @@ def test_qwen36_mimo_heterogeneous_base_is_uncorrected_grpo():
         "ServerH200FP8": ("H200", 1, "fp8"),
         "ServerB200NVFP4W4A16": ("B200", 1, "nvfp4"),
         "ServerB300NVFP4W4A16": ("B300", 1, "nvfp4"),
+        "ServerA100BF16TP2": ("A100-80GB", 2, "bf16"),
+        "ServerRTXPRO6000BF16TP2": ("RTX-PRO-6000", 2, "bf16"),
         "ServerH100BF16TP2": ("H100!", 2, "bf16"),
         "ServerH200BF16": ("H200", 1, "bf16"),
-        "ServerB200BF16": ("B200", 1, "bf16"),
-        "ServerB300BF16": ("B300", 1, "bf16"),
     }
     assert all(
         "--quantization" not in pool.sglang_args
@@ -394,14 +394,25 @@ def test_qwen36_mimo_heterogeneous_base_is_uncorrected_grpo():
         assert pool.sglang_args["--quantization"] == "modelopt_fp4"
         assert pool.sglang_args["--moe-runner-backend"] == "flashinfer_cutedsl"
         assert pool.environment == {"SGLANG_FLASHINFER_CUTEDSL_NVFP4_W4A16": "1"}
-    for pool in recipe.BF16_POOLS:
-        assert pools[pool.name] is pool
-        assert "--quantization" not in pool.sglang_args
-        assert pool.sglang_args["--moe-runner-backend"] == "triton"
-        assert pool.sglang_args["--kv-cache-dtype"] == "fp8_e4m3"
+    for pool in pools.values():
+        if pool.weight_view == "bf16":
+            assert "--quantization" not in pool.sglang_args
+            assert pool.sglang_args["--moe-runner-backend"] == "triton"
+    # fp8 KV everywhere. SM120 trtllm_mha rejects fp8 KV, so RTX uses flashinfer.
     assert all(
         pool.sglang_args["--kv-cache-dtype"] == "fp8_e4m3" for pool in pools.values()
     )
+    assert {
+        name: pools[name].sglang_args["--attention-backend"]
+        for name in ("ServerA100BF16TP2", "ServerRTXPRO6000BF16TP2")
+    } == {"ServerA100BF16TP2": "flashinfer", "ServerRTXPRO6000BF16TP2": "flashinfer"}
+    # FlashInfer GDN requires SM90+, so A100 uses Triton linear attention.
+    assert pools["ServerA100BF16TP2"].sglang_args["--linear-attn-decode-backend"] == (
+        "triton"
+    )
+    # Blackwell BF16 stays defined but disabled; Blackwell serves NVFP4 only.
+    for pool in recipe.BLACKWELL_BF16_POOLS:
+        assert pool.name not in pools
     assert {
         name: (
             pool.min_containers,
@@ -416,48 +427,21 @@ def test_qwen36_mimo_heterogeneous_base_is_uncorrected_grpo():
         "ServerH200FP8": (8, 12, 32, "32", "32"),
         "ServerB200NVFP4W4A16": (8, 12, 32, "32", "32"),
         "ServerB300NVFP4W4A16": (8, 12, 64, "64", "64"),
+        "ServerA100BF16TP2": (4, 6, 6, "8", "8"),
+        "ServerRTXPRO6000BF16TP2": (4, 6, 6, "8", "8"),
         "ServerH100BF16TP2": (4, 6, 16, "24", "24"),
         "ServerH200BF16": (8, 12, 16, "24", "24"),
-        "ServerB200BF16": (8, 12, 16, "24", "24"),
-        "ServerB300BF16": (8, 12, 32, "48", "48"),
     }
-    assert {
-        gpu: sum(
-            pool.min_containers * pool.gpus_per_engine
-            for pool in pools.values()
-            if pool.gpu == gpu
-        )
-        for gpu in ("H100!", "H200", "B200", "B300")
-    } == {"H100!": 16, "H200": 16, "B200": 16, "B300": 16}
-    a100 = recipe.A100_POOL
-    assert a100.name not in pools
-    assert (a100.gpu, a100.gpus_per_engine, a100.weight_view) == (
-        "A100-80GB",
-        2,
-        "bf16",
-    )
-    assert (a100.min_containers, a100.max_containers, a100.target_inputs) == (
-        8,
-        12,
-        6,
-    )
-    assert a100.sglang_args["--kv-cache-dtype"] == "bfloat16"
-    assert a100.sglang_args["--moe-runner-backend"] == "triton"
-    rtx = recipe.RTX_PRO_6000_POOL
-    assert rtx.name not in pools
-    assert (rtx.gpu, rtx.gpus_per_engine, rtx.weight_view) == (
-        "RTX-PRO-6000",
-        2,
-        "bf16",
-    )
-    assert (rtx.min_containers, rtx.max_containers, rtx.target_inputs) == (4, 6, 6)
-    assert rtx.sglang_args["--kv-cache-dtype"] == "bfloat16"
-    assert rtx.sglang_args["--moe-runner-backend"] == "triton"
+    # Every pool gets the same 8-GPU floor.
+    assert {pool.min_containers * pool.gpus_per_engine for pool in pools.values()} == {
+        8
+    }
     assert (
         sum(
             pool.min_containers * pool.target_inputs
             for pool in recipe.modal.rollout_pools
         )
+        == 1392
         >= cfg.sglang_server_concurrency
         == cfg.async_max_concurrent_samples
     )
@@ -470,20 +454,18 @@ def test_qwen36_mimo_heterogeneous_base_is_uncorrected_grpo():
         "ServerH200FP8": (120, 512),
         "ServerB200NVFP4W4A16": (88, 512),
         "ServerB300NVFP4W4A16": (88, 512),
+        "ServerA100BF16TP2": (224, 512),
+        "ServerRTXPRO6000BF16TP2": (224, 512),
         "ServerH100BF16TP2": (224, 512),
         "ServerH200BF16": (216, 512),
-        "ServerB200BF16": (216, 512),
-        "ServerB300BF16": (216, 512),
     }
-    assert recipe.A100_POOL.memory_mib == recipe.RTX_PRO_6000_POOL.memory_mib
-    assert recipe.A100_POOL.memory_mib == (224 * 1024, 512 * 1024)
     assert (cfg.rollout_batch_size, cfg.n_samples_per_prompt) == (128, 8)
     assert cfg.global_batch_size == 1024
     # Miles sizes the fully-async buffer as factor * rollout_batch_size groups.
     assert cfg.async_data_buffer_capacity_factor * cfg.rollout_batch_size == 256
-    assert cfg.sglang_server_concurrency == 64 * 27 == 1728
+    assert cfg.sglang_server_concurrency == 64 * 21 == 1344
     assert cfg.environment["MODAL_SWE_AGENT_PROCESSES"] == "64"
-    assert cfg.environment["MODAL_SWE_AGENT_THREADS_PER_PROCESS"] == "27"
+    assert cfg.environment["MODAL_SWE_AGENT_THREADS_PER_PROCESS"] == "21"
 
 
 def test_qwen36_mimo_heterogeneous_tis_is_a_thin_control():
