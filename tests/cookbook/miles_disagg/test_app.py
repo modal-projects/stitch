@@ -239,6 +239,9 @@ def test_local_checkpoints_mirror_the_run_directory_layout(monkeypatch):
     assert root.name.startswith("attempt-")
     assert cfg.save == str(root / "checkpoints")
     assert cfg.save_hf == str(root / "hf_checkpoints/weight_v{rollout_id:06d}")
+    # The event log is appended to all run long, so it stays on the Volume at the path
+    # Miles would derive from a Volume save; the uploader would delete it locally.
+    assert cfg.save_debug_event_data == str(app.RUN_DIR / "checkpoints" / "events")
     # A retry writes to a fresh directory.
     assert app._set_save_paths(SimpleNamespace(save_interval=10, save_hf=None)) != root
 
@@ -253,6 +256,17 @@ def test_volume_checkpoints_save_to_the_run_directory(monkeypatch):
     assert app._set_save_paths(cfg) is None
     assert cfg.save == str(app.RUN_DIR / "checkpoints")
     assert cfg.save_hf == str(app.RUN_DIR / "hf_checkpoints/weight_v{rollout_id:06d}")
+    # Miles derives the event log from --save itself.
+    assert not hasattr(cfg, "save_debug_event_data")
+
+
+def test_a_recipe_event_log_path_is_kept_with_local_checkpoints(monkeypatch):
+    app = _hetero_app(monkeypatch)
+    cfg = SimpleNamespace(save_interval=10, save_hf=None, save_debug_event_data="/x")
+
+    app._set_save_paths(cfg)
+
+    assert cfg.save_debug_event_data == "/x"
 
 
 def test_runs_without_saves_write_nothing(monkeypatch):

@@ -271,6 +271,11 @@ def _set_save_paths(cfg: Any) -> Path | None:
             / RUN_ID
             / f"attempt-{uuid4().hex[:12]}"
         )
+        # Miles defaults its event log to <save>/events. The log is appended to for the
+        # whole run and read back on resume, so it is not checkpoint output: keep it on
+        # the Volume, where it lived before saves moved to local disk.
+        if getattr(cfg, "save_debug_event_data", None) is None:
+            cfg.save_debug_event_data = str(RUN_DIR / "checkpoints" / "events")
     cfg.save = str(save_root / "checkpoints")
     if save_hf := getattr(cfg, "save_hf", None):
         cfg.save_hf = str(save_root / save_hf)
