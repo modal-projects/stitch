@@ -81,6 +81,11 @@ class ModalConfig:
     torch_dist_convert_extra_args: str = ""
     torch_dist_prep_ephemeral_disk_mib: int | None = None
     trainer_ephemeral_disk_mib: int | None = None
+    # When set, the trainer saves checkpoints under this node-local directory, with the
+    # run directory's layout, and the weight-publish hook uploads them to the run Volume
+    # in the background; completion markers go up last (cookbook.common.checkpoint_upload).
+    # Size trainer_ephemeral_disk_mib for about two saves on the host that holds rank 0.
+    trainer_local_checkpoint_dir: str | None = None
 
     def rollout_gpus(self, per_engine: int) -> str | list[str]:
         """GPU request for one rollout engine: ``rollout_gpu`` falling back to ``gpu``,

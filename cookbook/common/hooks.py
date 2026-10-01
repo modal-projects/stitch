@@ -12,7 +12,7 @@ import asyncio
 import json
 import logging
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from typing import Any
 
@@ -21,8 +21,10 @@ from stitch.pools.modal_flash import ModalFlashFleet, ModalFlashPool
 from stitch.publish import constrain_request
 from stitch.publisher import Publisher, TrainerComms, publish_together
 from stitch.stores.base import Store
+from stitch.types import WEIGHT_PREFIX, VersionRef
 
 from . import process, storage
+from .checkpoint_upload import CheckpointUploader
 from .constants import STITCH_WEIGHT_VIEW_VERSIONS_HEADER
 
 logger = logging.getLogger(__name__)
@@ -56,7 +58,12 @@ def commit_and_wake(args: Any, published_dir: str, rollout_engines: Any = None) 
     that is a Volume durability boundary and an S3 no-op.
     """
     del rollout_engines
+    uploader = _checkpoint_uploader(args, [published_dir])
+    if uploader is not None:
+        uploader.step()
     _publisher(args).publish(published_dir)
+    if uploader is not None and _publishes_final_version(args, [published_dir]):
+        uploader.drain()
 
 
 def commit_and_wake_views(
@@ -69,8 +76,53 @@ def commit_and_wake_views(
     :func:`stitch.publisher.publish_together`.
     """
     del rollout_engines
+    uploader = _checkpoint_uploader(args, published_dirs.values())
+    if uploader is not None:
+        uploader.step()
     publishers = {view: _publisher(_view_args(args, view)) for view in published_dirs}
     publish_together(publishers, published_dirs)
+    if uploader is not None and _publishes_final_version(args, published_dirs.values()):
+        uploader.drain()
+
+
+# ── node-local checkpoints ─────────────────────────────────────────────────────
+_CHECKPOINT_UPLOADER: CheckpointUploader | None = None
+
+
+def _checkpoint_uploader(args: Any, published_dirs) -> CheckpointUploader | None:
+    """This process's uploader when the trainer saves checkpoints to node-local disk.
+
+    It steps with every weight version's publish, which every rank reaches only after
+    any save of that step has finished. Other publish calls (the framework's run
+    directory, on one rank) are not collective and never step it.
+    """
+    global _CHECKPOINT_UPLOADER
+    root = getattr(args, "stitch_local_checkpoint_root", None)
+    if not root or not all(
+        Path(directory).name.startswith(WEIGHT_PREFIX) for directory in published_dirs
+    ):
+        return None
+    if _CHECKPOINT_UPLOADER is None:
+        import modal
+
+        _CHECKPOINT_UPLOADER = CheckpointUploader(
+            Path(root),
+            volume=modal.Volume.from_name(args.experiment_volume_name),
+            volume_root=PurePosixPath(_run_id(args)),
+            comms=_TorchComms(),
+        )
+    return _CHECKPOINT_UPLOADER
+
+
+def _publishes_final_version(args: Any, published_dirs) -> bool:
+    """Whether this publish follows the run's last training step, after which the
+    trainer exits and must not leave checkpoint files only on local disk."""
+    num_rollout = int(getattr(args, "num_rollout", 0) or 0)
+    return num_rollout > 0 and any(
+        VersionRef.parse(f"{_run_id(args)}/{Path(directory).name}").version
+        >= num_rollout
+        for directory in published_dirs
+    )
 
 
 def _view_args(args: Any, view: str) -> SimpleNamespace:

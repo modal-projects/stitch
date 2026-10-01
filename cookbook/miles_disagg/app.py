@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import tempfile
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
@@ -252,6 +253,28 @@ def _boot_checkpoint(store_config: dict, weight_view: str | None) -> tuple[str, 
         weight_view=weight_view,
     )
     return (str(export[1]), export[0]) if export else (base_checkpoint, 0)
+
+
+def _set_save_paths(cfg: Any) -> Path | None:
+    """Point the trainer's saves at the run directory, or, when the recipe sets
+    ``trainer_local_checkpoint_dir``, at a node-local root with the same layout that the
+    publish hook uploads to the run directory. Returns that local root, if any; a fresh
+    attempt directory keeps a retry's files apart from an earlier attempt's."""
+    if getattr(cfg, "save_interval", None) is None:
+        cfg.save = cfg.save_hf = None
+        return None
+    local_root = None
+    save_root = RUN_DIR
+    if modal_cfg.trainer_local_checkpoint_dir:
+        local_root = save_root = (
+            Path(modal_cfg.trainer_local_checkpoint_dir)
+            / RUN_ID
+            / f"attempt-{uuid4().hex[:12]}"
+        )
+    cfg.save = str(save_root / "checkpoints")
+    if save_hf := getattr(cfg, "save_hf", None):
+        cfg.save_hf = str(save_root / save_hf)
+    return local_root
 
 
 class _RolloutServer:
@@ -564,12 +587,7 @@ class Trainer:
         cfg.update_weight_initial_version = boot_version
         # Miles requires this CLI argument; the deployment owns its run-scoped value.
         cfg.update_weight_disk_dir = str(UPDATES_DIR)
-        if getattr(cfg, "save_interval", None) is None:
-            cfg.save = cfg.save_hf = None
-        else:
-            cfg.save = str(RUN_DIR / "checkpoints")
-            if save_hf := getattr(cfg, "save_hf", None):
-                cfg.save_hf = str(RUN_DIR / save_hf)
+        local_checkpoint_root = _set_save_paths(cfg)
         # Miles setattr's custom config keys onto the trainer args. Its request
         # hook runs in a separate session-server process, so the immutable store
         # coordinates travel through the dedicated hook-args contract.
@@ -589,6 +607,8 @@ class Trainer:
                 ROLLOUT_SERVER_NAMES_BY_WEIGHT_VIEW
             ),
         }
+        if local_checkpoint_root is not None:
+            custom_config["stitch_local_checkpoint_root"] = str(local_checkpoint_root)
         cfg.custom_rollout_request_hook_args = {
             **(getattr(cfg, "custom_rollout_request_hook_args", None) or {}),
             **run_config,

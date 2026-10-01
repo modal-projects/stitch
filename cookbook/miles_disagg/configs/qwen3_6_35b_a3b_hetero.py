@@ -286,7 +286,11 @@ modal = ModalConfig(
     trainer_memory_mib=(1_048_576, 3_145_728),
     rollout_memory_mib=(262_144, 524_288),
     rollout_ephemeral_disk_mib=524_288,
-    trainer_ephemeral_disk_mib=524_288,
+    # Checkpoints are saved to local disk and uploaded in the background. A save is
+    # about 260 GB on the host that holds rank 0 (its Megatron shards plus the HF
+    # export), so 1 TiB holds a second save while the first is still uploading.
+    trainer_ephemeral_disk_mib=1_048_576,
+    trainer_local_checkpoint_dir="/tmp/stitch-local-checkpoints",
     torch_dist_prep_nodes=1,
     torch_dist_prep_gpus_per_node=8,
     torch_dist_convert_extra_args=(

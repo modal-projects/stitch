@@ -214,3 +214,50 @@ def test_invalid_recipe_fails_before_image_construction(monkeypatch, entrypoint)
     monkeypatch.setattr(trainer_image, "build_trainer_image", build_image)
     with pytest.raises(ValueError, match="SOURCE_REVISION"):
         importlib.import_module(module)
+
+
+def _hetero_app(monkeypatch):
+    monkeypatch.setenv("EXPERIMENT_CONFIG", "qwen3_6_35b_a3b_hetero_grpo")
+    monkeypatch.setenv("RUN_ID", "test-run")
+    monkeypatch.delenv("STITCH_STORE_BACKEND", raising=False)
+    monkeypatch.delenv("MILES_LOCAL_DIR", raising=False)
+    monkeypatch.delitem(sys.modules, "cookbook.miles_disagg.app", raising=False)
+    return importlib.import_module("cookbook.miles_disagg.app")
+
+
+def test_local_checkpoints_mirror_the_run_directory_layout(monkeypatch):
+    """Miles saves under a node-local root shaped like the run directory, so each file's
+    path relative to it is its Volume path relative to the run directory."""
+    app = _hetero_app(monkeypatch)
+    cfg = SimpleNamespace(
+        save_interval=10, save_hf="hf_checkpoints/weight_v{rollout_id:06d}"
+    )
+
+    root = app._set_save_paths(cfg)
+
+    assert root.parent == app.Path("/tmp/stitch-local-checkpoints/test-run")
+    assert root.name.startswith("attempt-")
+    assert cfg.save == str(root / "checkpoints")
+    assert cfg.save_hf == str(root / "hf_checkpoints/weight_v{rollout_id:06d}")
+    # A retry writes to a fresh directory.
+    assert app._set_save_paths(SimpleNamespace(save_interval=10, save_hf=None)) != root
+
+
+def test_volume_checkpoints_save_to_the_run_directory(monkeypatch):
+    app = _hetero_app(monkeypatch)
+    monkeypatch.setattr(app.modal_cfg, "trainer_local_checkpoint_dir", None)
+    cfg = SimpleNamespace(
+        save_interval=10, save_hf="hf_checkpoints/weight_v{rollout_id:06d}"
+    )
+
+    assert app._set_save_paths(cfg) is None
+    assert cfg.save == str(app.RUN_DIR / "checkpoints")
+    assert cfg.save_hf == str(app.RUN_DIR / "hf_checkpoints/weight_v{rollout_id:06d}")
+
+
+def test_runs_without_saves_write_nothing(monkeypatch):
+    app = _hetero_app(monkeypatch)
+    cfg = SimpleNamespace(save_interval=None, save_hf="hf_checkpoints/x")
+
+    assert app._set_save_paths(cfg) is None
+    assert cfg.save is None and cfg.save_hf is None

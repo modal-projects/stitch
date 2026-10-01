@@ -605,3 +605,75 @@ if __name__ == "__main__":
         t()
         print(f"  ok  {t.__name__}")
     print(f"common hooks harness: {len(tests)} PASS")
+
+
+class _RecordingUploader:
+    def __init__(self, events: list[str]) -> None:
+        self._events = events
+
+    def step(self) -> None:
+        self._events.append("step")
+
+    def drain(self) -> None:
+        self._events.append("drain")
+
+
+@pytest.fixture
+def uploader_events(monkeypatch):
+    events: list[str] = []
+    monkeypatch.setattr(hooks, "_CHECKPOINT_UPLOADER", _RecordingUploader(events))
+    return events
+
+
+def _publish_recording(monkeypatch, events: list[str]) -> None:
+    monkeypatch.setattr(
+        hooks.Publisher, "publish", lambda self, directory: events.append("publish")
+    )
+    monkeypatch.setattr(
+        hooks, "publish_together", lambda publishers, dirs: events.append("publish")
+    )
+
+
+@pytest.mark.parametrize("version", [7, 10])
+def test_local_checkpoints_upload_around_every_version_publish(
+    tmp_path, monkeypatch, uploader_events, version
+) -> None:
+    """The uploader steps before each publish, so a re-save's stale markers are gone
+    before its pointer can move, and drains only after the run's last version."""
+    _publish_recording(monkeypatch, uploader_events)
+    monkeypatch.setattr(hooks, "_pool", lambda _args: _FakePool())
+    args = _args(
+        str(tmp_path),
+        stitch_local_checkpoint_root=str(tmp_path / "local"),
+        num_rollout=10,
+    )
+    version_dir = str(tmp_path / "updates" / f"weight_v{version:06d}")
+
+    hooks.commit_and_wake(args, version_dir)
+    hooks.commit_and_wake_views(
+        args, {"bf16": str(tmp_path / "updates/bf16" / f"weight_v{version:06d}")}
+    )
+
+    expected = ["step", "publish", *(["drain"] if version == 10 else [])]
+    assert uploader_events == expected * 2
+
+
+def test_local_checkpoints_never_step_on_the_single_rank_run_directory_publish(
+    tmp_path, monkeypatch, uploader_events
+) -> None:
+    _publish_recording(monkeypatch, uploader_events)
+    args = _args(str(tmp_path), stitch_local_checkpoint_root=str(tmp_path / "local"))
+
+    hooks.commit_and_wake(args, str(tmp_path / "updates"))
+
+    assert uploader_events == ["publish"]
+
+
+def test_volume_checkpoints_use_no_uploader(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(hooks, "_CHECKPOINT_UPLOADER", None)
+    assert (
+        hooks._checkpoint_uploader(
+            _args(str(tmp_path)), [str(tmp_path / "updates/weight_v000001")]
+        )
+        is None
+    )
