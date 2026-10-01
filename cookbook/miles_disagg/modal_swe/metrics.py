@@ -542,14 +542,15 @@ def _dump_rollout_history(
     trajectories and a few whole GRPO groups, in full. Every ``save_interval`` steps
     also writes the whole batch to ``rollout_batches/rollout_NNNNNN/``, readable and as
     token arrays. That batch trains right after a checkpoint, so the checkpoint
-    rescores it exactly offline. The run directory is the parent of Miles' ``--save``
-    directory on the run volume, which every trainer host commits with each weight
-    publication. A failed write only loses the dump, never the step.
+    rescores it exactly offline. The dumps go to the run directory on the run volume,
+    which every trainer host commits with each weight publication. The app names it;
+    otherwise it is the parent of Miles' ``--save``, which is node-local when saves
+    are. A failed write only loses the dump, never the step.
     """
     save = getattr(args, "save", None)
     if not save:
         return None
-    run_dir = Path(save).parent
+    run_dir = Path(getattr(args, "stitch_run_dir", None) or Path(save).parent)
     picks = _step_picks(samples, rollout_id, reward_key)
     records = [
         _trajectory(rollout_id, samples[position], reward_key, labels)

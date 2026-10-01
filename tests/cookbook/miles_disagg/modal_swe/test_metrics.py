@@ -341,6 +341,24 @@ def test_every_step_keeps_whole_groups_chosen_by_the_step(tmp_path):
     assert not list(dumps.glob("*.partial"))
 
 
+def test_dumps_go_to_the_named_run_directory_when_saves_are_node_local(tmp_path):
+    """Node-local saves leave --save's parent on local disk, where the checkpoint
+    uploader would take the dumps; the app's run directory is on the run volume."""
+    samples = [_dump_sample(float(i), i, response="r") for i in range(4)]
+    args = SimpleNamespace(
+        save=str(tmp_path / "local" / "checkpoints"),
+        save_interval=10,
+        stitch_run_dir=str(tmp_path / "run"),
+    )
+
+    log_rollout_data(10, args, samples, {}, 0.0)
+    _dump_rollout_history(20, args, samples).result()
+
+    assert (tmp_path / "run" / "rollout_samples" / "rollout_000010.jsonl.gz").exists()
+    assert (tmp_path / "run" / "rollout_batches" / "rollout_000020").is_dir()
+    assert not (tmp_path / "local").exists()
+
+
 def test_checkpoint_steps_keep_the_whole_batch_readable_and_as_tokens(tmp_path):
     samples = [
         _dump_sample(

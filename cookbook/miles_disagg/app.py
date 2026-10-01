@@ -614,6 +614,9 @@ class Trainer:
         }
         if local_checkpoint_root is not None:
             custom_config["stitch_local_checkpoint_root"] = str(local_checkpoint_root)
+            # Run-scoped files outside the checkpoints (the rollout dumps) belong in the
+            # run directory, which --save's parent no longer is.
+            custom_config["stitch_run_dir"] = str(RUN_DIR)
         cfg.custom_rollout_request_hook_args = {
             **(getattr(cfg, "custom_rollout_request_hook_args", None) or {}),
             **run_config,
