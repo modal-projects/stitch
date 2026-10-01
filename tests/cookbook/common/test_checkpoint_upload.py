@@ -234,10 +234,13 @@ def test_a_save_lands_at_run_directory_paths_with_markers_last(cluster, volume):
     assert max(_order(volume, path) for path in data) < min(
         _order(volume, path) for path in markers
     )
-    # Uploaded files leave local disk; Megatron's tracker stays where it wrote it.
+    # Uploaded files leave local disk; Megatron's tracker stays where it wrote it, and
+    # directories stay for the next save to write into.
     for root in cluster.roots.values():
         left = {p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()}
         assert left == ({TRACKER} if root == cluster.roots["A"] else set())
+        assert (root / "checkpoints" / "iter_0000009").is_dir()
+    assert (cluster.roots["A"] / "checkpoints" / "rollout").is_dir()
 
 
 def test_markers_wait_for_every_host(cluster, volume):
@@ -352,6 +355,25 @@ def test_steps_with_nothing_new_upload_nothing(cluster, volume):
     for _ in range(3):
         cluster.step()
 
+    assert len(volume.events) == uploads
+
+
+def test_files_written_without_a_save_fail_every_rank_and_are_left_alone(
+    cluster, volume
+):
+    """Only saves write under the local root, and each rewrites the tracker; a file in
+    a step without one belongs to another writer, which may still be using it."""
+    cluster.save(9)
+    cluster.step()
+    cluster.drain()
+    uploads = len(volume.events)
+    live = cluster.roots["B"] / "rollout_samples" / "rollout_000010.jsonl.gz"
+    _write(live, "appended all run")
+
+    with pytest.raises(RuntimeError, match="rollout_samples/rollout_000010"):
+        cluster.step()
+
+    assert live.read_text() == "appended all run"
     assert len(volume.events) == uploads
 
 

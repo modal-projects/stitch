@@ -6,13 +6,19 @@ uploader per container copies what its host wrote to the same paths on the Volum
 uses the Volume API rather than the mount: a mount copy would hold files open there, and
 every publish reloads the mount.
 
+Only saves write under the local root: run-scoped files that outlive a save, such as
+the event log and the rollout dumps, are pointed at the run directory instead. Every
+save rewrites the Megatron tracker, so new files in a step with no new tracker on any
+host mean another writer, and the step fails rather than take its files.
+
 Readers trust two kinds of marker file: the Megatron tracker and the HF ``.complete``
 markers. Markers go up last, only once every host's data files from the same save are
 durable, so a marker still vouches only for complete bytes. A marker's content is taken
 when its save is claimed, since the trainer rewrites the tracker in place at every save.
 Before a re-save's publish, the ``.complete`` markers it will replace are removed from
 the Volume, so no reader pairs an old marker with a partly overwritten export. The
-tracker is never removed: it only ever moves forward.
+tracker is never removed: it only ever moves forward. Directories are left in place;
+the next save writes into them.
 
 Every method is collective: all trainer ranks call it the same number of times, in the
 same order. Upload threads never use torch.distributed.
@@ -87,10 +93,23 @@ class CheckpointUploader:
 
     def step(self) -> None:
         """Before a publish: start uploading the files written since the last call and
-        publish the markers whose data every host has made durable. Collective."""
+        publish the markers whose data every host has made durable. Collective; raises
+        on every rank when new files arrived without a save."""
         self._step += 1
+        data, markers = self._claim() if self._data_executor is not None else ([], [])
+        claims = self._comms.all_gather_object(
+            (
+                [str(path) for path, _ in data + markers],
+                any(path.name == TRACKER_NAME for path, _ in markers),
+            )
+        )
+        if not any(saved for _, saved in claims):
+            if stray := sorted(path for paths, _ in claims for path in paths):
+                raise RuntimeError(
+                    "files appeared under the local checkpoint root without a save, so "
+                    "something other than a save writes there: " + ", ".join(stray)
+                )
         if self._data_executor is not None:
-            data, markers = self._claim()
             if markers:
                 # Must finish before this publish can advance a pointer to the new save.
                 self._retract(path for path, _ in markers)
@@ -196,7 +215,6 @@ class CheckpointUploader:
                 future.result()
         for path, _ in files:
             path.unlink()
-        _remove_empty_parents([path for path, _ in files], self._local_root)
         logger.info(
             "checkpoint upload: %d data files (%.1f GB) durable in %.0fs",
             len(files),
@@ -207,10 +225,9 @@ class CheckpointUploader:
     def _upload_markers(self, markers: Sequence[tuple[Path, bytes]]) -> None:
         self._put([(path, io.BytesIO(content)) for path, content in markers])
         # The tracker stays: Megatron owns and rewrites it; each save claims it anew.
-        completes = [path for path, _ in markers if path.name == COMPLETE_NAME]
-        for path in completes:
-            path.unlink(missing_ok=True)
-        _remove_empty_parents(completes, self._local_root)
+        for path, _ in markers:
+            if path.name == COMPLETE_NAME:
+                path.unlink(missing_ok=True)
         logger.info(
             "checkpoint upload: markers durable: %s",
             ", ".join(self._volume_path(path) for path, _ in markers),
@@ -251,16 +268,3 @@ def _balanced(items: Sequence, streams: int, *, key: Callable) -> list[list]:
         groups[lightest].append(item)
         loads[lightest] += key(item)
     return [group for group in groups if group]
-
-
-def _remove_empty_parents(paths: Sequence[Path], root: Path) -> None:
-    parents = {
-        parent for path in paths for parent in path.parents if root in parent.parents
-    }
-    for directory in sorted(
-        parents, key=lambda parent: len(parent.parts), reverse=True
-    ):
-        try:
-            directory.rmdir()
-        except OSError:
-            continue
