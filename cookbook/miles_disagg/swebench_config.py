@@ -2,7 +2,9 @@
 
 from cookbook.common.constants import DATA_PATH
 
-DATASET_PATH = DATA_PATH / "swebench-pro"
+# v2: task setup gives login shells the image's PATH (Go tasks need /usr/local/go/bin).
+# The first layout stays at DATA_PATH / "swebench-pro".
+DATASET_PATH = DATA_PATH / "swebench-pro-v2"
 TRAINER_PACKAGES = (
     "harbor[modal,huggingface]==0.20.0",
     "mini-swe-agent==2.4.5",

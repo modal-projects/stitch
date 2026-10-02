@@ -41,3 +41,27 @@ def test_generated_verifier_python_is_valid() -> None:
     script = _verifier_script(["test_a.py"])
     source = script.split("python3 - <<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
     compile(source, "verifier.py", "exec")
+
+
+def test_setup_gives_login_shells_the_image_path(tmp_path) -> None:
+    """The restoring lines run against a stand-in for PID 1's environment and
+    profile directory, then a login-style shell reads the result."""
+    environ = tmp_path / "environ"
+    environ.write_bytes(b"HOME=/root\0PATH=/go/bin:/usr/local/go/bin:/usr/bin:/bin\0")
+    profile = tmp_path / "profile.d"
+    profile.mkdir()
+    script = _setup_script("true")
+    restore = script[: script.index("cd /app")]
+    restore = restore.replace("/proc/1/environ", str(environ)).replace(
+        "/etc/profile.d", str(profile)
+    )
+    subprocess.run(["bash", "-c", restore], check=True)
+
+    path = subprocess.run(
+        ["bash", "-c", f"PATH=/usr/bin:/bin; . {profile}/zz-image-path.sh; echo $PATH"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+    assert path == "/go/bin:/usr/local/go/bin:/usr/bin:/bin"

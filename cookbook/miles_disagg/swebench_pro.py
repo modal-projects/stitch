@@ -40,6 +40,16 @@ def _patched_paths(test_patch: str) -> list[str]:
 def _setup_script(before_repo_set_cmd: str) -> str:
     return rf"""#!/bin/bash
 set -euo pipefail
+
+# The agent and the verifier run in login shells, where /etc/profile resets PATH and
+# drops the toolchain directories the image adds (Go's /usr/local/go/bin). The
+# benchmark's evaluator runs with the image's PATH: give every login shell that PATH,
+# read from the Sandbox's first process, which holds the image's environment.
+image_path=$(tr '\0' '\n' < /proc/1/environ | sed -n 's/^PATH=//p') || true
+if [ -n "$image_path" ]; then
+    printf 'export PATH=%q\n' "$image_path" > /etc/profile.d/zz-image-path.sh
+fi
+
 cd /app
 {before_repo_set_cmd}
 
