@@ -139,9 +139,15 @@ def run(
     dataset, n_tasks = dict(spec.DATASET), spec.TASKS
     if smoke is not None:
         n_tasks, dataset["n_samples_per_eval_prompt"] = smoke
-        dataset["path"] = str(
-            _write_subset(Path(dataset["path"]), results_dir / "tasks.jsonl", n_tasks)
+    dataset["path"] = str(
+        _write_eval_set(
+            Path(dataset["path"]),
+            results_dir / "tasks.jsonl",
+            excluded=spec.EXCLUDED_TASKS,
+            count=n_tasks,
+            smoke=smoke is not None,
         )
+    )
     concurrency = pool.min_containers * pool.target_inputs
     cfg = evaluation.eval_miles_config(
         exp.miles,
@@ -203,19 +209,20 @@ def run(
     return summary
 
 
-def _write_subset(source: Path, destination: Path, count: int) -> Path:
-    """The eval dataset restricted to ``evaluation.smoke_tasks``' fixed subset."""
+def _write_eval_set(
+    source: Path, destination: Path, *, excluded: Any, count: int, smoke: bool
+) -> Path:
+    """The eval dataset less the spec's excluded tasks; for a smoke run, the fixed
+    ``evaluation.smoke_tasks`` subset of what remains."""
     rows = [json.loads(line) for line in source.read_text().splitlines() if line]
-    chosen = set(
-        evaluation.smoke_tasks((row["metadata"]["instance_id"] for row in rows), count)
-    )
-    destination.write_text(
-        "".join(
-            json.dumps(row) + "\n"
-            for row in rows
-            if row["metadata"]["instance_id"] in chosen
-        )
-    )
+    rows = [row for row in rows if row["metadata"]["instance_id"] not in excluded]
+    if smoke:
+        ids = (row["metadata"]["instance_id"] for row in rows)
+        chosen = set(evaluation.smoke_tasks(ids, count))
+        rows = [row for row in rows if row["metadata"]["instance_id"] in chosen]
+    if len(rows) != count:
+        raise RuntimeError(f"eval set has {len(rows)} tasks, expected {count}")
+    destination.write_text("".join(json.dumps(row) + "\n" for row in rows))
     return destination
 
 

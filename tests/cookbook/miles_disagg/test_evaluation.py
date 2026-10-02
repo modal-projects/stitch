@@ -430,3 +430,46 @@ def test_results_live_under_the_prepared_task_set():
     assert str(evaluation.results_path(spec, point)) == (
         f"{tasks}/qwen3_6_35b_a3b_hetero_icepop/r03/v000050/fp8"
     )
+
+
+def test_eval_set_is_the_tasks_whose_gold_patch_passes_offline():
+    reasons = {"needs_network", "flaky_reference", "fixture_not_in_test_patch"}
+
+    assert spec.TASKS == 731 - len(spec.EXCLUDED_TASKS) == 683
+    assert set(spec.EXCLUDED_TASKS.values()) <= reasons
+
+
+def test_driver_writes_the_eval_set_less_excluded_tasks(tmp_path):
+    from cookbook.miles_disagg import eval_driver
+
+    source = tmp_path / "test.jsonl"
+    ids = [f"instance_{repo}__{repo}-{i}" for repo in "abc" for i in range(10)]
+    source.write_text(
+        "".join(
+            json.dumps({"prompt": i, "metadata": {"instance_id": i}}) + "\n"
+            for i in ids
+        )
+    )
+    excluded = {ids[0]: "needs_network", ids[5]: "flaky_reference"}
+
+    full = eval_driver._write_eval_set(
+        source, tmp_path / "full.jsonl", excluded=excluded, count=28, smoke=False
+    )
+    smoke = eval_driver._write_eval_set(
+        source, tmp_path / "smoke.jsonl", excluded=excluded, count=5, smoke=True
+    )
+
+    kept = [
+        json.loads(line)["metadata"]["instance_id"]
+        for line in full.read_text().splitlines()
+    ]
+    assert kept == [i for i in ids if i not in excluded]
+    chosen = [
+        json.loads(line)["metadata"]["instance_id"]
+        for line in smoke.read_text().splitlines()
+    ]
+    assert len(chosen) == 5 and not set(chosen) & set(excluded)
+    with pytest.raises(RuntimeError, match="expected 29"):
+        eval_driver._write_eval_set(
+            source, tmp_path / "bad.jsonl", excluded=excluded, count=29, smoke=False
+        )
