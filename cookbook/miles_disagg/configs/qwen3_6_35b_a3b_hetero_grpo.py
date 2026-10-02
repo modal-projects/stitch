@@ -1,4 +1,4 @@
-"""Naive GRPO on the heterogeneous fleet: no off-policy correction."""
+"""Vanilla GRPO on the heterogeneous fleet: no off-policy correction."""
 
 from cookbook.miles_disagg.configs.qwen3_6_35b_a3b_hetero import *  # noqa: F403
 from cookbook.miles_disagg.configs.qwen3_6_35b_a3b_hetero import HeteroMiles, arguments

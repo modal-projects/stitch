@@ -21,6 +21,8 @@ from cookbook.miles_disagg.configs import qwen3_4b_math
         "qwen3_6_35b_a3b_hetero_icepop",
         "qwen3_6_35b_a3b_hetero_score_centering",
         "qwen3_6_35b_a3b_hetero_score_centering_mis",
+        "qwen3_6_35b_a3b_hetero_icepop_advanced",
+        "qwen3_6_35b_a3b_hetero_score_centering_advanced",
         "qwen3_6_35b_a3b_swebench_pro",
         "qwen3_6_35b_a3b_nvfp4",
         "glm5_3_nvfp4",

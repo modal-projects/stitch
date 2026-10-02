@@ -6,15 +6,21 @@ therefore samples from its own approximation of the BF16 trainer's policy. Every
 request still asks its replica for the latest published weights of its precision,
 but no sample is dropped for its age.
 
-This base holds the fleet, the trainer and the data, and is itself naive GRPO:
-full-vocabulary sampling, group advantages normalized by the group's std, and each
-sample's token-mean loss averaged over samples. Each algorithm recipe inherits it,
-sets its own sampling and objective, and names its own app, volume and W&B group:
+This base holds the fleet, the B200 trainer and the data, and is itself vanilla GRPO:
+full-vocabulary sampling, group advantages normalized by the group's std, and a token
+mean over the whole batch, which every arm shares. Each algorithm recipe inherits it,
+changes only what its algorithm defines, and names its own app, volume and W&B group:
 
-- ``qwen3_6_35b_a3b_hetero_grpo``: naive GRPO.
-- ``qwen3_6_35b_a3b_hetero_icepop``: IcePop, prompt-mean loss, frozen MoE router.
+- ``qwen3_6_35b_a3b_hetero_grpo``: vanilla GRPO.
+- ``qwen3_6_35b_a3b_hetero_icepop``: GRPO with IcePop's masked importance weights.
 - ``qwen3_6_35b_a3b_hetero_score_centering``: score centering.
 - ``qwen3_6_35b_a3b_hetero_score_centering_mis``: score centering with IcePop's weights.
+
+Two frozen recipes pin the runs started before this layout (their r03). Each
+inherits its arm and shares its app, volume and W&B group:
+
+- ``qwen3_6_35b_a3b_hetero_icepop_advanced``: IcePop after MiMo-V2.6, B300 trainer.
+- ``qwen3_6_35b_a3b_hetero_score_centering_advanced``: score centering, top-p sampling.
 """
 
 from cookbook.common.config import ModalConfig, RolloutPoolConfig
@@ -205,7 +211,7 @@ def _pool(
 
 
 modal = ModalConfig(
-    gpu="B300",
+    gpu="B200",
     rollout_cpu=ROLLOUT_CPU,
     rollout_pools=(
         _pool(
@@ -411,6 +417,9 @@ class HeteroMiles(MilesConfig):
     # One optimizer step per rollout batch against the trainer's own detached
     # log-probs: ratio 1, no off-policy correction.
     advantage_estimator = "grpo"
+    # Every arm averages its token losses over the whole batch, so the arms differ
+    # only in their algorithm, not in how they weight long and short samples.
+    calculate_per_token_loss = True
     skip_actor_forward_only = True
     use_rollout_logprobs = False
     use_tis = False

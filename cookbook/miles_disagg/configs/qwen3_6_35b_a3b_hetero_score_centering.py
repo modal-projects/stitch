@@ -1,8 +1,10 @@
 """Score centering on the heterogeneous fleet.
 
-Each token's score has its expected value under the sampler subtracted, computed from
-the sampler's top-128 candidates, which cancels the drift toward the sampler that a
-mismatched policy gradient carries (arXiv:2609.20807).
+Each token's score has its expected value under the sampler subtracted, which cancels
+the drift toward the sampler that a mismatched policy gradient carries
+(arXiv:2609.20807). Sampling is vanilla GRPO's full vocabulary: the expectation is
+exact on the sampler's top-128 recorded candidates, and the remaining tail is modeled
+as the trainer's tail rescaled to the sampler's tail mass.
 """
 
 from cookbook.miles_disagg.configs.qwen3_6_35b_a3b_hetero import *  # noqa: F403
@@ -13,13 +15,8 @@ EXPERIMENT_VOLUME_NAME = APP_NAME
 
 
 class ScoreCenteringMiles(HeteroMiles):
-    # Top-p sampling bounded by top-k; the recorded candidates must cover the whole
-    # realized support, so they exceed top-k to leave room for ties at the cutoff.
-    rollout_top_p = 0.97
-    rollout_top_k = 64
-    # REINFORCE with group-centered rewards and a token-mean loss, as in the paper.
+    # REINFORCE with group-centered rewards, as in the paper.
     disable_grpo_std_normalization = True
-    calculate_per_token_loss = True
     loss_type = "score_centering"
     score_centering_top_k = 128
     score_centering_is = "none"

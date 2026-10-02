@@ -1,5 +1,6 @@
 import json
 from copy import deepcopy
+from dataclasses import replace
 from importlib import import_module
 from types import SimpleNamespace
 
@@ -546,13 +547,18 @@ _HETERO_RECIPES = (
     "score_centering",
     "score_centering_mis",
 )
+# Frozen recipes pin runs started before the clean arms, sharing each arm's names.
+_FROZEN_RECIPES = {
+    "icepop_advanced": "icepop",
+    "score_centering_advanced": "score_centering",
+}
 
 
 def _hetero(name):
     return _recipe(f"qwen3_6_35b_a3b_hetero_{name}")
 
 
-@pytest.mark.parametrize("name", _HETERO_RECIPES)
+@pytest.mark.parametrize("name", _HETERO_RECIPES + tuple(_FROZEN_RECIPES))
 def test_hetero_recipes_share_the_fleet_data_and_run_shape(name):
     recipe = _hetero(name)
     base = import_module("cookbook.miles_disagg.configs.qwen3_6_35b_a3b_hetero")
@@ -561,7 +567,11 @@ def test_hetero_recipes_share_the_fleet_data_and_run_shape(name):
     validate_recipe(recipe)
     validate_resumable_config(cfg, weight_views=recipe.ROLLOUT_WEIGHT_VIEWS)
 
-    assert recipe.modal is base.modal
+    # One rollout fleet and trainer shape for every arm, on the base's B200 trainer;
+    # only the frozen IcePop run keeps the B300 trainer it started on.
+    assert replace(recipe.modal, gpu=base.modal.gpu) == base.modal
+    assert base.modal.gpu == "B200"
+    assert recipe.modal.gpu == ("B300" if name == "icepop_advanced" else "B200")
     assert recipe.ROLLOUT_WEIGHT_VIEWS == base.ROLLOUT_WEIGHT_VIEWS
     assert cfg.rollout_temperature == 1.0
     assert cfg.advantage_estimator == "grpo"
@@ -584,7 +594,7 @@ def test_hetero_recipes_share_the_fleet_data_and_run_shape(name):
     assert cfg.custom_rollout_request_hook_args == {
         "rollout_request_weight_version_mode": "min"
     }
-    slug = name.replace("_", "-")
+    slug = _FROZEN_RECIPES.get(name, name).replace("_", "-")
     assert (
         recipe.APP_NAME
         == recipe.EXPERIMENT_VOLUME_NAME
@@ -621,51 +631,84 @@ def test_hetero_recipes_have_their_own_app_volume_and_wandb_group():
     assert len({recipe.miles.wandb_group for recipe in recipes}) == len(recipes)
 
 
-def test_hetero_recipes_change_only_their_algorithm():
-    grpo, icepop, sc, sc_mis = (_hetero(name).miles for name in _HETERO_RECIPES)
+def _public_fields(cfg) -> dict:
+    return {
+        key: getattr(cfg, key)
+        for key in dir(cfg)
+        if not key.startswith("_") and not callable(getattr(cfg, key))
+    }
 
-    # Only IcePop freezes the router.
-    for cfg in (grpo, sc, sc_mis):
-        assert not getattr(cfg, "freeze_moe_router", False)
 
-    # Naive GRPO: full-vocabulary sampling, std-normalized group advantages, each
-    # sample's token mean averaged over samples, one update per batch at ratio 1.
+_NAMES = {"wandb_group", "prometheus_run_name"}
+_SCORE_CENTERING = {
+    "disable_grpo_std_normalization": True,
+    "loss_type": "score_centering",
+    "score_centering_top_k": 128,
+    "score_centering_is": "none",
+    "skip_actor_forward_only": False,
+    "use_rollout_logprobs": True,
+}
+# Exactly what each arm changes from vanilla GRPO.
+_ALGORITHMS = {
+    "icepop": {
+        "use_tis": True,
+        "custom_tis_function_path": (
+            "miles.backends.training_utils.loss_hub.corrections.icepop_function"
+        ),
+        "tis_clip_low": 0.5,
+        "tis_clip": 5.0,
+    },
+    "score_centering": _SCORE_CENTERING,
+    "score_centering_mis": {
+        **_SCORE_CENTERING,
+        "score_centering_is": "mis",
+        "score_centering_mis_low": 0.5,
+        "score_centering_mis_high": 5.0,
+    },
+}
+
+
+def test_vanilla_grpo_samples_the_full_vocabulary_with_a_batch_token_mean():
+    grpo = _hetero("grpo").miles
     assert (grpo.rollout_top_p, grpo.rollout_top_k) == (1.0, -1)
     assert not getattr(grpo, "disable_grpo_std_normalization", False)
-    assert not getattr(grpo, "calculate_per_token_loss", False)
+    assert grpo.calculate_per_token_loss
     assert not getattr(grpo, "prompt_mean_loss", False)
+    assert not getattr(grpo, "freeze_moe_router", False)
     assert getattr(grpo, "loss_type", None) is None
+    # One optimizer step per batch against the trainer's own detached log-probs.
     assert (grpo.use_tis, grpo.use_rollout_logprobs) == (False, False)
     assert grpo.skip_actor_forward_only
-    # IcePop weights each token by its trainer/sampler ratio and drops it outside
-    # [0.2, 5], with prompt-mean aggregation and a frozen MoE router.
-    assert icepop.use_tis
-    assert (
-        icepop.custom_tis_function_path
-        == "miles.backends.training_utils.loss_hub.corrections.icepop_function"
+
+
+@pytest.mark.parametrize("name", sorted(_ALGORITHMS))
+def test_each_arm_changes_only_its_algorithm_from_vanilla_grpo(name):
+    grpo = _public_fields(_hetero("grpo").miles)
+    arm = _public_fields(_hetero(name).miles)
+    changed = {
+        key: arm.get(key)
+        for key in grpo.keys() | arm.keys()
+        if arm.get(key) != grpo.get(key)
+    }
+    assert {key: value for key, value in changed.items() if key not in _NAMES} == (
+        _ALGORITHMS[name]
     )
-    assert (icepop.tis_clip_low, icepop.tis_clip) == (0.2, 5.0)
-    assert (icepop.rollout_top_p, icepop.rollout_top_k) == (0.97, 4096)
-    assert icepop.disable_grpo_std_normalization
-    assert icepop.skip_actor_forward_only and not icepop.use_rollout_logprobs
-    assert icepop.prompt_mean_loss and not icepop.calculate_per_token_loss
-    assert icepop.freeze_moe_router
-    args = icepop.cli_args()
+    assert _hetero(name).modal is _hetero("grpo").modal
+
+
+def test_frozen_recipes_keep_their_runs_configuration():
+    advanced = _hetero("icepop_advanced").miles
+    assert (advanced.rollout_top_p, advanced.rollout_top_k) == (0.97, 4096)
+    assert (advanced.tis_clip_low, advanced.tis_clip) == (0.2, 5.0)
+    assert advanced.disable_grpo_std_normalization
+    assert advanced.prompt_mean_loss and not advanced.calculate_per_token_loss
+    assert advanced.freeze_moe_router
+    args = advanced.cli_args()
     assert "--prompt-mean-loss" in args and "--freeze-moe-router" in args
     assert "--calculate-per-token-loss" not in args
-    for cfg in (sc, sc_mis):
-        assert (cfg.loss_type, cfg.score_centering_top_k) == ("score_centering", 128)
-        assert cfg.use_rollout_logprobs and not cfg.skip_actor_forward_only
-        assert not cfg.use_tis
-        # REINFORCE with group-centered rewards and a token-mean loss.
-        assert cfg.disable_grpo_std_normalization and cfg.calculate_per_token_loss
-        assert not getattr(cfg, "prompt_mean_loss", False)
-        # The recorded candidates must cover the whole realized support.
-        assert (cfg.rollout_top_p, cfg.rollout_top_k) == (0.97, 64)
-        assert cfg.rollout_top_k <= cfg.score_centering_top_k
-    # Score centering composed with IcePop's masked weights.
-    assert (sc.score_centering_is, sc_mis.score_centering_is) == ("none", "mis")
-    assert (sc_mis.score_centering_mis_low, sc_mis.score_centering_mis_high) == (
-        icepop.tis_clip_low,
-        icepop.tis_clip,
-    )
+    sc_advanced = _hetero("score_centering_advanced").miles
+    assert (sc_advanced.rollout_top_p, sc_advanced.rollout_top_k) == (0.97, 64)
+    assert sc_advanced.rollout_top_k <= sc_advanced.score_centering_top_k
+    assert {
+        key: getattr(sc_advanced, key) for key in _SCORE_CENTERING
+    } == _SCORE_CENTERING
