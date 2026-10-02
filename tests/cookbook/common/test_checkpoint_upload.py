@@ -59,6 +59,9 @@ class _Volume:
         self.gates: dict[str, threading.Event] = {}
         # Path -> how many more uploads of it fail.
         self.failing: dict[str, int] = {}
+        # Path -> how many more uploads of it never finish (until ``release``).
+        self.stalling: dict[str, int] = {}
+        self.release = threading.Event()
         self._lock = threading.Lock()
 
     def batch_upload(self, force: bool = False):
@@ -91,6 +94,13 @@ class _Batch:
         for path, _ in self._puts:
             if (gate := self._volume.gates.get(path)) is not None:
                 assert gate.wait(timeout=30), f"gate for {path} never opened"
+            with self._volume._lock:
+                stalls = self._volume.stalling.get(path, 0) > 0
+                if stalls:
+                    self._volume.stalling[path] -= 1
+            if stalls:
+                self._volume.release.wait(timeout=60)
+                return False
             if self._volume.failing.get(path, 0) > 0:
                 self._volume.failing[path] -= 1
                 raise OSError(f"upload of {path} failed")
@@ -102,7 +112,7 @@ class _Batch:
 
 
 class _Cluster:
-    def __init__(self, tmp_path: Path, volume: _Volume) -> None:
+    def __init__(self, tmp_path: Path, volume: _Volume, **uploader_options) -> None:
         self.roots = {
             host: tmp_path / host / RUN / "attempt-current" for host in ("A", "B")
         }
@@ -116,6 +126,7 @@ class _Cluster:
                 comms=_Comms(rank, placement[rank][1], exchange),
                 streams=2,
                 retry_delay_seconds=0,
+                **uploader_options,
             )
         )
 
@@ -344,6 +355,43 @@ def test_a_transient_failure_is_retried(cluster, volume):
     assert volume.failing[target] == 0  # it did fail once
     assert target in volume.files
     assert volume.files[_volume_path(TRACKER)] == b"9"
+
+
+def test_a_stalled_upload_is_abandoned_for_a_fresh_one(tmp_path, volume):
+    """A batch upload that never returns (one did on 2026-10-02) must not hold the
+    host's later saves and every marker forever: past its deadline a fresh batch
+    uploads the same files."""
+    cluster = _Cluster(
+        tmp_path, volume, stall_floor_seconds=0.2, min_bytes_per_second=1e12
+    )
+    shard = _volume_path("checkpoints/iter_0000009/__2_0.distcp")
+    volume.stalling[shard] = 1
+    try:
+        cluster.save(9)
+        cluster.step()
+        cluster.drain()
+    finally:
+        volume.release.set()
+
+    assert volume.stalling[shard] == 0  # the first attempt did stall
+    assert volume.files[shard] == b"shard __2_0.distcp of 9"
+    assert volume.files[_volume_path(TRACKER)] == b"9"
+    assert _order(volume, shard) < _order(volume, _volume_path(TRACKER))
+
+
+def test_an_upload_that_always_stalls_fails_every_rank(tmp_path, volume):
+    cluster = _Cluster(
+        tmp_path, volume, stall_floor_seconds=0.1, min_bytes_per_second=1e12
+    )
+    volume.stalling[_volume_path("checkpoints/iter_0000009/__2_0.distcp")] = 10**6
+    try:
+        cluster.save(9)
+        cluster.step()
+        with pytest.raises(RuntimeError, match="still uploading after"):
+            cluster.drain()
+    finally:
+        volume.release.set()
+    assert _volume_path(TRACKER) not in volume.files
 
 
 def test_steps_with_nothing_new_upload_nothing(cluster, volume):

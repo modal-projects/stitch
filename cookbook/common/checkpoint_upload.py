@@ -29,6 +29,7 @@ from __future__ import annotations
 import io
 import logging
 import shutil
+import threading
 import time
 import traceback
 from collections import deque
@@ -63,9 +64,16 @@ class CheckpointUploader:
         comms: TrainerComms,
         streams: int = 4,
         retry_delay_seconds: float = 10.0,
+        stall_floor_seconds: float = 600.0,
+        min_bytes_per_second: float = 20e6,
     ) -> None:
         self._local_root = local_root
         self._retry_delay_seconds = retry_delay_seconds
+        # A batch upload has no deadline of its own, and one that stops making
+        # progress would otherwise hold this host's later saves, and every marker,
+        # forever. An attempt slower than this rate is abandoned for a fresh one.
+        self._stall_floor_seconds = stall_floor_seconds
+        self._min_bytes_per_second = min_bytes_per_second
         self._volume = volume
         self._volume_root = volume_root
         self._comms = comms
@@ -209,7 +217,7 @@ class CheckpointUploader:
         groups = _balanced(files, self._streams, key=lambda file: file[1])
         with ThreadPoolExecutor(max_workers=len(groups)) as pool:
             for future in [
-                pool.submit(self._put, [(path, str(path)) for path, _ in group])
+                pool.submit(self._put, [(path, path) for path, _ in group])
                 for group in groups
             ]:
                 future.result()
@@ -223,7 +231,7 @@ class CheckpointUploader:
         )
 
     def _upload_markers(self, markers: Sequence[tuple[Path, bytes]]) -> None:
-        self._put([(path, io.BytesIO(content)) for path, content in markers])
+        self._put(list(markers))
         # The tracker stays: Megatron owns and rewrites it; each save claims it anew.
         for path, _ in markers:
             if path.name == COMPLETE_NAME:
@@ -233,27 +241,63 @@ class CheckpointUploader:
             ", ".join(self._volume_path(path) for path, _ in markers),
         )
 
-    def _put(self, files: Sequence[tuple[Path, Any]], attempts: int = 3) -> None:
-        """Upload ``files`` in one batch; a batch is idempotent, so a failure retries it."""
+    def _put(
+        self, files: Sequence[tuple[Path, Path | bytes]], attempts: int = 3
+    ) -> None:
+        """Upload ``files``, each a local file or in-memory content, in one batch.
+
+        A batch is idempotent, so a failed attempt is retried, and so is one that
+        outlives its deadline: it is abandoned, not cancelled, and if it ever
+        finishes it writes the same bytes to the same paths. Abandoned attempts die
+        with this attempt's container, before any re-save, so a late one can at most
+        move the tracker back to an earlier save that is itself complete."""
+        nbytes = sum(
+            len(source) if isinstance(source, bytes) else source.stat().st_size
+            for _, source in files
+        )
+        deadline = self._stall_floor_seconds + nbytes / self._min_bytes_per_second
         for attempt in range(1, attempts + 1):
-            try:
-                with self._volume.batch_upload(force=True) as upload:
-                    for path, source in files:
-                        if isinstance(source, io.BytesIO):
-                            source.seek(0)
-                        upload.put_file(source, self._volume_path(path))
+            failure: list[BaseException] = []
+            worker = threading.Thread(
+                target=self._batch, args=(files, failure), daemon=True
+            )
+            worker.start()
+            worker.join(deadline)
+            if not worker.is_alive() and not failure:
                 return
-            except Exception:
-                if attempt == attempts:
-                    raise
-                logger.warning(
-                    "checkpoint upload: batch of %d files failed (attempt %d/%d)",
-                    len(files),
-                    attempt,
-                    attempts,
-                    exc_info=True,
+            error = (
+                failure[0]
+                if failure
+                else TimeoutError(
+                    f"batch of {len(files)} files ({nbytes / 1e9:.1f} GB) still "
+                    f"uploading after {deadline:.0f}s"
                 )
-                time.sleep(self._retry_delay_seconds * attempt)
+            )
+            if attempt == attempts:
+                raise error
+            logger.warning(
+                "checkpoint upload: batch of %d files failed (attempt %d/%d): %s",
+                len(files),
+                attempt,
+                attempts,
+                error,
+            )
+            time.sleep(self._retry_delay_seconds * attempt)
+
+    def _batch(
+        self, files: Sequence[tuple[Path, Path | bytes]], failure: list[BaseException]
+    ) -> None:
+        try:
+            with self._volume.batch_upload(force=True) as upload:
+                for path, source in files:
+                    upload.put_file(
+                        io.BytesIO(source)
+                        if isinstance(source, bytes)
+                        else str(source),
+                        self._volume_path(path),
+                    )
+        except BaseException as error:  # noqa: BLE001 — reported to the waiting caller
+            failure.append(error)
 
     def _volume_path(self, path: Path) -> str:
         return (self._volume_root / path.relative_to(self._local_root)).as_posix()
