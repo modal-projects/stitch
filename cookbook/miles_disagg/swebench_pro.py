@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 import shlex
 import subprocess
 import tempfile
@@ -37,7 +38,22 @@ def _patched_paths(test_patch: str) -> list[str]:
     return sorted(set(paths))
 
 
-def _setup_script(before_repo_set_cmd: str) -> str:
+_FIX_TEST_CHECKOUT = re.compile(r"git checkout [0-9a-f]{7,40} -- \S")
+
+
+def _agent_start_commands(before_repo_set_cmd: str, instance_id: str) -> str:
+    """The benchmark's repository setup without its last line, which checks out the
+    fix commit's test files. The benchmark's agent starts from the base commit, and its
+    evaluator runs that line only after applying the agent's patch."""
+    lines = before_repo_set_cmd.strip().splitlines()
+    if not lines or not _FIX_TEST_CHECKOUT.match(lines[-1].strip()):
+        raise ValueError(
+            f"{instance_id}: before_repo_set_cmd must end with the fix test checkout"
+        )
+    return "\n".join(lines[:-1])
+
+
+def _setup_script(agent_start_commands: str) -> str:
     return rf"""#!/bin/bash
 set -euo pipefail
 
@@ -51,7 +67,20 @@ if [ -n "$image_path" ]; then
 fi
 
 cd /app
-{before_repo_set_cmd}
+{agent_start_commands}
+
+# The image's clone carries the repository's later history, the fix commit included,
+# where `git log --all` finds it. Keep only what the task starts from: drop every ref
+# HEAD does not contain, every remote, and the objects only they reached.
+git for-each-ref --format='%(if)%(symref)%(then)%(refname)%(end)' | sed '/^$/d' |
+    while read -r ref; do git symbolic-ref --delete "$ref"; done
+git for-each-ref --format='delete %(refname)' --no-merged=HEAD | git update-ref --stdin
+git for-each-ref --format='delete %(refname)' refs/remotes | git update-ref --stdin
+git remote | while read -r remote; do git config --remove-section "remote.$remote"; done
+rm -f .git/FETCH_HEAD .git/ORIG_HEAD .git/MERGE_HEAD
+git stash clear
+git reflog expire --expire=now --all
+git gc --prune=now --quiet
 
 baseline_tree=$(git write-tree)
 baseline_commit=$(
@@ -81,22 +110,32 @@ write_zero() {{
 cd /app || exit 1
 baseline=$(git rev-parse refs/miles/task-baseline) || exit 1
 git add -N . >/dev/null 2>&1 || true
-git diff --name-only "$baseline" -- > /tmp/miles_changed_paths.txt || exit 1
-if grep -Fxf /tests/protected_test_paths.txt /tmp/miles_changed_paths.txt \
-        >/tmp/miles_modified_tests.txt; then
-    echo "Policy modified benchmark test files:"
-    cat /tmp/miles_modified_tests.txt
+git diff --binary "$baseline" -- . > /tmp/miles_policy.patch || exit 1
+git reset --hard "$baseline" >/dev/null || exit 1
+git clean -fd >/dev/null || exit 1
+# An unchanged tree is still graded, as the benchmark's evaluator grades an empty patch.
+if [ -s /tmp/miles_policy.patch ] &&
+        ! git apply --whitespace=nowarn /tmp/miles_policy.patch; then
+    echo "Policy patch could not be applied to the canonical task baseline."
     write_zero
     exit 0
 fi
 
-git diff --binary "$baseline" -- . > /tmp/miles_policy.patch || exit 1
-git reset --hard "$baseline" >/dev/null || exit 1
-git clean -fd >/dev/null || exit 1
-if ! git apply --whitespace=nowarn /tmp/miles_policy.patch; then
-    echo "Policy patch could not be applied to the canonical task baseline."
-    write_zero
-    exit 0
+# As the benchmark's evaluator does after the agent's patch, put the fix commit's test
+# files in place, whatever the policy did to them: the baseline's versions plus the
+# benchmark's test patch. A test patch that does not apply is the task's fault, not
+# the policy's, so it ends without a reward.
+while read -r path; do
+    [ -n "$path" ] || continue
+    if git cat-file -e "$baseline:$path" 2>/dev/null; then
+        git checkout "$baseline" -- "$path" || exit 1
+    else
+        rm -rf -- "$path"
+    fi
+done < /tests/test_paths.txt
+if ! git apply --whitespace=nowarn /tests/test.patch; then
+    echo "The benchmark test patch does not apply to the task baseline."
+    exit 1
 fi
 
 bash /tests/run_script.sh {selected} \
@@ -240,7 +279,9 @@ def prepare_swebench_pro(data_root: Path) -> Path:
                 f"FROM jefzda/sweap-images:{source['dockerhub_tag']}\n"
             )
             (environment_dir / "setup.sh").write_text(
-                _setup_script(source["before_repo_set_cmd"])
+                _setup_script(
+                    _agent_start_commands(source["before_repo_set_cmd"], instance_id)
+                )
             )
             (tests_dir / "test.sh").write_text(_verifier_script(selected_tests))
             (tests_dir / "run_script.sh").write_text(run_script.read_text())
@@ -248,8 +289,17 @@ def prepare_swebench_pro(data_root: Path) -> Path:
             (tests_dir / "required_tests.json").write_text(
                 json.dumps(required_tests) + "\n"
             )
-            (tests_dir / "protected_test_paths.txt").write_text(
-                "".join(f"{path}\n" for path in _patched_paths(source["test_patch"]))
+            # The fix commit's test files reach the Sandbox with the verifier only.
+            test_paths = _patched_paths(source["test_patch"])
+            checkout = source["before_repo_set_cmd"].strip().splitlines()[-1]
+            if sorted(set(checkout.split(" -- ", 1)[1].split())) != test_paths:
+                raise RuntimeError(
+                    f"{instance_id}: the fix test checkout and test_patch name "
+                    "different files"
+                )
+            (tests_dir / "test.patch").write_text(source["test_patch"])
+            (tests_dir / "test_paths.txt").write_text(
+                "".join(f"{path}\n" for path in test_paths)
             )
             (task_dir / "task.toml").write_text("[verifier]\ntimeout_sec = 3600\n")
 

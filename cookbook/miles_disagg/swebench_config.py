@@ -2,9 +2,11 @@
 
 from cookbook.common.constants import DATA_PATH
 
-# v2: task setup gives login shells the image's PATH (Go tasks need /usr/local/go/bin).
-# The first layout stays at DATA_PATH / "swebench-pro".
-DATASET_PATH = DATA_PATH / "swebench-pro-v2"
+# v3, as the benchmark's evaluator runs a task: the agent starts from the base commit
+# without the fix's tests or later history, the verifier adds the fix's tests after
+# the agent's patch, and every shell gets the image's PATH. Earlier layouts stay at
+# swebench-pro (v1) and swebench-pro-v2 (PATH only).
+DATASET_PATH = DATA_PATH / "swebench-pro-v3"
 TRAINER_PACKAGES = (
     "harbor[modal,huggingface]==0.20.0",
     "mini-swe-agent==2.4.5",
