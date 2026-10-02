@@ -96,6 +96,18 @@ class EvalPoint:
         return f"{self.run_id}-v{self.version}-{self.view}"
 
 
+def task_set(spec: Any) -> str:
+    """The spec's prepared task set: the directory of its dataset, which a new
+    preparation of the benchmark gets anew (``swebench-pro-v2``)."""
+    return PurePosixPath(spec.DATASET["path"]).parent.name
+
+
+def results_path(spec: Any, point: EvalPoint) -> PurePosixPath:
+    """A point's results on the eval volume, under its task set, so results from
+    different preparations of a benchmark never mix."""
+    return PurePosixPath(task_set(spec)) / point.relative_dir
+
+
 def app_name(spec_name: str, recipe_app_name: str, point: EvalPoint) -> str:
     """The point's Modal app. It also names the pool's store on the eval volume, which
     nothing publishes to, so the pool keeps serving its boot checkpoint."""

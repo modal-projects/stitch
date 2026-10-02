@@ -128,7 +128,7 @@ def _run_point() -> int:
     point, name = point_app.POINT, point_app.APP_NAME
     label = f"[{name}]"
     smoke = _parse_smoke(os.environ.get("EVAL_SMOKE") or None)
-    point_path = PurePosixPath(point_app.spec.NAME) / point.relative_dir
+    point_path = evaluation.results_path(point_app.spec, point)
     if smoke is not None:
         point_path /= evaluation.smoke_dir(smoke)
     metrics = _read_json(point_app.eval_volume, point_path / "metrics.json")
@@ -220,6 +220,7 @@ def _manifest(point_app: Any) -> dict[str, Any]:
     ).stdout.strip()
     return {
         "spec": point_app.spec.NAME,
+        "task_set": evaluation.task_set(point_app.spec),
         "experiment": point.experiment,
         "run_id": point.run_id,
         "version": point.version,

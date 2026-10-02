@@ -51,7 +51,7 @@ if engines := os.environ.get("EVAL_ENGINES"):
         POOL, min_containers=int(engines), max_containers=int(engines)
     )
 APP_NAME = evaluation.app_name(spec.NAME, exp.APP_NAME, POINT)
-POINT_DIR = STITCH_PATH / spec.NAME / POINT.relative_dir
+POINT_DIR = STITCH_PATH / evaluation.results_path(spec, POINT)
 STORE = storage.StoreDeployment(backend=storage.MODAL_VOLUME, s3_secret_name=None)
 # Baked into both images so a container's re-import selects the same point.
 POINT_ENVIRONMENT = {

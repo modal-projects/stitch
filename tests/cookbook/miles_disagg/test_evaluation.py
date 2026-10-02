@@ -225,7 +225,7 @@ def test_eval_app_imports_for_each_point(monkeypatch, version, view):
 
     assert eval_app.POOL is spec.POOLS[view]
     assert len(eval_app.APP_NAME) <= 64
-    assert str(eval_app.POINT_DIR).startswith("/stitch/swebench-pro/")
+    assert str(eval_app.POINT_DIR).startswith("/stitch/swebench-pro-v2/")
     # Training volumes are mounted read-only; only the eval volume is writable.
     assert (str(evaluation.SOURCE_RUN_PATH) in eval_app.pool_volumes) == (version > 0)
     assert eval_app.pool_volumes["/stitch"] is eval_app.eval_volume
@@ -418,3 +418,12 @@ def test_eval_engines_resizes_the_pool_fleet(monkeypatch):
     assert (eval_app.POOL.min_containers, eval_app.POOL.max_containers) == (32, 32)
     assert eval_app.POOL.sglang_args == spec.POOLS["fp8"].sglang_args
     assert eval_app.POINT_ENVIRONMENT["EVAL_ENGINES"] == "32"
+
+
+def test_results_live_under_the_prepared_task_set():
+    point = evaluation.EvalPoint("qwen3_6_35b_a3b_hetero_icepop", "r03", 50, "fp8")
+
+    assert evaluation.task_set(spec) == "swebench-pro-v2"
+    assert str(evaluation.results_path(spec, point)) == (
+        "swebench-pro-v2/qwen3_6_35b_a3b_hetero_icepop/r03/v000050/fp8"
+    )

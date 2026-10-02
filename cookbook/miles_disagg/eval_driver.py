@@ -230,13 +230,19 @@ def log_to_wandb(
 
         owner = "base" if point.is_base else f"{exp.APP_NAME}-{point.run_id}"
         name = f"{owner}-{point.view}"
+        tasks = evaluation.task_set(spec)
         run = wandb.init(
             project=exp.miles.wandb_project,
-            group=f"{spec.NAME}-eval",
+            group=f"{tasks}-eval",
             name=name,
-            id=hashlib.sha256(f"{spec.NAME}/{name}".encode()).hexdigest()[:16],
+            id=hashlib.sha256(f"{tasks}/{name}".encode()).hexdigest()[:16],
             resume="allow",
-            config={"spec": spec.NAME, "view": point.view, "run_id": point.run_id},
+            config={
+                "spec": spec.NAME,
+                "task_set": tasks,
+                "view": point.view,
+                "run_id": point.run_id,
+            },
         )
         run.define_metric("eval/version")
         run.define_metric("eval/*", step_metric="eval/version")
