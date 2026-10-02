@@ -5,13 +5,13 @@ Stitch installs an immutable Miles revision over a dated trainer image:
 ```python
 MILES_IMAGE_TAG = "radixark/miles:dev-202609290439"
 MILES_REPO_URL = "https://github.com/modal-projects/miles.git"
-MILES_REPO_REF = "c96c327f32383c1160b99f58f53ad48f8f0aa265"
+MILES_REPO_REF = "90c3e94a08520c5d7322ea64c99f8461862ae12d"
 ```
 
 The image supplies the compiled CUDA, Transformer Engine, and Megatron-LM
 environment. The source pin belongs to
 `modal-projects/miles:stitch-miles-hetero`, the heterogeneous-RL experiment branch:
-upstream Miles main at `3439ec7513`, followed by twenty-one reviewed integration changes.
+upstream Miles main at `3439ec7513`, followed by twenty-two reviewed integration changes.
 `stitch-miles` tracks the pin on Stitch main.
 Each upstream PR is represented by one commit; the branch carries no additional
 runtime patches. Stitch no longer patches Miles at container startup.
@@ -41,6 +41,7 @@ runtime patches. Stitch no longer patches Miles at container startup.
 | Canonical view exports | Not yet upstreamed | `f9559086ee` | Export each rollout view in its canonical checkpoint layout, as its deltas are, so a replica booted from an export can apply the deltas that follow it. |
 | Joint view publication | Not yet upstreamed | `0f09a4da66` | Publish rollout views that finish encoding together with one `--custom-update-weight-post-write-views-path` call, so one commit round covers them; no view waits for another. |
 | Weight-sync timing | Not yet upstreamed | `c96c327f32` | Log where each weight sync's time goes (bucket production, conversion wait, pinned buffers, GPU-to-CPU copy, diff/compress workers); log lines only. |
+| Signed mismatch direction | Not yet upstreamed | `90c3e94a08` | Report the mean signed trainer-minus-rollout log-ratio next to KL and the ratio tail, for all tokens and per view, rollout source and staleness bucket; one more row in the same pass. |
 
 The integration boundary is intentionally small:
 
