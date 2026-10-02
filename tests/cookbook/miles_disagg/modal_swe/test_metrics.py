@@ -11,6 +11,7 @@ from cookbook.miles_disagg.modal_swe.metrics import (
     _per_source_metrics,
     _request_metrics,
     _routing_replay_metrics,
+    _training_batch_metrics,
     log_rollout_data,
 )
 
@@ -184,7 +185,9 @@ def test_per_source_metrics_staleness_uses_the_drain_version():
     _per_source_metrics(samples, output)
 
     assert output["rollout/by_view/fp8/staleness_mean"] == 4
+    assert output["rollout/by_view/fp8/post_generation_staleness_mean"] == 2
     assert output["rollout/by_view/nvfp4/staleness_mean"] == 1
+    assert output["rollout/by_view/nvfp4/post_generation_staleness_mean"] == 0
     assert "rollout/by_view/bf16/staleness_mean" not in output
 
     unversioned = {}
@@ -201,9 +204,11 @@ def test_per_source_metrics_tolerate_a_bare_sample():
         "rollout/by_source/unknown/sample_count": 1,
         "rollout/by_source/unknown/infra_error_ratio": 0.0,
         "rollout/by_source/unknown/format_error_ratio": 0.0,
+        "rollout/by_source/unknown/exit_status/unknown_ratio": 1.0,
         "rollout/by_view/unknown/sample_count": 1,
         "rollout/by_view/unknown/infra_error_ratio": 0.0,
         "rollout/by_view/unknown/format_error_ratio": 0.0,
+        "rollout/by_view/unknown/exit_status/unknown_ratio": 1.0,
     }
 
 
@@ -253,8 +258,6 @@ def test_per_source_metrics_split_format_errors_by_pool_and_view():
     assert output["rollout/by_view/nvfp4/format_error_ratio"] == 1.0
     assert output["rollout/by_source/ServerH100FP8:fp8/format_error_ratio"] == 1.0
     assert output["rollout/by_view/bf16/format_error_ratio"] == 0.0
-    # Exit statuses are reported only for the whole batch.
-    assert not any("/exit_status/" in key for key in output)
 
 
 def _dump_sample(
@@ -423,3 +426,142 @@ def test_a_failed_dump_never_fails_the_step(tmp_path):
         is False
     )
     assert metrics["rollout_agent/format_error_ratio"] == 0.0
+
+
+def test_training_batch_breaks_down_the_consumed_batch_by_pool_and_view():
+    """Counts and shares of the drained batch, in samples and in loss tokens."""
+    samples = [
+        _sample("ServerH100FP8:fp8", response_length=10, loss_mask=[1] * 6 + [0] * 4),
+        _sample("ServerH200FP8:fp8", response_length=30),
+        _sample("ServerB300NVFP4W4A16:nvfp4", response_length=20, loss_mask=[1] * 20),
+        _sample(response_length=4),
+    ]
+    output = {}
+
+    _training_batch_metrics(samples, output)
+
+    assert output["rollout/training_batch/sample_count"] == 4
+    assert output["rollout/training_batch/token_count"] == 6 + 30 + 20 + 4
+    fp8_pool = "rollout/training_batch/ServerH100FP8:fp8"
+    assert output[f"{fp8_pool}/sample_count"] == 1
+    assert output[f"{fp8_pool}/sample_percentage"] == 25.0
+    # The loss mask, not the response length, is what the trainer's loss counts.
+    assert output[f"{fp8_pool}/token_count"] == 6
+    assert output[f"{fp8_pool}/token_percentage"] == pytest.approx(100 * 6 / 60)
+    assert output["rollout/training_batch/by_view/fp8/sample_count"] == 2
+    assert output["rollout/training_batch/by_view/fp8/sample_percentage"] == 50.0
+    assert output[
+        "rollout/training_batch/by_view/fp8/token_percentage"
+    ] == pytest.approx(100 * 36 / 60)
+    assert output["rollout/training_batch/by_view/nvfp4/token_count"] == 20
+    assert output["rollout/training_batch/unknown/sample_count"] == 1
+    assert output["rollout/training_batch/by_view/unknown/sample_count"] == 1
+    views = ("fp8", "nvfp4", "unknown")
+    assert sum(
+        output[f"rollout/training_batch/by_view/{v}/sample_percentage"] for v in views
+    ) == pytest.approx(100.0)
+    assert sum(
+        output[f"rollout/training_batch/by_view/{v}/token_percentage"] for v in views
+    ) == pytest.approx(100.0)
+
+
+def test_training_batch_counts_no_tokens_for_a_removed_sample():
+    samples = [
+        _sample("ServerH100FP8:fp8", response_length=10, remove_sample=True),
+        _sample("ServerH200FP8:fp8", response_length=30),
+    ]
+    output = {}
+
+    _training_batch_metrics(samples, output)
+
+    assert output["rollout/training_batch/sample_count"] == 2
+    assert output["rollout/training_batch/ServerH100FP8:fp8/token_count"] == 0
+    assert output["rollout/training_batch/by_view/fp8/token_percentage"] == 100.0
+
+
+def test_per_source_metrics_split_exit_statuses_by_view():
+    samples = [
+        _sample("ServerH100FP8:fp8", metadata={"exit_status": "RepeatedFormatError"}),
+        _sample("ServerH200FP8:fp8", metadata={"exit_status": "Submitted"}),
+        _sample("ServerB300NVFP4W4A16:nvfp4", metadata={"exit_status": "FormatError"}),
+        _sample("ServerH200BF16:bf16", metadata={"exit_status": "made-up status"}),
+    ]
+    output = {}
+
+    _per_source_metrics(samples, output)
+
+    assert output["rollout/by_view/fp8/exit_status/RepeatedFormatError_ratio"] == 0.5
+    assert output["rollout/by_view/fp8/exit_status/Submitted_ratio"] == 0.5
+    assert output["rollout/by_view/fp8/format_error_ratio"] == 0.5
+    assert output["rollout/by_view/nvfp4/format_error_ratio"] == 1.0
+    assert output["rollout/by_source/ServerH100FP8:fp8/format_error_ratio"] == 1.0
+    # Unknown statuses fold into "other", as in the global ratios.
+    assert output["rollout/by_view/bf16/exit_status/other_ratio"] == 1.0
+    assert output["rollout/by_view/bf16/format_error_ratio"] == 0.0
+
+
+def test_per_source_metrics_report_agent_wall_time():
+    samples = [
+        _sample("ServerH100FP8:fp8", metadata={"agent_metrics": {"total_time": 30.0}}),
+        _sample("ServerH200FP8:fp8", metadata={"agent_metrics": {"total_time": 90.0}}),
+        _sample("ServerB300NVFP4W4A16:nvfp4", metadata={"agent_metrics": {}}),
+    ]
+    output = {}
+
+    _per_source_metrics(samples, output)
+
+    assert output["rollout/by_view/fp8/total_time_mean"] == 60.0
+    assert output["rollout/by_source/ServerH100FP8:fp8/total_time_mean"] == 30.0
+    assert "rollout/by_view/nvfp4/total_time_mean" not in output
+
+
+def test_training_batch_counts_the_data_that_carries_gradient():
+    """A sample carries gradient when its reward differs from its group's mean."""
+    samples = [
+        # Group 0 has mixed rewards: every sample carries gradient.
+        _sample("ServerH100FP8:fp8", reward=1.0, group=0, index=0, response_length=10),
+        _sample(
+            "ServerB300NVFP4W4A16:nvfp4",
+            reward=0.0,
+            group=0,
+            index=1,
+            response_length=30,
+        ),
+        # Group 1 is all-fail: zero advantage, no gradient.
+        _sample("ServerH100FP8:fp8", reward=0.0, group=1, index=2, response_length=20),
+        _sample(
+            "ServerB300NVFP4W4A16:nvfp4",
+            reward=0.0,
+            group=1,
+            index=3,
+            response_length=40,
+        ),
+    ]
+    output = {}
+
+    _training_batch_metrics(samples, output)
+
+    assert output["rollout/training_batch/gradient_sample_percentage"] == 50.0
+    assert output["rollout/training_batch/gradient_token_percentage"] == pytest.approx(
+        100 * 40 / 100
+    )
+    fp8 = "rollout/training_batch/by_view/fp8"
+    assert output[f"{fp8}/gradient_sample_percentage"] == 50.0
+    assert output[f"{fp8}/gradient_token_percentage"] == pytest.approx(100 * 10 / 30)
+    nvfp4 = "rollout/training_batch/ServerB300NVFP4W4A16:nvfp4"
+    assert output[f"{nvfp4}/gradient_token_percentage"] == pytest.approx(100 * 30 / 70)
+
+
+def test_gradient_share_takes_one_reward_per_trajectory_as_miles_does():
+    """Segments of one trajectory share its reward and count once in the group mean."""
+    samples = [
+        _sample("A:fp8", reward=1.0, group=0, rollout_id=7, response_length=5),
+        _sample("A:fp8", reward=1.0, group=0, rollout_id=7, response_length=5),
+        _sample("B:bf16", reward=0.0, group=0, rollout_id=8, response_length=5),
+    ]
+    output = {}
+
+    _training_batch_metrics(samples, output)
+
+    # The group mean is over trajectories (0.5), not segments (2/3): all carry gradient.
+    assert output["rollout/training_batch/gradient_sample_percentage"] == 100.0

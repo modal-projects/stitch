@@ -284,11 +284,124 @@ def _raw_reward(sample: Sample, reward_key: str | None) -> float | None:
     return _number(reward)
 
 
-def _oldest_weight_version(sample: Sample) -> int | None:
-    """Oldest numeric generation version, as Miles' staleness reads it."""
+def _weight_version_range(sample: Sample) -> tuple[int | None, int | None]:
+    """Oldest and newest numeric generation versions, as Miles' staleness reads them."""
     spans = getattr(sample, "all_weight_version_spans", None) or []
     versions = [int(span.version) for span in spans if str(span.version).isdigit()]
-    return min(versions) if versions else None
+    return (min(versions), max(versions)) if versions else (None, None)
+
+
+def _loss_tokens(sample: Sample) -> int:
+    """The response tokens the trainer's loss counts: the loss mask's, else the response.
+
+    Miles' conversion zeroes a removed sample's loss mask after this hook runs, so a
+    removed sample counts no tokens here either.
+    """
+    if getattr(sample, "remove_sample", False):
+        return 0
+    mask = getattr(sample, "loss_mask", None)
+    if mask is not None:
+        return int(sum(mask))
+    return int(getattr(sample, "response_length", 0) or 0)
+
+
+def _advantage_reward(sample: Sample, reward_key: str | None) -> float | None:
+    """The reward Miles turns into advantages (``Sample.get_reward_value``)."""
+    reward = getattr(sample, "reward", None)
+    if reward_key and isinstance(reward, dict):
+        reward = reward.get(reward_key)
+    return _number(reward)
+
+
+def _carries_gradient(samples: list[Sample], reward_key: str | None) -> list[bool]:
+    """Whether each sample's group-centered advantage is nonzero.
+
+    Mirrors Miles' GRPO advantages: samples are grouped by ``group_index`` (one group
+    for the whole batch when any sample lacks it), each trajectory (``rollout_id``,
+    else ``index``) contributes one reward, and a trajectory's advantage is its
+    reward minus its group's mean over trajectories. Std normalization rescales but
+    never zeroes it, so a sample carries gradient exactly when its reward differs
+    from its group's mean.
+    """
+    whole_batch = any(getattr(s, "group_index", None) is None for s in samples)
+    keys = []
+    group_rewards: dict[Any, dict[Any, float]] = defaultdict(dict)
+    for row, sample in enumerate(samples):
+        group = None if whole_batch else sample.group_index
+        trajectory = getattr(sample, "rollout_id", None)
+        if trajectory is None:
+            trajectory = getattr(sample, "index", None)
+        if trajectory is None:
+            trajectory = ("row", row)
+        keys.append(group)
+        reward = _advantage_reward(sample, reward_key)
+        if reward is not None:
+            group_rewards[group][trajectory] = reward
+    means = {
+        group: sum(rewards.values()) / len(rewards)
+        for group, rewards in group_rewards.items()
+    }
+    carries = []
+    for sample, group in zip(samples, keys, strict=True):
+        reward = _advantage_reward(sample, reward_key)
+        carries.append(reward is not None and group in means and reward != means[group])
+    return carries
+
+
+def _training_batch_metrics(
+    samples: list[Sample], output: dict[str, Any], *, reward_key: str | None = None
+) -> None:
+    """What the trainer consumes this step, by serving pool and by weight view.
+
+    ``samples`` is the drained batch the trainer converts and trains on: Miles calls
+    this hook on the batch it then converts, and conversion and the data-parallel split
+    keep every sample. Each pool's
+    and view's share is reported both in samples and in loss tokens: with a token-mean
+    loss, a pool's weight in the gradient is its token share. Samples without a source
+    count under ``unknown``. ``gradient_*_percentage`` is the share of a group's samples
+    and loss tokens whose advantage is nonzero: consumed data that actually moves the
+    policy, which a precision or kernel change should not lower.
+    """
+    output["rollout/training_batch/sample_count"] = len(samples)
+    tokens = [_loss_tokens(sample) for sample in samples]
+    total_tokens = sum(tokens)
+    output["rollout/training_batch/token_count"] = total_tokens
+    carries = _carries_gradient(samples, reward_key)
+    # Per group: samples, tokens, gradient-bearing samples, gradient-bearing tokens.
+    counts: dict[str, list[int]] = defaultdict(lambda: [0, 0, 0, 0])
+    counts["rollout/training_batch"] = [0, 0, 0, 0]
+    for sample, sample_tokens, carry in zip(samples, tokens, carries, strict=True):
+        source = str(sample.metadata.get("rollout_source") or "unknown")
+        view = source.rsplit(":", 1)[1] if ":" in source else "unknown"
+        for prefix in (
+            "rollout/training_batch",
+            f"rollout/training_batch/{_metric_name(source)}",
+            f"rollout/training_batch/by_view/{_metric_name(view)}",
+        ):
+            counts[prefix][0] += 1
+            counts[prefix][1] += sample_tokens
+            counts[prefix][2] += carry
+            counts[prefix][3] += sample_tokens if carry else 0
+    for prefix, (
+        sample_count,
+        token_count,
+        grad_samples,
+        grad_tokens,
+    ) in counts.items():
+        output[f"{prefix}/gradient_sample_percentage"] = (
+            100 * grad_samples / sample_count
+        )
+        if token_count:
+            output[f"{prefix}/gradient_token_percentage"] = (
+                100 * grad_tokens / token_count
+            )
+        if prefix == "rollout/training_batch":
+            continue
+        output[f"{prefix}/sample_count"] = sample_count
+        output[f"{prefix}/sample_percentage"] = 100 * sample_count / len(samples)
+        output[f"{prefix}/token_count"] = token_count
+        if total_tokens:
+            output[f"{prefix}/token_percentage"] = 100 * token_count / total_tokens
 
 
 def _per_source_metrics(
@@ -302,9 +415,10 @@ def _per_source_metrics(
     A prompt's samples land on different pools, so the within-prompt delta (a
     sample's reward minus its prompt's mean in this batch) separates a pool's
     effect from prompt difficulty. Staleness is the per-sample form of Miles'
-    group staleness: the drain's version minus the sample's oldest generation
-    version. Miles filters aborted trajectories before this hook, so
-    ``infra_error_ratio`` counts only the failures that still reach training.
+    group staleness: the drain's version minus the sample's oldest (or, for
+    post-generation, newest) generation version. Miles filters aborted
+    trajectories before this hook, so ``infra_error_ratio`` counts only the
+    failures that still reach training.
     """
     rewards = [_raw_reward(sample, reward_key) for sample in samples]
     prompt_rewards: dict[Any, list[float]] = defaultdict(list)
@@ -318,7 +432,8 @@ def _per_source_metrics(
         if len(values) >= 2
     }
 
-    oldest = [_oldest_weight_version(sample) for sample in samples]
+    versions = [_weight_version_range(sample) for sample in samples]
+    oldest = [low for low, _ in versions]
     # Miles reports max_staleness = drain version - oldest version in the batch.
     max_staleness = _number(output.get("rollout/fully_async/max_staleness"))
     versioned = [version for version in oldest if version is not None]
@@ -329,12 +444,14 @@ def _per_source_metrics(
     )
 
     groups: dict[str, dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
-    for sample, reward, low in zip(samples, rewards, oldest, strict=True):
+    group_statuses: dict[str, Counter[str]] = defaultdict(Counter)
+    for sample, reward, (low, high) in zip(samples, rewards, versions, strict=True):
         agent_metrics = sample.metadata.get("agent_metrics") or {}
         source = str(sample.metadata.get("rollout_source") or "unknown")
         view = source.rsplit(":", 1)[1] if ":" in source else "unknown"
         group = getattr(sample, "group_index", None)
         completion_tokens = _number(agent_metrics.get("model_completion_tokens_total"))
+        status = _exit_status(sample)
         values = {
             "raw_reward_mean": reward,
             "within_prompt_reward_delta_mean": (
@@ -343,12 +460,18 @@ def _per_source_metrics(
                 else None
             ),
             "infra_error_ratio": float(bool(agent_metrics.get("infra_error"))),
-            "format_error_ratio": float(_exit_status(sample) in _FORMAT_ERROR_STATUSES),
+            "format_error_ratio": float(status in _FORMAT_ERROR_STATUSES),
             "response_length_mean": _number(getattr(sample, "response_length", None)),
             "turns_mean": _number(agent_metrics.get("turns")),
+            "total_time_mean": _number(agent_metrics.get("total_time")),
             "staleness_mean": (
                 current_version - low
                 if current_version is not None and low is not None
+                else None
+            ),
+            "post_generation_staleness_mean": (
+                current_version - high
+                if current_version is not None and high is not None
                 else None
             ),
             # Paired per sample so the speed ratio never mixes in untimed tokens.
@@ -363,12 +486,17 @@ def _per_source_metrics(
             f"rollout/by_source/{_metric_name(source)}",
             f"rollout/by_view/{_metric_name(view)}",
         ):
+            group_statuses[prefix][status] += 1
             for name, value in values.items():
                 if value is not None:
                     groups[prefix][name].append(value)
 
     for prefix, metrics in groups.items():
         output[f"{prefix}/sample_count"] = len(metrics["infra_error_ratio"])
+        for status, count in group_statuses[prefix].items():
+            output[f"{prefix}/exit_status/{_metric_name(status)}_ratio"] = count / len(
+                metrics["infra_error_ratio"]
+            )
         for name, values in metrics.items():
             if name.endswith(("_mean", "_ratio")):
                 output[f"{prefix}/{name}"] = sum(values) / len(values)
@@ -398,6 +526,7 @@ def add_metrics(
     _request_metrics(samples, output)
     _routing_replay_metrics(samples, output)
     _per_source_metrics(samples, output, reward_key=reward_key)
+    _training_batch_metrics(samples, output, reward_key=reward_key)
 
     statuses = Counter(_exit_status(sample) for sample in samples)
     for status, count in statuses.items():
