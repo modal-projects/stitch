@@ -21,7 +21,7 @@ from cookbook.common import trainer_image as common_trainer_image
 # a moved mutable tag, so `latest` silently serves whatever was first pulled.
 MILES_IMAGE_TAG = "radixark/miles:dev-202609290439"
 MILES_REPO_URL = "https://github.com/modal-projects/miles.git"
-MILES_REPO_REF = "931466431e616bb5f55fe1440efea46558e2d11b"
+MILES_REPO_REF = "1a0f6a9cd8dfac14e358dd26ac2dccb86f82832e"
 
 MILES_ROOT = "/root/miles"
 # Source-only megatron.training must be on PYTHONPATH.
