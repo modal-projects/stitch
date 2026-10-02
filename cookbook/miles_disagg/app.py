@@ -33,7 +33,6 @@ from cookbook.common.constants import (
     RAY_PORT,
     SERVER_STARTUP_TIMEOUT,
     SGLANG_CACHE_PATH,
-    SIDECAR_PORT,
     STITCH_PATH,
     STITCH_ROLLOUT_SOURCE_HEADER,
     STITCH_SESSION_ID_HEADER,
@@ -337,12 +336,8 @@ def _define_rollout_server(pool_config: Any) -> Any:
     )
     globals()[pool_config.name] = cls
     decorated = app.server(
-        name=pool_config.name,
+        **server.modal_server_options(modal_cfg, pool_config),
         image=server_image,
-        gpu=pool_config.gpu_request(),
-        cpu=modal_cfg.rollout_cpu,
-        cloud=pool_config.cloud or modal_cfg.cloud,
-        compute_region=pool_config.region or modal_cfg.region,
         volumes={
             str(HF_CACHE_PATH): hf_cache_volume,
             str(CHECKPOINTS_PATH): checkpoint_volume,
@@ -358,22 +353,7 @@ def _define_rollout_server(pool_config: Any) -> Any:
                 else {}
             ),
         },
-        min_containers=pool_config.min_containers,
-        max_containers=pool_config.max_containers,
-        target_concurrency=pool_config.target_inputs,
-        scaledown_window=15 * MINUTES,
-        ephemeral_disk=(
-            pool_config.ephemeral_disk_mib or modal_cfg.rollout_ephemeral_disk_mib
-        ),
-        memory=pool_config.memory_mib or modal_cfg.rollout_memory_mib,
         secrets=STORE_SECRETS,
-        include_source=False,
-        port=SIDECAR_PORT,
-        routing_region=modal_cfg.routing_region,
-        experimental_options={"kv_aware_routing": True},
-        unauthenticated=True,
-        exit_grace_period=60 * MINUTES,
-        startup_timeout=SERVER_STARTUP_TIMEOUT,
     )(cls)
     globals()[pool_config.name] = decorated
     return decorated

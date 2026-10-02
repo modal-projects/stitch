@@ -12,7 +12,34 @@ from __future__ import annotations
 from typing import Any
 
 from . import process
-from .constants import SGLANG_PORT, SIDECAR_PORT
+from .constants import MINUTES, SERVER_STARTUP_TIMEOUT, SGLANG_PORT, SIDECAR_PORT
+
+
+def modal_server_options(modal_cfg: Any, pool_config: Any) -> dict[str, Any]:
+    """The ``app.server`` options a rollout pool runs with, apart from its image,
+    volumes and secrets: GPU, host resources, scaling, routing, and lifecycle."""
+    return {
+        "name": pool_config.name,
+        "gpu": pool_config.gpu_request(),
+        "cpu": modal_cfg.rollout_cpu,
+        "cloud": pool_config.cloud or modal_cfg.cloud,
+        "compute_region": pool_config.region or modal_cfg.region,
+        "min_containers": pool_config.min_containers,
+        "max_containers": pool_config.max_containers,
+        "target_concurrency": pool_config.target_inputs,
+        "scaledown_window": 15 * MINUTES,
+        "ephemeral_disk": (
+            pool_config.ephemeral_disk_mib or modal_cfg.rollout_ephemeral_disk_mib
+        ),
+        "memory": pool_config.memory_mib or modal_cfg.rollout_memory_mib,
+        "include_source": False,
+        "port": SIDECAR_PORT,
+        "routing_region": modal_cfg.routing_region,
+        "experimental_options": {"kv_aware_routing": True},
+        "unauthenticated": True,
+        "exit_grace_period": 60 * MINUTES,
+        "startup_timeout": SERVER_STARTUP_TIMEOUT,
+    }
 
 
 def serve_startup(
