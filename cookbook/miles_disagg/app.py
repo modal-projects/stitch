@@ -262,19 +262,21 @@ def _set_save_paths(cfg: Any) -> Path | None:
     if getattr(cfg, "save_interval", None) is None:
         cfg.save = cfg.save_hf = None
         return None
+    attempt = f"attempt-{uuid4().hex[:12]}"
+    # Miles' event log is not checkpoint output: every trainer container appends to it
+    # all attempt long, so it lives on the Volume. On resume Miles moves the log directory
+    # aside and refills it from the checkpoint's snapshot, but each container appends
+    # through its own view of the Volume, so renaming a directory that other containers
+    # write into loses it (IcePop r03 at its first publish after a resume). Each attempt
+    # therefore logs to a directory of its own, which no resume ever renames.
+    if getattr(cfg, "save_debug_event_data", None) is None:
+        cfg.save_debug_event_data = str(RUN_DIR / "events" / attempt)
     local_root = None
     save_root = RUN_DIR
     if modal_cfg.trainer_local_checkpoint_dir:
         local_root = save_root = (
-            Path(modal_cfg.trainer_local_checkpoint_dir)
-            / RUN_ID
-            / f"attempt-{uuid4().hex[:12]}"
+            Path(modal_cfg.trainer_local_checkpoint_dir) / RUN_ID / attempt
         )
-        # Miles defaults its event log to <save>/events. The log is appended to for the
-        # whole run and read back on resume, so it is not checkpoint output: keep it on
-        # the Volume, where it lived before saves moved to local disk.
-        if getattr(cfg, "save_debug_event_data", None) is None:
-            cfg.save_debug_event_data = str(RUN_DIR / "checkpoints" / "events")
     cfg.save = str(save_root / "checkpoints")
     if save_hf := getattr(cfg, "save_hf", None):
         cfg.save_hf = str(save_root / save_hf)
