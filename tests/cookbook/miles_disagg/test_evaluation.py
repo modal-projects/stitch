@@ -135,6 +135,7 @@ def test_eval_config_differs_from_training_only_where_an_eval_must(arm):
 
     assert evaluation.config_drift(train, evaluated) == []
     assert evaluated.custom_rollout_request_hook_path is None
+    assert evaluated.custom_rollout_request_hook_args is None
     assert evaluated.async_max_concurrent_samples == 384
     # Training's ratios: sessions per session server and threads per agent process.
     assert evaluated.session_server_workers == 19

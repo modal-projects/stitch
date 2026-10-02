@@ -37,6 +37,7 @@ EVAL_FIELD_OVERRIDES = frozenset(
         # The gate pins each request to the training run's newest weights, so it would
         # reject every request to a pool serving one fixed checkpoint.
         "custom_rollout_request_hook_path",
+        "custom_rollout_request_hook_args",
         # Capacity, sized to the eval pool.
         "async_max_concurrent_samples",
         "session_server_workers",
@@ -149,7 +150,7 @@ def eval_miles_config(
     datasets = [{**dataset, "custom_generate_function_path": EVAL_GENERATE_FUNCTION}]
     document = json.dumps({"eval": {"datasets": datasets}})
     cfg.eval_config = "base64:" + base64.b64encode(document.encode()).decode()
-    cfg.custom_rollout_request_hook_path = None
+    cfg.custom_rollout_request_hook_path = cfg.custom_rollout_request_hook_args = None
     cfg.save_debug_rollout_data = dump_template
     cfg.use_wandb = False
     threads = int(cfg.environment["MODAL_SWE_AGENT_THREADS_PER_PROCESS"])
