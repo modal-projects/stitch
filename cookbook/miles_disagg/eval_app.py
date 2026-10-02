@@ -159,6 +159,9 @@ globals()[POOL.name] = app.server(
 
 @app.function(
     image=driver_image,
+    # Miles' argument parser imports Megatron, whose Transformer Engine loads the CUDA
+    # driver library; the client computes nothing on the GPU.
+    gpu="L4",
     cpu=(32.0, 64.0),
     memory=(65_536, 262_144),
     volumes={

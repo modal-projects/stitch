@@ -169,7 +169,9 @@ def run(
     commit()
     servers = start_session_servers(args, backend_url=pool_url)
     try:
-        ray.init(include_dashboard=False)
+        # One logical CPU per agent-controller actor, as the agent pool requests.
+        processes = int(cfg.environment["MODAL_SWE_AGENT_PROCESSES"])
+        ray.init(include_dashboard=False, num_cpus=max(os.cpu_count() or 1, processes))
 
         async def evaluate() -> dict[str, Any]:
             return await run_eval_datasets(GenerateState(args), {})
