@@ -132,6 +132,7 @@ def run(
     from miles.rollout.inference_rollout.inference_rollout_eval import (
         run_eval_datasets,
     )
+    from miles.utils.http_utils import init_http_client
 
     results_dir = point_dir / evaluation.smoke_dir(smoke) if smoke else point_dir
     results_dir.mkdir(parents=True, exist_ok=True)
@@ -174,6 +175,8 @@ def run(
         ray.init(include_dashboard=False, num_cpus=max(os.cpu_count() or 1, processes))
 
         async def evaluate() -> dict[str, Any]:
+            # Miles' rollout manager opens this shared client before any eval request.
+            init_http_client(args)
             return await run_eval_datasets(GenerateState(args), {})
 
         data = asyncio.run(evaluate())
