@@ -66,6 +66,8 @@ class SidecarConfig:
     engine_health_timeout: float = 30.0
     proxy_max_connections: int = 100
     proxy_max_keepalive_connections: int = 20
+    # The source this replica stamps on each response it serves, beside the version.
+    rollout_source: str | None = None
 
     def __post_init__(self) -> None:
         if not self.run_id:
@@ -130,6 +132,8 @@ class SidecarConfig:
             argv += ["--store-opt", f"{key}={value}"]
         if self.local_checkpoint_dir is not None:
             argv += ["--local-checkpoint-dir", self.local_checkpoint_dir]
+        if self.rollout_source is not None:
+            argv += ["--rollout-source", self.rollout_source]
         if self.flush_cache_on_commit:
             argv.append("--flush-cache-on-commit")
         if self.debug_requests:
@@ -171,6 +175,7 @@ class SidecarConfig:
             engine_health_timeout=args.engine_health_timeout,
             proxy_max_connections=args.proxy_max_connections,
             proxy_max_keepalive_connections=args.proxy_max_keepalive_connections,
+            rollout_source=args.rollout_source,
         )
 
 
@@ -202,6 +207,7 @@ def _sidecar_parser() -> argparse.ArgumentParser:
     p.add_argument("--proxy-max-connections", type=int, default=100)
     p.add_argument("--proxy-max-keepalive-connections", type=int, default=20)
     p.add_argument("--local-checkpoint-dir")
+    p.add_argument("--rollout-source")
     p.add_argument("--flush-cache-on-commit", action="store_true")
     p.add_argument("--debug-requests", action="store_true")
     return p
@@ -232,6 +238,7 @@ def run(config: SidecarConfig, store: Store) -> None:
         config.local_checkpoint_dir,
         delta_update_mode=config.delta_update_mode,
         health_timeout=config.engine_health_timeout,
+        rollout_source=config.rollout_source,
     )
     serve(
         store,

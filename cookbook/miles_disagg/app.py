@@ -320,6 +320,9 @@ class _RolloutServer:
             startup_timeout=SERVER_STARTUP_TIMEOUT,
             engine_health_timeout=getattr(exp, "SIDECAR_ENGINE_HEALTH_TIMEOUT", 30.0),
             weight_view=pool_config.weight_view,
+            # Every response carries its source next to its weight version, in the
+            # body, so a one-pool fleet (no router to name it) is attributed too.
+            rollout_source=ROLLOUT_SOURCES[pool_config.name],
         )
 
     @modal.exit()

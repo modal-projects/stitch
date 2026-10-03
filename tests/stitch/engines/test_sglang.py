@@ -200,6 +200,27 @@ def test_stamp_response_generate_vs_openai() -> None:
     assert "meta_info" not in openai and "weight_version" not in openai
 
 
+def test_stamp_response_names_the_replicas_source_beside_its_version() -> None:
+    engine = SGLangEngine(
+        "http://engine",
+        "/ckpt",
+        rollout_source="ServerB200NVFP4W4A16:nvfp4",
+    )
+    gen: dict = {"text": "x", "meta_info": {}}
+    engine.stamp_response(gen, VersionRef("r1", 4), VersionRef("r1", 5))
+    assert gen["meta_info"]["rollout_source"] == "ServerB200NVFP4W4A16:nvfp4"
+    openai: dict = {"choices": [{"meta_info": {}}, {"meta_info": {}}]}
+    engine.stamp_response(openai, VersionRef("r1", 4), VersionRef("r1", 4))
+    for choice in openai["choices"]:
+        assert choice["meta_info"] == {
+            "weight_version": "4",
+            "weight_version_start": 4,
+            "weight_version_end": 4,
+            "rollout_source": "ServerB200NVFP4W4A16:nvfp4",
+        }
+    assert "rollout_source" not in openai
+
+
 class _HealthClient:
     def __init__(self, outcome) -> None:
         self.outcome = outcome

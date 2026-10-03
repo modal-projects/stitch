@@ -21,6 +21,7 @@ class SGLangEngine(Engine):
         health_timeout: float = 30.0,
         weight_staging_timeout: float = 3600.0,
         weight_update_timeout: float = 600.0,
+        rollout_source: str | None = None,
     ) -> None:
         if delta_update_mode not in ("disk", "cpu"):
             raise ValueError(
@@ -36,6 +37,9 @@ class SGLangEngine(Engine):
         self._health_timeout = health_timeout
         self._weight_staging_timeout = weight_staging_timeout
         self._weight_update_timeout = weight_update_timeout
+        # Which replica served a response, stamped beside the version it served, so a
+        # client that reaches this replica without a router can still attribute it.
+        self.rollout_source = rollout_source
 
     def base_url(self) -> str:
         return self._base_url
@@ -173,18 +177,23 @@ class SGLangEngine(Engine):
     ) -> None:
         meta = response.get("meta_info")
         if isinstance(meta, dict):  # sglang /generate carries attribution in meta_info
-            meta["weight_version"] = str(served.version)
-            meta["weight_version_start"] = served.version
-            meta["weight_version_end"] = current.version
+            self._stamp_meta(meta, served, current)
         else:  # OpenAI-style routes at the top level
             response["weight_version_start"] = served.version
             response["weight_version_end"] = current.version
             for choice in response.get("choices", []):
                 meta = choice.get("meta_info")
                 if isinstance(meta, dict):
-                    meta["weight_version"] = str(served.version)
-                    meta["weight_version_start"] = served.version
-                    meta["weight_version_end"] = current.version
+                    self._stamp_meta(meta, served, current)
+
+    def _stamp_meta(
+        self, meta: dict[str, Any], served: VersionRef, current: VersionRef
+    ) -> None:
+        meta["weight_version"] = str(served.version)
+        meta["weight_version_start"] = served.version
+        meta["weight_version_end"] = current.version
+        if self.rollout_source is not None:
+            meta["rollout_source"] = self.rollout_source
 
     def _extra_key(self, served: VersionRef, user: str | None) -> str:
         # Namespace the KV cache by version+run so radix prefixes aren't shared across versions.

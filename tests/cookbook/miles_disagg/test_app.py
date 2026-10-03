@@ -94,6 +94,53 @@ def test_rollout_pool_environment_is_applied_before_engine_start(monkeypatch):
     assert observed == pool.environment
 
 
+@pytest.mark.parametrize(
+    "recipe",
+    [
+        "qwen3_6_35b_a3b_hetero_grpo",
+        "qwen3_6_35b_a3b_b200_nvfp4_grpo",
+        "qwen3_6_35b_a3b_b200_bf16_grpo",
+    ],
+)
+def test_every_rollout_replica_stamps_its_own_source(monkeypatch, recipe):
+    """A one-pool fleet has no router to name the source, and the Modal gateway in front
+    of a pool drops custom response headers, so each replica stamps its own source in
+    the response body: the pool and weight view the trainer splits its metrics by."""
+    monkeypatch.setenv("EXPERIMENT_CONFIG", recipe)
+    monkeypatch.setenv("RUN_ID", "test-run")
+    monkeypatch.delenv("STITCH_STORE_BACKEND", raising=False)
+    monkeypatch.delenv("MILES_LOCAL_DIR", raising=False)
+    monkeypatch.delitem(sys.modules, "cookbook.miles_disagg.app", raising=False)
+
+    app = importlib.import_module("cookbook.miles_disagg.app")
+    monkeypatch.setattr(
+        app,
+        "STORE_DEPLOYMENT",
+        SimpleNamespace(
+            bootstrap_credentials=lambda: None,
+            hook_config=lambda _namespace: {"stitch_store_backend": "modal-volume"},
+        ),
+    )
+    monkeypatch.setattr(app, "_boot_checkpoint", lambda *_args: ("checkpoint", 0))
+    stamped = {}
+
+    def serve_startup(*_args, **kwargs):
+        stamped[pool.name] = kwargs["rollout_source"]
+
+    monkeypatch.setattr(app.server, "serve_startup", serve_startup)
+    for pool in app.ROLLOUT_POOL_CONFIGS:
+        actor = app._RolloutServer()
+        actor.rollout_pool_config = pool
+        actor.startup()
+
+    assert stamped == {
+        pool.name: f"{pool.name}:{pool.weight_view}"
+        for pool in app.ROLLOUT_POOL_CONFIGS
+    }
+    # The trainer knows every source a replica stamps.
+    assert set(stamped.values()) == set(app.ROLLOUT_SOURCES.values())
+
+
 def test_multi_view_pool_claims_use_view_scoped_update_directories(monkeypatch):
     monkeypatch.setenv("EXPERIMENT_CONFIG", "qwen3_6_35b_a3b_hetero_grpo")
     monkeypatch.setenv("RUN_ID", "test-run")

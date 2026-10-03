@@ -167,9 +167,14 @@ layout. Do not introduce a second generic checkpoint-layout option.
 
 ### 2. Miles: rollout-source attribution
 
-Use the existing session response path to copy the rollout source supplied by
-the fleet router into sample metadata. This is transport metadata only; it must
-not affect reward, filtering, correction, or loss.
+Use the existing session response path to copy the rollout source into sample
+metadata. Every pool replica's sidecar stamps its `<pool>:<view>` source into each
+choice's `meta_info`, beside the weight version it served, so a one-pool fleet with
+no router is attributed too. The source travels in the body because the Modal
+gateway in front of a pool drops custom response headers. In a mixed fleet the
+router's `X-Stitch-Rollout-Source` header names the same pool and takes precedence.
+This is transport metadata only; it must not affect reward, filtering, correction,
+or loss.
 
 Do not add a new mismatch-metrics primitive. Pure GRPO disables TIS and mismatch
 metrics. Corrected experiments use Miles' existing TIS/mismatch contract. R3

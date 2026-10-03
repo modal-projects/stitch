@@ -96,6 +96,7 @@ _FULL = SidecarConfig(
     engine_health_timeout=30.0,
     proxy_max_connections=256,
     proxy_max_keepalive_connections=64,
+    rollout_source="ServerB200NVFP4W4A16:nvfp4",
 )
 
 
@@ -180,6 +181,7 @@ def test_run_builds_engine_and_serves(monkeypatch: pytest.MonkeyPatch) -> None:
         engine_health_timeout=30.0,
         proxy_max_connections=256,
         proxy_max_keepalive_connections=64,
+        rollout_source="ServerH100FP8:fp8",
     )
     sidecar.run(config, store_out)
 
@@ -189,6 +191,7 @@ def test_run_builds_engine_and_serves(monkeypatch: pytest.MonkeyPatch) -> None:
         {
             "delta_update_mode": "disk",
             "health_timeout": 30.0,
+            "rollout_source": "ServerH100FP8:fp8",
         },
     )
     store, engine, serve_kwargs = calls["serve"]
