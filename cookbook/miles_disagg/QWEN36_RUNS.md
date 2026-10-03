@@ -71,6 +71,12 @@ flag, so what each engine receives is the same as in B.
 
 Things to know when reading the record runs:
 
+- **Ladder r02 runs (L0, L1): per-view metrics read `unknown`.** These fleets have one
+  pool and so no router, and before the sidecar reported its own source, nothing tagged
+  their samples. W&B files their per-view rollout metrics under `rollout/by_view/unknown/`
+  (L1 `nvfp4`, L0 `bf16`), and the trainer logs no per-view or per-source mismatch split;
+  `train/train_rollout_*/all` and the `lag_*` splits are complete. With one pool,
+  `unknown` and `all` are the whole fleet. Runs deployed after the fix are tagged.
 - **Ladder r02 runs (L0, L1):** these are the first runs to publish a single weight view. Miles
   still takes its views path with one view, so resume keeps the delta history and checks the
   new conversion against it. Every save exports `bf16`, `fp8` and `nvfp4` under
