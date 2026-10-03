@@ -40,6 +40,7 @@ decodes 94 tok/s per request, against 90 for H200 FP8 at its 32.
 | B | `bfb6239` | `c0202f9621` | `25d7c62b2b` (`stitch-sglang-hetero`) |
 | B+L | `bfb6239` + the ladder recipes (uncommitted at launch) | `c0202f9621` | `25d7c62b2b` |
 | C | `ed38dde` (deployed from the working tree minutes before the commit; same content) | `0fe16fcb5e` | `25d7c62b2b` |
+| D | `449cc3d` | `0fe16fcb5e` | `25d7c62b2b` |
 
 B differs from A only in how top-logprob candidates for training are carried:
 - the client reply omits them;
@@ -47,6 +48,10 @@ B differs from A only in how top-logprob candidates for training are carried:
 - SGLang skips rendering them as OpenAI objects.
 
 GRPO and IcePop request no candidates, so their runs compare across A and B.
+
+D adds only the replica's rollout source stamped in each response body, which tags
+a one-pool fleet's samples with their view. It changes attribution metrics, nothing
+the trainer optimizes.
 
 C adds `--hf-export-weight-views`. A ladder run's trainer publishes only the view its fleet
 serves, but every save exports all three, as an L2 save does. Only the HF export reads the
@@ -98,6 +103,7 @@ Things to know when reading the record runs:
 | L1 GRPO | r01 | none | stopped at step 0 (06:30, 2026-10-03): would have exported only nvfp4; relaunched as r02 with all three exports |
 | L1 IcePop | r01 | none | stopped at step 0 (06:30, 2026-10-03): same as L1 GRPO r01 |
 | L0 GRPO | r01 | none | stopped in its first rollout (06:40, 2026-10-03): would have exported only bf16; relaunched as r02 with all three exports |
+| L0 IcePop | r01 | none | stopped at the user's request before its trainer got GPUs (18:20, 2026-10-03); code D |
 | L2 GRPO | r06 | [b450kpxu](https://wandb.ai/nan-playground/fully-async-rl-modal/runs/b450kpxu) | preempted at v58 (see below); stopped, rerun from scratch as r07 on code C |
 | L2 IcePop | r05 | [mprwa9hg](https://wandb.ai/nan-playground/fully-async-rl-modal/runs/mprwa9hg) | preempted at v55; stopped, rerun from scratch as r06 on code C |
 | L2 SC | r08 | [3rp31dgx](https://wandb.ai/nan-playground/fully-async-rl-modal/runs/3rp31dgx) | preempted at v25; stopped, to be rerun from scratch |
