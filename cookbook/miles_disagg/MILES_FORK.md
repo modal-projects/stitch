@@ -5,13 +5,13 @@ Stitch installs an immutable Miles revision over a dated trainer image:
 ```python
 MILES_IMAGE_TAG = "radixark/miles:dev-202609290439"
 MILES_REPO_URL = "https://github.com/modal-projects/miles.git"
-MILES_REPO_REF = "1f85a590fc5f1f46b6a476509a628b0870d220a6"
+MILES_REPO_REF = "c0202f9621aec29e794ca9a5504c4c76b99aec0b"
 ```
 
 The image supplies the compiled CUDA, Transformer Engine, and Megatron-LM
 environment. The source pin belongs to
 `modal-projects/miles:stitch-miles-hetero`, the heterogeneous-RL experiment branch:
-upstream Miles main at `3439ec7513`, followed by twenty-five reviewed integration changes.
+upstream Miles main at `3439ec7513`, followed by twenty-six reviewed integration changes.
 `stitch-miles` tracks the pin on Stitch main.
 Each upstream PR is represented by one commit; the branch carries no additional
 runtime patches. Stitch no longer patches Miles at container startup.
@@ -45,6 +45,7 @@ runtime patches. Stitch no longer patches Miles at container startup.
 | Per-view mismatch size | Not yet upstreamed | `931466431e` | Report the mean absolute trainer-minus-rollout log-ratio per view, rollout source and staleness bucket again, next to its signed mean; one more row in the same pass. |
 | Client reply without training candidates | Not yet upstreamed | `1a0f6a9cd8` | Cut the candidate logprobs the session server requests for training back to the client's own `top_logprobs` in the reply, in both the OpenAI logprobs and `meta_info`; the session record keeps them all. |
 | Compact candidate records | Not yet upstreamed | `1f85a590fc` | Keep the score-centering candidates a session record holds as compact arrays and drop their OpenAI copy, so a session server's heap and garbage-collector passes stay small; the training arrays are bit-identical. |
+| Training-only candidates skip OpenAI logprobs | Not yet upstreamed | `c0202f9621` | Ask the backend to keep candidate logprobs only training requested in `meta_info` (`top_logprobs_in_meta_info_only`, SGLang `25d7c62b2b`), decided each turn from the client's own request. |
 
 The integration boundary is intentionally small:
 

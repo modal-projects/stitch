@@ -13,8 +13,8 @@ default runtime:
 DEFAULT_SGLANG_RUNTIME = SGLangRuntime(
     image="lmsysorg/sglang:v0.5.20",
     repository="https://github.com/modal-projects/sglang.git",
-    branch="stitch-sglang-v0.5.20",
-    commit="cbc0988c10e831005f7fa0cf5952305e4b632a3a",
+    branch="stitch-sglang-hetero",
+    commit="25d7c62b2b8f7eae7f3a0b45807d36ea8fbaac9c",
 )
 ```
 
@@ -33,6 +33,16 @@ sampling-mask transport. The former provides the behavior distribution needed
 by score-centered training; the latter avoids materializing the same numeric
 rows as Python objects at every serving boundary. Both changes are already
 merged upstream and are expected in SGLang v0.5.21.
+
+One Stitch change follows them: a chat request can set
+`top_logprobs_in_meta_info_only` to keep top-logprob candidates out of the OpenAI
+logprobs when the caller reads them from `meta_info`. Score-centered training asks
+for 128 per generated token and gives the client none; rendering each as an OpenAI
+object cost about 2.3 s of main-process CPU per 1k generated tokens and cut replica
+throughput about 5x. The default keeps upstream behavior.
+
+The branch is `stitch-sglang-hetero`, the heterogeneous-RL experiment line, kept
+apart from `stitch-sglang-v0.5.20` (now another stack without these cherry-picks).
 
 The branch history keeps these physical responsibilities in separate commits;
 the immutable pin above is the executable definition of the stack.
