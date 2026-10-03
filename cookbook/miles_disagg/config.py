@@ -137,12 +137,29 @@ def validate_recipe(recipe: Any) -> None:
             raise ValueError(
                 "explicit rollout pools must select every configured weight view"
             )
+        export_views = dict(getattr(recipe, "EXPORT_WEIGHT_VIEWS", {}) or {})
+        for name, checkpoint in export_views.items():
+            validate_weight_view(name)
+            if not isinstance(checkpoint, (str, Path)) or not str(checkpoint):
+                raise TypeError(
+                    f"EXPORT_WEIGHT_VIEWS[{name!r}] must be a checkpoint path"
+                )
+        # A run saves every view it served, from the checkpoint it served it from.
+        if export_views and any(
+            name not in export_views or Path(export_views[name]) != Path(checkpoint)
+            for name, checkpoint in weight_views.items()
+        ):
+            raise ValueError(
+                "EXPORT_WEIGHT_VIEWS must include every rollout weight view"
+            )
         return
 
     if any(pool.weight_view is not None for pool in recipe.modal.rollout_pools):
         raise ValueError(
             "rollout pools cannot select weight_view without ROLLOUT_WEIGHT_VIEWS"
         )
+    if getattr(recipe, "EXPORT_WEIGHT_VIEWS", None):
+        raise ValueError("EXPORT_WEIGHT_VIEWS requires ROLLOUT_WEIGHT_VIEWS")
 
     served = Path(recipe.ROLLOUT_CHECKPOINT_PATH)
     if Path(cfg.hf_checkpoint) != served:

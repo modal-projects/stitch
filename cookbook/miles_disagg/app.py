@@ -173,6 +173,8 @@ ROLLOUT_POOL_CONFIGS = modal_cfg.resolved_rollout_pools(
     default_sglang_args=DEFAULT_SGLANG_SERVER_ARGS,
 )
 ROLLOUT_WEIGHT_VIEWS = dict(getattr(exp, "ROLLOUT_WEIGHT_VIEWS", {}) or {})
+# Views each HF export saves, when they differ from the views the rollout serves.
+EXPORT_WEIGHT_VIEWS = dict(getattr(exp, "EXPORT_WEIGHT_VIEWS", {}) or {})
 ROLLOUT_SERVER_NAMES = tuple(pool.name for pool in ROLLOUT_POOL_CONFIGS)
 # The source the router reports for each pool's samples. The trainer splits its
 # train-vs-rollout diagnostics by the same names.
@@ -567,6 +569,11 @@ class Trainer:
             cfg.update_weight_views = {
                 name: str(checkpoint)
                 for name, checkpoint in ROLLOUT_WEIGHT_VIEWS.items()
+            }
+        if EXPORT_WEIGHT_VIEWS:
+            cfg.hf_export_weight_views = {
+                name: str(checkpoint)
+                for name, checkpoint in EXPORT_WEIGHT_VIEWS.items()
             }
         boot_version = resume_point.version if resume_point is not None else 0
         # The external fleet already serves this version. Miles owns the next

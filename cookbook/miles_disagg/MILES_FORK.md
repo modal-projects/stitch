@@ -5,13 +5,13 @@ Stitch installs an immutable Miles revision over a dated trainer image:
 ```python
 MILES_IMAGE_TAG = "radixark/miles:dev-202609290439"
 MILES_REPO_URL = "https://github.com/modal-projects/miles.git"
-MILES_REPO_REF = "c0202f9621aec29e794ca9a5504c4c76b99aec0b"
+MILES_REPO_REF = "0fe16fcb5ed5fba9bd3aef43f7b03f60ee774bd0"
 ```
 
 The image supplies the compiled CUDA, Transformer Engine, and Megatron-LM
 environment. The source pin belongs to
 `modal-projects/miles:stitch-miles-hetero`, the heterogeneous-RL experiment branch:
-upstream Miles main at `3439ec7513`, followed by twenty-six reviewed integration changes.
+upstream Miles main at `3439ec7513`, followed by twenty-seven reviewed integration changes.
 `stitch-miles` tracks the pin on Stitch main.
 Each upstream PR is represented by one commit; the branch carries no additional
 runtime patches. Stitch no longer patches Miles at container startup.
@@ -46,6 +46,7 @@ runtime patches. Stitch no longer patches Miles at container startup.
 | Client reply without training candidates | Not yet upstreamed | `1a0f6a9cd8` | Cut the candidate logprobs the session server requests for training back to the client's own `top_logprobs` in the reply, in both the OpenAI logprobs and `meta_info`; the session record keeps them all. |
 | Compact candidate records | Not yet upstreamed | `1f85a590fc` | Keep the score-centering candidates a session record holds as compact arrays and drop their OpenAI copy, so a session server's heap and garbage-collector passes stay small; the training arrays are bit-identical. |
 | Training-only candidates skip OpenAI logprobs | Not yet upstreamed | `c0202f9621` | Ask the backend to keep candidate logprobs only training requested in `meta_info` (`top_logprobs_in_meta_info_only`, SGLang `25d7c62b2b`), decided each turn from the client's own request. |
+| Export views beyond the rollout's | Not yet upstreamed | `0fe16fcb5e` | Let `--hf-export-weight-views` name the views every HF export saves (default: the rollout views), so a fleet serving one precision still saves the BF16 policy and the other precisions; weight updates still publish only the rollout views. |
 
 The integration boundary is intentionally small:
 
