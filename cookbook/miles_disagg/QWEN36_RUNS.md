@@ -56,10 +56,10 @@ flag, so what each engine receives is the same as in B.
 
 | Rung | Arm | Recipe | Run | W&B run | Trainer call | Launched (UTC) | Code | Status |
 |---|---|---|---|---|---|---|---|---|
-| L2 | GRPO | `qwen3_6_35b_a3b_hetero_grpo` | r06 | [b450kpxu](https://wandb.ai/nan-playground/fully-async-rl-modal/runs/b450kpxu) | `fc-01M3ZEBDBEQ4VWPMT3S9GZZH1M` | 2026-10-02 23:08 | A | running |
-| L2 | IcePop | `qwen3_6_35b_a3b_hetero_icepop` | r05 | [mprwa9hg](https://wandb.ai/nan-playground/fully-async-rl-modal/runs/mprwa9hg) | `fc-01M3Z8N0KKEH6B78ZT7J7H5NW7` | 2026-10-02 20:34 | A | running |
-| L2 | SC | `qwen3_6_35b_a3b_hetero_score_centering` | r08 | [3rp31dgx](https://wandb.ai/nan-playground/fully-async-rl-modal/runs/3rp31dgx) | `fc-01M3ZYZQ4QVAAR8JV8ZP7WX9HY` | 2026-10-03 03:57 | B | running |
-| L2 | SC+MIS | `qwen3_6_35b_a3b_hetero_score_centering_mis` | r01 | [3ojxtmkv](https://wandb.ai/nan-playground/fully-async-rl-modal/runs/3ojxtmkv) | `fc-01M4036Q3TS0CD5FPGDF4T1Y2A` | 2026-10-03 05:15 | B | running |
+| L2 | GRPO | `qwen3_6_35b_a3b_hetero_grpo` | r07 | [totxahfg](https://wandb.ai/nan-playground/fully-async-rl-modal/runs/totxahfg) | `fc-01M40MGVDKA2J2NQWFWT6S3V51` | 2026-10-03 10:15 | C | running |
+| L2 | IcePop | `qwen3_6_35b_a3b_hetero_icepop` | r06 | [j8nc4xng](https://wandb.ai/nan-playground/fully-async-rl-modal/runs/j8nc4xng) | `fc-01M40MJSP0D4X8M35RWMN53W3M` | 2026-10-03 10:15 | C | running |
+| L2 | SC | `qwen3_6_35b_a3b_hetero_score_centering` | | | | | | not relaunched yet |
+| L2 | SC+MIS | `qwen3_6_35b_a3b_hetero_score_centering_mis` | | | | | | not relaunched yet |
 | L1 | GRPO | `qwen3_6_35b_a3b_b200_nvfp4_grpo` | r02 | [gvo1ldkg](https://wandb.ai/nan-playground/fully-async-rl-modal/runs/gvo1ldkg) | `fc-01M4091PER6VVB1CVBSDGSBSKP` | 2026-10-03 06:57 | C | running |
 | L1 | IcePop | `qwen3_6_35b_a3b_b200_nvfp4_icepop` | r02 | [quwkb52d](https://wandb.ai/nan-playground/fully-async-rl-modal/runs/quwkb52d) | `fc-01M4090XWSFKYTS0KK8NDCVT3W` | 2026-10-03 06:57 | C | running |
 | L1 | SC | `qwen3_6_35b_a3b_b200_nvfp4_score_centering` | | | | | | not launched |
@@ -71,10 +71,6 @@ flag, so what each engine receives is the same as in B.
 
 Things to know when reading the record runs:
 
-- **IcePop r05:** the iteration-29 save needed one upload retry, and the uploader recovered
-  it by itself. The training data is unaffected.
-- **SC r08:** deployed from the working tree six minutes before `bfb6239` was committed,
-  with the same content.
 - **Ladder r02 runs (L0, L1):** these are the first runs to publish a single weight view. Miles
   still takes its views path with one view, so resume keeps the delta history and checks the
   new conversion against it. Every save exports `bf16`, `fp8` and `nvfp4` under
@@ -96,6 +92,10 @@ Things to know when reading the record runs:
 | L1 GRPO | r01 | none | stopped at step 0 (06:30, 2026-10-03): would have exported only nvfp4; relaunched as r02 with all three exports |
 | L1 IcePop | r01 | none | stopped at step 0 (06:30, 2026-10-03): same as L1 GRPO r01 |
 | L0 GRPO | r01 | none | stopped in its first rollout (06:40, 2026-10-03): would have exported only bf16; relaunched as r02 with all three exports |
+| L2 GRPO | r06 | [b450kpxu](https://wandb.ai/nan-playground/fully-async-rl-modal/runs/b450kpxu) | preempted at v58 (see below); stopped, rerun from scratch as r07 on code C |
+| L2 IcePop | r05 | [mprwa9hg](https://wandb.ai/nan-playground/fully-async-rl-modal/runs/mprwa9hg) | preempted at v55; stopped, rerun from scratch as r06 on code C |
+| L2 SC | r08 | [3rp31dgx](https://wandb.ai/nan-playground/fully-async-rl-modal/runs/3rp31dgx) | preempted at v25; stopped, to be rerun from scratch |
+| L2 SC+MIS | r01 | [3ojxtmkv](https://wandb.ai/nan-playground/fully-async-rl-modal/runs/3ojxtmkv) | preempted at v19; stopped, to be rerun from scratch |
 | GRPO | hetero-base-01 | [07obimhw](https://wandb.ai/nan-playground/fully-async-rl-modal/runs/07obimhw) | Sep 30, older `qwen3_6_35b_a3b_mimo_code_heterogeneous` layout |
 | TIS | hetero-tis-01 | [1tslnj1g](https://wandb.ai/nan-playground/fully-async-rl-modal/runs/1tslnj1g) | Sep 30, older `qwen3_6_35b_a3b_mimo_code_heterogeneous` layout |
 
@@ -103,3 +103,11 @@ How the two frozen configs differ from the clean arms:
 - `qwen3_6_35b_a3b_hetero_icepop_advanced`: B300 trainer, IcePop [0.2, 5], top-p 0.97 /
   top-k 4096, no std normalization, prompt-mean loss, frozen router.
 - `qwen3_6_35b_a3b_hetero_score_centering_advanced`: top-p 0.97 / top-k 64.
+
+The four preempted L2 runs (GRPO r06, IcePop r05, SC r08, SC+MIS r01) went down together
+on 2026-10-03. At about 10:01 UTC, Modal terminated one node of each run's 4-node trainer
+gang. Its system log reads "Container terminated due to preemption". A gang can't train
+without a node, so each trainer attempt failed. Modal's retry policy restarts the whole
+gang from the run's last save. The last saves were at iterations 49, 49, 19 and 9, and
+IcePop r05 had resumed from checkpoint version 50 by 10:03. All four were stopped at 10:08,
+and the arms are rerun from scratch. The ladder runs (L0, L1) weren't touched.
