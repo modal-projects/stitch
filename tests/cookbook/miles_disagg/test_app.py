@@ -23,6 +23,11 @@ from cookbook.miles_disagg.configs import qwen3_4b_math
         "qwen3_6_35b_a3b_hetero_score_centering_mis",
         "qwen3_6_35b_a3b_hetero_icepop_advanced",
         "qwen3_6_35b_a3b_hetero_score_centering_advanced",
+        *(
+            f"qwen3_6_35b_a3b_{fleet}_{arm}"
+            for fleet in ("b200_bf16", "b200_nvfp4")
+            for arm in ("grpo", "icepop", "score_centering", "score_centering_mis")
+        ),
         "qwen3_6_35b_a3b_swebench_pro",
         "qwen3_6_35b_a3b_nvfp4",
         "glm5_3_nvfp4",
@@ -169,6 +174,30 @@ def test_heterogeneous_rollout_sources_name_every_pool_and_its_view(monkeypatch)
         assert source == f"{pool.name}:{pool.weight_view}"
         assert source.rsplit(":", 1)[1] in app.ROLLOUT_WEIGHT_VIEWS
     assert len(set(app.ROLLOUT_SOURCES.values())) == len(app.ROLLOUT_POOL_CONFIGS)
+
+
+@pytest.mark.parametrize(
+    ("recipe", "rollout", "exported"),
+    [
+        ("qwen3_6_35b_a3b_hetero_grpo", ["bf16", "fp8", "nvfp4"], []),
+        ("qwen3_6_35b_a3b_b200_bf16_grpo", ["bf16"], ["bf16", "fp8", "nvfp4"]),
+        ("qwen3_6_35b_a3b_b200_nvfp4_icepop", ["nvfp4"], ["bf16", "fp8", "nvfp4"]),
+    ],
+)
+def test_a_fleet_serving_fewer_views_still_exports_all_three(
+    monkeypatch, recipe, rollout, exported
+):
+    monkeypatch.setenv("EXPERIMENT_CONFIG", recipe)
+    monkeypatch.setenv("RUN_ID", "test-run")
+    monkeypatch.delenv("STITCH_STORE_BACKEND", raising=False)
+    monkeypatch.delenv("MILES_LOCAL_DIR", raising=False)
+    monkeypatch.delitem(sys.modules, "cookbook.miles_disagg.app", raising=False)
+
+    app = importlib.import_module("cookbook.miles_disagg.app")
+
+    # An empty export set leaves Miles exporting the rollout views.
+    assert list(app.ROLLOUT_WEIGHT_VIEWS) == rollout
+    assert list(app.EXPORT_WEIGHT_VIEWS) == exported
 
 
 def test_heterogeneous_readiness_is_checked_per_pool(monkeypatch):

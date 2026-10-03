@@ -624,13 +624,6 @@ def test_hetero_recipes_share_the_fleet_data_and_run_shape(name):
     assert len(recipe.APP_NAME) + len("-r01") < 64
 
 
-def test_hetero_recipes_have_their_own_app_volume_and_wandb_group():
-    recipes = [_hetero(name) for name in _HETERO_RECIPES]
-    for field in ("APP_NAME", "EXPERIMENT_VOLUME_NAME"):
-        assert len({getattr(recipe, field) for recipe in recipes}) == len(recipes)
-    assert len({recipe.miles.wandb_group for recipe in recipes}) == len(recipes)
-
-
 def _public_fields(cfg) -> dict:
     return {
         key: getattr(cfg, key)
@@ -712,3 +705,98 @@ def test_frozen_recipes_keep_their_runs_configuration():
     assert {
         key: getattr(sc_advanced, key) for key in _SCORE_CENTERING
     } == _SCORE_CENTERING
+
+
+# The mismatch ladder: one B200 fleet per rung, each serving one weight view.
+_LADDER_FLEETS = {"b200_bf16": "bf16", "b200_nvfp4": "nvfp4"}
+
+
+def _ladder(fleet, name):
+    return _recipe(f"qwen3_6_35b_a3b_{fleet}_{name}")
+
+
+@pytest.mark.parametrize("fleet", sorted(_LADDER_FLEETS))
+@pytest.mark.parametrize("name", _HETERO_RECIPES)
+def test_ladder_recipes_change_only_the_fleet_from_their_hetero_arm(fleet, name):
+    recipe = _ladder(fleet, name)
+    hetero = _hetero(name)
+    cfg = recipe.miles
+
+    validate_recipe(recipe)
+    validate_resumable_config(cfg, weight_views=recipe.ROLLOUT_WEIGHT_VIEWS)
+
+    # The trainer publishes only the view its fleet serves, but every save exports all
+    # three precisions, as the heterogeneous runs' saves do.
+    view = _LADDER_FLEETS[fleet]
+    assert recipe.ROLLOUT_WEIGHT_VIEWS == {view: hetero.ROLLOUT_WEIGHT_VIEWS[view]}
+    assert recipe.EXPORT_WEIGHT_VIEWS == hetero.ROLLOUT_WEIGHT_VIEWS
+    assert not getattr(hetero, "EXPORT_WEIGHT_VIEWS", None)
+    assert replace(recipe.modal, rollout_pools=hetero.modal.rollout_pools) == (
+        hetero.modal
+    )
+    (pool,) = recipe.modal.rollout_pools
+    assert (pool.gpu, pool.gpus_per_engine, pool.weight_view) == ("B200", 1, view)
+    # A fixed fleet that holds every concurrent session at the engine's load.
+    assert pool.min_containers == pool.max_containers
+    assert pool.min_containers * pool.target_inputs == (
+        cfg.async_max_concurrent_samples
+    )
+    assert _public_fields(cfg).keys() - _NAMES == (
+        _public_fields(hetero.miles).keys() - _NAMES
+    )
+    assert {
+        key: value for key, value in _public_fields(cfg).items() if key not in _NAMES
+    } == {
+        key: value
+        for key, value in _public_fields(hetero.miles).items()
+        if key not in _NAMES
+    }
+    slug = f"{fleet}-{name}".replace("_", "-")
+    assert recipe.APP_NAME == recipe.EXPERIMENT_VOLUME_NAME == f"stitch-qwen36-{slug}"
+    assert cfg.wandb_group == cfg.prometheus_run_name == f"qwen36-{slug}"
+    assert len(recipe.APP_NAME) + len("-r01") < 64
+
+
+def test_export_views_must_include_every_rollout_view():
+    recipe = _ladder("b200_nvfp4", "grpo")
+    views = recipe.EXPORT_WEIGHT_VIEWS
+    recipe.EXPORT_WEIGHT_VIEWS = {"bf16": views["bf16"], "fp8": views["fp8"]}
+    with pytest.raises(ValueError, match="must include every rollout weight view"):
+        validate_recipe(recipe)
+    recipe.EXPORT_WEIGHT_VIEWS = {**views, "nvfp4": views["bf16"]}
+    with pytest.raises(ValueError, match="must include every rollout weight view"):
+        validate_recipe(recipe)
+    recipe.EXPORT_WEIGHT_VIEWS = {**views, "../bf16": views["bf16"]}
+    with pytest.raises(ValueError):
+        validate_recipe(recipe)
+
+
+def test_b200_nvfp4_fleet_is_the_hetero_b200_engine():
+    hetero_pool = next(
+        pool
+        for pool in _hetero("grpo").modal.rollout_pools
+        if pool.name == "ServerB200NVFP4W4A16"
+    )
+    (pool,) = _ladder("b200_nvfp4", "grpo").modal.rollout_pools
+    assert replace(pool, min_containers=8, max_containers=8) == hetero_pool
+    assert pool.min_containers == 42
+
+
+def test_b200_bf16_fleet_serves_bf16_weights_and_kv_cache():
+    (pool,) = _ladder("b200_bf16", "grpo").modal.rollout_pools
+    args = pool.sglang_args
+    assert args["--kv-cache-dtype"] == "bf16"
+    assert "--quantization" not in args
+    assert args["--moe-runner-backend"] == "triton"
+    assert args["--attention-backend"] == "trtllm_mha"
+    assert (pool.target_inputs, args["--max-running-requests"]) == (32, "32")
+    assert pool.min_containers == 42
+
+
+def test_ladder_and_hetero_recipes_have_their_own_app_volume_and_wandb_group():
+    recipes = [_hetero(name) for name in _HETERO_RECIPES] + [
+        _ladder(fleet, name) for fleet in _LADDER_FLEETS for name in _HETERO_RECIPES
+    ]
+    for field in ("APP_NAME", "EXPERIMENT_VOLUME_NAME"):
+        assert len({getattr(recipe, field) for recipe in recipes}) == len(recipes)
+    assert len({recipe.miles.wandb_group for recipe in recipes}) == len(recipes)
