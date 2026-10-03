@@ -5,13 +5,13 @@ Stitch installs an immutable Miles revision over a dated trainer image:
 ```python
 MILES_IMAGE_TAG = "radixark/miles:dev-202609290439"
 MILES_REPO_URL = "https://github.com/modal-projects/miles.git"
-MILES_REPO_REF = "1a0f6a9cd8dfac14e358dd26ac2dccb86f82832e"
+MILES_REPO_REF = "1f85a590fc5f1f46b6a476509a628b0870d220a6"
 ```
 
 The image supplies the compiled CUDA, Transformer Engine, and Megatron-LM
 environment. The source pin belongs to
 `modal-projects/miles:stitch-miles-hetero`, the heterogeneous-RL experiment branch:
-upstream Miles main at `3439ec7513`, followed by twenty-four reviewed integration changes.
+upstream Miles main at `3439ec7513`, followed by twenty-five reviewed integration changes.
 `stitch-miles` tracks the pin on Stitch main.
 Each upstream PR is represented by one commit; the branch carries no additional
 runtime patches. Stitch no longer patches Miles at container startup.
@@ -44,6 +44,7 @@ runtime patches. Stitch no longer patches Miles at container startup.
 | Signed mismatch direction | Not yet upstreamed | `90c3e94a08` | Report the mean signed trainer-minus-rollout log-ratio next to KL and the ratio tail, for all tokens and per view, rollout source and staleness bucket; one more row in the same pass. |
 | Per-view mismatch size | Not yet upstreamed | `931466431e` | Report the mean absolute trainer-minus-rollout log-ratio per view, rollout source and staleness bucket again, next to its signed mean; one more row in the same pass. |
 | Client reply without training candidates | Not yet upstreamed | `1a0f6a9cd8` | Cut the candidate logprobs the session server requests for training back to the client's own `top_logprobs` in the reply, in both the OpenAI logprobs and `meta_info`; the session record keeps them all. |
+| Compact candidate records | Not yet upstreamed | `1f85a590fc` | Keep the score-centering candidates a session record holds as compact arrays and drop their OpenAI copy, so a session server's heap and garbage-collector passes stay small; the training arrays are bit-identical. |
 
 The integration boundary is intentionally small:
 
