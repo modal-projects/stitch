@@ -60,11 +60,11 @@ flag, so what each engine receives is the same as in B.
 | L2 | IcePop | `qwen3_6_35b_a3b_hetero_icepop` | r05 | [mprwa9hg](https://wandb.ai/nan-playground/fully-async-rl-modal/runs/mprwa9hg) | `fc-01M3Z8N0KKEH6B78ZT7J7H5NW7` | 2026-10-02 20:34 | A | running |
 | L2 | SC | `qwen3_6_35b_a3b_hetero_score_centering` | r08 | [3rp31dgx](https://wandb.ai/nan-playground/fully-async-rl-modal/runs/3rp31dgx) | `fc-01M3ZYZQ4QVAAR8JV8ZP7WX9HY` | 2026-10-03 03:57 | B | running |
 | L2 | SC+MIS | `qwen3_6_35b_a3b_hetero_score_centering_mis` | r01 | [3ojxtmkv](https://wandb.ai/nan-playground/fully-async-rl-modal/runs/3ojxtmkv) | `fc-01M4036Q3TS0CD5FPGDF4T1Y2A` | 2026-10-03 05:15 | B | running |
-| L1 | GRPO | `qwen3_6_35b_a3b_b200_nvfp4_grpo` | r02 | pending | pending | 2026-10-03 06:57 | C | launching |
-| L1 | IcePop | `qwen3_6_35b_a3b_b200_nvfp4_icepop` | r02 | pending | `fc-01M4090XWSFKYTS0KK8NDCVT3W` | 2026-10-03 06:57 | C | launching |
+| L1 | GRPO | `qwen3_6_35b_a3b_b200_nvfp4_grpo` | r02 | [gvo1ldkg](https://wandb.ai/nan-playground/fully-async-rl-modal/runs/gvo1ldkg) | `fc-01M4091PER6VVB1CVBSDGSBSKP` | 2026-10-03 06:57 | C | running |
+| L1 | IcePop | `qwen3_6_35b_a3b_b200_nvfp4_icepop` | r02 | [quwkb52d](https://wandb.ai/nan-playground/fully-async-rl-modal/runs/quwkb52d) | `fc-01M4090XWSFKYTS0KK8NDCVT3W` | 2026-10-03 06:57 | C | running |
 | L1 | SC | `qwen3_6_35b_a3b_b200_nvfp4_score_centering` | | | | | | not launched |
 | L1 | SC+MIS | `qwen3_6_35b_a3b_b200_nvfp4_score_centering_mis` | | | | | | not launched |
-| L0 | GRPO | `qwen3_6_35b_a3b_b200_bf16_grpo` | r02 | pending | pending | 2026-10-03 06:57 | C | launching |
+| L0 | GRPO | `qwen3_6_35b_a3b_b200_bf16_grpo` | r02 | [7mpv4qdb](https://wandb.ai/nan-playground/fully-async-rl-modal/runs/7mpv4qdb) | `fc-01M4099CZTA1TY6ZS51YJY4B90` | 2026-10-03 06:57 | C | running |
 | L0 | IcePop | `qwen3_6_35b_a3b_b200_bf16_icepop` | | | | | | not launched |
 | L0 | SC | `qwen3_6_35b_a3b_b200_bf16_score_centering` | | | | | | not launched |
 | L0 | SC+MIS | `qwen3_6_35b_a3b_b200_bf16_score_centering_mis` | | | | | | not launched |
