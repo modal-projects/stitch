@@ -41,6 +41,8 @@ decodes 94 tok/s per request, against 90 for H200 FP8 at its 32.
 | B+L | `bfb6239` + the ladder recipes (uncommitted at launch) | `c0202f9621` | `25d7c62b2b` |
 | C | `ed38dde` (deployed from the working tree minutes before the commit; same content) | `0fe16fcb5e` | `25d7c62b2b` |
 | D | `449cc3d` | `0fe16fcb5e` | `25d7c62b2b` |
+| E | `a7526bb` plus the trainer AWS pin, deployed from the working tree before its commit | `0fe16fcb5e` | `25d7c62b2b` |
+| F | E with the AWS pin removed (trainers on any cloud), plus the eval-only V2 grading code; working tree | `0fe16fcb5e` | `25d7c62b2b` |
 
 B differs from A only in how top-logprob candidates for training are carried:
 - the client reply omits them;
@@ -48,6 +50,10 @@ B differs from A only in how top-logprob candidates for training are carried:
 - SGLang skips rendering them as OpenAI objects.
 
 GRPO and IcePop request no candidates, so their runs compare across A and B.
+
+E pins every study trainer to AWS (`ModalConfig.trainer_cloud`); the rollout pools may
+still run on any provider, and nothing the trainer computes changes. F drops the pin
+(07:53, 2026-10-04): AWS-only trainers sat queued for GPUs.
 
 D adds only the replica's rollout source stamped in each response body, which tags
 a one-pool fleet's samples with their view. It changes attribution metrics, nothing
@@ -61,20 +67,26 @@ flag, so what each engine receives is the same as in B.
 
 | Rung | Arm | Recipe | Run | W&B run | Trainer call | Launched (UTC) | Code | Status |
 |---|---|---|---|---|---|---|---|---|
-| L2 | GRPO | `qwen3_6_35b_a3b_hetero_grpo` | r07 | [totxahfg](https://wandb.ai/nan-playground/fully-async-rl-modal/runs/totxahfg) | `fc-01M40MGVDKA2J2NQWFWT6S3V51` | 2026-10-03 10:15 | C | running |
+| L2 | GRPO | `qwen3_6_35b_a3b_hetero_grpo` | r07 | [totxahfg](https://wandb.ai/nan-playground/fully-async-rl-modal/runs/totxahfg) | `fc-01M40MGVDKA2J2NQWFWT6S3V51` | 2026-10-03 10:15 | C | stopped at 07:37 (2026-10-04) right after its step-120 save completed (tracker 119, three views); not resumed |
 | L2 | IcePop | `qwen3_6_35b_a3b_hetero_icepop` | r06 | [j8nc4xng](https://wandb.ai/nan-playground/fully-async-rl-modal/runs/j8nc4xng) | `fc-01M40MJSP0D4X8M35RWMN53W3M` | 2026-10-03 10:15 | C | running |
-| L2 | SC | `qwen3_6_35b_a3b_hetero_score_centering` | | | | | | not relaunched yet |
+| L2 | SC | `qwen3_6_35b_a3b_hetero_score_centering` | r10 | | `fc-01M42V9RE182WVG65B6Q4X65P1` | 2026-10-04 06:52 | E | running |
 | L2 | SC+MIS | `qwen3_6_35b_a3b_hetero_score_centering_mis` | | | | | | not relaunched yet |
-| L1 | GRPO | `qwen3_6_35b_a3b_b200_nvfp4_grpo` | r02 | [gvo1ldkg](https://wandb.ai/nan-playground/fully-async-rl-modal/runs/gvo1ldkg) | `fc-01M4091PER6VVB1CVBSDGSBSKP` | 2026-10-03 06:57 | C | running |
-| L1 | IcePop | `qwen3_6_35b_a3b_b200_nvfp4_icepop` | r02 | [quwkb52d](https://wandb.ai/nan-playground/fully-async-rl-modal/runs/quwkb52d) | `fc-01M4090XWSFKYTS0KK8NDCVT3W` | 2026-10-03 06:57 | C | running |
-| L1 | SC | `qwen3_6_35b_a3b_b200_nvfp4_score_centering` | | | | | | not launched |
+| L1 | GRPO | `qwen3_6_35b_a3b_b200_nvfp4_grpo` | r02 | [gvo1ldkg](https://wandb.ai/nan-playground/fully-async-rl-modal/runs/gvo1ldkg) | `fc-01M4091PER6VVB1CVBSDGSBSKP` | 2026-10-03 06:57 | C | stopped at v131 (06:34, 2026-10-04) after its step-130 save completed; not resumed |
+| L1 | IcePop | `qwen3_6_35b_a3b_b200_nvfp4_icepop` | r02 | [quwkb52d](https://wandb.ai/nan-playground/fully-async-rl-modal/runs/quwkb52d) | `fc-01M4090XWSFKYTS0KK8NDCVT3W` (attempt 1); `fc-01M42W8B46V98DX06H366V8BGR` queued on AWS and never ran; `fc-01M42YPP65QFXV73T9VQ23Q9G3` (attempt 2) | 2026-10-03 06:57 | C, then F from v100 | attempt 1 hit the 24 h limit at v102 (07:01, 2026-10-04); resumed from step 100 on code F (07:53) after an AWS-pinned attempt sat queued |
+| L1 | SC | `qwen3_6_35b_a3b_b200_nvfp4_score_centering` | | | | | | paused (r01 stopped before its trainer got GPUs); launch after every IcePop trainer holds GPUs |
 | L1 | SC+MIS | `qwen3_6_35b_a3b_b200_nvfp4_score_centering_mis` | | | | | | not launched |
-| L0 | GRPO | `qwen3_6_35b_a3b_b200_bf16_grpo` | r02 | [7mpv4qdb](https://wandb.ai/nan-playground/fully-async-rl-modal/runs/7mpv4qdb) | `fc-01M4099CZTA1TY6ZS51YJY4B90` | 2026-10-03 06:57 | C | running |
-| L0 | IcePop | `qwen3_6_35b_a3b_b200_bf16_icepop` | | | | | | not launched |
+| L0 | GRPO | `qwen3_6_35b_a3b_b200_bf16_grpo` | r02 | [7mpv4qdb](https://wandb.ai/nan-playground/fully-async-rl-modal/runs/7mpv4qdb) | `fc-01M4099CZTA1TY6ZS51YJY4B90` | 2026-10-03 06:57 | C | stopped at v148 (06:39, 2026-10-04), 25 min before its 24 h attempt limit; last complete save step 140; not resumed |
+| L0 | IcePop | `qwen3_6_35b_a3b_b200_bf16_icepop` | r04 | | `fc-01M42YQXTRXZVRNR8NS6QPEKJ5` | 2026-10-04 07:53 | F | waiting for trainer GPUs |
 | L0 | SC | `qwen3_6_35b_a3b_b200_bf16_score_centering` | | | | | | not launched |
 | L0 | SC+MIS | `qwen3_6_35b_a3b_b200_bf16_score_centering_mis` | | | | | | not launched |
 
 Things to know when reading the record runs:
+
+- **A resumed attempt is a new W&B run.** Miles mints a W&B run per trainer attempt (the
+  recipes pass no `--wandb-run-id`), so a run resumed after its 24 h limit has one W&B
+  run per attempt. The W&B column lists every attempt in order with the versions it
+  covers. A resumed attempt retrains from its save, so where two attempts logged the
+  same step, the later attempt is the record.
 
 - **Ladder r02 runs (L0, L1): per-view metrics read `unknown`.** These fleets have one
   pool and so no router, and before the sidecar reported its own source, nothing tagged
@@ -104,10 +116,14 @@ Things to know when reading the record runs:
 | L1 IcePop | r01 | none | stopped at step 0 (06:30, 2026-10-03): same as L1 GRPO r01 |
 | L0 GRPO | r01 | none | stopped in its first rollout (06:40, 2026-10-03): would have exported only bf16; relaunched as r02 with all three exports |
 | L0 IcePop | r01 | none | stopped at the user's request before its trainer got GPUs (18:20, 2026-10-03); code D |
+| L0 IcePop | r02 | none | stopped at the user's request at v0 (07:00, 2026-10-04), before its first publish; relaunched as r03 on code E |
+| L0 IcePop | r03 | none | trainer queued for AWS GPUs from 07:06 and never ran; stopped 07:53 (2026-10-04) to relaunch without the AWS pin as r04 |
+| L1 SC | r01 | none | stopped at the user's request before its trainer got GPUs (07:48, 2026-10-04): paused until every IcePop trainer holds GPUs |
 | L2 GRPO | r06 | [b450kpxu](https://wandb.ai/nan-playground/fully-async-rl-modal/runs/b450kpxu) | preempted at v58 (see below); stopped, rerun from scratch as r07 on code C |
 | L2 IcePop | r05 | [mprwa9hg](https://wandb.ai/nan-playground/fully-async-rl-modal/runs/mprwa9hg) | preempted at v55; stopped, rerun from scratch as r06 on code C |
 | L2 SC | r08 | [3rp31dgx](https://wandb.ai/nan-playground/fully-async-rl-modal/runs/3rp31dgx) | preempted at v25; stopped, to be rerun from scratch |
 | L2 SC+MIS | r01 | [3ojxtmkv](https://wandb.ai/nan-playground/fully-async-rl-modal/runs/3ojxtmkv) | preempted at v19; stopped, to be rerun from scratch |
+| L2 SC | r09 | none | stopped before its trainer got GPUs (06:52, 2026-10-04); relaunched as r10 with the trainer pinned to AWS (code E) |
 | GRPO | hetero-base-01 | [07obimhw](https://wandb.ai/nan-playground/fully-async-rl-modal/runs/07obimhw) | Sep 30, older `qwen3_6_35b_a3b_mimo_code_heterogeneous` layout |
 | TIS | hetero-tis-01 | [1tslnj1g](https://wandb.ai/nan-playground/fully-async-rl-modal/runs/1tslnj1g) | Sep 30, older `qwen3_6_35b_a3b_mimo_code_heterogeneous` layout |
 
