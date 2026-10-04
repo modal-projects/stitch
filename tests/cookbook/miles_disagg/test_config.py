@@ -800,3 +800,15 @@ def test_ladder_and_hetero_recipes_have_their_own_app_volume_and_wandb_group():
     for field in ("APP_NAME", "EXPERIMENT_VOLUME_NAME"):
         assert len({getattr(recipe, field) for recipe in recipes}) == len(recipes)
     assert len({recipe.miles.wandb_group for recipe in recipes}) == len(recipes)
+
+
+def test_study_trainers_and_pools_may_run_on_any_cloud():
+    """The AWS-only trainer pin left trainers queued for GPUs; every study recipe now
+    lets Modal place its trainer and pools on any provider."""
+    recipes = [_hetero(name) for name in _HETERO_RECIPES] + [
+        _ladder(fleet, name) for fleet in _LADDER_FLEETS for name in _HETERO_RECIPES
+    ]
+    for recipe in recipes:
+        assert recipe.modal.trainer_cloud is None
+        assert recipe.modal.cloud is None
+        assert all(pool.cloud is None for pool in recipe.modal.rollout_pools)

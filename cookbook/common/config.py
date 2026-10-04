@@ -64,6 +64,9 @@ class ModalConfig:
     trainer_cpu: float | tuple[float, float] | None = None
     trainer_memory_mib: int | tuple[int, int] | None = None
     cloud: str | None = None
+    # The trainer's provider when it must differ from ``cloud``, which rollout pools
+    # also default to.
+    trainer_cloud: str | None = None
     region: str | None = None
     draft_volume: str | None = None
     draft_volume_env: str | None = None
