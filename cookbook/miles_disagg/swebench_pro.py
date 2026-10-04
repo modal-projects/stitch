@@ -3,14 +3,27 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import re
 import shlex
+import shutil
 import subprocess
 import tempfile
+import tomllib
 from pathlib import Path
 
 EVALUATOR_REVISION = "ca10a60a5fcae51e6948ffe1485d4153d421e6c5"
+
+# SWE-bench Pro V2 as Scale released it (2026-09-22): the HuggingFace rows and the
+# Harbor task directories in the benchmark's repository, pinned together.
+V2_DATASET_REVISION = "2d52cb3df914a3fcf80c7f66738b3a88ae37fc50"
+V2_REPOSITORY_REVISION = "66f92766bba642462d4bbe5479e83f91f9211862"
+V2_TASKS = 642
+# Every task's setup records the tree the agent starts from under this ref.
+TASK_BASELINE_REF = "refs/miles/task-baseline"
+# A grader that runs the verifier in a fresh Sandbox puts the policy's patch here.
+GRADE_PATCH_PATH = "/tmp/miles-grade/policy.patch"
 
 
 def _parse_string_list(value: str, field: str, instance_id: str) -> list[str]:
@@ -170,7 +183,7 @@ PY
 """
 
 
-def _checkout_evaluator(source_root: Path) -> None:
+def _checkout_evaluator(source_root: Path, revision: str = EVALUATOR_REVISION) -> None:
     source_root.mkdir(parents=True, exist_ok=True)
     subprocess.run(["git", "-C", str(source_root), "init"], check=True)
     has_origin = (
@@ -202,7 +215,7 @@ def _checkout_evaluator(source_root: Path) -> None:
             "fetch",
             "--depth=1",
             "origin",
-            EVALUATOR_REVISION,
+            revision,
         ],
         check=True,
     )
@@ -341,4 +354,169 @@ def prepare_swebench_pro(data_root: Path) -> Path:
         + "\n"
     )
     print(f"Prepared {len(prompt_rows)} SWE-bench Pro tasks at {prompt_path}")
+    return prompt_path
+
+
+def _v2_agent_start_commands(base_commit: str) -> str:
+    """V2 images are already at the task's base commit with a sanitised history, and
+    V2 runs no repository setup before the agent; only check that the image agrees."""
+    return rf"""head=$(git rev-parse HEAD)
+if [ "$head" != {shlex.quote(base_commit)} ]; then
+    echo "the image is at $head, not the task's base commit {base_commit}" >&2
+    exit 1
+fi"""
+
+
+def _v2_verifier_script() -> str:
+    """The policy's patch on the task baseline, then V2's own verifier unchanged.
+
+    A fresh-Sandbox grader puts the patch at ``GRADE_PATCH_PATH`` in a Sandbox whose
+    tree is the baseline, and it is applied as V2's re-grade (``patch_replay``) applies
+    a captured diff to a pristine image: ``git apply``, else a three-way apply, else a
+    fuzzy ``patch``, and the verifier grades whatever applied. Files a service in the
+    image writes under the repository (NodeBB's Redis log) are in both trees, so a
+    strict apply would refuse the patch. In the agent's own Sandbox the patch is the
+    policy's diff from the baseline, applied strictly to a clean baseline tree.
+    """
+    return rf"""#!/bin/bash
+set -u
+
+write_zero() {{
+    mkdir -p /logs/verifier
+    printf '0\n' > /logs/verifier/reward.txt
+}}
+
+cd /app || exit 1
+patch={GRADE_PATCH_PATH}
+if [ -f "$patch" ]; then
+    if [ -s "$patch" ]; then
+        git apply --verbose "$patch" ||
+            git apply --3way "$patch" ||
+            patch --fuzz=3 -p1 -i "$patch" < /dev/null ||
+            echo "The policy patch applied only in part."
+    fi
+else
+    baseline=$(git rev-parse {TASK_BASELINE_REF}) || exit 1
+    patch=/tmp/miles_policy.patch
+    git add -N . >/dev/null 2>&1 || true
+    git diff --binary "$baseline" -- . > "$patch" || exit 1
+    git reset --hard "$baseline" >/dev/null || exit 1
+    git clean -fd >/dev/null || exit 1
+    # An unchanged tree is still graded, as the benchmark grades an empty patch.
+    if [ -s "$patch" ] && ! git apply --whitespace=nowarn "$patch"; then
+        echo "Policy patch could not be applied to the canonical task baseline."
+        write_zero
+        exit 0
+    fi
+fi
+exec bash /tests/harbor_test.sh
+"""
+
+
+def _verify_checksums(root: Path) -> None:
+    """Every file under ``root`` that its SHA256SUMS lists must match."""
+    listed = 0
+    for line in (root / "SHA256SUMS").read_text().splitlines():
+        if not line.strip():
+            continue
+        digest, name = line.split(maxsplit=1)
+        path = root / name.lstrip("*")
+        if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            raise RuntimeError(f"checksum mismatch: {path}")
+        listed += 1
+    if listed == 0:
+        raise RuntimeError(f"{root}/SHA256SUMS lists no files")
+
+
+def _write_v2_task(source: Path, task_dir: Path, base_commit: str) -> str:
+    """Copy one V2 Harbor task and put our setup and verifier preamble around it.
+    Returns the task's instruction, which is what the agent sees."""
+    spec = tomllib.loads((source / "task.toml").read_text())
+    image = spec["environment"]["docker_image"]
+    dockerfile = (source / "environment" / "Dockerfile").read_text().split()
+    if dockerfile[:2] != ["FROM", image]:
+        raise RuntimeError(
+            f"{source.name}: Dockerfile and task.toml name different images"
+        )
+    if spec["agent"]["network_mode"] != "no-network":
+        raise RuntimeError(f"{source.name}: V2's agent phase must be offline")
+    shutil.copytree(source, task_dir, dirs_exist_ok=True)
+    (task_dir / "tests" / "test.sh").rename(task_dir / "tests" / "harbor_test.sh")
+    (task_dir / "tests" / "test.sh").write_text(_v2_verifier_script())
+    (task_dir / "environment" / "setup.sh").write_text(
+        _setup_script(_v2_agent_start_commands(base_commit))
+    )
+    return (source / "instruction.md").read_text()
+
+
+def prepare_swebench_pro_v2(data_root: Path) -> Path:
+    """Write SWE-bench Pro V2's 642 tasks and return the prompt JSONL path.
+
+    Each task is V2's Harbor directory: its image, its instruction (the agent's
+    prompt), and its verifier, which runs after our preamble grades the policy's
+    patch. Our setup gives login shells the image's PATH and records the baseline.
+    """
+    from datasets import load_dataset
+
+    tasks_root = data_root / "tasks"
+    data_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="swebench-pro-v2-") as temp_dir:
+        source_root = Path(temp_dir) / "SWE-bench_Pro-os"
+        _checkout_evaluator(source_root, revision=V2_REPOSITORY_REVISION)
+        v2 = source_root / "v2"
+        _verify_checksums(v2)
+        rows = {
+            row["instance_id"]: row
+            for row in load_dataset(
+                "ScaleAI/SWE-bench_Pro", revision=V2_DATASET_REVISION, split="test"
+            )
+        }
+        sources = sorted(path for path in (v2 / "tasks").iterdir() if path.is_dir())
+        if len(rows) != V2_TASKS or {path.name for path in sources} != set(rows):
+            raise RuntimeError(
+                f"V2 rows ({len(rows)}) and task directories ({len(sources)}) disagree"
+            )
+
+        tasks_root.mkdir(parents=True, exist_ok=True)
+        prompt_rows = []
+        for source in sources:
+            row = rows[source.name]
+            task_dir = tasks_root / source.name
+            instruction = _write_v2_task(source, task_dir, row["base_commit"])
+            prompt_rows.append(
+                {
+                    "prompt": instruction,
+                    "metadata": {
+                        "instance_id": source.name,
+                        "task_dir": str(task_dir),
+                        "sandbox_cwd": "/app",
+                        "agent_name": "mini-swe-agent",
+                        "source_dataset": "ScaleAI/SWE-bench_Pro",
+                        "source_revision": V2_DATASET_REVISION,
+                        "benchmark_revision": V2_REPOSITORY_REVISION,
+                        "split": "test",
+                        "repo": row["repo"],
+                        "repo_language": row["repo_language"],
+                    },
+                }
+            )
+
+    prompt_path = data_root / "test.jsonl"
+    prompt_path.write_text("".join(json.dumps(row) + "\n" for row in prompt_rows))
+    (data_root / "manifest.json").write_text(
+        json.dumps(
+            {
+                "source": "ScaleAI/SWE-bench_Pro",
+                "version": "2.0.0",
+                "dataset_revision": V2_DATASET_REVISION,
+                "benchmark": "scaleapi/SWE-bench_Pro-os v2/tasks",
+                "benchmark_revision": V2_REPOSITORY_REVISION,
+                "split": "test",
+                "tasks": len(prompt_rows),
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    print(f"Prepared {len(prompt_rows)} SWE-bench Pro V2 tasks at {prompt_path}")
     return prompt_path

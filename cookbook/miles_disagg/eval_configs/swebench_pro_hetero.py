@@ -4,36 +4,46 @@ BF16 is the learning policy: the trainer's precision on the trainer's GPU, with 
 KV cache. FP8 and NVFP4 are deployment settings, each served exactly as its training
 pool serves it.
 
-The eval set is the public set less the tasks its own gold patch fails under the
-harness's conditions (offline, as in training): ``swebench_pro_v3_excluded.json``
-lists each with its reason.
+The benchmark is SWE-bench Pro V2 as Scale released it, graded by its own protocol: the
+agent works offline in the training harness, and its patch is graded in a fresh Sandbox
+of the task image whose network is open. The eval set is V2 less the tasks that do not
+run reliably there: ``swebench_pro_scale_v2_excluded.json`` lists each with its reason.
 """
 
 import json
 from pathlib import Path
 
 import cookbook.miles_disagg.configs.qwen3_6_35b_a3b_hetero as hetero
-from cookbook.miles_disagg import swebench_config
+from cookbook.common.constants import DATA_PATH
+from cookbook.miles_disagg import swebench_pro
 
 NAME = "swebench-pro"
 # Base points are shared by every arm; any arm's recipe supplies the same harness.
 BASE_EXPERIMENT = "qwen3_6_35b_a3b_hetero_grpo"
+# Written by swebench_pro.prepare_swebench_pro_v2.
+DATASET_PATH = DATA_PATH / "swebench-pro-scale-v2"
 _EXCLUDED = json.loads(
-    (Path(__file__).parent / "swebench_pro_v3_excluded.json").read_text()
+    (Path(__file__).parent / "swebench_pro_scale_v2_excluded.json").read_text()
 )
-if _EXCLUDED["task_set"] != swebench_config.DATASET_PATH.name:
+if (_EXCLUDED["task_set"], _EXCLUDED["benchmark_revision"]) != (
+    DATASET_PATH.name,
+    swebench_pro.V2_REPOSITORY_REVISION,
+):
     raise ValueError("the excluded-task list was checked against another task set")
 EXCLUDED_TASKS: dict[str, str] = _EXCLUDED["tasks"]
-TASKS = 731 - len(EXCLUDED_TASKS)
-TASKS_DIR = swebench_config.DATASET_PATH / "tasks"
+TASKS = swebench_pro.V2_TASKS - len(EXCLUDED_TASKS)
+TASKS_DIR = DATASET_PATH / "tasks"
+# V2's protocol: each patch is graded in a fresh Sandbox of the task image.
+GRADE_IN_FRESH_SANDBOX = True
 N_SAMPLES = 8
 # Miles eval-dataset fields; the rest (max_response_len, keys) follow the recipe.
 DATASET = {
     "name": "swebench_pro",
-    "path": f"{swebench_config.DATASET_PATH}/test.jsonl",
+    "path": f"{DATASET_PATH}/test.jsonl",
     "n_samples_per_eval_prompt": N_SAMPLES,
+    # Full-vocabulary sampling, the same as the training samplers.
     "temperature": 1.0,
-    "top_p": 0.97,
+    "top_p": 1.0,
     "top_k": -1,
 }
 # Sandbox or API failures never reached the policy, so they rerun instead of scoring.

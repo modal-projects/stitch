@@ -52,6 +52,8 @@ EVAL_ENVIRONMENT_OVERRIDES = frozenset(
         "MODAL_SWE_TASKS_DIR",
         "MODAL_SWE_SANDBOX_APP",
         "MODAL_SWE_AGENT_PROCESSES",
+        # Grading only: the benchmark's protocol, not the agent's harness.
+        "MODAL_SWE_GRADE_IN_FRESH_SANDBOX",
     }
 )
 
@@ -151,8 +153,11 @@ def eval_miles_config(
     sandbox_app: str,
     concurrency: int,
     dump_template: str,
+    fresh_sandbox_grading: bool = False,
 ) -> MilesConfig:
-    """The training recipe's Miles config, changed only as ``EVAL_*_OVERRIDES`` allow."""
+    """The training recipe's Miles config, changed only as ``EVAL_*_OVERRIDES`` allow.
+    ``fresh_sandbox_grading`` grades each policy patch in a fresh Sandbox of the task
+    image, as the benchmark's own re-grade does; the agent's Sandbox is unchanged."""
     cfg: Any = MilesConfig.from_payload(miles_cfg.to_payload())
     # Same sessions per session server and agent threads per process as training.
     cfg.session_server_workers = math.ceil(
@@ -172,6 +177,8 @@ def eval_miles_config(
         "MODAL_SWE_SANDBOX_APP": sandbox_app,
         "MODAL_SWE_AGENT_PROCESSES": str(math.ceil(concurrency / threads)),
     }
+    if fresh_sandbox_grading:
+        cfg.environment["MODAL_SWE_GRADE_IN_FRESH_SANDBOX"] = "1"
     return cfg
 
 
@@ -243,9 +250,33 @@ def results_from_samples(
                 "response_length": sample.response_length,
                 "exit_status": metadata.get("exit_status"),
                 "agent_metrics": metadata.get("agent_metrics"),
+                "verifier_output_tail": metadata.get("verifier_output_tail"),
+                "policy_patch_b64": metadata.get("policy_patch_b64"),
             }
         )
     return records, failures
+
+
+def split_patches(
+    records: Iterable[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Records without their graded patches, and the patches keyed by sample, so the
+    scores stay small and every sample can be re-graded without rerunning the agent."""
+    scores, patches = [], []
+    for record in records:
+        record = dict(record)
+        patch = record.pop("policy_patch_b64", None)
+        scores.append(record)
+        if patch is not None:
+            patches.append(
+                {
+                    "instance_id": record["instance_id"],
+                    "sample_index": record["sample_index"],
+                    "reward": record["reward"],
+                    "patch_b64": patch,
+                }
+            )
+    return scores, patches
 
 
 def pass_at_k(n: int, c: int, k: int) -> float:

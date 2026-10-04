@@ -222,3 +222,70 @@ def test_stop_detaches_once_even_when_termination_fails(caplog):
     assert sandbox.terminate_calls == 1
     assert sandbox.detach_calls == 1
     assert "Failed to terminate Modal Sandbox" in caplog.text
+
+
+class _FileSandbox:
+    """A Sandbox whose ``cat`` returns fixed bytes and exit code."""
+
+    def __init__(self, data: bytes, return_code: int = 0):
+        self.data, self.return_code = data, return_code
+
+    def exec(self, *args, **kwargs):
+        sandbox = self
+
+        class Stream:
+            def __init__(self, data):
+                self.data = data
+
+            def read(self):
+                return self.data
+
+        class Process:
+            stdout = Stream(sandbox.data)
+            stderr = Stream(b"cat: no such file")
+
+            def wait(self):
+                return sandbox.return_code
+
+        return Process()
+
+
+def _environment(monkeypatch, tmp_path, sandbox, **kwargs):
+    created = {}
+    monkeypatch.setattr(sandbox_module, "_cached_image", lambda _name: object())
+    monkeypatch.setattr(sandbox_module, "_cached_app", lambda _name, **_kw: object())
+    monkeypatch.setattr(
+        sandbox_module.modal.Probe, "with_exec", lambda *args, **kw: object()
+    )
+
+    def create(*_args, **create_kwargs):
+        created.update(create_kwargs)
+        return sandbox
+
+    monkeypatch.setattr(sandbox_module.modal.Sandbox, "_experimental_create", create)
+    env = sandbox_module.ModalSWEEnvironment(_task_dir(tmp_path), **kwargs)
+    return env, created
+
+
+def test_only_a_grading_sandbox_opens_the_network(monkeypatch, tmp_path):
+    _, created = _environment(monkeypatch, tmp_path, _FileSandbox(b""))
+    assert created["block_network"] is True
+
+    _, created = _environment(
+        monkeypatch, tmp_path / "grade", _FileSandbox(b""), block_network=False
+    )
+    assert created["block_network"] is False
+
+
+def test_download_returns_exact_bytes_beyond_the_output_bound(monkeypatch, tmp_path):
+    data = bytes(range(256)) * (sandbox_module._OUTPUT_LIMIT_BYTES // 64)
+    env, _ = _environment(monkeypatch, tmp_path, _FileSandbox(data))
+
+    assert env.download_file("/tmp/policy.patch") == data
+
+
+def test_failed_download_is_a_transport_error(monkeypatch, tmp_path):
+    env, _ = _environment(monkeypatch, tmp_path, _FileSandbox(b"", return_code=1))
+
+    with pytest.raises(sandbox_module.SandboxTransportError, match="no such file"):
+        env.download_file("/tmp/missing.patch")

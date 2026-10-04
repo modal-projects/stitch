@@ -178,7 +178,7 @@ def test_every_hetero_arm_evaluates_with_the_same_harness():
 
 def test_spec_samples_eight_times_at_the_agreed_sampler():
     assert spec.DATASET["n_samples_per_eval_prompt"] == spec.N_SAMPLES == 8
-    assert (spec.DATASET["temperature"], spec.DATASET["top_p"]) == (1.0, 0.97)
+    assert (spec.DATASET["temperature"], spec.DATASET["top_p"]) == (1.0, 1.0)
     assert spec.DATASET["top_k"] == -1
 
 
@@ -421,10 +421,8 @@ def test_eval_engines_resizes_the_pool_fleet(monkeypatch):
 
 
 def test_results_live_under_the_prepared_task_set():
-    from cookbook.miles_disagg import swebench_config
-
     point = evaluation.EvalPoint("qwen3_6_35b_a3b_hetero_icepop", "r03", 50, "fp8")
-    tasks = swebench_config.DATASET_PATH.name
+    tasks = spec.DATASET_PATH.name
 
     assert evaluation.task_set(spec) == tasks
     assert str(evaluation.results_path(spec, point)) == (
@@ -432,11 +430,28 @@ def test_results_live_under_the_prepared_task_set():
     )
 
 
-def test_eval_set_is_the_tasks_whose_gold_patch_passes_offline():
-    reasons = {"needs_network", "flaky_reference", "fixture_not_in_test_patch"}
+def test_eval_set_is_v2_less_the_tasks_that_do_not_run_reliably():
+    assert spec.DATASET_PATH.name == "swebench-pro-scale-v2"
+    assert spec.TASKS == 642 - len(spec.EXCLUDED_TASKS) == 641
+    assert set(spec.EXCLUDED_TASKS.values()) == {"unreliable"}
 
-    assert spec.TASKS == 731 - len(spec.EXCLUDED_TASKS) == 683
-    assert set(spec.EXCLUDED_TASKS.values()) <= reasons
+
+def test_v2_patches_are_graded_in_a_fresh_sandbox_as_v2_grades_them():
+    assert spec.GRADE_IN_FRESH_SANDBOX is True
+    cfg = evaluation.eval_miles_config(
+        importlib.import_module(
+            "cookbook.miles_disagg.configs.qwen3_6_35b_a3b_hetero_grpo"
+        ).miles,
+        dataset=spec.DATASET,
+        tasks_dir=spec.TASKS_DIR,
+        sandbox_app=spec.SANDBOX_APP,
+        concurrency=256,
+        dump_template="/tmp/{rollout_id}.pt",
+        fresh_sandbox_grading=spec.GRADE_IN_FRESH_SANDBOX,
+    )
+
+    assert cfg.environment["MODAL_SWE_GRADE_IN_FRESH_SANDBOX"] == "1"
+    assert cfg.environment["MODAL_SWE_TASKS_DIR"] == "/data/swebench-pro-scale-v2/tasks"
 
 
 def test_driver_writes_the_eval_set_less_excluded_tasks(tmp_path):
@@ -473,3 +488,53 @@ def test_driver_writes_the_eval_set_less_excluded_tasks(tmp_path):
         eval_driver._write_eval_set(
             source, tmp_path / "bad.jsonl", excluded=excluded, count=29, smoke=False
         )
+
+
+def test_patches_are_kept_apart_from_scores_for_regrading():
+    records = [
+        {
+            "instance_id": "t1",
+            "sample_index": 0,
+            "reward": 1.0,
+            "policy_patch_b64": "cA==",
+        },
+        {
+            "instance_id": "t1",
+            "sample_index": 1,
+            "reward": 0.0,
+            "policy_patch_b64": None,
+        },
+    ]
+
+    scores, patches = evaluation.split_patches(records)
+
+    assert all("policy_patch_b64" not in row for row in scores)
+    assert [row["reward"] for row in scores] == [1.0, 0.0]
+    assert patches == [
+        {"instance_id": "t1", "sample_index": 0, "reward": 1.0, "patch_b64": "cA=="}
+    ]
+    assert records[0]["policy_patch_b64"] == "cA=="
+
+
+def test_sample_records_keep_the_verifier_output_and_patch():
+    sample = SimpleNamespace(
+        metadata={
+            "instance_id": "t1",
+            "eval_sample_index": 9,
+            "eval_attempts": 1,
+            "exit_status": "Submitted",
+            "agent_metrics": {},
+            "verifier_output_tail": "RESULT: PASSED",
+            "policy_patch_b64": "cA==",
+        },
+        status="completed",
+        reward=1.0,
+        response_length=10,
+    )
+
+    (record,), failures = evaluation.results_from_samples([sample], n_samples=8)
+
+    assert failures == []
+    assert record["sample_index"] == 1
+    assert record["verifier_output_tail"] == "RESULT: PASSED"
+    assert record["policy_patch_b64"] == "cA=="

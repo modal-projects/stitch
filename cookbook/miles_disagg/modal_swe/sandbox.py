@@ -320,6 +320,7 @@ class ModalSWEEnvironment:
         app_name: str = "miles-modal-swe-sandboxes",
         cpu: float | None = None,
         memory_mib: int | None = None,
+        block_network: bool = True,
     ) -> None:
         self.task_dir = Path(task_dir).resolve()
         dockerfile = self.task_dir / "environment" / "Dockerfile"
@@ -356,8 +357,9 @@ class ModalSWEEnvironment:
                 interval_ms=250,
             ),
             # The task image is self-contained. Policy commands must not fetch
-            # issue solutions, repository history, or benchmark artifacts.
-            "block_network": True,
+            # issue solutions, repository history, or benchmark artifacts. Only a
+            # fresh grading Sandbox, where no policy command runs, may open it.
+            "block_network": block_network,
         }
         # Sandbox v2 does not return until the container has been scheduled.
         # Besides supporting higher create throughput, that makes the interval
@@ -621,6 +623,20 @@ class ModalSWEEnvironment:
             )
         self.upload_time += time.perf_counter() - started
         self.upload_bytes += payload_size
+
+    def download_file(self, path: str, *, max_bytes: int = 1 << 30) -> bytes:
+        """A file's exact bytes; command output is bounded, so it cannot carry them."""
+        process = self.sandbox.exec("cat", path, text=False)
+        data = process.stdout.read()
+        return_code = process.wait()
+        if return_code != 0:
+            stderr = process.stderr.read().decode("utf-8", errors="replace")
+            raise SandboxTransportError(f"Failed to download {path}: {stderr}")
+        if len(data) > max_bytes:
+            raise SandboxTransportError(
+                f"{path} is {len(data)} bytes, over {max_bytes}"
+            )
+        return data
 
     def get_template_vars(self, **kwargs: Any) -> dict[str, Any]:
         return {"cwd": self.cwd, **kwargs}

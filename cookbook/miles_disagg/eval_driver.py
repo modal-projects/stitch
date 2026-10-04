@@ -156,6 +156,7 @@ def run(
         sandbox_app=spec.SANDBOX_APP,
         concurrency=concurrency,
         dump_template=str(results_dir / "dump" / "{rollout_id}.pt"),
+        fresh_sandbox_grading=getattr(spec, "GRADE_IN_FRESH_SANDBOX", False),
     )
     # The agent, its Ray workers, and the session servers read the recipe environment.
     os.environ.update(cfg.environment)
@@ -196,7 +197,12 @@ def run(
     records, failures = evaluation.results_from_samples(
         result["samples"], n_samples=n_samples
     )
-    for name, rows in (("samples.jsonl", records), ("infra_failures.jsonl", failures)):
+    scores, patches = evaluation.split_patches(records)
+    for name, rows in (
+        ("samples.jsonl", scores),
+        ("patches.jsonl", patches),
+        ("infra_failures.jsonl", failures),
+    ):
         (results_dir / name).write_text("".join(json.dumps(row) + "\n" for row in rows))
     summary = {
         **evaluation.summarize(records, n_samples=n_samples, n_tasks=n_tasks),

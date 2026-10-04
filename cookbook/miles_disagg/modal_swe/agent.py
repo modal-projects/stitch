@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import json
 import logging
 import math
 import os
 import shlex
+import tempfile
 import threading
 import time
 import tomllib
@@ -470,6 +473,125 @@ def run_verifier(
         "timeout_sec": timeout,
         "output_tail": output[-_VERIFIER_LOG_TAIL_CHARS:],
     }
+
+
+# What a fresh-Sandbox grader shares with a task's verifier (for SWE-bench Pro, see
+# cookbook.miles_disagg.swebench_pro): the ref naming the tree the agent started from,
+# and where the grader puts the policy's patch.
+_TASK_BASELINE_REF = "refs/miles/task-baseline"
+_GRADE_PATCH_DIR = "/tmp/miles-grade"
+_GRADE_PATCH_NAME = "policy.patch"
+_CAPTURED_PATCH_PATH = "/tmp/miles_policy_capture.patch"
+
+
+def _fresh_sandbox_grading() -> bool:
+    """Grade in a fresh Sandbox of the task image, with the network open, that receives
+    only the policy's patch, as SWE-bench Pro V2 re-grades a captured diff on a pristine
+    image. Evaluation turns this on; training grades in the agent's own Sandbox."""
+    return os.getenv("MODAL_SWE_GRADE_IN_FRESH_SANDBOX", "0") == "1"
+
+
+def _task_resources(task_dir: Path) -> tuple[float | None, int | None]:
+    """The CPU and memory a Harbor task declares for its environment, if any."""
+    task_config = task_dir / "task.toml"
+    if not task_config.is_file():
+        return None, None
+    environment = tomllib.loads(task_config.read_text()).get("environment", {})
+    cpus, memory = environment.get("cpus"), environment.get("memory_mb")
+    return (
+        float(cpus) if cpus is not None else None,
+        int(memory) if memory is not None else None,
+    )
+
+
+def capture_policy_patch(env: ModalSWEEnvironment, *, timeout: int) -> bytes | None:
+    """The policy's change, as its diff from the task baseline with untracked files
+    included. None when the baseline ref is gone, so there is nothing to grade."""
+    return_code, output = env.exec(
+        f"git rev-parse --verify --quiet {_TASK_BASELINE_REF} >/dev/null && "
+        "{ git add -N . >/dev/null 2>&1 || true; } && "
+        f"git diff --binary {_TASK_BASELINE_REF} -- . > {_CAPTURED_PATCH_PATH} && "
+        f"sha256sum {_CAPTURED_PATCH_PATH}",
+        cwd=env.cwd,
+        timeout=timeout,
+    )
+    if return_code != 0 or not output.strip():
+        return None
+    patch = env.download_file(_CAPTURED_PATCH_PATH)
+    if hashlib.sha256(patch).hexdigest() != output.split()[0]:
+        raise SandboxTransportError("the policy patch changed in transfer")
+    return patch
+
+
+def grade_in_fresh_sandbox(
+    agent_env: ModalSWEEnvironment,
+    task_dir: Path,
+    *,
+    settings: dict[str, Any],
+) -> dict[str, Any]:
+    """``run_verifier``'s result for the policy's patch, graded in a fresh Sandbox.
+
+    The fresh Sandbox runs the task's setup, so its tree is the baseline the agent
+    started from; it receives the patch and nothing else of the agent's Sandbox. Its
+    network is open, as a benchmark's verifier phase may download dependencies. It
+    takes the task's declared CPU and memory, which the benchmark grades with.
+    """
+    started = time.perf_counter()
+    timeout = _verifier_timeout(task_dir, int(settings["verify_timeout"]))
+    patch = capture_policy_patch(agent_env, timeout=int(settings["exec_timeout"]))
+    if patch is None:
+        return {
+            "reward": None,
+            "return_code": None,
+            "timeout_sec": timeout,
+            "output_tail": f"no {_TASK_BASELINE_REF} in the agent's Sandbox",
+        }
+    cpu, memory_mib = _task_resources(task_dir)
+    grade_env = ModalSWEEnvironment(
+        task_dir,
+        cwd=agent_env.cwd,
+        lifetime=timeout + 900,
+        exec_timeout=int(settings["exec_timeout"]),
+        app_name=str(settings["app_name"]),
+        cpu=cpu,
+        memory_mib=memory_mib,
+        block_network=False,
+    )
+    try:
+        _prepare_environment(grade_env, task_dir)
+        with tempfile.TemporaryDirectory() as staging:
+            (Path(staging) / _GRADE_PATCH_NAME).write_bytes(patch)
+            grade_env.upload_tree(staging, _GRADE_PATCH_DIR)
+        verifier = run_verifier(
+            grade_env, task_dir, configured_timeout=int(settings["verify_timeout"])
+        )
+    except SandboxCommandTimeoutError as error:
+        # A verifier timeout is still graded (zero), so keep what it graded.
+        error.policy_patch = patch
+        raise
+    finally:
+        _stop_environment(grade_env)
+    verifier["policy_patch"] = patch
+    verifier["grade_metrics"] = {
+        "grade_sandbox_boot_time": grade_env.boot_time,
+        "grade_time": time.perf_counter() - started,
+        "policy_patch_bytes": len(patch),
+    }
+    return verifier
+
+
+def _graded_outputs(
+    verifier: dict[str, Any] | None, patch: bytes | None
+) -> dict[str, Any]:
+    """What a fresh-Sandbox grade keeps beside the reward, so the sample can be re-graded
+    or diagnosed without rerunning the agent: the exact patch it graded (base64) and the
+    verifier's output tail. Grading in the agent's own Sandbox keeps neither."""
+    if patch is None:
+        return {}
+    outputs = {"policy_patch_b64": base64.b64encode(patch).decode("ascii")}
+    if verifier is not None:
+        outputs["verifier_output_tail"] = verifier["output_tail"]
+    return outputs
 
 
 def _failure(
@@ -1141,11 +1263,14 @@ def _run_episode_sync(
         _raise_if_cancelled(cancelled)
         set_phase("verification")
         try:
-            verifier = run_verifier(
-                env,
-                task_dir,
-                configured_timeout=int(settings["verify_timeout"]),
-            )
+            if _fresh_sandbox_grading():
+                verifier = grade_in_fresh_sandbox(env, task_dir, settings=settings)
+            else:
+                verifier = run_verifier(
+                    env,
+                    task_dir,
+                    configured_timeout=int(settings["verify_timeout"]),
+                )
         except SandboxCommandTimeoutError as error:
             diagnostic = ""
             if error.result is not None:
@@ -1189,6 +1314,7 @@ def _run_episode_sync(
                 ),
                 verifier_output_tail=diagnostic,
                 agent_metrics=metrics,
+                **_graded_outputs(None, getattr(error, "policy_patch", None)),
             )
         verify_time = time.perf_counter() - verify_started
         reward = verifier["reward"]
@@ -1224,6 +1350,8 @@ def _run_episode_sync(
                 verifier_timeout_sec=verifier["timeout_sec"],
                 verifier_output_tail=verifier["output_tail"],
                 agent_metrics=metrics,
+                # The tail is already passed above; keep only the patch.
+                **_graded_outputs(None, verifier.get("policy_patch")),
             )
 
         elapsed = time.perf_counter() - started
@@ -1243,6 +1371,7 @@ def _run_episode_sync(
         agent_metrics["verifier_return_code"] = verifier["return_code"]
         agent_metrics["verifier_reward_missing"] = 0
         agent_metrics["verifier_timeout"] = 0
+        agent_metrics.update(verifier.get("grade_metrics", {}))
         _attach_client_model_timings(
             agent_metrics,
             client_model_request_durations,
@@ -1257,6 +1386,7 @@ def _run_episode_sync(
             "verifier_return_code": verifier["return_code"],
             "verifier_timeout_sec": verifier["timeout_sec"],
             "agent_metrics": agent_metrics,
+            **_graded_outputs(verifier, verifier.get("policy_patch")),
         }
     except _EpisodeCancelled:
         return _failure(

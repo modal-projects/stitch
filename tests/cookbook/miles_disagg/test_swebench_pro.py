@@ -1,15 +1,22 @@
 from __future__ import annotations
 
+import hashlib
 import subprocess
 
 import pytest
 
 from cookbook.miles_disagg.swebench_pro import (
+    GRADE_PATCH_PATH,
+    TASK_BASELINE_REF,
     _agent_start_commands,
     _parse_string_list,
     _patched_paths,
     _setup_script,
+    _v2_agent_start_commands,
+    _v2_verifier_script,
     _verifier_script,
+    _verify_checksums,
+    _write_v2_task,
 )
 
 
@@ -192,3 +199,234 @@ def test_verifier_grades_the_policy_against_the_fix_tests(
         (repo / name).write_text(content)
 
     assert _run_verifier(tmp_path, repo, test_patch) == reward
+
+
+# SWE-bench Pro V2: Scale's Harbor tasks behind our setup and verifier preamble.
+
+
+def _v2_harbor_test(tests) -> None:
+    """A stand-in for V2's tests/test.sh: reward 1 when the fix is in place."""
+    (tests / "harbor_test.sh").write_text(
+        'mkdir -p "$LOGS"; cd "$REPO" && grep -q "VALUE = 1" src.py'
+        ' && echo 1 > "$LOGS/reward.txt" || echo 0 > "$LOGS/reward.txt"\n'
+    )
+
+
+def _run_v2_verifier(tmp_path, repo, *, graded_patch: bytes | None = None) -> str:
+    tests = tmp_path / "tests"
+    tests.mkdir(exist_ok=True)
+    _v2_harbor_test(tests)
+    logs = tmp_path / "logs"
+    grade_patch = tmp_path / "grade" / "policy.patch"
+    if graded_patch is not None:
+        grade_patch.parent.mkdir(exist_ok=True)
+        grade_patch.write_bytes(graded_patch)
+    script = (
+        _v2_verifier_script()
+        .replace("cd /app", f"cd {repo}")
+        .replace(GRADE_PATCH_PATH, str(grade_patch))
+        .replace("/tests/", f"{tests}/")
+        .replace("/logs/verifier", str(logs))
+    )
+    subprocess.run(
+        ["bash", "-c", script],
+        capture_output=True,
+        check=True,
+        env={"PATH": "/usr/bin:/bin", "LOGS": str(logs), "REPO": str(repo)},
+    )
+    return (logs / "reward.txt").read_text().strip()
+
+
+def _v2_task_repo(tmp_path):
+    """A V2-style image repository: already at the base commit, history sanitised,
+    with the task baseline recorded by our setup."""
+    repo = tmp_path / "app"
+    repo.mkdir(parents=True)
+    _git(repo, "init", "-q", "-b", "main")
+    base = _commit(repo, {"src.py": "VALUE = 0\n", "notes.txt": "keep\n"}, "base")
+    script = _setup_script(_v2_agent_start_commands(base)).replace(
+        "cd /app", f"cd {repo}"
+    )
+    subprocess.run(["bash", "-c", script], check=True, capture_output=True)
+    return repo, base
+
+
+def test_v2_setup_refuses_an_image_away_from_the_base_commit(tmp_path) -> None:
+    repo, base = _v2_task_repo(tmp_path)
+    _commit(repo, {"src.py": "VALUE = 2\n"}, "drift")
+    script = _setup_script(_v2_agent_start_commands(base)).replace(
+        "cd /app", f"cd {repo}"
+    )
+
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+
+    assert result.returncode != 0
+    assert "not the task's base commit" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("policy_files", "reward"),
+    [({"src.py": "VALUE = 1\n"}, "1"), ({}, "0"), ({"other.py": "VALUE = 1\n"}, "0")],
+)
+def test_v2_verifier_grades_the_policy_in_its_own_sandbox(
+    tmp_path, policy_files, reward
+) -> None:
+    repo, _ = _v2_task_repo(tmp_path)
+    for name, content in policy_files.items():
+        (repo / name).write_text(content)
+
+    assert _run_v2_verifier(tmp_path, repo) == reward
+
+
+@pytest.mark.parametrize(
+    ("policy_files", "commit", "reward"),
+    [
+        ({"src.py": "VALUE = 1\n"}, False, "1"),
+        # A policy that commits its change is graded on the same diff.
+        ({"src.py": "VALUE = 1\n"}, True, "1"),
+        ({}, False, "0"),
+    ],
+)
+def test_v2_fresh_sandbox_grades_only_the_captured_patch(
+    tmp_path, policy_files, commit, reward
+) -> None:
+    """The agent's Sandbox yields its diff from the baseline; a fresh baseline tree
+    receives only that patch, whatever else the agent's Sandbox holds."""
+    agent_repo, _ = _v2_task_repo(tmp_path / "agent")
+    for name, content in policy_files.items():
+        (agent_repo / name).write_text(content)
+    if commit:
+        _git(agent_repo, "add", "-A")
+        _git(
+            agent_repo,
+            "-c",
+            "user.name=a",
+            "-c",
+            "user.email=a@a",
+            "commit",
+            "-qm",
+            "x",
+        )
+    (agent_repo / "untracked_scratch.txt").write_text("agent-only state\n")
+    _git(agent_repo, "add", "-N", ".")
+    patch = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(agent_repo),
+            "diff",
+            "--binary",
+            TASK_BASELINE_REF,
+            "--",
+            ".",
+        ],
+        capture_output=True,
+        check=True,
+    ).stdout
+
+    fresh_repo, _ = _v2_task_repo(tmp_path / "fresh")
+    assert (
+        _run_v2_verifier(tmp_path / "fresh", fresh_repo, graded_patch=patch) == reward
+    )
+
+
+def test_v2_fresh_sandbox_grades_an_unapplied_patch_on_the_baseline(tmp_path) -> None:
+    repo, _ = _v2_task_repo(tmp_path)
+    bad = b"diff --git a/src.py b/src.py\n--- a/src.py\n+++ b/src.py\n@@ -1 +1 @@\n-NOPE\n+VALUE = 1\n"
+
+    assert _run_v2_verifier(tmp_path, repo, graded_patch=bad) == "0"
+    assert (repo / "src.py").read_text() == "VALUE = 0\n"
+
+
+def test_v2_fresh_sandbox_keeps_the_fix_when_a_service_file_conflicts(tmp_path) -> None:
+    """NodeBB's Redis writes its log under the repository in every Sandbox, so the
+    captured patch creates a file the fresh tree already has; V2's replay still applies
+    the rest of the patch."""
+    agent_repo, _ = _v2_task_repo(tmp_path / "agent")
+    (agent_repo / "src.py").write_text("VALUE = 1\n")
+    (agent_repo / "appendonlydir").mkdir()
+    (agent_repo / "appendonlydir" / "a.aof").write_text("agent redis state\n")
+    _git(agent_repo, "add", "-N", ".")
+    patch = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(agent_repo),
+            "diff",
+            "--binary",
+            TASK_BASELINE_REF,
+            "--",
+            ".",
+        ],
+        capture_output=True,
+        check=True,
+    ).stdout
+    fresh_repo, _ = _v2_task_repo(tmp_path / "fresh")
+    (fresh_repo / "appendonlydir").mkdir()
+    (fresh_repo / "appendonlydir" / "a.aof").write_text("fresh redis state\n")
+
+    assert _run_v2_verifier(tmp_path / "fresh", fresh_repo, graded_patch=patch) == "1"
+    assert (fresh_repo / "appendonlydir" / "a.aof").read_text() == "fresh redis state\n"
+
+
+def _v2_source_task(root, name="instance_a__b-1"):
+    source = root / name
+    (source / "environment").mkdir(parents=True)
+    (source / "tests").mkdir()
+    (source / "solution").mkdir()
+    image = f"ghcr.io/scaleapi/swe-bench_pro-v2:{name}"
+    (source / "environment" / "Dockerfile").write_text(f"FROM {image}\n")
+    (source / "task.toml").write_text(
+        f'[verifier]\ntimeout_sec = 3000.0\n[agent]\nnetwork_mode = "no-network"\n'
+        f'[environment]\ndocker_image = "{image}"\ncpus = 1\nmemory_mb = 4096\n'
+    )
+    (source / "tests" / "test.sh").write_text("echo v2 verifier\n")
+    (source / "tests" / "config.json").write_text("{}\n")
+    (source / "solution" / "gold_patch.diff").write_text("")
+    (source / "instruction.md").write_text("Fix the bug in /app.\n")
+    return source
+
+
+def test_v2_task_keeps_scales_verifier_behind_our_preamble(tmp_path) -> None:
+    source = _v2_source_task(tmp_path / "v2")
+    task_dir = tmp_path / "tasks" / source.name
+
+    instruction = _write_v2_task(source, task_dir, "abc1234")
+
+    assert instruction == "Fix the bug in /app.\n"
+    assert (task_dir / "tests" / "harbor_test.sh").read_text() == "echo v2 verifier\n"
+    assert (task_dir / "tests" / "test.sh").read_text() == _v2_verifier_script()
+    setup = (task_dir / "environment" / "setup.sh").read_text()
+    assert "abc1234" in setup and TASK_BASELINE_REF in setup
+    assert (
+        (task_dir / "environment" / "Dockerfile")
+        .read_text()
+        .startswith("FROM ghcr.io/scaleapi/swe-bench_pro-v2:")
+    )
+
+
+def test_v2_task_must_keep_the_agent_offline(tmp_path) -> None:
+    source = _v2_source_task(tmp_path / "v2")
+    toml = (source / "task.toml").read_text().replace("no-network", "public")
+    (source / "task.toml").write_text(toml)
+
+    with pytest.raises(RuntimeError, match="offline"):
+        _write_v2_task(source, tmp_path / "task", "abc1234")
+
+
+def test_v2_checksums_must_match(tmp_path) -> None:
+    (tmp_path / "a.txt").write_text("a\n")
+    good = hashlib.sha256(b"a\n").hexdigest()
+    (tmp_path / "SHA256SUMS").write_text(f"{good}  a.txt\n")
+    _verify_checksums(tmp_path)
+
+    (tmp_path / "a.txt").write_text("tampered\n")
+    with pytest.raises(RuntimeError, match="checksum mismatch"):
+        _verify_checksums(tmp_path)
+
+
+def test_harness_and_tasks_agree_on_the_grading_contract() -> None:
+    from cookbook.miles_disagg.modal_swe import agent
+
+    assert agent._TASK_BASELINE_REF == TASK_BASELINE_REF
+    assert f"{agent._GRADE_PATCH_DIR}/{agent._GRADE_PATCH_NAME}" == GRADE_PATCH_PATH
