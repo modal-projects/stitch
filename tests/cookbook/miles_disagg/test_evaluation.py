@@ -94,6 +94,26 @@ def test_summary_reports_pass_at_1_to_n_only_once_every_task_is_complete():
     assert [f"pass@{k}" in complete for k in range(1, 5)] == [True] * 4
 
 
+def test_episodes_that_kept_aborting_count_as_failures_so_the_point_completes():
+    scored = [
+        {"instance_id": "a", "sample_index": index, "reward": 1.0} for index in range(3)
+    ]
+    failure = {
+        "instance_id": "a",
+        "sample_index": 3,
+        "attempts": 4,
+        "status": "aborted",
+    }
+
+    zeroed = evaluation.scored_as_failures([failure])
+    summary = evaluation.summarize(scored + zeroed, n_samples=4, n_tasks=1)
+
+    assert zeroed == [{**failure, "reward": 0.0, "exit_status": "retries_exhausted"}]
+    assert summary["complete"] is True
+    assert summary["pass@1"] == pytest.approx(0.75)
+    assert summary["pass@4"] == pytest.approx(1.0)
+
+
 def test_points_name_their_checkpoint_by_published_version(tmp_path):
     exp = _recipe("qwen3_6_35b_a3b_hetero_score_centering")
     point = evaluation.EvalPoint(exp.__name__.rsplit(".", 1)[1], "r03", 50, "nvfp4")
@@ -176,8 +196,8 @@ def test_every_hetero_arm_evaluates_with_the_same_harness():
         assert len({cfg.environment.get(key) for cfg in configs}) == 1, key
 
 
-def test_spec_samples_eight_times_at_the_agreed_sampler():
-    assert spec.DATASET["n_samples_per_eval_prompt"] == spec.N_SAMPLES == 8
+def test_spec_samples_four_times_at_the_agreed_sampler():
+    assert spec.DATASET["n_samples_per_eval_prompt"] == spec.N_SAMPLES == 4
     assert (spec.DATASET["temperature"], spec.DATASET["top_p"]) == (1.0, 1.0)
     assert spec.DATASET["top_k"] == -1
 

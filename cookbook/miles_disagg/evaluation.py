@@ -257,6 +257,20 @@ def results_from_samples(
     return records, failures
 
 
+def scored_as_failures(failures: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Samples that still aborted after their retries, scored as failed episodes.
+
+    In practice these are episodes whose model requests kept outrunning the session
+    server's deadline: the policy produced no verdict in time, so the sample counts
+    as unsolved rather than leaving its task without pass@k. The abort reasons are
+    only in the app's logs; check them before reading a count above zero.
+    """
+    return [
+        {**failure, "reward": 0.0, "exit_status": "retries_exhausted"}
+        for failure in failures
+    ]
+
+
 def split_patches(
     records: Iterable[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:

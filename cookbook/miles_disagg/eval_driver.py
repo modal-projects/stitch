@@ -197,6 +197,7 @@ def run(
     records, failures = evaluation.results_from_samples(
         result["samples"], n_samples=n_samples
     )
+    records += evaluation.scored_as_failures(failures)
     scores, patches = evaluation.split_patches(records)
     for name, rows in (
         ("samples.jsonl", scores),
@@ -206,6 +207,7 @@ def run(
         (results_dir / name).write_text("".join(json.dumps(row) + "\n" for row in rows))
     summary = {
         **evaluation.summarize(records, n_samples=n_samples, n_tasks=n_tasks),
+        # Scored as failures above, so a point with them still reports pass@k.
         "infra_failures": len(failures),
     }
     (results_dir / "metrics.json").write_text(json.dumps(summary, indent=2) + "\n")

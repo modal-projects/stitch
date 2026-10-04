@@ -160,10 +160,12 @@ globals()[POOL.name] = app.server(
 @app.function(
     image=driver_image,
     # Miles' argument parser imports Megatron, whose Transformer Engine loads the CUDA
-    # driver library; the client computes nothing on the GPU.
-    gpu="L4",
+    # driver library; the client computes nothing on the GPU. An H100 host leaves room
+    # for the memory limit: the session servers grow with the tokens a point serves, and
+    # long-response checkpoints outgrew 256 GiB.
+    gpu="H100",
     cpu=(32.0, 64.0),
-    memory=(65_536, 262_144),
+    memory=(65_536, 1_048_576),
     volumes={
         str(HF_CACHE_PATH): hf_cache_volume,
         str(CHECKPOINTS_PATH): checkpoint_volume,

@@ -35,7 +35,9 @@ TASKS = swebench_pro.V2_TASKS - len(EXCLUDED_TASKS)
 TASKS_DIR = DATASET_PATH / "tasks"
 # V2's protocol: each patch is graded in a fresh Sandbox of the task image.
 GRADE_IN_FRESH_SANDBOX = True
-N_SAMPLES = 8
+# Four samples a task give pass@1, pass@2 and pass@4. Points scored before 2026-10-04
+# 17:00 have eight samples; their pass@1/2/4 are the same unbiased estimates.
+N_SAMPLES = 4
 # Miles eval-dataset fields; the rest (max_response_len, keys) follow the recipe.
 DATASET = {
     "name": "swebench_pro",
