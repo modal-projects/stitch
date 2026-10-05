@@ -157,17 +157,28 @@ def run(
         concurrency=concurrency,
         dump_template=str(results_dir / "dump" / "{rollout_id}.pt"),
         fresh_sandbox_grading=getattr(spec, "GRADE_IN_FRESH_SANDBOX", False),
+        request_attempts=getattr(spec, "REQUEST_ATTEMPTS", 1),
     )
     # The agent, its Ray workers, and the session servers read the recipe environment.
     os.environ.update(cfg.environment)
     args = miles_args(cfg, pool_url=pool_url)
     args.eval_infra_retries = spec.INFRA_RETRIES
+    # Read only by the session servers below; training keeps the recipe's deadline.
+    if hasattr(spec, "REQUEST_DEADLINE_SECONDS"):
+        args.miles_router_timeout = evaluation.request_deadline(
+            cfg, spec.REQUEST_DEADLINE_SECONDS
+        )
     (results_dir / "manifest.json").write_text(
         json.dumps(
             {
                 **manifest,
                 "concurrency": concurrency,
                 "dataset": dataset,
+                "infra_retries": spec.INFRA_RETRIES,
+                "request_deadline_seconds": args.miles_router_timeout,
+                "request_attempts": int(
+                    cfg.environment["MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT"]
+                ),
                 "smoke": smoke,
             },
             indent=2,

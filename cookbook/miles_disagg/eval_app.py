@@ -76,7 +76,9 @@ driver_image = trainer_image.build_trainer_image(
     miles_repo_ref=getattr(exp, "MILES_REPO_REF", trainer_image.MILES_REPO_REF),
     extra_pip_packages=tuple(getattr(exp, "TRAINER_EXTRA_PIP_PACKAGES", ())),
     image_run_commands=getattr(exp, "TRAINER_IMAGE_RUN_COMMANDS", ()),
-    extra_env=POINT_ENVIRONMENT,
+    # Ray reads RAY_DEDUP_LOGS once, at import: every worker's abort lines, not one
+    # per message across the cluster.
+    extra_env={**POINT_ENVIRONMENT, "RAY_DEDUP_LOGS": "0"},
 )
 
 eval_volume = modal.Volume.from_name(

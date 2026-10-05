@@ -20,6 +20,8 @@ HETERO_ARMS = [
     "qwen3_6_35b_a3b_hetero_icepop",
     "qwen3_6_35b_a3b_hetero_score_centering",
     "qwen3_6_35b_a3b_hetero_score_centering_mis",
+    "qwen3_6_35b_a3b_hetero_grpo_top_p",
+    "qwen3_6_35b_a3b_hetero_score_centering_mis_top_p",
 ]
 # The harness: what the policy sees and is scored by. Eval must not change any of it.
 HARNESS_FIELDS = [
@@ -348,7 +350,13 @@ def test_results_split_scored_samples_from_episodes_that_kept_aborting():
         ("b", 1, 1.0),
     ]
     assert failures == [
-        {"instance_id": "b", "sample_index": 0, "attempts": 1, "status": "aborted"}
+        {
+            "instance_id": "b",
+            "sample_index": 0,
+            "attempts": 1,
+            "aborts": [],
+            "status": "aborted",
+        }
     ]
 
 
@@ -365,8 +373,16 @@ def _stub_miles(monkeypatch, outcomes):
     async def recipe_generate(input):
         calls.append(input.sample)
         status = outcomes[len(calls) - 1]
+        metadata = {"instance_id": "a"}
+        if status is _Status.ABORTED:
+            # What the agent's failure carries for an infrastructure abort.
+            metadata |= {
+                "exit_status": "agent_error",
+                "failure_phase": "model_generation",
+                "agent_error": f"BadGatewayError: deadline exceeded ({len(calls)})",
+            }
         return SimpleNamespace(
-            samples=[SimpleNamespace(metadata={"instance_id": "a"}, status=status)]
+            samples=[SimpleNamespace(metadata=metadata, status=status)]
         )
 
     compatibility = types.ModuleType("miles.rollout.inference_rollout.compatibility")
@@ -410,6 +426,17 @@ def test_retry_hook_reruns_aborted_episodes_from_a_fresh_copy(monkeypatch):
     assert episode.metadata["eval_sample_index"] == 13
     assert len(calls) == 3
     assert all(call is not hook_input.sample for call in calls)
+    # The scored sample keeps why each earlier attempt aborted.
+    assert episode.metadata["eval_aborts"] == [
+        {
+            "attempt": attempt,
+            "exit_status": "agent_error",
+            "failure_phase": "model_generation",
+            "agent_error": f"BadGatewayError: deadline exceeded ({attempt})",
+            "root_error": None,
+        }
+        for attempt in (1, 2)
+    ]
 
 
 def test_retry_hook_returns_the_abort_once_retries_run_out(monkeypatch):
@@ -421,7 +448,30 @@ def test_retry_hook_returns_the_abort_once_retries_run_out(monkeypatch):
 
     assert output.samples[0].status is _Status.ABORTED
     assert output.samples[0].metadata["eval_attempts"] == 2
+    assert [a["attempt"] for a in output.samples[0].metadata["eval_aborts"]] == [1, 2]
     assert len(calls) == 2
+
+
+def test_failed_samples_keep_their_abort_reasons():
+    aborts = [{"attempt": 1, "exit_status": "agent_error", "agent_error": "x"}]
+    sample = SimpleNamespace(
+        metadata={
+            "instance_id": "t1",
+            "eval_sample_index": 2,
+            "eval_attempts": 1,
+            "eval_aborts": aborts,
+        },
+        status="aborted",
+        reward=None,
+        response_length=0,
+    )
+
+    records, (failure,) = evaluation.results_from_samples([sample], n_samples=4)
+    (scored,) = evaluation.scored_as_failures([failure])
+
+    assert records == []
+    assert failure["aborts"] == aborts
+    assert scored["aborts"] == aborts and scored["exit_status"] == "retries_exhausted"
 
 
 def test_eval_engines_resizes_the_pool_fleet(monkeypatch):
@@ -438,6 +488,31 @@ def test_eval_engines_resizes_the_pool_fleet(monkeypatch):
     assert (eval_app.POOL.min_containers, eval_app.POOL.max_containers) == (32, 32)
     assert eval_app.POOL.sglang_args == spec.POOLS["fp8"].sglang_args
     assert eval_app.POINT_ENVIRONMENT["EVAL_ENGINES"] == "32"
+
+
+def test_eval_driver_keeps_every_workers_log_lines(monkeypatch):
+    from cookbook.miles_disagg import trainer_image
+
+    built = []
+    real = trainer_image.build_trainer_image
+    monkeypatch.setattr(
+        trainer_image,
+        "build_trainer_image",
+        lambda **kwargs: built.append(kwargs) or real(**kwargs),
+    )
+    monkeypatch.setenv("EXPERIMENT_CONFIG", "qwen3_6_35b_a3b_hetero_icepop")
+    monkeypatch.setenv("EVAL_CONFIG", "swebench_pro_hetero")
+    monkeypatch.setenv("EVAL_RUN", "r03")
+    monkeypatch.setenv("EVAL_VERSION", "50")
+    monkeypatch.setenv("EVAL_VIEW", "bf16")
+    monkeypatch.delitem(sys.modules, "cookbook.miles_disagg.eval_app", raising=False)
+
+    importlib.import_module("cookbook.miles_disagg.eval_app")
+
+    # Ray reads it at import, so it must be in the driver's environment from the start.
+    (driver,) = built
+    assert driver["extra_env"]["RAY_DEDUP_LOGS"] == "0"
+    assert driver["extra_env"]["EVAL_VERSION"] == "50"
 
 
 def test_results_live_under_the_prepared_task_set():
@@ -472,6 +547,47 @@ def test_v2_patches_are_graded_in_a_fresh_sandbox_as_v2_grades_them():
 
     assert cfg.environment["MODAL_SWE_GRADE_IN_FRESH_SANDBOX"] == "1"
     assert cfg.environment["MODAL_SWE_TASKS_DIR"] == "/data/swebench-pro-scale-v2/tasks"
+
+
+@pytest.mark.parametrize("arm", HETERO_ARMS)
+def test_a_lost_request_is_resent_inside_its_episode(arm):
+    train = _recipe(arm).miles
+    cfg = evaluation.eval_miles_config(
+        train,
+        dataset=spec.DATASET,
+        tasks_dir=spec.TASKS_DIR,
+        sandbox_app=spec.SANDBOX_APP,
+        concurrency=384,
+        dump_template="/tmp/{rollout_id}.pt",
+        request_attempts=spec.REQUEST_ATTEMPTS,
+    )
+
+    # Training sends each turn once; the eval resends a failed one.
+    assert train.environment["MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT"] == "1"
+    assert cfg.environment["MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT"] == "3"
+    assert evaluation.config_drift(train, cfg) == []
+    # The session server gives up first, so a resent turn never overlaps the original.
+    assert evaluation.request_deadline(cfg, spec.REQUEST_DEADLINE_SECONDS) == 600
+    assert 600 < float(cfg.environment["MODAL_SWE_MODEL_REQUEST_TIMEOUT"])
+
+
+def test_request_deadline_must_fall_before_the_agent_timeout():
+    cfg = _eval_config(_recipe("qwen3_6_35b_a3b_hetero_grpo").miles)
+    agent_timeout = float(cfg.environment["MODAL_SWE_MODEL_REQUEST_TIMEOUT"])
+
+    for seconds in (0, agent_timeout, agent_timeout + 1):
+        with pytest.raises(ValueError, match="request deadline"):
+            evaluation.request_deadline(cfg, seconds)
+    with pytest.raises(ValueError, match="request_attempts"):
+        evaluation.eval_miles_config(
+            _recipe("qwen3_6_35b_a3b_hetero_grpo").miles,
+            dataset=spec.DATASET,
+            tasks_dir=spec.TASKS_DIR,
+            sandbox_app=spec.SANDBOX_APP,
+            concurrency=384,
+            dump_template="/tmp/{rollout_id}.pt",
+            request_attempts=0,
+        )
 
 
 def test_driver_writes_the_eval_set_less_excluded_tasks(tmp_path):

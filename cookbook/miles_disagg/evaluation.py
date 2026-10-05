@@ -54,6 +54,9 @@ EVAL_ENVIRONMENT_OVERRIDES = frozenset(
         "MODAL_SWE_AGENT_PROCESSES",
         # Grading only: the benchmark's protocol, not the agent's harness.
         "MODAL_SWE_GRADE_IN_FRESH_SANDBOX",
+        # Transport only: how often the agent resends a turn whose request failed. The
+        # policy sees the same messages either way.
+        "MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT",
     }
 )
 
@@ -154,10 +157,13 @@ def eval_miles_config(
     concurrency: int,
     dump_template: str,
     fresh_sandbox_grading: bool = False,
+    request_attempts: int = 1,
 ) -> MilesConfig:
     """The training recipe's Miles config, changed only as ``EVAL_*_OVERRIDES`` allow.
     ``fresh_sandbox_grading`` grades each policy patch in a fresh Sandbox of the task
-    image, as the benchmark's own re-grade does; the agent's Sandbox is unchanged."""
+    image, as the benchmark's own re-grade does; the agent's Sandbox is unchanged.
+    ``request_attempts`` is how many times the agent sends a turn whose request
+    fails before its episode aborts."""
     cfg: Any = MilesConfig.from_payload(miles_cfg.to_payload())
     # Same sessions per session server and agent threads per process as training.
     cfg.session_server_workers = math.ceil(
@@ -179,7 +185,24 @@ def eval_miles_config(
     }
     if fresh_sandbox_grading:
         cfg.environment["MODAL_SWE_GRADE_IN_FRESH_SANDBOX"] = "1"
+    if request_attempts < 1:
+        raise ValueError(f"request_attempts must be >= 1, got {request_attempts}")
+    cfg.environment["MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT"] = str(request_attempts)
     return cfg
+
+
+def request_deadline(cfg: MilesConfig, seconds: float) -> float:
+    """The session server's per-request deadline for an eval, checked to fall before
+    the agent's own request timeout. The agent then always hears the failure first
+    and resends only after the session server has dropped the original request, so
+    two requests for one turn never overlap."""
+    agent_timeout = float(cfg.environment["MODAL_SWE_MODEL_REQUEST_TIMEOUT"])
+    if not 0 < seconds < agent_timeout:
+        raise ValueError(
+            f"request deadline {seconds}s must be positive and below the agent's "
+            f"{agent_timeout}s request timeout"
+        )
+    return seconds
 
 
 def config_drift(train: MilesConfig, evaluated: MilesConfig) -> list[str]:
@@ -229,7 +252,8 @@ def results_from_samples(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Per-sample records from Miles' eval output: scored samples, and samples whose
     episode still aborted after its retries. ``eval_hooks.generate`` stamps each
-    sample with its attempts and its eval index (task * n_samples + sample)."""
+    sample with its attempts, why each aborted attempt aborted, and its eval index
+    (task * n_samples + sample)."""
     records, failures = [], []
     for sample in samples:
         metadata = sample.metadata or {}
@@ -238,6 +262,7 @@ def results_from_samples(
             "instance_id": metadata["instance_id"],
             "sample_index": metadata["eval_sample_index"] % n_samples,
             "attempts": metadata.get("eval_attempts"),
+            "aborts": metadata.get("eval_aborts", []),
             "status": status,
         }
         if status == "aborted" or sample.reward is None:
@@ -262,8 +287,8 @@ def scored_as_failures(failures: Iterable[Mapping[str, Any]]) -> list[dict[str, 
 
     In practice these are episodes whose model requests kept outrunning the session
     server's deadline: the policy produced no verdict in time, so the sample counts
-    as unsolved rather than leaving its task without pass@k. The abort reasons are
-    only in the app's logs; check them before reading a count above zero.
+    as unsolved rather than leaving its task without pass@k. Each record keeps its
+    attempts' abort reasons; check them before reading a count above zero.
     """
     return [
         {**failure, "reward": 0.0, "exit_status": "retries_exhausted"}

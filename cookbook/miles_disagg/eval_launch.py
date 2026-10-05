@@ -209,6 +209,7 @@ def _require_checkpoint(point_app: Any) -> None:
 
 
 def _manifest(point_app: Any) -> dict[str, Any]:
+    from cookbook.common import serving_image
     from cookbook.miles_disagg import trainer_image
 
     point, pool, exp = point_app.POINT, point_app.POOL, point_app.exp
@@ -243,6 +244,9 @@ def _manifest(point_app: Any) -> dict[str, Any]:
         "stitch_commit": head,
         "stitch_dirty": bool(dirty),
         "miles_commit": getattr(exp, "MILES_REPO_REF", trainer_image.MILES_REPO_REF),
+        "sglang_commit": getattr(
+            exp, "SGLANG_RUNTIME", serving_image.DEFAULT_SGLANG_RUNTIME
+        ).commit,
         "launched_at": datetime.now(UTC).isoformat(),
     }
 

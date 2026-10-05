@@ -1148,11 +1148,14 @@ def _run_episode_sync(
             # without flooding the distributed job log.
             litellm.suppress_debug_info = True
             if hasattr(model, "abort_exceptions"):
+                # A cancelled episode raises from inside the request, and must
+                # end there even when an eval allows the request a retry.
                 model.abort_exceptions = list(
                     dict.fromkeys(
                         [
                             *model.abort_exceptions,
                             litellm.exceptions.BadRequestError,
+                            _EpisodeCancelled,
                         ]
                     )
                 )

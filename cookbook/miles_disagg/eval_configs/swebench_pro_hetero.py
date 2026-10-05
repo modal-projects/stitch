@@ -50,6 +50,12 @@ DATASET = {
 }
 # Sandbox or API failures never reached the policy, so they rerun instead of scoring.
 INFRA_RETRIES = 3
+# A model request that the serving gateway loses never returns. The session server gives
+# up on a request after REQUEST_DEADLINE_SECONDS, and the agent resends the turn, up to
+# REQUEST_ATTEMPTS times, before the episode aborts and reruns. The slowest of the 4.7M
+# requests answered in the first 20 points took 350 s.
+REQUEST_DEADLINE_SECONDS = 600
+REQUEST_ATTEMPTS = 3
 SANDBOX_APP = "stitch-swebench-pro-eval-sandbox"
 
 
