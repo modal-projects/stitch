@@ -552,13 +552,20 @@ _FROZEN_RECIPES = {
     "icepop_advanced": "icepop",
     "score_centering_advanced": "score_centering",
 }
+# Top-p arms: each full-vocabulary arm with truncated sampling and support replay.
+_TOP_P_RECIPES = {
+    "grpo_top_p": "grpo",
+    "score_centering_mis_top_p": "score_centering_mis",
+}
 
 
 def _hetero(name):
     return _recipe(f"qwen3_6_35b_a3b_hetero_{name}")
 
 
-@pytest.mark.parametrize("name", _HETERO_RECIPES + tuple(_FROZEN_RECIPES))
+@pytest.mark.parametrize(
+    "name", _HETERO_RECIPES + tuple(_FROZEN_RECIPES) + tuple(_TOP_P_RECIPES)
+)
 def test_hetero_recipes_share_the_fleet_data_and_run_shape(name):
     recipe = _hetero(name)
     base = import_module("cookbook.miles_disagg.configs.qwen3_6_35b_a3b_hetero")
@@ -689,6 +696,30 @@ def test_each_arm_changes_only_its_algorithm_from_vanilla_grpo(name):
     assert _hetero(name).modal is _hetero("grpo").modal
 
 
+@pytest.mark.parametrize("name", sorted(_TOP_P_RECIPES))
+def test_top_p_arms_change_only_the_decoding_from_their_full_vocabulary_arm(name):
+    full = _public_fields(_hetero(_TOP_P_RECIPES[name]).miles)
+    arm = _public_fields(_hetero(name).miles)
+    changed = {
+        key: arm.get(key)
+        for key in full.keys() | arm.keys()
+        if arm.get(key) != full.get(key)
+    }
+    assert {key: value for key, value in changed.items() if key not in _NAMES} == {
+        "rollout_top_p": 0.97,
+        "rollout_top_k": 64,
+    }
+    assert _hetero(name).modal is _hetero("grpo").modal
+    cfg = _hetero(name).miles
+    # Score centering needs the sampler's whole support among its logged candidates,
+    # with room for ties at the cutoff (at most 11 tied tokens were measured there).
+    if getattr(cfg, "loss_type", None) == "score_centering":
+        assert 2 * cfg.rollout_top_k <= cfg.score_centering_top_k
+    args = cfg.cli_args()
+    assert args[args.index("--rollout-top-p") + 1] == "0.97"
+    assert args[args.index("--rollout-top-k") + 1] == "64"
+
+
 def test_frozen_recipes_keep_their_runs_configuration():
     advanced = _hetero("icepop_advanced").miles
     assert (advanced.rollout_top_p, advanced.rollout_top_k) == (0.97, 4096)
@@ -715,8 +746,13 @@ def _ladder(fleet, name):
     return _recipe(f"qwen3_6_35b_a3b_{fleet}_{name}")
 
 
-@pytest.mark.parametrize("fleet", sorted(_LADDER_FLEETS))
-@pytest.mark.parametrize("name", _HETERO_RECIPES)
+# The final recipe also runs on the trainer's own hardware and precision.
+_LADDER_RECIPES = [
+    (fleet, name) for fleet in sorted(_LADDER_FLEETS) for name in _HETERO_RECIPES
+] + [("b200_bf16", "score_centering_mis_top_p")]
+
+
+@pytest.mark.parametrize(("fleet", "name"), _LADDER_RECIPES)
 def test_ladder_recipes_change_only_the_fleet_from_their_hetero_arm(fleet, name):
     recipe = _ladder(fleet, name)
     hetero = _hetero(name)
@@ -794,9 +830,9 @@ def test_b200_bf16_fleet_serves_bf16_weights_and_kv_cache():
 
 
 def test_ladder_and_hetero_recipes_have_their_own_app_volume_and_wandb_group():
-    recipes = [_hetero(name) for name in _HETERO_RECIPES] + [
-        _ladder(fleet, name) for fleet in _LADDER_FLEETS for name in _HETERO_RECIPES
-    ]
+    recipes = [
+        _hetero(name) for name in _HETERO_RECIPES + tuple(_TOP_P_RECIPES)
+    ] + [_ladder(fleet, name) for fleet, name in _LADDER_RECIPES]
     for field in ("APP_NAME", "EXPERIMENT_VOLUME_NAME"):
         assert len({getattr(recipe, field) for recipe in recipes}) == len(recipes)
     assert len({recipe.miles.wandb_group for recipe in recipes}) == len(recipes)

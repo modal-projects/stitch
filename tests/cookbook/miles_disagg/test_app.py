@@ -23,6 +23,9 @@ from cookbook.miles_disagg.configs import qwen3_4b_math
         "qwen3_6_35b_a3b_hetero_score_centering_mis",
         "qwen3_6_35b_a3b_hetero_icepop_advanced",
         "qwen3_6_35b_a3b_hetero_score_centering_advanced",
+        "qwen3_6_35b_a3b_hetero_grpo_top_p",
+        "qwen3_6_35b_a3b_hetero_score_centering_mis_top_p",
+        "qwen3_6_35b_a3b_b200_bf16_score_centering_mis_top_p",
         *(
             f"qwen3_6_35b_a3b_{fleet}_{arm}"
             for fleet in ("b200_bf16", "b200_nvfp4")
