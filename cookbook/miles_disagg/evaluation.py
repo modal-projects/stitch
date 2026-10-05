@@ -113,13 +113,24 @@ def results_path(spec: Any, point: EvalPoint) -> PurePosixPath:
     return PurePosixPath(task_set(spec)) / point.relative_dir
 
 
+# Words a too-long eval app name abbreviates, in order.
+APP_NAME_ABBREVIATIONS = (("score-centering", "sc"),)
+
+
 def app_name(spec_name: str, recipe_app_name: str, point: EvalPoint) -> str:
     """The point's Modal app. It also names the pool's store on the eval volume, which
-    nothing publishes to, so the pool keeps serving its boot checkpoint."""
+    nothing publishes to, so the pool keeps serving its boot checkpoint. A name that
+    would pass Modal's 64 characters abbreviates the recipe's words (score centering
+    as sc); a name that fits is unchanged."""
     if point.is_base:
         name = f"stitch-eval-{spec_name}-{point.slug}"
     else:
         name = f"{recipe_app_name}-eval-{point.slug}"
+        if len(name) > 64:
+            short = recipe_app_name
+            for word, abbreviation in APP_NAME_ABBREVIATIONS:
+                short = short.replace(word, abbreviation)
+            name = f"{short}-eval-{point.slug}"
     if len(name) > 64:
         raise ValueError(f"app name {name!r} exceeds Modal's 64 characters")
     return name

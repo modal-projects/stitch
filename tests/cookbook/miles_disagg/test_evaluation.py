@@ -674,3 +674,22 @@ def test_sample_records_keep_the_verifier_output_and_patch():
     assert record["sample_index"] == 1
     assert record["verifier_output_tail"] == "RESULT: PASSED"
     assert record["policy_patch_b64"] == "cA=="
+
+
+def test_app_names_fit_modal_and_stay_unchanged_when_they_already_fit():
+    point = evaluation.EvalPoint("recipe", "r01", 20, "bf16")
+    late = evaluation.EvalPoint("recipe", "r01", 480, "bf16")
+    fits = "stitch-qwen36-hetero-score-centering-mis-top-p"  # 64 characters at step 20
+    long = "stitch-qwen36-b200-bf16-score-centering-mis-top-p"
+
+    assert evaluation.app_name("spec", fits, point) == f"{fits}-eval-r01-v20-bf16"
+    assert (
+        evaluation.app_name("spec", long, point)
+        == "stitch-qwen36-b200-bf16-sc-mis-top-p-eval-r01-v20-bf16"
+    )
+    assert (
+        evaluation.app_name("spec", fits, late)
+        == "stitch-qwen36-hetero-sc-mis-top-p-eval-r01-v480-bf16"
+    )
+    with pytest.raises(ValueError, match="64 characters"):
+        evaluation.app_name("spec", "x" * 60, point)
