@@ -28,12 +28,14 @@ try:
         _is_infrastructure_error,
         _is_sandbox_not_found_error,
         _is_truncated_generation_error,
+        _is_turn_time_limit,
         _model_token_metrics,
         _parse_reward,
         _prepare_environment,
         _RayAgentWorkerPool,
         _StartRamp,
         _task_cwd,
+        _TurnTimeLimitExceeded,
         pick_latest_leaf,
         postprocess_samples,
         reward_func,
@@ -453,6 +455,48 @@ def test_client_model_request_instrumentation_records_exact_attempts():
     assert metrics["client_model_request_durations_seconds"] == durations
     assert metrics["model_request_count"] == 1
     assert metrics["model_request_time"] == pytest.approx(sum(durations))
+
+
+def test_a_request_past_the_turn_time_limit_ends_the_turn_without_a_retry():
+    deadline = RuntimeError(
+        "BadGatewayError: OpenAIException - Error code: 502 - "
+        "{'error': 'backend transport error: request deadline exceeded'}"
+    )
+
+    class Model:
+        abort_exceptions = []
+
+        def __init__(self, error):
+            self.error = error
+
+        def _query(self):
+            raise self.error
+
+    durations = []
+    model = Model(deadline)
+    _instrument_model_requests(model, durations, turn_time_limit=True)
+    with pytest.raises(_TurnTimeLimitExceeded) as raised:
+        model._query()
+    # The attempt is still timed, and the gateway error stays in the chain.
+    assert len(durations) == 1
+    assert raised.value.__cause__ is deadline
+    assert _is_turn_time_limit(raised.value)
+    assert _is_turn_time_limit(RuntimeError("wrapped")) is False
+    # The episode then fails with zero reward instead of aborting.
+    result = _failure("TurnTimeLimit", infrastructure=False)
+    assert result["reward"] == 0.0
+    assert "_miles_abort" not in result
+
+    # Without the limit, or for any other failure, the original error propagates.
+    for turn_time_limit, error in (
+        (False, deadline),
+        (True, RuntimeError("Error code: 502 - bad gateway")),
+    ):
+        other = Model(error)
+        _instrument_model_requests(other, [], turn_time_limit=turn_time_limit)
+        with pytest.raises(RuntimeError) as plain:
+            other._query()
+        assert plain.value is error
 
 
 def test_client_model_timings_split_generation_from_interaction():

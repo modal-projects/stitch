@@ -158,16 +158,19 @@ def run(
         dump_template=str(results_dir / "dump" / "{rollout_id}.pt"),
         fresh_sandbox_grading=getattr(spec, "GRADE_IN_FRESH_SANDBOX", False),
         request_attempts=getattr(spec, "REQUEST_ATTEMPTS", 1),
+        turn_time_limit=getattr(spec, "TURN_TIME_LIMIT_SECONDS", None),
     )
     # The agent, its Ray workers, and the session servers read the recipe environment.
     os.environ.update(cfg.environment)
     args = miles_args(cfg, pool_url=pool_url)
     args.eval_infra_retries = spec.INFRA_RETRIES
     # Read only by the session servers below; training keeps the recipe's deadline.
-    if hasattr(spec, "REQUEST_DEADLINE_SECONDS"):
-        args.miles_router_timeout = evaluation.request_deadline(
-            cfg, spec.REQUEST_DEADLINE_SECONDS
-        )
+    # With a turn time limit, the session servers give up at that limit.
+    deadline = getattr(
+        spec, "TURN_TIME_LIMIT_SECONDS", getattr(spec, "REQUEST_DEADLINE_SECONDS", None)
+    )
+    if deadline is not None:
+        args.miles_router_timeout = evaluation.request_deadline(cfg, deadline)
     (results_dir / "manifest.json").write_text(
         json.dumps(
             {
@@ -176,6 +179,9 @@ def run(
                 "dataset": dataset,
                 "infra_retries": spec.INFRA_RETRIES,
                 "request_deadline_seconds": args.miles_router_timeout,
+                "turn_time_limit_seconds": getattr(
+                    spec, "TURN_TIME_LIMIT_SECONDS", None
+                ),
                 "request_attempts": int(
                     cfg.environment["MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT"]
                 ),

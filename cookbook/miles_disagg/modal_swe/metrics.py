@@ -27,6 +27,7 @@ _KNOWN_EXIT_STATUSES = {
     "Submitted",
     "LimitsExceeded",
     "TimeExceeded",
+    "TurnTimeLimit",
     "RepeatedFormatError",
     "FormatError",
     "UserInterruption",

@@ -57,6 +57,8 @@ EVAL_ENVIRONMENT_OVERRIDES = frozenset(
         # Transport only: how often the agent resends a turn whose request failed. The
         # policy sees the same messages either way.
         "MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT",
+        # Scoring only: a turn still generating at this limit fails its episode.
+        "MODAL_SWE_TURN_TIME_LIMIT_SECONDS",
     }
 )
 
@@ -169,12 +171,15 @@ def eval_miles_config(
     dump_template: str,
     fresh_sandbox_grading: bool = False,
     request_attempts: int = 1,
+    turn_time_limit: float | None = None,
 ) -> MilesConfig:
     """The training recipe's Miles config, changed only as ``EVAL_*_OVERRIDES`` allow.
     ``fresh_sandbox_grading`` grades each policy patch in a fresh Sandbox of the task
     image, as the benchmark's own re-grade does; the agent's Sandbox is unchanged.
     ``request_attempts`` is how many times the agent sends a turn whose request
-    fails before its episode aborts."""
+    fails before its episode aborts. With ``turn_time_limit``, a turn the session
+    server gives up on (see ``request_deadline``) fails its episode with zero reward
+    instead of being resent."""
     cfg: Any = MilesConfig.from_payload(miles_cfg.to_payload())
     # Same sessions per session server and agent threads per process as training.
     cfg.session_server_workers = math.ceil(
@@ -199,6 +204,10 @@ def eval_miles_config(
     if request_attempts < 1:
         raise ValueError(f"request_attempts must be >= 1, got {request_attempts}")
     cfg.environment["MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT"] = str(request_attempts)
+    if turn_time_limit is not None:
+        if turn_time_limit <= 0:
+            raise ValueError(f"turn_time_limit must be positive, got {turn_time_limit}")
+        cfg.environment["MODAL_SWE_TURN_TIME_LIMIT_SECONDS"] = str(int(turn_time_limit))
     return cfg
 
 

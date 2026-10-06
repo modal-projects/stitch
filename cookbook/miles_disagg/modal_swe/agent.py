@@ -38,6 +38,11 @@ class _EpisodeCancelled(Exception):
     pass
 
 
+class _TurnTimeLimitExceeded(Exception):
+    """A model request outlived the eval's per-turn time limit
+    (``MODAL_SWE_TURN_TIME_LIMIT_SECONDS``): the session server gave up on it."""
+
+
 @dataclass
 class _ActiveEpisode:
     cancelled: threading.Event
@@ -395,6 +400,21 @@ def _is_truncated_generation_error(error: BaseException) -> bool:
         if marker in message and (status_code == 409 or "error code: 409" in message):
             return True
     return False
+
+
+def _is_request_deadline_error(error: BaseException) -> bool:
+    """Recognize the session server's answer to a request it gave up on."""
+    return any(
+        "request deadline exceeded" in str(current).lower()
+        for current in _exception_chain(error)
+    )
+
+
+def _is_turn_time_limit(error: BaseException) -> bool:
+    return any(
+        isinstance(current, _TurnTimeLimitExceeded)
+        for current in _exception_chain(error)
+    )
 
 
 def _exception_metadata(error: BaseException) -> dict[str, Any]:
@@ -972,8 +992,11 @@ def _instrument_model_requests(
     durations: list[float],
     phase_callback: Callable[[str], None] | None = None,
     cancelled: threading.Event | None = None,
+    turn_time_limit: bool = False,
 ) -> None:
-    """Measure each real LiteLLM HTTP attempt as perceived by the agent."""
+    """Measure each real LiteLLM HTTP attempt as perceived by the agent. With
+    ``turn_time_limit``, a request the session server gave up on raises
+    ``_TurnTimeLimitExceeded``, which the model never retries."""
     query = getattr(model, "_query", None)
     if not callable(query):
         logger.warning(
@@ -991,6 +1014,10 @@ def _instrument_model_requests(
             result = query(*args, **kwargs)
             _raise_if_cancelled(cancelled)
             return result
+        except Exception as error:
+            if turn_time_limit and _is_request_deadline_error(error):
+                raise _TurnTimeLimitExceeded(str(error)[:500]) from error
+            raise
         finally:
             durations.append(time.perf_counter() - started)
             if phase_callback is not None:
@@ -1134,6 +1161,7 @@ def _run_episode_sync(
             client_model_request_durations,
             set_phase,
             cancelled,
+            turn_time_limit=bool(os.getenv("MODAL_SWE_TURN_TIME_LIMIT_SECONDS")),
         )
         # BadRequest errors are deterministic for a fixed request. Retrying a
         # TITO validation or context-limit 400 ten times only burns rollout
@@ -1156,6 +1184,7 @@ def _run_episode_sync(
                             *model.abort_exceptions,
                             litellm.exceptions.BadRequestError,
                             _EpisodeCancelled,
+                            _TurnTimeLimitExceeded,
                         ]
                     )
                 )
@@ -1198,6 +1227,30 @@ def _run_episode_sync(
         except Exception as error:
             if cancelled is not None and cancelled.is_set():
                 raise _EpisodeCancelled from None
+            if _is_turn_time_limit(error):
+                # A turn still generating at the eval's time limit is a policy
+                # outcome: the episode fails with zero reward instead of resending
+                # or rerunning. Checked before the infrastructure test, which the
+                # underlying gateway error would otherwise match.
+                elapsed = time.perf_counter() - started
+                agent_metrics = _environment_metrics(
+                    env,
+                    agent_queue_time=agent_queue_time,
+                    agent_dispatch_queue_time=dispatch_queue_time,
+                    total_time=elapsed,
+                    agent_start_snapshot=agent_start_snapshot,
+                )
+                _attach_client_model_timings(
+                    agent_metrics,
+                    client_model_request_durations,
+                )
+                return _failure(
+                    "TurnTimeLimit",
+                    infrastructure=False,
+                    total_time=elapsed,
+                    agent_queue_time=agent_queue_time,
+                    agent_metrics=agent_metrics,
+                )
             if _is_context_limit_error(error):
                 # Reaching the configured context budget is a normal policy
                 # limit, not an infrastructure failure. Grade the current

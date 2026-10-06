@@ -550,7 +550,7 @@ def test_v2_patches_are_graded_in_a_fresh_sandbox_as_v2_grades_them():
 
 
 @pytest.mark.parametrize("arm", HETERO_ARMS)
-def test_a_lost_request_is_resent_inside_its_episode(arm):
+def test_a_turn_past_the_time_limit_fails_and_other_failures_are_resent(arm):
     train = _recipe(arm).miles
     cfg = evaluation.eval_miles_config(
         train,
@@ -560,18 +560,36 @@ def test_a_lost_request_is_resent_inside_its_episode(arm):
         concurrency=384,
         dump_template="/tmp/{rollout_id}.pt",
         request_attempts=spec.REQUEST_ATTEMPTS,
+        turn_time_limit=spec.TURN_TIME_LIMIT_SECONDS,
     )
 
     # Training sends each turn once; the eval resends a failed one.
     assert train.environment["MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT"] == "1"
     assert cfg.environment["MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT"] == "3"
+    # The agent learns the limit, so a turn the session server gives up on fails its
+    # episode instead of being resent.
+    assert cfg.environment["MODAL_SWE_TURN_TIME_LIMIT_SECONDS"] == "300"
+    assert "MODAL_SWE_TURN_TIME_LIMIT_SECONDS" not in train.environment
     assert evaluation.config_drift(train, cfg) == []
-    # The session server gives up first, so a resent turn never overlaps the original.
-    assert evaluation.request_deadline(cfg, spec.REQUEST_DEADLINE_SECONDS) == 1800
-    assert 1800 < float(cfg.environment["MODAL_SWE_MODEL_REQUEST_TIMEOUT"])
-    # The deadline only catches lost requests: a full-length turn still fits at a slow
-    # per-request decode speed.
-    assert spec.REQUEST_DEADLINE_SECONDS >= train.rollout_max_response_len / 20
+    # The session server gives up at the limit, before the agent's own request timeout,
+    # and before the GPU pools' serving path drops a silent response (~343 s observed).
+    assert evaluation.request_deadline(cfg, spec.TURN_TIME_LIMIT_SECONDS) == 300
+    assert 300 < float(cfg.environment["MODAL_SWE_MODEL_REQUEST_TIMEOUT"])
+    assert spec.TURN_TIME_LIMIT_SECONDS < 343
+    assert not hasattr(spec, "REQUEST_DEADLINE_SECONDS")
+
+
+def test_the_turn_time_limit_must_be_positive():
+    with pytest.raises(ValueError, match="turn_time_limit"):
+        evaluation.eval_miles_config(
+            _recipe("qwen3_6_35b_a3b_hetero_grpo").miles,
+            dataset=spec.DATASET,
+            tasks_dir=spec.TASKS_DIR,
+            sandbox_app=spec.SANDBOX_APP,
+            concurrency=384,
+            dump_template="/tmp/{rollout_id}.pt",
+            turn_time_limit=0,
+        )
 
 
 def test_request_deadline_must_fall_before_the_agent_timeout():

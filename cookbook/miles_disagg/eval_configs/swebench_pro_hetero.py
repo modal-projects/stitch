@@ -50,13 +50,15 @@ DATASET = {
 }
 # Sandbox or API failures never reached the policy, so they rerun instead of scoring.
 INFRA_RETRIES = 3
-# A model request that the serving gateway loses never returns. The session server gives
-# up on a request after REQUEST_DEADLINE_SECONDS, and the agent resends the turn, up to
-# REQUEST_ATTEMPTS times, before the episode aborts and reruns. The deadline must not cut
-# off a real turn: a full 32K-token turn at ~45 tok/s per request (8 B300 engines under
-# eval load) takes ~12 min, and degenerating checkpoints write such turns, so 600 s
-# aborted them as if lost. 1800 s fits a full turn down to ~18 tok/s.
-REQUEST_DEADLINE_SECONDS = 1800
+# A turn the policy is still generating after TURN_TIME_LIMIT_SECONDS fails its episode
+# with zero reward, like a limit the agent runs out of. Healthy turns return far sooner
+# (99.9th percentile 100-190 s over 45 points; 16 per million completed between 300 and
+# 356 s), long turns go with failing episodes, and the GPU pools' serving path drops any
+# response slower than ~350 s, so a resend could not complete such a turn either. The
+# session server gives up at the limit and the agent ends the episode instead of
+# resending. Other request failures are still resent, up to REQUEST_ATTEMPTS times,
+# before the episode aborts and reruns.
+TURN_TIME_LIMIT_SECONDS = 300
 REQUEST_ATTEMPTS = 3
 SANDBOX_APP = "stitch-swebench-pro-eval-sandbox"
 
