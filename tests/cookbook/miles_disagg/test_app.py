@@ -126,9 +126,11 @@ def test_every_rollout_replica_stamps_its_own_source(monkeypatch, recipe):
     )
     monkeypatch.setattr(app, "_boot_checkpoint", lambda *_args: ("checkpoint", 0))
     stamped = {}
+    keepalive = {}
 
     def serve_startup(*_args, **kwargs):
         stamped[pool.name] = kwargs["rollout_source"]
+        keepalive[pool.name] = kwargs["response_keepalive_after"]
 
     monkeypatch.setattr(app.server, "serve_startup", serve_startup)
     for pool in app.ROLLOUT_POOL_CONFIGS:
@@ -142,6 +144,9 @@ def test_every_rollout_replica_stamps_its_own_source(monkeypatch, recipe):
     }
     # The trainer knows every source a replica stamps.
     assert set(stamped.values()) == set(app.ROLLOUT_SOURCES.values())
+    # Every replica starts a long response before the rollout router's web endpoint
+    # answers a silent one with a 303 (150 s), well inside Flash's ~350 s.
+    assert all(0 < after < 150 for after in keepalive.values()), keepalive
 
 
 def test_multi_view_pool_claims_use_view_scoped_update_directories(monkeypatch):

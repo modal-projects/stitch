@@ -53,6 +53,23 @@ def test_sidecar_config_requires_bounded_health_timeout(timeout: float) -> None:
         SidecarConfig(**_BASE, delta_update_mode="cpu", engine_health_timeout=timeout)
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("response_keepalive_after", -1.0),
+        ("response_keepalive_after", float("inf")),
+        ("response_keepalive_after", float("nan")),
+        ("response_keepalive_interval", 0.0),
+        ("response_keepalive_interval", float("inf")),
+    ],
+)
+def test_sidecar_config_requires_bounded_response_keepalive(
+    field: str, value: float
+) -> None:
+    with pytest.raises(ValueError, match=field):
+        SidecarConfig(**_BASE, delta_update_mode="cpu", **{field: value})
+
+
 def test_sidecar_config_requires_local_checkpoint_dir_in_disk_mode() -> None:
     with pytest.raises(
         ValueError, match="local_checkpoint_dir is required in disk mode"
@@ -96,6 +113,8 @@ _FULL = SidecarConfig(
     engine_health_timeout=30.0,
     proxy_max_connections=256,
     proxy_max_keepalive_connections=64,
+    response_keepalive_after=60.0,
+    response_keepalive_interval=15.0,
     rollout_source="ServerB200NVFP4W4A16:nvfp4",
 )
 
@@ -120,6 +139,7 @@ def test_from_argv_fills_unflagged_fields_with_defaults() -> None:
     )
     assert parsed == _MINIMAL
     assert parsed.engine_health_timeout == 30.0
+    assert parsed.response_keepalive_after is None
 
 
 def test_disk_mode_requires_local_checkpoint_dir() -> None:
@@ -181,6 +201,8 @@ def test_run_builds_engine_and_serves(monkeypatch: pytest.MonkeyPatch) -> None:
         engine_health_timeout=30.0,
         proxy_max_connections=256,
         proxy_max_keepalive_connections=64,
+        response_keepalive_after=60.0,
+        response_keepalive_interval=15.0,
         rollout_source="ServerH100FP8:fp8",
     )
     sidecar.run(config, store_out)
@@ -210,6 +232,8 @@ def test_run_builds_engine_and_serves(monkeypatch: pytest.MonkeyPatch) -> None:
         "watchdog_failure_threshold": 7,
         "proxy_max_connections": 256,
         "proxy_max_keepalive_connections": 64,
+        "response_keepalive_after": 60.0,
+        "response_keepalive_interval": 15.0,
     }
 
 

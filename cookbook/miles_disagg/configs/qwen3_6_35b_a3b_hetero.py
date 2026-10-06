@@ -66,6 +66,10 @@ SGLANG_SERVER_ENV = {}
 
 SIDECAR_COMMIT_MODE = "in_place"
 SIDECAR_FLUSH_CACHE_ON_COMMIT = False
+# A turn still generating after 60 s gets its response started and a whitespace byte
+# every 20 s. Silent responses are dropped on the way back: Modal Flash after ~350 s,
+# the rollout router's web endpoint (a 303) after 150 s.
+SIDECAR_RESPONSE_KEEPALIVE_AFTER = 60.0
 SGLANG_DELTA_UPDATE_MODE = "cpu"
 
 DATASET_PATH = DATA_PATH / "mimo-v2-6-rl-oss"
@@ -458,13 +462,26 @@ class HeteroMiles(MilesConfig):
         "MODAL_SWE_TASKS_DIR": f"{DATASET_PATH}/tasks/code",
         "MODAL_SWE_AGENT_PROFILE": "mimo-code-bash",
         "MODAL_SWE_MAX_STEPS": "500",
-        "MODAL_SWE_EPISODE_TIMEOUT": "4800",
+        # A safety net for a slow or unhealthy sampler: the policy's own budgets are
+        # the step and context limits, and an episode that reaches this one is
+        # dropped as an infrastructure failure rather than graded.
+        "MODAL_SWE_EPISODE_TIMEOUT": "7200",
+        "MODAL_SWE_TIME_EXCEEDED_IS_INFRA": "1",
         "MODAL_SWE_MODEL_REQUEST_TIMEOUT": "3600",
         "MODAL_SWE_EXEC_TIMEOUT": "300",
         "MODAL_SWE_MEMORY_MIB": "8192",
         # Spread the first wave of sessions over five minutes; starting them all at
         # once clustered gateway errors and aborted requests in the first ~45 min.
         "MODAL_SWE_START_RAMP_SECONDS": "300",
+        # Grade only the policy's patch, in a fresh Sandbox of the task image, as the
+        # eval and the benchmark do: changes outside the diff cannot make or break a
+        # reward. MiMo code verifiers test the tree they find, so the grader applies
+        # the patch first.
+        "MODAL_SWE_GRADE_IN_FRESH_SANDBOX": "1",
+        "MODAL_SWE_FRESH_GRADE_APPLY_PATCH": "1",
+        # The task tells the agent to run the submit command when it is finished; an
+        # episode that ends any other way scores zero, whatever its diff grades to.
+        "MODAL_SWE_REQUIRE_SUBMISSION": "1",
     }
 
     def prepare_data(self) -> None:

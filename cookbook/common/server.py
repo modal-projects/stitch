@@ -63,6 +63,7 @@ def serve_startup(
     engine_health_timeout: float = 30.0,
     proxy_max_connections: int = 100,
     proxy_max_keepalive_connections: int = 20,
+    response_keepalive_after: float | None = None,
     weight_view: str | None = None,
     rollout_source: str | None = None,
 ) -> None:
@@ -129,6 +130,7 @@ def serve_startup(
         engine_health_timeout=engine_health_timeout,
         proxy_max_connections=proxy_max_connections,
         proxy_max_keepalive_connections=proxy_max_keepalive_connections,
+        response_keepalive_after=response_keepalive_after,
         weight_view=weight_view,
         rollout_source=rollout_source,
     )

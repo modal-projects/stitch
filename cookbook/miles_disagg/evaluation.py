@@ -59,8 +59,23 @@ EVAL_ENVIRONMENT_OVERRIDES = frozenset(
         "MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT",
         # Scoring only: a turn still generating at this limit fails its episode.
         "MODAL_SWE_TURN_TIME_LIMIT_SECONDS",
+        # Training-only grading and scoring rules, which an eval pins off (see
+        # TRAINING_ONLY_ENVIRONMENT): eval scores are recorded as graded, and their
+        # scoring rules are applied in one place, by the figure pipeline.
+        "MODAL_SWE_FRESH_GRADE_APPLY_PATCH",
+        "MODAL_SWE_GRADE_BOTH_WAYS",
+        "MODAL_SWE_REQUIRE_SUBMISSION",
+        "MODAL_SWE_TIME_EXCEEDED_IS_INFRA",
     }
 )
+# A SWE-bench Pro verifier applies the policy's patch itself, so a training recipe's
+# MODAL_SWE_FRESH_GRADE_APPLY_PATCH would apply it twice and fail every episode.
+TRAINING_ONLY_ENVIRONMENT = {
+    "MODAL_SWE_FRESH_GRADE_APPLY_PATCH": "0",
+    "MODAL_SWE_GRADE_BOTH_WAYS": "0",
+    "MODAL_SWE_REQUIRE_SUBMISSION": "0",
+    "MODAL_SWE_TIME_EXCEEDED_IS_INFRA": "0",
+}
 
 
 @dataclass(frozen=True)
@@ -198,9 +213,9 @@ def eval_miles_config(
         "MODAL_SWE_TASKS_DIR": str(tasks_dir),
         "MODAL_SWE_SANDBOX_APP": sandbox_app,
         "MODAL_SWE_AGENT_PROCESSES": str(math.ceil(concurrency / threads)),
+        **TRAINING_ONLY_ENVIRONMENT,
+        "MODAL_SWE_GRADE_IN_FRESH_SANDBOX": "1" if fresh_sandbox_grading else "0",
     }
-    if fresh_sandbox_grading:
-        cfg.environment["MODAL_SWE_GRADE_IN_FRESH_SANDBOX"] = "1"
     if request_attempts < 1:
         raise ValueError(f"request_attempts must be >= 1, got {request_attempts}")
     cfg.environment["MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT"] = str(request_attempts)

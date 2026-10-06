@@ -714,3 +714,33 @@ def test_app_names_fit_modal_and_stay_unchanged_when_they_already_fit():
     )
     with pytest.raises(ValueError, match="64 characters"):
         evaluation.app_name("spec", "x" * 60, point)
+
+
+@pytest.mark.parametrize(
+    "arm",
+    [
+        "qwen3_6_35b_a3b_hetero_score_centering_mis_top_p",
+        "qwen3_6_35b_a3b_b200_bf16_score_centering_mis_top_p",
+    ],
+)
+def test_an_eval_pins_the_training_only_grading_rules_off(arm):
+    """A SWE-bench Pro verifier applies the patch itself; a recipe that applies it in
+    training must not make an eval apply it twice, and eval scores stay as graded."""
+    train = _recipe(arm).miles
+    assert train.environment["MODAL_SWE_FRESH_GRADE_APPLY_PATCH"] == "1"
+
+    graded = evaluation.eval_miles_config(
+        train,
+        dataset=spec.DATASET,
+        tasks_dir=spec.TASKS_DIR,
+        sandbox_app=spec.SANDBOX_APP,
+        concurrency=256,
+        dump_template="/tmp/{rollout_id}.pt",
+        fresh_sandbox_grading=True,
+    )
+    in_place = _eval_config(train)
+
+    for key, value in evaluation.TRAINING_ONLY_ENVIRONMENT.items():
+        assert graded.environment[key] == value == "0"
+    assert graded.environment["MODAL_SWE_GRADE_IN_FRESH_SANDBOX"] == "1"
+    assert in_place.environment["MODAL_SWE_GRADE_IN_FRESH_SANDBOX"] == "0"

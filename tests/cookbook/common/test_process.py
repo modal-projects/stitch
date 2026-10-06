@@ -87,6 +87,7 @@ def test_start_sidecar_passes_s3_store_settings(monkeypatch) -> None:
         engine_health_timeout=30.0,
         proxy_max_connections=256,
         proxy_max_keepalive_connections=64,
+        response_keepalive_after=60.0,
         rollout_source="ServerH100FP8:fp8",
     )
 
@@ -103,6 +104,7 @@ def test_start_sidecar_passes_s3_store_settings(monkeypatch) -> None:
     assert config.engine_health_timeout == 30.0
     assert config.proxy_max_connections == 256
     assert config.proxy_max_keepalive_connections == 64
+    assert config.response_keepalive_after == 60.0
     assert config.rollout_source == "ServerH100FP8:fp8"
     assert config.store_options == {
         "backend": storage.S3,

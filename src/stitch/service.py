@@ -92,21 +92,29 @@ def create_app(
     upstream_timeout: float | None = 3600.0,
     proxy_max_connections: int = 100,
     proxy_max_keepalive_connections: int = 20,
+    response_keepalive_after: float | None = None,
+    response_keepalive_interval: float = 20.0,
 ):
     """The versioned rollout proxy. Versioned routes are admitted through the gate
     (constraint enforced, serving version captured), stamped by the engine, forwarded,
     and the response stamped with the served version. A rejected constraint returns a
     retryable 409; a client disconnect aborts the upstream generation. A local-engine
-    transport failure returns a retryable 503 instead of escaping as a sidecar 500."""
+    transport failure returns a retryable 503 instead of escaping as a sidecar 500.
+
+    With ``response_keepalive_after`` set, a request the engine has not answered by then
+    gets its 200 at once and a whitespace byte every ``response_keepalive_interval``
+    seconds until the stamped body follows, so gateways that drop silent responses
+    deliver it."""
     import httpx
     from fastapi import FastAPI, Request
-    from fastapi.responses import JSONResponse, Response
+    from fastapi.responses import JSONResponse, Response, StreamingResponse
 
     engine_url = engine.base_url().rstrip("/")
     blocked = engine.blocked_routes()
     timeout = httpx.Timeout(upstream_timeout, connect=10.0)
     versioned = {r.strip("/") for r in versioned_routes}
     pooled: dict[str, Any] = {}
+    releasing: set[asyncio.Task] = set()
 
     def client() -> Any:
         c = pooled.get("client")
@@ -205,83 +213,79 @@ def create_app(
         }
 
         # Metrics may be scraped before the first pointer exists. Keep the exporter
-        # available without making scrapes participate in weight commits.
+        # available without making scrapes participate in weight commits. The lease is
+        # held on a stack so a kept-alive response can carry it past this handler.
+        lease = contextlib.AsyncExitStack()
         try:
-            async with (
+            served = await lease.enter_async_context(
                 contextlib.nullcontext()
                 if request.method == "GET" and route == "metrics"
                 else gate.admit(constraint if is_versioned else None)
-            ) as served:
-                if is_versioned and payload is not None and served is not None:
-                    engine.stamp_request(payload, served)
-                kwargs: dict[str, Any] = {
-                    "params": request.query_params,
-                    "headers": headers,
-                }
-                kwargs["json" if payload is not None else "content"] = (
-                    payload if payload is not None else body
-                )
-
-                upstream_task = asyncio.ensure_future(
-                    client().request(request.method, f"{engine_url}/{path}", **kwargs)
-                )
-                disconnect_task = asyncio.ensure_future(_watch_disconnect(request))
-                try:
-                    await asyncio.wait(
-                        {upstream_task, disconnect_task},
-                        return_when=asyncio.FIRST_COMPLETED,
-                    )
-                    if not upstream_task.done():
-                        upstream_task.cancel()
-                        with contextlib.suppress(BaseException):
-                            await upstream_task
-                        if rid is not None:
-                            await _abort(client(), engine_url, rid)
-                        return Response(status_code=499)
-                finally:
-                    disconnect_task.cancel()
-                    with contextlib.suppress(BaseException):
-                        await disconnect_task
-
-                try:
-                    resp = upstream_task.result()
-                except httpx.RequestError as exc:
-                    # The sidecar is still healthy when its colocated engine exits, wedges, or
-                    # drops a connection. Surface that distinction to the pool so another replica
-                    # can take the retry. A failed read can leave generation alive upstream, so
-                    # retain the admission lease until the best-effort abort has completed.
-                    logger.warning(
-                        "local engine request failed method=%s route=/%s rid=%s error=%s: %s",
-                        request.method,
-                        route,
-                        rid,
-                        type(exc).__name__,
-                        exc,
-                    )
-                    if rid is not None:
-                        await _abort(client(), engine_url, rid)
-                    return JSONResponse(
-                        {
-                            "error": {
-                                "type": "EngineUnavailable",
-                                "message": "the local inference engine is unavailable",
-                                "retryable": True,
-                            }
-                        },
-                        status_code=503,
-                        headers={"Retry-After": "1"},
-                    )
-                if "application/json" not in resp.headers.get("content-type", ""):
-                    return Response(
-                        content=resp.content,
-                        status_code=resp.status_code,
-                        media_type=resp.headers.get("content-type") or None,
-                    )
-                current = (
-                    status.applied
-                )  # capture while still pinned, before a commit advances it
+            )
         except ConstraintUnmet as exc:
             return JSONResponse(exc.error, status_code=409)
+        handed_off = False
+        try:
+            if is_versioned and payload is not None and served is not None:
+                engine.stamp_request(payload, served)
+            kwargs: dict[str, Any] = {
+                "params": request.query_params,
+                "headers": headers,
+            }
+            kwargs["json" if payload is not None else "content"] = (
+                payload if payload is not None else body
+            )
+
+            upstream_task = asyncio.ensure_future(
+                client().request(request.method, f"{engine_url}/{path}", **kwargs)
+            )
+            disconnect_task = asyncio.ensure_future(_watch_disconnect(request))
+            try:
+                await asyncio.wait(
+                    {upstream_task, disconnect_task},
+                    timeout=response_keepalive_after if is_versioned else None,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if disconnect_task.done() and not upstream_task.done():
+                    upstream_task.cancel()
+                    with contextlib.suppress(BaseException):
+                        await upstream_task
+                    if rid is not None:
+                        await _abort(client(), engine_url, rid)
+                    return Response(status_code=499)
+            finally:
+                disconnect_task.cancel()
+                with contextlib.suppress(BaseException):
+                    await disconnect_task
+
+            if not upstream_task.done():
+                # A long generation: start the response now and keep bytes flowing, or
+                # a gateway on the way back drops it (Modal Flash drops a silent POST
+                # response after ~6 min, and a Modal web endpoint answers 303 after
+                # 150 s). The stream owns the admission lease until the engine answers.
+                handed_off = True
+                release = _releaser(lease, upstream_task, rid)
+                return _KeptAliveResponse(
+                    _kept_alive(release, upstream_task, route, rid, served),
+                    release,
+                )
+
+            outcome = await _engine_outcome(upstream_task, request.method, route, rid)
+            if isinstance(outcome, Response):
+                return outcome
+            resp = outcome
+            if "application/json" not in resp.headers.get("content-type", ""):
+                return Response(
+                    content=resp.content,
+                    status_code=resp.status_code,
+                    media_type=resp.headers.get("content-type") or None,
+                )
+            current = (
+                status.applied
+            )  # capture while still pinned, before a commit advances it
+        finally:
+            if not handed_off:
+                await lease.aclose()
 
         body = await asyncio.to_thread(
             _render_json_response,
@@ -294,6 +298,119 @@ def create_app(
             content=body,
             status_code=resp.status_code,
             media_type="application/json",
+        )
+
+    async def _engine_outcome(
+        upstream_task: asyncio.Future, method: str, route: str, rid: str | None
+    ) -> Any:
+        """The engine's response, or the retryable 503 for a failed local request."""
+        try:
+            return upstream_task.result()
+        except httpx.RequestError as exc:
+            # The sidecar is still healthy when its colocated engine exits, wedges, or
+            # drops a connection. Surface that distinction to the pool so another replica
+            # can take the retry. A failed read can leave generation alive upstream, so
+            # retain the admission lease until the best-effort abort has completed.
+            logger.warning(
+                "local engine request failed method=%s route=/%s rid=%s error=%s: %s",
+                method,
+                route,
+                rid,
+                type(exc).__name__,
+                exc,
+            )
+            if rid is not None:
+                await _abort(client(), engine_url, rid)
+            return JSONResponse(
+                {
+                    "error": {
+                        "type": "EngineUnavailable",
+                        "message": "the local inference engine is unavailable",
+                        "retryable": True,
+                    }
+                },
+                status_code=503,
+                headers={"Retry-After": "1"},
+            )
+
+    def _releaser(
+        lease: contextlib.AsyncExitStack, upstream_task: asyncio.Future, rid: str | None
+    ) -> Any:
+        """Ends a kept-alive request once, in its own task: aborts the generation if the
+        engine has not answered, then releases the admission lease. A disconnecting client
+        cancels the stream's task, so cleanup awaited there could be cut short and leak
+        the lease; a separate task cannot be."""
+        started: list[asyncio.Task] = []
+
+        async def cleanup() -> None:
+            if not upstream_task.done():
+                upstream_task.cancel()
+                with contextlib.suppress(BaseException):
+                    await upstream_task
+                if rid is not None:
+                    await _abort(client(), engine_url, rid)
+            await lease.aclose()
+
+        async def release() -> None:
+            if not started:
+                task = asyncio.ensure_future(cleanup())
+                releasing.add(task)
+                task.add_done_callback(releasing.discard)
+                started.append(task)
+            await asyncio.shield(started[0])
+
+        return release
+
+    class _KeptAliveResponse(StreamingResponse):
+        """A 200 whose body arrives later. Releases the request however the stream
+        ends: completion, client disconnect, or a failed send."""
+
+        def __init__(self, content: Any, release: Any) -> None:
+            super().__init__(content, status_code=200, media_type="application/json")
+            self._release = release
+
+        async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+            try:
+                await super().__call__(scope, receive, send)
+            finally:
+                await self._release()
+
+    async def _kept_alive(
+        release: Any,
+        upstream_task: asyncio.Future,
+        route: str,
+        rid: str | None,
+        served: Any,
+    ) -> Any:
+        """Whitespace every ``response_keepalive_interval`` seconds until the engine
+        answers, then its body, stamped as an immediate response would be. JSON allows
+        leading whitespace, so a client parses the same document. The status is already
+        200, so an engine error arrives as its error body (the session server rejects a
+        body without choices)."""
+        yield b" "
+        while not upstream_task.done():
+            await asyncio.wait({upstream_task}, timeout=response_keepalive_interval)
+            if not upstream_task.done():
+                yield b" "
+        outcome = await _engine_outcome(upstream_task, "POST", route, rid)
+        if isinstance(outcome, Response):
+            await release()
+            yield outcome.body
+            return
+        if outcome.status_code != 200:
+            logger.warning(
+                "local engine answered %d after the response started route=/%s rid=%s",
+                outcome.status_code,
+                route,
+                rid,
+            )
+        current = status.applied  # capture while still pinned, before a commit advances it
+        await release()
+        if "application/json" not in outcome.headers.get("content-type", ""):
+            yield outcome.content
+            return
+        yield await asyncio.to_thread(
+            _render_json_response, outcome.content, engine, served, current
         )
 
     return app
@@ -329,6 +446,8 @@ def serve(
     watchdog_failure_threshold: int = 3,
     proxy_max_connections: int = 100,
     proxy_max_keepalive_connections: int = 20,
+    response_keepalive_after: float | None = None,
+    response_keepalive_interval: float = 20.0,
 ) -> None:
     """Run one replica's sidecar: build the Reconciler over the given store+engine
     and serve the versioned proxy. The deployment supplies the concrete instances."""
@@ -360,6 +479,8 @@ def serve(
             engine,
             proxy_max_connections=proxy_max_connections,
             proxy_max_keepalive_connections=proxy_max_keepalive_connections,
+            response_keepalive_after=response_keepalive_after,
+            response_keepalive_interval=response_keepalive_interval,
         ),
         host=host,
         port=port,

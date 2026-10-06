@@ -499,6 +499,9 @@ def run_verifier(
 # cookbook.miles_disagg.swebench_pro): the ref naming the tree the agent started from,
 # and where the grader puts the policy's patch.
 _TASK_BASELINE_REF = "refs/miles/task-baseline"
+# The tree the policy starts from: the baseline plus what the image leaves untracked.
+_TASK_START_REF = "refs/miles/task-start"
+_TASK_START_INDEX = "/tmp/miles-task-start.index"
 _GRADE_PATCH_DIR = "/tmp/miles-grade"
 _GRADE_PATCH_NAME = "policy.patch"
 _CAPTURED_PATCH_PATH = "/tmp/miles_policy_capture.patch"
@@ -509,6 +512,141 @@ def _fresh_sandbox_grading() -> bool:
     only the policy's patch, as SWE-bench Pro V2 re-grades a captured diff on a pristine
     image. Evaluation turns this on; training grades in the agent's own Sandbox."""
     return os.getenv("MODAL_SWE_GRADE_IN_FRESH_SANDBOX", "0") == "1"
+
+
+def _fresh_grade_applies_patch() -> bool:
+    """Apply the policy's patch to the fresh Sandbox's tree before its verifier runs.
+
+    A SWE-bench Pro verifier applies the patch itself (``swebench_pro.GRADE_PATCH_PATH``);
+    a MiMo code verifier tests the tree it finds, so without this a fresh Sandbox would
+    grade the untouched baseline. Training on MiMo tasks turns it on with fresh grading."""
+    return os.getenv("MODAL_SWE_FRESH_GRADE_APPLY_PATCH", "0") == "1"
+
+
+def _grade_both_ways() -> bool:
+    """Grade each episode in its own Sandbox and in a fresh one, train on the fresh grade,
+    and log the own-Sandbox grade beside it, to measure how often the two disagree."""
+    return os.getenv("MODAL_SWE_GRADE_BOTH_WAYS", "0") == "1"
+
+
+def _require_submission() -> bool:
+    """Score an episode that ends without the agent's submit command as failed.
+
+    The task tells the agent to run the submit command when it is finished, so an episode
+    that stops on repeated format errors or on the step or context limit has not
+    completed it, whatever its diff grades to. The diff is still graded and logged as
+    ``unsubmitted_diff_passed``."""
+    return os.getenv("MODAL_SWE_REQUIRE_SUBMISSION", "0") == "1"
+
+
+def _time_exceeded_is_infrastructure() -> bool:
+    """Drop an episode that reaches its wall-clock budget as an infrastructure failure.
+
+    How fast an episode runs depends on its sampler, not only on the policy; the policy's
+    own budgets are the step and context limits, which end the episode as
+    ``LimitsExceeded``. With this on, the wall-clock budget is a safety net that should
+    almost never fire on a healthy sampler."""
+    return os.getenv("MODAL_SWE_TIME_EXCEEDED_IS_INFRA", "0") == "1"
+
+
+def submission_outcome(
+    exit_status: str, graded_reward: float
+) -> tuple[float, dict[str, int]]:
+    """The reward to train on and the submission metrics, from the episode's exit status
+    and its graded reward."""
+    submitted = exit_status == "Submitted"
+    passed = graded_reward > 0.5
+    metrics = {
+        "unsubmitted": int(not submitted),
+        "unsubmitted_diff_passed": int(not submitted and passed),
+    }
+    if not submitted and _require_submission():
+        return 0.0, metrics
+    return graded_reward, metrics
+
+
+def _apply_grade_patch(
+    grade_env: ModalSWEEnvironment, patch: bytes, *, timeout: int
+) -> dict[str, Any] | None:
+    """Apply the uploaded patch to a fresh Sandbox's tree when the task's verifier will
+    not. Returns a missing-reward result when it does not apply, which the episode
+    treats as an infrastructure failure: the patch is a diff from this same baseline."""
+    if not _fresh_grade_applies_patch() or not patch:
+        return None
+    return_code, output = grade_env.exec(
+        f"git apply --binary --whitespace=nowarn {_GRADE_PATCH_DIR}/{_GRADE_PATCH_NAME}",
+        cwd=grade_env.cwd,
+        timeout=int(timeout),
+    )
+    if return_code == 0:
+        return None
+    return {
+        "reward": None,
+        "return_code": return_code,
+        "timeout_sec": timeout,
+        "output_tail": (
+            "the policy patch did not apply in the fresh Sandbox: "
+            + output[-_VERIFIER_LOG_TAIL_CHARS:]
+        ),
+    }
+
+
+def grade_episode(
+    env: ModalSWEEnvironment, task_dir: Path, *, settings: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, float | int]]:
+    """The verifier result an episode trains on, and grading metrics to log beside it."""
+    if not _grade_both_ways():
+        if _fresh_sandbox_grading():
+            return grade_in_fresh_sandbox(env, task_dir, settings=settings), {}
+        verifier = run_verifier(
+            env, task_dir, configured_timeout=int(settings["verify_timeout"])
+        )
+        return verifier, {}
+    # Capture the patch before the own-Sandbox verifier applies the hidden tests to
+    # the tree, so the fresh grade receives only the policy's change.
+    patch = capture_policy_patch(env, timeout=int(settings["exec_timeout"]))
+    metrics: dict[str, float | int] = {}
+    own: dict[str, Any] = {}
+    try:
+        own = run_verifier(
+            env, task_dir, configured_timeout=int(settings["verify_timeout"])
+        )
+        own_reward = own["reward"]
+    except SandboxCommandTimeoutError:
+        own_reward = None
+        metrics["grade_own_sandbox_timeout"] = 1
+    if patch is None:
+        fresh: dict[str, Any] = {
+            "reward": None,
+            "return_code": None,
+            "timeout_sec": _verifier_timeout(task_dir, int(settings["verify_timeout"])),
+            "output_tail": f"no {_TASK_BASELINE_REF} in the agent's Sandbox",
+        }
+    else:
+        fresh = grade_patch_in_fresh_sandbox(
+            patch, task_dir, cwd=env.cwd, settings=settings
+        )
+    if own_reward is not None:
+        metrics["grade_own_sandbox_reward"] = own_reward
+        if fresh["reward"] is not None:
+            metrics["grade_disagreement"] = int(
+                (own_reward > 0.5) != (fresh["reward"] > 0.5)
+            )
+            if metrics["grade_disagreement"]:
+                # Aggregate rates cannot say which grade was wrong; the verifier
+                # output of each disagreeing episode can.
+                logger.warning(
+                    "grades disagree for %s: own Sandbox %s (rc=%s), fresh %s (rc=%s); "
+                    "own tail: %s | fresh tail: %s",
+                    task_dir.name,
+                    own_reward,
+                    own.get("return_code"),
+                    fresh["reward"],
+                    fresh.get("return_code"),
+                    str(own.get("output_tail", ""))[-400:].replace("\n", " "),
+                    str(fresh.get("output_tail", ""))[-400:].replace("\n", " "),
+                )
+    return fresh, metrics
 
 
 def _task_resources(task_dir: Path) -> tuple[float | None, int | None]:
@@ -524,13 +662,43 @@ def _task_resources(task_dir: Path) -> tuple[float | None, int | None]:
     )
 
 
-def capture_policy_patch(env: ModalSWEEnvironment, *, timeout: int) -> bytes | None:
-    """The policy's change, as its diff from the task baseline with untracked files
-    included. None when the baseline ref is gone, so there is nothing to grade."""
+def snapshot_task_start(env: ModalSWEEnvironment, *, timeout: int) -> None:
+    """Record the tree the policy starts from as ``_TASK_START_REF``: the task baseline
+    plus whatever the image leaves untracked, such as an installed .venv or a generated
+    lockfile. The captured patch is the policy's change from this tree, so it applies
+    to a fresh Sandbox of the same image, which holds the same untracked files; a diff
+    from the baseline alone would re-add them there and fail to apply. A temporary
+    index leaves the agent's own index and status untouched."""
+    index = f"GIT_INDEX_FILE={_TASK_START_INDEX}"
     return_code, output = env.exec(
-        f"git rev-parse --verify --quiet {_TASK_BASELINE_REF} >/dev/null && "
+        f"rm -f {_TASK_START_INDEX} && "
+        f'base=$(git rev-parse --verify {_TASK_BASELINE_REF}) && '
+        f'{index} git read-tree "$base" && '
+        f"{index} git add -A . && "
+        f"tree=$({index} git write-tree) && "
+        "commit=$(git -c user.name=miles -c user.email=miles@example.invalid "
+        'commit-tree "$tree" -p "$base" -m task-start) && '
+        f'git update-ref {_TASK_START_REF} "$commit"; '
+        f"status=$?; rm -f {_TASK_START_INDEX}; exit $status",
+        cwd=env.cwd,
+        timeout=timeout,
+    )
+    if return_code != 0:
+        raise RuntimeError(
+            f"recording the task start tree failed with return code {return_code}: "
+            f"{output[-_VERIFIER_LOG_TAIL_CHARS:]}"
+        )
+
+
+def capture_policy_patch(env: ModalSWEEnvironment, *, timeout: int) -> bytes | None:
+    """The policy's change, as its diff from the tree it started from (the task start,
+    else the baseline) with untracked files included. None when both refs are gone, so
+    there is nothing to grade."""
+    return_code, output = env.exec(
+        f"ref=$(git rev-parse --verify --quiet {_TASK_START_REF} || "
+        f"git rev-parse --verify --quiet {_TASK_BASELINE_REF}) && "
         "{ git add -N . >/dev/null 2>&1 || true; } && "
-        f"git diff --binary {_TASK_BASELINE_REF} -- . > {_CAPTURED_PATCH_PATH} && "
+        f'git diff --binary "$ref" -- . > {_CAPTURED_PATCH_PATH} && '
         f"sha256sum {_CAPTURED_PATCH_PATH}",
         cwd=env.cwd,
         timeout=timeout,
@@ -557,19 +725,36 @@ def grade_in_fresh_sandbox(
     takes the task's declared CPU and memory, which the benchmark grades with.
     """
     started = time.perf_counter()
-    timeout = _verifier_timeout(task_dir, int(settings["verify_timeout"]))
     patch = capture_policy_patch(agent_env, timeout=int(settings["exec_timeout"]))
     if patch is None:
         return {
             "reward": None,
             "return_code": None,
-            "timeout_sec": timeout,
+            "timeout_sec": _verifier_timeout(task_dir, int(settings["verify_timeout"])),
             "output_tail": f"no {_TASK_BASELINE_REF} in the agent's Sandbox",
         }
+    return grade_patch_in_fresh_sandbox(
+        patch, task_dir, cwd=agent_env.cwd, settings=settings, started=started
+    )
+
+
+def grade_patch_in_fresh_sandbox(
+    patch: bytes,
+    task_dir: Path,
+    *,
+    cwd: str,
+    settings: dict[str, Any],
+    started: float | None = None,
+) -> dict[str, Any]:
+    """``grade_in_fresh_sandbox`` for a patch already captured, such as one an eval
+    stored, so a sample can be re-graded without rerunning its agent."""
+    if started is None:
+        started = time.perf_counter()
+    timeout = _verifier_timeout(task_dir, int(settings["verify_timeout"]))
     cpu, memory_mib = _task_resources(task_dir)
     grade_env = ModalSWEEnvironment(
         task_dir,
-        cwd=agent_env.cwd,
+        cwd=cwd,
         lifetime=timeout + 900,
         exec_timeout=int(settings["exec_timeout"]),
         app_name=str(settings["app_name"]),
@@ -582,9 +767,11 @@ def grade_in_fresh_sandbox(
         with tempfile.TemporaryDirectory() as staging:
             (Path(staging) / _GRADE_PATCH_NAME).write_bytes(patch)
             grade_env.upload_tree(staging, _GRADE_PATCH_DIR)
-        verifier = run_verifier(
-            grade_env, task_dir, configured_timeout=int(settings["verify_timeout"])
-        )
+        verifier = _apply_grade_patch(grade_env, patch, timeout=timeout)
+        if verifier is None:
+            verifier = run_verifier(
+                grade_env, task_dir, configured_timeout=int(settings["verify_timeout"])
+            )
     except SandboxCommandTimeoutError as error:
         # A verifier timeout is still graded (zero), so keep what it graded.
         error.policy_patch = patch
@@ -734,6 +921,17 @@ def postprocess_samples(
             sample.status = Sample.Status.ABORTED
             sample.reward = None
             sample.metadata.pop("_miles_abort", None)
+        # Miles drops aborted samples before the metrics hook, so per-pool abort
+        # rates are counted from this line. An episode whose first request failed
+        # has no response to name its pool.
+        sources = {s.metadata.get("rollout_source") for s in processed} - {None}
+        logger.info(
+            "aborted episode source=%s reason=%s phase=%s error=%s",
+            ",".join(sorted(map(str, sources))) or "unknown",
+            agent_metadata.get("exit_status"),
+            agent_metadata.get("failure_phase"),
+            str(agent_metadata.get("agent_error", ""))[:200].replace("\n", " "),
+        )
     return processed
 
 
@@ -1120,6 +1318,8 @@ def _run_episode_sync(
         _raise_if_cancelled(cancelled)
         set_phase("sandbox_setup")
         _prepare_environment(env, task_dir)
+        if _fresh_sandbox_grading() or _grade_both_ways():
+            snapshot_task_start(env, timeout=int(settings["exec_timeout"]))
         _raise_if_cancelled(cancelled)
         set_phase("agent_setup")
         agent_start_snapshot = _EnvironmentSnapshot.capture(env)
@@ -1314,19 +1514,38 @@ def _run_episode_sync(
             else:
                 raise
 
+        exit_status = result.get("exit_status", "completed")
+        if exit_status == "TimeExceeded" and _time_exceeded_is_infrastructure():
+            logger.warning(
+                "Modal SWE episode reached its wall-clock budget for %s; "
+                "dropped as an infrastructure failure",
+                task_dir.name,
+            )
+            elapsed = time.perf_counter() - started
+            agent_metrics = _environment_metrics(
+                env,
+                agent_queue_time=agent_queue_time,
+                agent_dispatch_queue_time=dispatch_queue_time,
+                total_time=elapsed,
+                agent_start_snapshot=agent_start_snapshot,
+            )
+            _attach_client_model_timings(
+                agent_metrics,
+                client_model_request_durations,
+            )
+            return _failure(
+                "time_exceeded",
+                total_time=elapsed,
+                agent_queue_time=agent_queue_time,
+                failure_phase="interaction",
+                agent_metrics=agent_metrics,
+            )
         agent_snapshot = _EnvironmentSnapshot.capture(env)
         verify_started = time.perf_counter()
         _raise_if_cancelled(cancelled)
         set_phase("verification")
         try:
-            if _fresh_sandbox_grading():
-                verifier = grade_in_fresh_sandbox(env, task_dir, settings=settings)
-            else:
-                verifier = run_verifier(
-                    env,
-                    task_dir,
-                    configured_timeout=int(settings["verify_timeout"]),
-                )
+            verifier, grade_metrics = grade_episode(env, task_dir, settings=settings)
         except SandboxCommandTimeoutError as error:
             diagnostic = ""
             if error.result is not None:
@@ -1392,6 +1611,7 @@ def _run_episode_sync(
             )
             metrics["verifier_return_code"] = verifier["return_code"]
             metrics["verifier_reward_missing"] = 1
+            metrics.update(grade_metrics)
             metrics["context_limit_exceeded"] = int(context_limit_exceeded)
             metrics["generation_limit_exceeded"] = int(generation_limit_exceeded)
             _attach_client_model_timings(
@@ -1428,13 +1648,16 @@ def _run_episode_sync(
         agent_metrics["verifier_reward_missing"] = 0
         agent_metrics["verifier_timeout"] = 0
         agent_metrics.update(verifier.get("grade_metrics", {}))
+        agent_metrics.update(grade_metrics)
+        reward, submission_metrics = submission_outcome(exit_status, reward)
+        agent_metrics.update(submission_metrics)
         _attach_client_model_timings(
             agent_metrics,
             client_model_request_durations,
         )
         return {
             "reward": reward,
-            "exit_status": result.get("exit_status", "completed"),
+            "exit_status": exit_status,
             "eval_report": {
                 "reward": reward,
                 "verifier_return_code": verifier["return_code"],

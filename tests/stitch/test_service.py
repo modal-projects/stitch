@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import threading
@@ -324,6 +325,325 @@ def test_client_disconnect_cancels_aborts_and_releases_admission(monkeypatch):
         assert upstream.abort_rids == ["rollout-2"]
         assert gate_sidecar.gate.active_requests == 0
         assert status == 499
+
+    asyncio.run(go())
+
+
+class _SlowUpstream:
+    """An engine request that answers (or fails) when the test says, and records an
+    abort or a cancellation."""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.started = asyncio.Event()
+        self.finish = asyncio.Event()
+        self.cancelled = asyncio.Event()
+        self.abort_rids: list[str] = []
+
+    async def request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+        if url.endswith("/abort_request"):
+            self.abort_rids.append(kwargs["json"]["rid"])
+            return httpx.Response(200)
+        self.started.set()
+        try:
+            await self.finish.wait()
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
+        if self.fail:
+            raise httpx.ReadError(
+                "engine connection reset", request=httpx.Request(method, url)
+            )
+        return httpx.Response(
+            200,
+            content=b'{"choices":[{"text":"done"}]}',
+            headers={"content-type": "application/json"},
+        )
+
+
+class _Exchange:
+    """One ASGI request, observable while its response streams. A client on ASGI spec
+    2.4 learns of a disconnect only when a send fails; an older one is told via
+    ``receive``."""
+
+    def __init__(
+        self,
+        app: Any,
+        payload: dict[str, Any] | None,
+        *,
+        method: str = "POST",
+        path: str = "/generate",
+        spec_version: str = "2.3",
+    ) -> None:
+        self.app = app
+        self.body_in = b"" if payload is None else json.dumps(payload).encode()
+        self.method = method
+        self.path = path
+        self.spec_version = spec_version
+        self.started = asyncio.Event()
+        self.chunk = asyncio.Event()
+        self.disconnect = asyncio.Event()
+        self.status: int | None = None
+        self.headers: dict[str, str] = {}
+        self.body = b""
+        self._body_sent = False
+
+    async def receive(self) -> dict[str, Any]:
+        if not self._body_sent:
+            self._body_sent = True
+            return {"type": "http.request", "body": self.body_in, "more_body": False}
+        await self.disconnect.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(self, message: dict[str, Any]) -> None:
+        if self.disconnect.is_set() and self.spec_version >= "2.4":
+            raise OSError("client went away")
+        if message["type"] == "http.response.start":
+            self.status = message["status"]
+            self.headers = {
+                k.decode().lower(): v.decode() for k, v in message["headers"]
+            }
+            self.started.set()
+        elif message["type"] == "http.response.body":
+            self.body += message.get("body", b"")
+            self.chunk.set()
+
+    async def run(self) -> None:
+        headers = [(b"content-type", b"application/json")] if self.body_in else []
+        await self.app(
+            {
+                "type": "http",
+                "asgi": {"version": "3.0", "spec_version": self.spec_version},
+                "http_version": "1.1",
+                "method": self.method,
+                "scheme": "http",
+                "path": self.path,
+                "raw_path": self.path.encode(),
+                "query_string": b"",
+                "headers": headers,
+                "client": ("127.0.0.1", 1234),
+                "server": ("sidecar", 8000),
+            },
+            self.receive,
+            self.send,
+        )
+
+
+def _keepalive_app(monkeypatch, upstream: Any, sidecar: _GateSidecar) -> Any:
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: upstream)
+    return create_app(
+        sidecar.gate,
+        sidecar,
+        _ProxyEngine(),
+        response_keepalive_after=0.05,
+        response_keepalive_interval=0.01,
+    )
+
+
+def test_long_generation_is_kept_alive_and_holds_admission(monkeypatch):
+    async def go():
+        upstream = _SlowUpstream()
+        sidecar = _GateSidecar(VersionRef("run", 3))
+        exchange = _Exchange(
+            _keepalive_app(monkeypatch, upstream, sidecar), {"rid": "rollout-3"}
+        )
+        request = asyncio.create_task(exchange.run())
+
+        await asyncio.wait_for(exchange.started.wait(), timeout=5)
+        assert exchange.status == 200
+        assert exchange.headers["content-type"] == "application/json"
+        await asyncio.sleep(0.1)
+        assert len(exchange.body) >= 2 and not exchange.body.strip()
+
+        # The stream holds the admission lease, so a commit cannot advance the
+        # version under the generation the response will be stamped with.
+        assert sidecar.gate.active_requests == 1
+
+        async def apply() -> None:
+            pass
+
+        def on_applied() -> None:
+            sidecar.applied = VersionRef("run", 4)
+
+        commit = asyncio.create_task(
+            sidecar.gate.commit(apply=apply, on_applied=on_applied, drain_all=True)
+        )
+        await asyncio.sleep(0.05)
+        assert not commit.done()
+
+        upstream.finish.set()
+        await asyncio.wait_for(request, timeout=5)
+        await asyncio.wait_for(commit, timeout=5)
+
+        assert sidecar.gate.active_requests == 0
+        assert upstream.abort_rids == []
+        assert exchange.body.startswith(b" ")
+        assert json.loads(exchange.body) == {
+            "choices": [{"text": "done"}],
+            "served_version": 3,
+        }
+
+    asyncio.run(go())
+
+
+def test_in_place_commit_crosses_a_kept_alive_generation(monkeypatch):
+    """In-place commits do not drain non-exact requests: a long generation keeps
+    running across the weight update, its keep-alive bytes keep flowing while the
+    engine is paused, and its response spans both versions."""
+
+    class _SpanEngine(_ProxyEngine):
+        def stamp_response(self, response, served, current) -> None:
+            response["weight_version_start"] = served.version
+            response["weight_version_end"] = current.version
+
+    async def go():
+        upstream = _SlowUpstream()
+        sidecar = _GateSidecar(VersionRef("run", 3))
+        monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: upstream)
+        app = create_app(
+            sidecar.gate,
+            sidecar,
+            _SpanEngine(),
+            response_keepalive_after=0.05,
+            response_keepalive_interval=0.01,
+        )
+        exchange = _Exchange(app, {"rid": "rollout-6"})
+        request = asyncio.create_task(exchange.run())
+        await asyncio.wait_for(exchange.started.wait(), timeout=5)
+
+        paused = asyncio.Event()
+        finish_apply = asyncio.Event()
+        calls: list[str] = []
+
+        async def pause() -> None:
+            calls.append("pause")
+            paused.set()
+
+        async def apply() -> None:
+            await finish_apply.wait()
+
+        async def resume() -> None:
+            calls.append("resume")
+
+        def on_applied() -> None:
+            sidecar.applied = VersionRef("run", 4)
+
+        commit = asyncio.create_task(
+            sidecar.gate.commit(
+                apply=apply, on_applied=on_applied, pause=pause, resume=resume
+            )
+        )
+        # The commit does not wait for the kept-alive request to finish.
+        await asyncio.wait_for(paused.wait(), timeout=5)
+        assert sidecar.gate.active_requests == 1
+        before = len(exchange.body)
+        await asyncio.sleep(0.1)
+        assert len(exchange.body) > before  # bytes keep flowing during the pause
+        finish_apply.set()
+        await asyncio.wait_for(commit, timeout=5)
+        assert calls == ["pause", "resume"]
+        assert not request.done()
+
+        upstream.finish.set()
+        await asyncio.wait_for(request, timeout=5)
+        assert json.loads(exchange.body) == {
+            "choices": [{"text": "done"}],
+            "weight_version_start": 3,
+            "weight_version_end": 4,
+        }
+        assert sidecar.gate.active_requests == 0
+
+    asyncio.run(go())
+
+
+def test_fast_response_is_unchanged_with_keepalive_enabled(monkeypatch):
+    async def go():
+        upstream = _SlowUpstream()
+        upstream.finish.set()
+        sidecar = _GateSidecar(VersionRef("run", 3))
+        exchange = _Exchange(_keepalive_app(monkeypatch, upstream, sidecar), {})
+        await asyncio.wait_for(exchange.run(), timeout=5)
+
+        assert exchange.status == 200
+        assert exchange.body == b'{"choices":[{"text":"done"}],"served_version":3}'
+        assert exchange.headers["content-length"] == str(len(exchange.body))
+        assert sidecar.gate.active_requests == 0
+
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("spec_version", ["2.3", "2.4"])
+def test_disconnect_during_keepalive_aborts_and_releases_admission(
+    monkeypatch, spec_version
+):
+    async def go():
+        upstream = _SlowUpstream()
+        sidecar = _GateSidecar(VersionRef("run", 3))
+        exchange = _Exchange(
+            _keepalive_app(monkeypatch, upstream, sidecar),
+            {"rid": "rollout-4"},
+            spec_version=spec_version,
+        )
+        request = asyncio.create_task(exchange.run())
+        await asyncio.wait_for(exchange.chunk.wait(), timeout=5)
+        assert sidecar.gate.active_requests == 1
+
+        exchange.disconnect.set()
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(request, timeout=5)
+
+        assert upstream.cancelled.is_set()
+        assert upstream.abort_rids == ["rollout-4"]
+        assert sidecar.gate.active_requests == 0
+
+    asyncio.run(go())
+
+
+def test_engine_failure_during_keepalive_ends_the_body_and_releases(
+    monkeypatch, caplog
+):
+    async def go():
+        upstream = _SlowUpstream(fail=True)
+        sidecar = _GateSidecar(VersionRef("run", 3))
+        exchange = _Exchange(
+            _keepalive_app(monkeypatch, upstream, sidecar), {"rid": "rollout-5"}
+        )
+        request = asyncio.create_task(exchange.run())
+        await asyncio.wait_for(exchange.started.wait(), timeout=5)
+        upstream.finish.set()
+        await asyncio.wait_for(request, timeout=5)
+
+        # The 200 is already on the wire; the body carries the retryable error, which
+        # the session server rejects as a response without choices.
+        assert exchange.status == 200
+        assert json.loads(exchange.body)["error"]["type"] == "EngineUnavailable"
+        assert upstream.abort_rids == ["rollout-5"]
+        assert sidecar.gate.active_requests == 0
+
+    with caplog.at_level(logging.WARNING, logger="stitch.service"):
+        asyncio.run(go())
+    assert any("local engine request failed" in r.message for r in caplog.records)
+
+
+def test_unversioned_routes_are_never_kept_alive(monkeypatch):
+    async def go():
+        upstream = _MetricsUpstream()
+        sidecar = _GateSidecar(VersionRef("run", 3))
+        exchange = _Exchange(
+            _keepalive_app(monkeypatch, upstream, sidecar),
+            None,
+            method="GET",
+            path="/metrics",
+        )
+        request = asyncio.create_task(exchange.run())
+        await upstream.started.wait()
+        await asyncio.sleep(0.15)
+        assert not exchange.started.is_set()
+
+        upstream.finish.set()
+        await asyncio.wait_for(request, timeout=5)
+        assert exchange.status == 200
+        assert exchange.body.startswith(b"# TYPE sglang:num_running_reqs gauge")
 
     asyncio.run(go())
 

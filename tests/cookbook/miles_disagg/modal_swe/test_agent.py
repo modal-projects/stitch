@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import subprocess
 import sys
 import time
@@ -337,25 +338,51 @@ def test_infrastructure_failure_requests_scheduler_abort():
     assert result["agent_metrics"]["infra_error"] == 1
 
 
-def test_v2_postprocessor_marks_infrastructure_failure_aborted():
+def test_v2_postprocessor_marks_infrastructure_failure_aborted(caplog):
     sample = Sample(
         tokens=[1],
         response_length=1,
         loss_mask=[1],
         status=Sample.Status.COMPLETED,
-        metadata={"leaf": {"node_id": 0, "path_node_ids": [0]}},
+        metadata={
+            "leaf": {"node_id": 0, "path_node_ids": [0]},
+            "rollout_source": "ServerH100FP8:fp8",
+        },
     )
     metadata = {
         "tree": {"nodes": [{"id": 0, "completion_span": [0, 1]}]},
-        "agent": _failure("sandbox_infra_error"),
+        "agent": _failure(
+            "sandbox_infra_error",
+            failure_phase="interaction",
+            agent_error="ConnectError: connection reset\nby peer",
+        ),
     }
 
-    [processed] = postprocess_samples([sample], metadata)
+    with caplog.at_level(logging.INFO):
+        [processed] = postprocess_samples([sample], metadata)
 
     assert processed.status == Sample.Status.ABORTED
     assert processed.reward is None
     assert processed.metadata["exit_status"] == "sandbox_infra_error"
     assert "_miles_abort" not in processed.metadata
+    # Aborted samples never reach the metrics hook, so the per-pool abort count
+    # comes from this line.
+    assert [r.getMessage() for r in caplog.records if "aborted episode" in r.getMessage()] == [
+        "aborted episode source=ServerH100FP8:fp8 reason=sandbox_infra_error "
+        "phase=interaction error=ConnectError: connection reset by peer"
+    ]
+
+
+def test_v2_postprocessor_names_no_pool_for_an_episode_without_responses(caplog):
+    metadata = {"tree": {"nodes": []}, "agent": _failure("agent_infra_error")}
+
+    with caplog.at_level(logging.INFO):
+        assert postprocess_samples([], metadata) == []
+
+    assert any(
+        "aborted episode source=unknown reason=agent_infra_error" in r.getMessage()
+        for r in caplog.records
+    )
 
 
 def test_v2_picker_returns_only_latest_committed_leaf():

@@ -66,6 +66,7 @@ def test_serve_startup_owns_weight_staging_args(
         startup_timeout=60,
         proxy_max_connections=256,
         proxy_max_keepalive_connections=64,
+        response_keepalive_after=60.0,
         rollout_source="ServerH100FP8:fp8",
     )
 
@@ -80,4 +81,5 @@ def test_serve_startup_owns_weight_staging_args(
     assert sidecar_args["engine_health_timeout"] == 30.0
     assert sidecar_args["proxy_max_connections"] == 256
     assert sidecar_args["proxy_max_keepalive_connections"] == 64
+    assert sidecar_args["response_keepalive_after"] == 60.0
     assert sidecar_args["rollout_source"] == "ServerH100FP8:fp8"

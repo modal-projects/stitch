@@ -462,6 +462,13 @@ def _per_source_metrics(
             ),
             "infra_error_ratio": float(bool(agent_metrics.get("infra_error"))),
             "format_error_ratio": float(status in _FORMAT_ERROR_STATUSES),
+            # An episode that ended without the agent's submit command, and those of
+            # them whose diff passed the tests (scored zero when a recipe requires a
+            # submission).
+            "unsubmitted_ratio": _number(agent_metrics.get("unsubmitted")),
+            "unsubmitted_diff_passed_ratio": _number(
+                agent_metrics.get("unsubmitted_diff_passed")
+            ),
             "response_length_mean": _number(getattr(sample, "response_length", None)),
             "turns_mean": _number(agent_metrics.get("turns")),
             "total_time_mean": _number(agent_metrics.get("total_time")),

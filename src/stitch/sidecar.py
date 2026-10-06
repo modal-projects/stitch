@@ -66,6 +66,10 @@ class SidecarConfig:
     engine_health_timeout: float = 30.0
     proxy_max_connections: int = 100
     proxy_max_keepalive_connections: int = 20
+    # Start a response this many seconds into a generation and keep it alive with
+    # whitespace until the body follows (None: answer only when the engine does).
+    response_keepalive_after: float | None = None
+    response_keepalive_interval: float = 20.0
     # The source this replica stamps on each response it serves, beside the version.
     rollout_source: str | None = None
 
@@ -79,6 +83,16 @@ class SidecarConfig:
             or self.engine_health_timeout <= 0
         ):
             raise ValueError("engine_health_timeout must be finite and positive")
+        if self.response_keepalive_after is not None and (
+            not math.isfinite(self.response_keepalive_after)
+            or self.response_keepalive_after < 0
+        ):
+            raise ValueError("response_keepalive_after must be finite and non-negative")
+        if (
+            not math.isfinite(self.response_keepalive_interval)
+            or self.response_keepalive_interval <= 0
+        ):
+            raise ValueError("response_keepalive_interval must be finite and positive")
         if self.delta_update_mode == "disk" and not self.local_checkpoint_dir:
             raise ValueError("local_checkpoint_dir is required in disk mode")
         if ":" not in self.store_factory:
@@ -127,11 +141,15 @@ class SidecarConfig:
             str(self.proxy_max_connections),
             "--proxy-max-keepalive-connections",
             str(self.proxy_max_keepalive_connections),
+            "--response-keepalive-interval",
+            str(self.response_keepalive_interval),
         ]
         for key, value in self.store_options.items():
             argv += ["--store-opt", f"{key}={value}"]
         if self.local_checkpoint_dir is not None:
             argv += ["--local-checkpoint-dir", self.local_checkpoint_dir]
+        if self.response_keepalive_after is not None:
+            argv += ["--response-keepalive-after", str(self.response_keepalive_after)]
         if self.rollout_source is not None:
             argv += ["--rollout-source", self.rollout_source]
         if self.flush_cache_on_commit:
@@ -175,6 +193,8 @@ class SidecarConfig:
             engine_health_timeout=args.engine_health_timeout,
             proxy_max_connections=args.proxy_max_connections,
             proxy_max_keepalive_connections=args.proxy_max_keepalive_connections,
+            response_keepalive_after=args.response_keepalive_after,
+            response_keepalive_interval=args.response_keepalive_interval,
             rollout_source=args.rollout_source,
         )
 
@@ -206,7 +226,9 @@ def _sidecar_parser() -> argparse.ArgumentParser:
     p.add_argument("--engine-health-timeout", type=float, default=30.0)
     p.add_argument("--proxy-max-connections", type=int, default=100)
     p.add_argument("--proxy-max-keepalive-connections", type=int, default=20)
+    p.add_argument("--response-keepalive-interval", type=float, default=20.0)
     p.add_argument("--local-checkpoint-dir")
+    p.add_argument("--response-keepalive-after", type=float)
     p.add_argument("--rollout-source")
     p.add_argument("--flush-cache-on-commit", action="store_true")
     p.add_argument("--debug-requests", action="store_true")
@@ -255,6 +277,8 @@ def run(config: SidecarConfig, store: Store) -> None:
         watchdog_failure_threshold=config.watchdog_failure_threshold,
         proxy_max_connections=config.proxy_max_connections,
         proxy_max_keepalive_connections=config.proxy_max_keepalive_connections,
+        response_keepalive_after=config.response_keepalive_after,
+        response_keepalive_interval=config.response_keepalive_interval,
     )
 
 
