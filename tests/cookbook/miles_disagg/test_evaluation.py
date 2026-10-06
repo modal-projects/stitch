@@ -567,8 +567,11 @@ def test_a_lost_request_is_resent_inside_its_episode(arm):
     assert cfg.environment["MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT"] == "3"
     assert evaluation.config_drift(train, cfg) == []
     # The session server gives up first, so a resent turn never overlaps the original.
-    assert evaluation.request_deadline(cfg, spec.REQUEST_DEADLINE_SECONDS) == 600
-    assert 600 < float(cfg.environment["MODAL_SWE_MODEL_REQUEST_TIMEOUT"])
+    assert evaluation.request_deadline(cfg, spec.REQUEST_DEADLINE_SECONDS) == 1800
+    assert 1800 < float(cfg.environment["MODAL_SWE_MODEL_REQUEST_TIMEOUT"])
+    # The deadline only catches lost requests: a full-length turn still fits at a slow
+    # per-request decode speed.
+    assert spec.REQUEST_DEADLINE_SECONDS >= train.rollout_max_response_len / 20
 
 
 def test_request_deadline_must_fall_before_the_agent_timeout():

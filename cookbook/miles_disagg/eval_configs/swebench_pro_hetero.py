@@ -52,9 +52,11 @@ DATASET = {
 INFRA_RETRIES = 3
 # A model request that the serving gateway loses never returns. The session server gives
 # up on a request after REQUEST_DEADLINE_SECONDS, and the agent resends the turn, up to
-# REQUEST_ATTEMPTS times, before the episode aborts and reruns. The slowest of the 4.7M
-# requests answered in the first 20 points took 350 s.
-REQUEST_DEADLINE_SECONDS = 600
+# REQUEST_ATTEMPTS times, before the episode aborts and reruns. The deadline must not cut
+# off a real turn: a full 32K-token turn at ~45 tok/s per request (8 B300 engines under
+# eval load) takes ~12 min, and degenerating checkpoints write such turns, so 600 s
+# aborted them as if lost. 1800 s fits a full turn down to ~18 tok/s.
+REQUEST_DEADLINE_SECONDS = 1800
 REQUEST_ATTEMPTS = 3
 SANDBOX_APP = "stitch-swebench-pro-eval-sandbox"
 
