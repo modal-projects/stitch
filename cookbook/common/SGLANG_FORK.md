@@ -11,14 +11,15 @@ default runtime:
 
 ```python
 DEFAULT_SGLANG_RUNTIME = SGLangRuntime(
-    image="lmsysorg/sglang:v0.5.20",
+    image="lmsysorg/sglang:v0.5.21",
     repository="https://github.com/modal-projects/sglang.git",
-    branch="stitch-sglang-v0.5.20",
-    commit="7686f6b711fc274986eb311f2e7b6df7e13a7cd3",
+    branch="stitch-sglang-v0.5.21",
+    commit="1d420cc80ae48717e553bac60f56330628a8c075",
 )
 ```
 
-The branch is upstream v0.5.20 plus four independently reviewable layers:
+The branch starts at the exact upstream v0.5.21 tag. It retains four groups of
+fork changes:
 
 | Layer | Responsibility |
 | --- | --- |
@@ -31,10 +32,10 @@ The branch history keeps these physical responsibilities in separate commits;
 the immutable pin above is the executable definition of the stack.
 
 The image and immutable source pin stay together so the Python overlay remains
-ABI-compatible with the image's CUDA and C++ extensions. SGLang v0.5.20 includes
-Kimi K3, so all cookbook recipes now use this one runtime line. The fork's MXFP4
-staging path transforms runtime layouts on GPU before caching rank-ready host
-images.
+ABI-compatible with the image's CUDA and C++ extensions. The overlay preserves
+the matching image's native SGLang modules, including the Rust cache module.
+All cookbook recipes use this runtime line. The fork's MXFP4 staging path
+transforms runtime layouts on GPU before caching rank-ready host images.
 
 ## API
 
@@ -140,8 +141,9 @@ CPU mode keeps rank-ready images in RAM for the shortest commit:
    quantization hooks and must match the requested checkpoint before use.
 3. For every delta lineage, it reconstructs and checksums the canonical target,
    then builds every next rank image while inference continues. The in-memory
-   path streams deltas through a bounded work budget; the storage-backed path
-   reuses the transactional disk materializer.
+   path bounds decoding scratch space and holds one complete compressed shard
+   per active rank outside that budget. The storage-backed path reuses the
+   transactional disk materializer.
 4. `/commit_weight_update` performs distributed preflight and copies the
    complete images into the existing CUDA storages without replacing storage
    pointers.
@@ -213,12 +215,12 @@ Measured component sizes are:
 | Kimi K2.6 NVFP4 | 4 | 595.19 GB | 151.17 GB × 4 | 0 |
 | Kimi K3 MXFP4 | 8 | 1.561 TB | 207.47 GB × 8 | 8.04 MB |
 
-Allow additional memory for the engine process, delta decoding, and bounded
-loader staging. Modal memory requests use `(request, limit)`. K3 all-RAM
-validation requires a 4 TiB limit. Exact-final GLM-5.2 FP8 validation reached
-1.58 TB of cgroup memory with the canonical checkpoint in RAM and 1.54 TB with
-it on NVMe. The NVMe path's file-cache pages are reclaimable; its persistent
-allocation is the rank images and loader state.
+These are payload sizes, not sampled process-memory peaks. Allow additional
+memory for the engine process, decoding scratch, one compressed source shard
+per active rank, and bounded loader staging. Modal memory requests use
+`(request, limit)`. K3 all-RAM validation requires a 4 TiB limit. The NVMe
+path's file-cache pages are reclaimable; its persistent allocation is the
+rank images and loader state.
 
 All runtime storages are prepared and committed. Element-wise sparsity reduces
 the compressed delta transport and storage, but not the full-target checksum,
@@ -255,6 +257,11 @@ For a new SGLang release:
 4. audit the release's loader, quantization, scheduler, process-group, and
    CUDA-graph primitives and delete fork code superseded upstream;
 5. run SGLang’s own pre-commit hooks and focused unit tests;
-6. validate generation before, during, and after one complete delta update on
-   FP8 and ModelOpt NVFP4, and validate MXFP4 transforms on Blackwell; and
-7. update the image, branch, immutable commit, and this file.
+6. validate generation before, during, and after complete delta updates on
+   FP8 and ModelOpt NVFP4, and validate MXFP4 transforms on Blackwell;
+7. compare documented preparation, activation, and end-to-end sync timings when
+   their paths change, with repeated runs across identified hosts; report the
+   sample count, confidence interval, and cache policy for each timing;
+8. exercise the maintained image builder against the published immutable pin;
+   verify the installed source and native modules, then run a serving check; and
+9. update the image, branch, immutable commit, and this file together.

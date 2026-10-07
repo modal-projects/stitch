@@ -27,10 +27,10 @@ class SGLangRuntime:
 
 
 DEFAULT_SGLANG_RUNTIME = SGLangRuntime(
-    image="lmsysorg/sglang:v0.5.20",
+    image="lmsysorg/sglang:v0.5.21",
     repository="https://github.com/modal-projects/sglang.git",
-    branch="stitch-sglang-v0.5.20",
-    commit="7686f6b711fc274986eb311f2e7b6df7e13a7cd3",
+    branch="stitch-sglang-v0.5.21",
+    commit="1d420cc80ae48717e553bac60f56330628a8c075",
 )
 
 _COOKBOOK_DIR = Path(__file__).resolve().parent.parent
@@ -63,6 +63,10 @@ def build_serving_image(
             f" && git clone --filter=blob:none --single-branch --branch {runtime.branch}"
             f" {runtime.repository} /tmp/stitch-sglang-overlay"
             f" && git -C /tmp/stitch-sglang-overlay checkout --detach {runtime.commit}"
+            # Keep the native modules compiled for the matching base image.
+            " && cd /sgl-workspace/sglang/python"
+            " && find sglang -name '*.so' -exec cp -a --parents {}"
+            " /tmp/stitch-sglang-overlay/python/ \\;"
             " && rm -rf /sgl-workspace/sglang/python/sglang"
             " && cp -a /tmp/stitch-sglang-overlay/python/. /sgl-workspace/sglang/python/"
             " && rm -rf /tmp/stitch-sglang-overlay"
