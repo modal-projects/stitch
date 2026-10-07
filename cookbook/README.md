@@ -257,8 +257,11 @@ is available for reference; use the maintained recipes above for new runs.
 
 ### Weight-update performance
 
-These are steady-state measurements on H200s. Cold replica initialization,
-fleet replacement, and checkpoint-save steps are excluded.
+These historical steady-state measurements use the retired H200 configuration.
+They precede the v0.5.21 runtime and do not validate its performance. Cold
+replica initialization, fleet replacement, and checkpoint-save steps are
+excluded. The recorded samples do not define independent host groups, so
+host-level confidence intervals are unavailable.
 
 | Stage | Sample | Mean | p50 | p95 |
 | --- | ---: | ---: | ---: | ---: |
