@@ -273,10 +273,30 @@ def test_an_empty_patch_is_graded_without_applying_it(grading, monkeypatch):
 @pytest.mark.parametrize(
     ("status", "required", "reward", "expected"),
     [
-        ("Submitted", True, 1.0, (1.0, {"unsubmitted": 0, "unsubmitted_diff_passed": 0})),
-        ("RepeatedFormatError", False, 1.0, (1.0, {"unsubmitted": 1, "unsubmitted_diff_passed": 1})),
-        ("RepeatedFormatError", True, 1.0, (0.0, {"unsubmitted": 1, "unsubmitted_diff_passed": 1})),
-        ("LimitsExceeded", True, 0.0, (0.0, {"unsubmitted": 1, "unsubmitted_diff_passed": 0})),
+        (
+            "Submitted",
+            True,
+            1.0,
+            (1.0, {"unsubmitted": 0, "unsubmitted_diff_passed": 0}),
+        ),
+        (
+            "RepeatedFormatError",
+            False,
+            1.0,
+            (1.0, {"unsubmitted": 1, "unsubmitted_diff_passed": 1}),
+        ),
+        (
+            "RepeatedFormatError",
+            True,
+            1.0,
+            (0.0, {"unsubmitted": 1, "unsubmitted_diff_passed": 1}),
+        ),
+        (
+            "LimitsExceeded",
+            True,
+            0.0,
+            (0.0, {"unsubmitted": 1, "unsubmitted_diff_passed": 0}),
+        ),
     ],
 )
 def test_an_unsubmitted_episode_scores_zero_only_when_submission_is_required(
@@ -320,9 +340,19 @@ def test_grading_both_ways_trains_the_fresh_grade_and_logs_the_disagreement(
     def run_verifier(env, task_dir, *, configured_timeout):
         if env is own:
             own.events.append("own verifier")
-            return {"reward": 1.0, "return_code": 0, "timeout_sec": 1, "output_tail": "3 passed"}
+            return {
+                "reward": 1.0,
+                "return_code": 0,
+                "timeout_sec": 1,
+                "output_tail": "3 passed",
+            }
         calls["verified"].append(env)
-        return {"reward": 0.0, "return_code": 1, "timeout_sec": 1, "output_tail": "1 failed"}
+        return {
+            "reward": 0.0,
+            "return_code": 1,
+            "timeout_sec": 1,
+            "output_tail": "1 failed",
+        }
 
     monkeypatch.setattr(agent, "run_verifier", run_verifier)
 
@@ -333,7 +363,9 @@ def test_grading_both_ways_trains_the_fresh_grade_and_logs_the_disagreement(
     assert verifier["reward"] == 0.0
     assert metrics == {"grade_own_sandbox_reward": 1.0, "grade_disagreement": 1}
     # Each disagreement names its task and shows both verifiers' output.
-    [line] = [r.getMessage() for r in caplog.records if "grades disagree" in r.getMessage()]
+    [line] = [
+        r.getMessage() for r in caplog.records if "grades disagree" in r.getMessage()
+    ]
     assert "own Sandbox 1.0 (rc=0), fresh 0.0 (rc=1)" in line
     assert "own tail: 3 passed | fresh tail: 1 failed" in line
 
@@ -363,7 +395,11 @@ class _LocalSandbox:
             capture_output=True,
             text=True,
             timeout=timeout,
-            env={**os.environ, "HOME": str(self.root.parent), "GIT_CONFIG_NOSYSTEM": "1"},
+            env={
+                **os.environ,
+                "HOME": str(self.root.parent),
+                "GIT_CONFIG_NOSYSTEM": "1",
+            },
         )
         return done.returncode, done.stdout + done.stderr
 
@@ -410,7 +446,13 @@ def task_image(tmp_path, monkeypatch):
 def _apply(tree: Path, patch: bytes) -> subprocess.CompletedProcess:
     (tree.parent / "apply.patch").write_bytes(patch)
     return subprocess.run(
-        ["git", "apply", "--binary", "--whitespace=nowarn", str(tree.parent / "apply.patch")],
+        [
+            "git",
+            "apply",
+            "--binary",
+            "--whitespace=nowarn",
+            str(tree.parent / "apply.patch"),
+        ],
         cwd=tree,
         capture_output=True,
         text=True,
@@ -431,9 +473,10 @@ def test_patch_from_the_start_tree_applies_to_a_fresh_sandbox_of_the_image(task_
     (agent_tree / ".venv" / "bin" / "activate").unlink()
     patch = agent.capture_policy_patch(sandbox, timeout=60)
 
-    assert b"a/package-lock.json" in patch and b"new file mode" not in patch.split(
-        b"diff --git a/new.py"
-    )[0]
+    assert (
+        b"a/package-lock.json" in patch
+        and b"new file mode" not in patch.split(b"diff --git a/new.py")[0]
+    )
     assert b"build/out.o" not in patch
     applied = _apply(fresh_tree, patch)
     assert applied.returncode == 0, applied.stderr

@@ -404,7 +404,9 @@ def create_app(
                 route,
                 rid,
             )
-        current = status.applied  # capture while still pinned, before a commit advances it
+        current = (
+            status.applied
+        )  # capture while still pinned, before a commit advances it
         await release()
         if "application/json" not in outcome.headers.get("content-type", ""):
             yield outcome.content

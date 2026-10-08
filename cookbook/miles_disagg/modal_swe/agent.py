@@ -672,7 +672,7 @@ def snapshot_task_start(env: ModalSWEEnvironment, *, timeout: int) -> None:
     index = f"GIT_INDEX_FILE={_TASK_START_INDEX}"
     return_code, output = env.exec(
         f"rm -f {_TASK_START_INDEX} && "
-        f'base=$(git rev-parse --verify {_TASK_BASELINE_REF}) && '
+        f"base=$(git rev-parse --verify {_TASK_BASELINE_REF}) && "
         f'{index} git read-tree "$base" && '
         f"{index} git add -A . && "
         f"tree=$({index} git write-tree) && "
