@@ -31,6 +31,8 @@ from cookbook.miles_disagg.config import YAML_CONFIG_FIELDS
 logger = logging.getLogger(__name__)
 
 _SESSION_SERVER_READY_SECONDS = 300.0
+# With STITCH_TRACE_REQUESTS set, the session servers log every proxied request by rid.
+_TRACED_SESSION_SERVER = "cookbook.miles_disagg.traced_session_server"
 
 
 def miles_args(cfg: Any, *, pool_url: str) -> Any:
@@ -63,13 +65,23 @@ def miles_args(cfg: Any, *, pool_url: str) -> Any:
 
 def start_session_servers(args: Any, *, backend_url: str) -> list[subprocess.Popen]:
     """Start the session servers Miles would, pointed at the eval pool, and publish
-    them on ``args`` as Miles' tracer expects."""
+    them on ``args`` as Miles' tracer expects. With ``STITCH_TRACE_REQUESTS`` set, each
+    is Miles' server under ``traced_session_server``, which logs every request."""
     import httpx
     from miles.ray.specs.inference import compute_session_server_instance_id
     from miles.rollout.session.config import compute_session_server_config
     from miles.rollout.session.types import SessionServerInstance
     from miles.utils.workers.argv_utils import config_to_argv
 
+    from cookbook.miles_disagg.traced_session_server import TRACE_ENV
+
+    module, env = "miles.rollout.session.server", None
+    if os.environ.get(TRACE_ENV, "") not in ("", "0"):
+        # The cookbook's parent directory, so the subprocess imports the wrapper.
+        root = str(Path(__file__).resolve().parents[2])
+        path = os.environ.get("PYTHONPATH")
+        module = _TRACED_SESSION_SERVER
+        env = {**os.environ, "PYTHONPATH": os.pathsep.join(filter(None, (root, path)))}
     processes, instances = [], []
     base_port = args.session_server_port or 30000
     for index in range(args.session_server_workers):
@@ -82,12 +94,8 @@ def start_session_servers(args: Any, *, backend_url: str) -> list[subprocess.Pop
         )
         processes.append(
             subprocess.Popen(
-                [
-                    sys.executable,
-                    "-m",
-                    "miles.rollout.session.server",
-                    *config_to_argv(config),
-                ]
+                [sys.executable, "-m", module, *config_to_argv(config)],
+                env=env,
             )
         )
         instances.append(

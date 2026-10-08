@@ -14,6 +14,8 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
+import re
 import time
 import uuid
 from collections.abc import Iterable
@@ -42,6 +44,14 @@ POOL_READY_FRACTION = 0.75
 
 # Hop-by-hop / rewritten headers the proxy never forwards upstream.
 _DROP_HEADERS = {"host", "content-length", "connection"}
+
+# Set to trace each versioned request through the proxy by its rid (see create_app).
+TRACE_REQUESTS_ENV = "STITCH_TRACE_REQUESTS"
+# Request headers a trace logs the values of: ids a gateway sets to name a request.
+_TRACE_ID_HEADER = re.compile(
+    r"(request|trace|correlation|span|call)[-_]?u?u?id$|^traceparent$"
+)
+_SECRET_HEADER = re.compile(r"key|secret|token|auth|cookie")
 
 
 class SidecarStatus(Protocol):
@@ -94,6 +104,7 @@ def create_app(
     proxy_max_keepalive_connections: int = 20,
     response_keepalive_after: float | None = None,
     response_keepalive_interval: float = 20.0,
+    trace_requests: bool | None = None,
 ):
     """The versioned rollout proxy. Versioned routes are admitted through the gate
     (constraint enforced, serving version captured), stamped by the engine, forwarded,
@@ -104,7 +115,11 @@ def create_app(
     With ``response_keepalive_after`` set, a request the engine has not answered by then
     gets its 200 at once and a whitespace byte every ``response_keepalive_interval``
     seconds until the stamped body follows, so gateways that drop silent responses
-    deliver it."""
+    deliver it.
+
+    ``trace_requests`` (default: whether ``STITCH_TRACE_REQUESTS`` is set) logs one
+    ``trace`` line per hop of each versioned request, keyed by its rid: received,
+    admitted, kept alive, upstream done or failed, client disconnected, responded."""
     import httpx
     from fastapi import FastAPI, Request
     from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -115,6 +130,32 @@ def create_app(
     versioned = {r.strip("/") for r in versioned_routes}
     pooled: dict[str, Any] = {}
     releasing: set[asyncio.Task] = set()
+    if trace_requests is None:
+        trace_requests = os.environ.get(TRACE_REQUESTS_ENV, "") not in ("", "0")
+    traced_header_names: set[str] = set()
+
+    def trace(event: str, rid: str, start: float, detail: str = "") -> None:
+        logger.info(
+            "trace %s rid=%s after=%.1f%s",
+            event,
+            rid,
+            time.monotonic() - start,
+            f" {detail}" if detail else "",
+        )
+
+    def trace_received(rid: str, route: str, size: int, headers: Any) -> None:
+        names = sorted(name.lower() for name in headers.keys())
+        if set(names) - traced_header_names:
+            # Names only, once per new set: values may carry credentials.
+            traced_header_names.update(names)
+            logger.info("trace headers names=%s", ",".join(names))
+        ids = {
+            name: value
+            for name, value in headers.items()
+            if _TRACE_ID_HEADER.search(name.lower())
+            and not _SECRET_HEADER.search(name.lower())
+        }
+        logger.info("trace recv rid=%s route=%s bytes=%d ids=%s", rid, route, size, ids)
 
     def client() -> Any:
         c = pooled.get("client")
@@ -207,6 +248,10 @@ def create_app(
         if is_versioned and payload is not None:
             payload.pop("weight_version", None)
             rid = payload.setdefault("rid", uuid.uuid4().hex)
+        traced = trace_requests and isinstance(rid, str)
+        start = time.monotonic()
+        if traced:
+            trace_received(rid, route, len(body), request.headers)
 
         headers = {
             k: v for k, v in request.headers.items() if k.lower() not in _DROP_HEADERS
@@ -222,7 +267,11 @@ def create_app(
                 if request.method == "GET" and route == "metrics"
                 else gate.admit(constraint if is_versioned else None)
             )
+            if traced:
+                trace("admitted", rid, start)
         except ConstraintUnmet as exc:
+            if traced:
+                trace("rejected", rid, start)
             return JSONResponse(exc.error, status_code=409)
         handed_off = False
         try:
@@ -250,6 +299,8 @@ def create_app(
                     upstream_task.cancel()
                     with contextlib.suppress(BaseException):
                         await upstream_task
+                    if traced:
+                        trace("disconnect", rid, start)
                     if rid is not None:
                         await _abort(client(), engine_url, rid)
                     return Response(status_code=499)
@@ -264,6 +315,8 @@ def create_app(
                 # response after ~6 min, and a Modal web endpoint answers 303 after
                 # 150 s). The stream owns the admission lease until the engine answers.
                 handed_off = True
+                if traced:
+                    trace("keepalive", rid, start)
                 release = _releaser(lease, upstream_task, rid)
                 return _KeptAliveResponse(
                     _kept_alive(release, upstream_task, route, rid, served),
@@ -272,8 +325,17 @@ def create_app(
 
             outcome = await _engine_outcome(upstream_task, request.method, route, rid)
             if isinstance(outcome, Response):
+                if traced:
+                    trace("upstream_error", rid, start)
                 return outcome
             resp = outcome
+            if traced:
+                trace(
+                    "upstream",
+                    rid,
+                    start,
+                    f"status={resp.status_code} bytes={len(resp.content)}",
+                )
             if "application/json" not in resp.headers.get("content-type", ""):
                 return Response(
                     content=resp.content,
@@ -294,6 +356,8 @@ def create_app(
             served if is_versioned else None,
             current if is_versioned else None,
         )
+        if traced:
+            trace("respond", rid, start, f"status={resp.status_code} bytes={len(body)}")
         return Response(
             content=body,
             status_code=resp.status_code,

@@ -452,6 +452,51 @@ def test_retry_hook_returns_the_abort_once_retries_run_out(monkeypatch):
     assert len(calls) == 2
 
 
+def test_retry_hook_shows_the_agent_its_sample_index(monkeypatch):
+    from cookbook.miles_disagg import eval_hooks
+
+    calls = _stub_miles(monkeypatch, [_Status.COMPLETED])
+    hook_input = _hook_input(retries=0)
+
+    asyncio.run(eval_hooks.generate(hook_input))
+
+    # The agent's metadata is the sample's; the trajectory dump names the sample by it.
+    assert calls[0].metadata == {"instance_id": "a", "eval_sample_index": 13}
+    assert hook_input.sample.metadata == {"instance_id": "a"}
+
+
+def _import_eval_app(monkeypatch):
+    monkeypatch.setenv("EXPERIMENT_CONFIG", spec.BASE_EXPERIMENT)
+    monkeypatch.setenv("EVAL_CONFIG", "swebench_pro_hetero")
+    monkeypatch.setenv("EVAL_RUN", "")
+    monkeypatch.setenv("EVAL_VERSION", "0")
+    monkeypatch.setenv("EVAL_VIEW", "bf16")
+    monkeypatch.delitem(sys.modules, "cookbook.miles_disagg.eval_app", raising=False)
+    return importlib.import_module("cookbook.miles_disagg.eval_app")
+
+
+def test_eval_app_passes_a_trajectory_dump_dir_to_the_driver(monkeypatch):
+    monkeypatch.delenv("MODAL_SWE_TRAJECTORY_DUMP_DIR", raising=False)
+    assert "MODAL_SWE_TRAJECTORY_DUMP_DIR" not in (
+        _import_eval_app(monkeypatch).POINT_ENVIRONMENT
+    )
+
+    monkeypatch.setenv("MODAL_SWE_TRAJECTORY_DUMP_DIR", "/stitch/bench-traces/t1")
+    eval_app = _import_eval_app(monkeypatch)
+
+    assert (
+        eval_app.POINT_ENVIRONMENT["MODAL_SWE_TRAJECTORY_DUMP_DIR"]
+        == "/stitch/bench-traces/t1"
+    )
+
+
+def test_eval_app_rejects_a_dump_dir_off_the_eval_volume(monkeypatch):
+    monkeypatch.setenv("MODAL_SWE_TRAJECTORY_DUMP_DIR", "/tmp/traces")
+
+    with pytest.raises(ValueError, match="must be under /stitch"):
+        _import_eval_app(monkeypatch)
+
+
 def test_failed_samples_keep_their_abort_reasons():
     aborts = [{"attempt": 1, "exit_status": "agent_error", "agent_error": "x"}]
     sample = SimpleNamespace(
@@ -548,6 +593,95 @@ def test_eval_driver_keeps_every_workers_log_lines(monkeypatch):
     (driver,) = built
     assert driver["extra_env"]["RAY_DEDUP_LOGS"] == "0"
     assert driver["extra_env"]["EVAL_VERSION"] == "50"
+
+
+@pytest.mark.parametrize("trace", ["", "1"], ids=["untraced", "traced"])
+def test_only_a_traced_launch_sets_request_tracing_in_the_images(monkeypatch, trace):
+    monkeypatch.setenv("EXPERIMENT_CONFIG", "qwen3_6_35b_a3b_hetero_grpo_top_p")
+    monkeypatch.setenv("EVAL_CONFIG", "swebench_pro_hetero")
+    monkeypatch.setenv("EVAL_RUN", "r02")
+    monkeypatch.setenv("EVAL_VERSION", "60")
+    monkeypatch.setenv("EVAL_VIEW", "bf16")
+    monkeypatch.setenv("STITCH_TRACE_REQUESTS", trace)
+    monkeypatch.delitem(sys.modules, "cookbook.miles_disagg.eval_app", raising=False)
+
+    eval_app = importlib.import_module("cookbook.miles_disagg.eval_app")
+
+    if trace:
+        assert eval_app.POINT_ENVIRONMENT["STITCH_TRACE_REQUESTS"] == "1"
+    else:
+        # Untraced points keep their images unchanged: no key at all, not an empty one.
+        assert "STITCH_TRACE_REQUESTS" not in eval_app.POINT_ENVIRONMENT
+
+
+@pytest.mark.parametrize("trace", ["", "1"], ids=["untraced", "traced"])
+def test_traced_evals_run_the_traced_session_server(monkeypatch, trace):
+    from cookbook.miles_disagg import eval_driver
+
+    def module(name, **attrs):
+        mod = types.ModuleType(name)
+        mod.__dict__.update(attrs)
+        monkeypatch.setitem(sys.modules, name, mod)
+
+    module(
+        "miles.ray.specs.inference",
+        compute_session_server_instance_id=lambda _args, index: f"ss-{index}",
+    )
+    module(
+        "miles.rollout.session.config",
+        compute_session_server_config=lambda _args, **kw: SimpleNamespace(**kw),
+    )
+
+    class Instance(SimpleNamespace):
+        @property
+        def url(self):
+            return f"http://{self.addr}"
+
+    module("miles.rollout.session.types", SessionServerInstance=Instance)
+    module(
+        "miles.utils.workers.argv_utils",
+        config_to_argv=lambda config: ["--port", str(config.port)],
+    )
+    launched = []
+
+    class Process:
+        def __init__(self, command, env=None):
+            launched.append((command, env))
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(eval_driver.subprocess, "Popen", Process)
+    monkeypatch.setattr(
+        "httpx.get", lambda _url, timeout: SimpleNamespace(is_success=True)
+    )
+    monkeypatch.setenv("STITCH_TRACE_REQUESTS", trace)
+    monkeypatch.setenv("PYTHONPATH", "/opt/extra")
+    args = SimpleNamespace(session_server_port=None, session_server_workers=2)
+
+    eval_driver.start_session_servers(args, backend_url="http://pool")
+
+    assert [command[2:] for command, _env in launched] == [
+        [
+            "cookbook.miles_disagg.traced_session_server"
+            if trace
+            else "miles.rollout.session.server",
+            "--port",
+            str(port),
+        ]
+        for port in (30000, 30001)
+    ]
+    for _command, env in launched:
+        if trace:
+            # The wrapper imports from the cookbook, which the subprocess must find.
+            root = str(eval_driver.Path(eval_driver.__file__).resolve().parents[2])
+            assert env["PYTHONPATH"] == f"{root}:/opt/extra"
+        else:
+            assert env is None
+    assert [instance.addr for instance in args.session_server_instances] == [
+        "127.0.0.1:30000",
+        "127.0.0.1:30001",
+    ]
 
 
 def test_results_live_under_the_prepared_task_set():

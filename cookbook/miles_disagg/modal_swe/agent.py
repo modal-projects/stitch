@@ -18,7 +18,7 @@ import uuid
 from collections import Counter
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cache, partial
 from pathlib import Path
 from typing import Any
@@ -1185,6 +1185,194 @@ def _model_token_metrics(messages: list[dict[str, Any]]) -> dict[str, int]:
     }
 
 
+# Off unless set: a directory each finished episode writes its trajectory to, as one
+# JSON file, for the sampler benchmark's replay (cookbook/miles_disagg/bench).
+TRAJECTORY_DUMP_ENV = "MODAL_SWE_TRAJECTORY_DUMP_DIR"
+TRAJECTORY_FORMAT = "modal-swe-trajectory/v1"
+
+
+def _token_count(value: Any) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return None
+
+
+def _model_call_fields(response: Any) -> dict[str, Any]:
+    """What a retained model response says about its request: token counts from its
+    usage and the finish reason. A response mini-swe-agent could only keep as a repr
+    still marks the message as a model call."""
+    fields: dict[str, Any] = {"model_call": True}
+    if not isinstance(response, dict):
+        return fields
+    usage = response.get("usage")
+    if isinstance(usage, dict):
+        for key in ("prompt_tokens", "completion_tokens"):
+            if (count := _token_count(usage.get(key))) is not None:
+                fields[key] = count
+        details = usage.get("prompt_tokens_details")
+        if isinstance(details, dict):
+            if (cached := _token_count(details.get("cached_tokens"))) is not None:
+                fields["cached_tokens"] = cached
+    choices = response.get("choices")
+    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+        if (reason := choices[0].get("finish_reason")) is not None:
+            fields["finish_reason"] = reason
+    return fields
+
+
+def _trajectory_tool_call(call: dict[str, Any]) -> dict[str, Any]:
+    function = call.get("function") if isinstance(call.get("function"), dict) else {}
+    return {
+        "id": call.get("id"),
+        "type": call.get("type") or "function",
+        "function": {
+            "name": function.get("name"),
+            "arguments": function.get("arguments"),
+        },
+    }
+
+
+def _trajectory_message(message: dict[str, Any]) -> dict[str, Any]:
+    """One message as the dump keeps it: what the API saw, plus the request's token
+    counts on every message that carries a model response. That is each assistant
+    turn, and the format-error message mini-swe-agent sends instead of a response it
+    could not parse (whose output never re-enters the context)."""
+    record: dict[str, Any] = {
+        "role": message.get("role"),
+        "content": message.get("content"),
+    }
+    for key in ("reasoning_content", "tool_call_id", "name"):
+        if message.get(key) is not None:
+            record[key] = message[key]
+    tool_calls = message.get("tool_calls")
+    if isinstance(tool_calls, list) and tool_calls:
+        record["tool_calls"] = [
+            _trajectory_tool_call(call) for call in tool_calls if isinstance(call, dict)
+        ]
+    extra = message.get("extra")
+    if isinstance(extra, dict):
+        if "response" in extra:
+            record.update(_model_call_fields(extra["response"]))
+            if isinstance(extra.get("timestamp"), (int, float)):
+                record["timestamp"] = float(extra["timestamp"])
+        if record["role"] == "exit" and "exit_status" in extra:
+            record["exit_status"] = extra["exit_status"]
+    return record
+
+
+def trajectory_record(
+    messages: list[dict[str, Any]],
+    *,
+    metadata: dict[str, Any],
+    result: dict[str, Any],
+    durations: list[float],
+    request_kwargs: dict[str, Any] | None = None,
+    tools: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """An episode's trajectory for replay: its ordered messages, and the duration of
+    every model HTTP request in order. Each duration is also set on its model call
+    when the two counts match; a resent or failed request leaves them unpaired."""
+    records = [
+        _trajectory_message(message)
+        for message in messages
+        if isinstance(message, dict)
+    ]
+    calls = [record for record in records if record.get("model_call")]
+    durations = [float(duration) for duration in durations]
+    if len(calls) == len(durations):
+        for record, duration in zip(calls, durations, strict=True):
+            record["request_seconds"] = duration
+    return {
+        "format": TRAJECTORY_FORMAT,
+        "instance_id": metadata.get("instance_id"),
+        # Stamped by the eval's generate hook; training samples have none.
+        "sample_index": metadata.get("eval_sample_index"),
+        "exit_status": result.get("exit_status"),
+        "reward": result.get("reward"),
+        "model_calls": len(calls),
+        "model_request_durations_seconds": durations,
+        "request_kwargs": dict(request_kwargs or {}),
+        "tools": tools,
+        "messages": records,
+    }
+
+
+def write_trajectory(directory: Path, record: dict[str, Any]) -> Path:
+    """Write one trajectory under a unique name, atomically, so a reader never sees a
+    partial file and two episodes of one task never collide."""
+    directory.mkdir(parents=True, exist_ok=True)
+    instance = "".join(
+        char if char.isalnum() or char in "-_." else "_"
+        for char in str(record.get("instance_id") or "unknown")
+    )
+    index = record.get("sample_index")
+    name = f"{instance}.s{'x' if index is None else index}.{uuid.uuid4().hex[:12]}"
+    path = directory / f"{name}.json"
+    partial_path = directory / f"{name}.partial"
+    partial_path.write_text(json.dumps(record, default=str))
+    os.replace(partial_path, path)
+    return path
+
+
+def _request_tools(model: Any) -> list[dict[str, Any]] | None:
+    """The tools every request of ``model`` carries: mini-swe-agent's LiteLLM model
+    sends its bash tool with each one, and the chat template renders it."""
+    try:
+        from minisweagent.models.litellm_model import LitellmModel
+        from minisweagent.models.utils.actions_toolcall import BASH_TOOL
+    except ImportError:
+        return None
+    return [BASH_TOOL] if isinstance(model, LitellmModel) else None
+
+
+@dataclass
+class _TrajectoryCapture:
+    """Collects an episode's agent while it runs and writes its trajectory at the end."""
+
+    directory: Path
+    metadata: dict[str, Any]
+    request_kwargs: dict[str, Any]
+    agent: Any = None
+    model: Any = None
+    durations: list[float] = field(default_factory=list)
+
+    @classmethod
+    def from_environment(
+        cls, metadata: dict[str, Any], request_kwargs: dict[str, Any]
+    ) -> _TrajectoryCapture | None:
+        directory = os.getenv(TRAJECTORY_DUMP_ENV, "").strip()
+        if not directory:
+            return None
+        return cls(Path(directory), dict(metadata or {}), dict(request_kwargs or {}))
+
+    def attach(self, agent: Any, model: Any, durations: list[float]) -> None:
+        self.agent, self.model, self.durations = agent, model, durations
+
+    def write(self, result: Any) -> Path | None:
+        """Write the trajectory, or nothing when the agent never started. A failed
+        write is logged and never fails the episode."""
+        if self.agent is None or not isinstance(result, dict):
+            return None
+        try:
+            record = trajectory_record(
+                list(getattr(self.agent, "messages", None) or []),
+                metadata=self.metadata,
+                result=result,
+                durations=self.durations,
+                request_kwargs=self.request_kwargs,
+                tools=_request_tools(self.model),
+            )
+            return write_trajectory(self.directory, record)
+        except Exception:
+            logger.warning(
+                "Failed to write the trajectory of %s to %s",
+                self.metadata.get("instance_id"),
+                self.directory,
+                exc_info=True,
+            )
+            return None
+
+
 def _instrument_model_requests(
     model: Any,
     durations: list[float],
@@ -1277,6 +1465,39 @@ def _run_episode_sync(
     phase_callback: Callable[[str], None] | None = None,
     cancelled: threading.Event | None = None,
     sandbox_started: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
+    """Run one episode; with ``MODAL_SWE_TRAJECTORY_DUMP_DIR`` set, also write its
+    trajectory there once it ends. The dump never changes the episode's result."""
+    trajectory = _TrajectoryCapture.from_environment(metadata, request_kwargs)
+    result = _run_episode(
+        base_url=base_url,
+        prompt=prompt,
+        request_kwargs=request_kwargs,
+        metadata=metadata,
+        queued_at=queued_at,
+        dispatch_queue_time=dispatch_queue_time,
+        phase_callback=phase_callback,
+        cancelled=cancelled,
+        sandbox_started=sandbox_started,
+        trajectory=trajectory,
+    )
+    if trajectory is not None:
+        trajectory.write(result)
+    return result
+
+
+def _run_episode(
+    *,
+    base_url: str,
+    prompt: Any,
+    request_kwargs: dict[str, Any],
+    metadata: dict[str, Any],
+    queued_at: float,
+    dispatch_queue_time: float = 0.0,
+    phase_callback: Callable[[str], None] | None = None,
+    cancelled: threading.Event | None = None,
+    sandbox_started: Callable[[str], None] | None = None,
+    trajectory: _TrajectoryCapture | None = None,
 ) -> dict[str, Any]:
     from minisweagent.agents import get_agent
     from minisweagent.config import get_config_from_spec
@@ -1391,6 +1612,8 @@ def _run_episode_sync(
         except (AttributeError, ImportError):
             logger.warning("Unable to mark LiteLLM BadRequestError as non-retryable")
         agent = get_agent(model, env, agent_config, default_type="default")
+        if trajectory is not None:
+            trajectory.attach(agent, model, client_model_request_durations)
         # DefaultAgent logs every message (including complete command output)
         # at DEBUG. Miles configures the process root logger independently, so
         # logger levels alone can be reset by initialization order; disabling

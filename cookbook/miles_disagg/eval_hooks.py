@@ -31,7 +31,13 @@ async def generate(input: Any) -> Any:
     aborts: list[dict[str, Any]] = []
     while True:
         attempt += 1
-        output = await inner(dataclasses.replace(input, sample=copy.deepcopy(original)))
+        fresh = copy.deepcopy(original)
+        # The agent sees the index too, so a trajectory dump can name its sample.
+        fresh.metadata = {
+            **(fresh.metadata or {}),
+            "eval_sample_index": original.index,
+        }
+        output = await inner(dataclasses.replace(input, sample=fresh))
         samples = (
             output.samples if isinstance(output.samples, list) else [output.samples]
         )

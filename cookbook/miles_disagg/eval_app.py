@@ -64,6 +64,13 @@ if soft_watchdog := os.environ.get("EVAL_SOFT_WATCHDOG_TIMEOUT"):
     )
 APP_NAME = evaluation.app_name(spec.NAME, exp.APP_NAME, POINT)
 POINT_DIR = STITCH_PATH / evaluation.results_path(spec, POINT)
+if (dump_dir := os.environ.get("MODAL_SWE_TRAJECTORY_DUMP_DIR")) and not (
+    os.path.normpath(dump_dir).startswith(f"{STITCH_PATH}/")
+):
+    raise ValueError(
+        f"MODAL_SWE_TRAJECTORY_DUMP_DIR={dump_dir!r} must be under {STITCH_PATH}, "
+        "the eval volume's mount in the driver"
+    )
 STORE = storage.StoreDeployment(backend=storage.MODAL_VOLUME, s3_secret_name=None)
 # Baked into both images so a container's re-import selects the same point.
 POINT_ENVIRONMENT = {
@@ -76,6 +83,20 @@ POINT_ENVIRONMENT = {
     "EVAL_SESSIONS_PER_ENGINE": os.environ.get("EVAL_SESSIONS_PER_ENGINE", ""),
     "EVAL_SOFT_WATCHDOG_TIMEOUT": os.environ.get("EVAL_SOFT_WATCHDOG_TIMEOUT", ""),
     **STORE.image_environment,
+    # Only a traced launch sets it, so other points' images are unchanged.
+    **(
+        {"STITCH_TRACE_REQUESTS": os.environ["STITCH_TRACE_REQUESTS"]}
+        if os.environ.get("STITCH_TRACE_REQUESTS")
+        else {}
+    ),
+    # Only a launch that records trajectories for the sampler benchmark sets it: a
+    # directory on the eval volume (mounted at /stitch in the driver) where every
+    # episode writes its trajectory. The agent's Ray workers inherit it.
+    **(
+        {"MODAL_SWE_TRAJECTORY_DUMP_DIR": os.environ["MODAL_SWE_TRAJECTORY_DUMP_DIR"]}
+        if os.environ.get("MODAL_SWE_TRAJECTORY_DUMP_DIR")
+        else {}
+    ),
 }
 
 server_image = serving_image.build_serving_image(

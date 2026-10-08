@@ -121,7 +121,11 @@ class _MetricsUpstream:
 
 
 async def _asgi_post(
-    app: Any, payload: dict[str, Any], *, disconnect_on: asyncio.Event | None = None
+    app: Any,
+    payload: dict[str, Any],
+    *,
+    disconnect_on: asyncio.Event | None = None,
+    headers: list[tuple[bytes, bytes]] = (),
 ):
     """Issue one request directly to the ASGI app, optionally disconnecting after its body."""
     body = json.dumps(payload).encode()
@@ -152,7 +156,7 @@ async def _asgi_post(
             "path": "/generate",
             "raw_path": b"/generate",
             "query_string": b"",
-            "headers": [(b"content-type", b"application/json")],
+            "headers": [(b"content-type", b"application/json"), *headers],
             "client": ("127.0.0.1", 1234),
             "server": ("sidecar", 8000),
         },
@@ -801,3 +805,91 @@ def test_await_pool_ready_fails_closed_below_threshold(monkeypatch) -> None:
         stitch_service.await_pool_ready(
             object(), replica_floor=2, timeout=1, interval=0
         )
+
+
+class _JsonUpstream:
+    async def request(self, _method: str, _url: str, **_kwargs: Any) -> httpx.Response:
+        return httpx.Response(
+            200, content=b'{"choices":[]}', headers={"content-type": "application/json"}
+        )
+
+
+def _trace_lines(caplog) -> list[str]:
+    return [
+        r.getMessage() for r in caplog.records if r.getMessage().startswith("trace ")
+    ]
+
+
+def test_a_traced_request_logs_each_hop_by_its_rid(monkeypatch, caplog):
+    monkeypatch.setenv("STITCH_TRACE_REQUESTS", "1")
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: _JsonUpstream())
+    sidecar = _GateSidecar(VersionRef("run", 3))
+    app = create_app(sidecar.gate, sidecar, _ProxyEngine())
+    headers = [
+        (b"x-request-id", b"gw-7"),
+        (b"modal-flash-request-uuid", b"fl-9"),
+        (b"modal-key", b"wk-secret"),
+        (b"authorization", b"Bearer t0k"),
+    ]
+
+    with caplog.at_level(logging.INFO, logger="stitch.service"):
+        status, _headers, _body = asyncio.run(
+            _asgi_post(app, {"rid": "rollout-3"}, headers=headers)
+        )
+
+    lines = _trace_lines(caplog)
+    assert status == 200
+    assert lines[0] == (
+        "trace headers names=authorization,content-type,modal-flash-request-uuid,"
+        "modal-key,x-request-id"
+    )
+    assert lines[1] == (
+        "trace recv rid=rollout-3 route=generate bytes=20 "
+        "ids={'x-request-id': 'gw-7', 'modal-flash-request-uuid': 'fl-9'}"
+    )
+    assert [line.split(" after=")[0] for line in lines[2:]] == [
+        "trace admitted rid=rollout-3",
+        "trace upstream rid=rollout-3",
+        "trace respond rid=rollout-3",
+    ]
+    assert lines[3].endswith("status=200 bytes=14")
+    # Credentials never reach the log.
+    assert not any("secret" in line or "t0k" in line for line in lines)
+
+
+def test_a_traced_client_disconnect_is_logged(monkeypatch, caplog):
+    async def go():
+        upstream = _HangingUpstream()
+        allow_disconnect = asyncio.Event()
+        sidecar = _GateSidecar(VersionRef("run", 3))
+        monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: upstream)
+        app = create_app(sidecar.gate, sidecar, _ProxyEngine(), trace_requests=True)
+        request = asyncio.create_task(
+            _asgi_post(app, {"rid": "rollout-4"}, disconnect_on=allow_disconnect)
+        )
+        await upstream.started.wait()
+        allow_disconnect.set()
+        return await request
+
+    with caplog.at_level(logging.INFO, logger="stitch.service"):
+        status, _headers, _body = asyncio.run(go())
+
+    assert status == 499
+    events = [line.split(" after=")[0] for line in _trace_lines(caplog)[1:]]
+    assert events == [
+        "trace recv rid=rollout-4 route=generate bytes=20 ids={}",
+        "trace admitted rid=rollout-4",
+        "trace disconnect rid=rollout-4",
+    ]
+
+
+def test_requests_are_not_traced_by_default(monkeypatch, caplog):
+    monkeypatch.delenv("STITCH_TRACE_REQUESTS", raising=False)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: _JsonUpstream())
+    sidecar = _GateSidecar(VersionRef("run", 3))
+    app = create_app(sidecar.gate, sidecar, _ProxyEngine())
+
+    with caplog.at_level(logging.INFO, logger="stitch.service"):
+        asyncio.run(_asgi_post(app, {"rid": "rollout-5"}))
+
+    assert _trace_lines(caplog) == []
