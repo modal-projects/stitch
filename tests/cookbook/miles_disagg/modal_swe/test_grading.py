@@ -209,6 +209,26 @@ def test_grading_in_the_agents_sandbox_keeps_no_extra_outputs():
     assert agent._graded_outputs({"output_tail": "x"}, None) == {}
 
 
+def test_a_stored_patch_regrades_in_the_same_sandbox_the_eval_graded_it_in(grading):
+    task_dir, calls = grading
+    patch = b"diff --git a/src.py b/src.py\n"
+
+    graded = agent.grade_in_fresh_sandbox(
+        _AgentEnvironment(patch), task_dir, settings=_SETTINGS
+    )
+    regraded = agent.grade_patch_in_fresh_sandbox(
+        patch, task_dir, cwd=_AgentEnvironment.cwd, settings=_SETTINGS
+    )
+
+    first, second = _GradeEnvironment.instances
+    assert first.kwargs == second.kwargs
+    assert first.uploads == second.uploads
+    assert calls["prepared"] == [first, second] and calls["verified"] == [first, second]
+    assert second.stopped
+    for key in ("reward", "return_code", "policy_patch"):
+        assert regraded[key] == graded[key]
+
+
 class _ApplyingGradeEnvironment(_GradeEnvironment):
     """A fresh Sandbox that records commands and fails ``git apply`` when told to."""
 

@@ -22,6 +22,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -31,6 +32,8 @@ from cookbook.miles_disagg import evaluation
 
 _POINT_FLAG = "--point-from-environment"
 _WAIT_SECONDS = 600
+# Consecutive failed polls (a slow Modal API) before giving up on a driver call.
+_TRANSIENT_POLL_RETRIES = 20
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -45,6 +48,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--parallel", type=int, default=3, help="points at once")
     parser.add_argument(
         "--engines", type=int, help="engines per point's pool (default: the spec's)"
+    )
+    parser.add_argument(
+        "--sessions-per-engine",
+        type=int,
+        help="agent sessions per engine (default: the pool's target_inputs)",
     )
     parser.add_argument(
         "--smoke",
@@ -71,7 +79,10 @@ def main() -> None:
     with ThreadPoolExecutor(max(1, args.parallel)) as executor:
         codes = list(
             executor.map(
-                lambda point: _spawn(args.spec, point, args.smoke, args.engines), points
+                lambda point: _spawn(
+                    args.spec, point, args.smoke, args.engines, args.sessions_per_engine
+                ),
+                points,
             )
         )
     failed = [point for point, code in zip(points, codes, strict=True) if code != 0]
@@ -102,11 +113,13 @@ def _spawn(
     point: evaluation.EvalPoint,
     smoke: str | None,
     engines: int | None,
+    sessions_per_engine: int | None = None,
 ) -> int:
     env = {
         **os.environ,
         "EVAL_SMOKE": smoke or "",
         "EVAL_ENGINES": str(engines or ""),
+        "EVAL_SESSIONS_PER_ENGINE": str(sessions_per_engine or ""),
         "EXPERIMENT_CONFIG": point.experiment,
         "EVAL_CONFIG": spec_name,
         "EVAL_RUN": point.run_id or "",
@@ -119,6 +132,8 @@ def _spawn(
 
 def _run_point() -> int:
     import modal
+    from modal.exception import ConnectionError as ModalConnectionError
+    from modal.exception import InternalError as ModalInternalError
     from modal.exception import NotFoundError
 
     from stitch.pools.modal_flash import ModalFlashPool
@@ -155,12 +170,22 @@ def _run_point() -> int:
             _manifest(point_app), list(smoke) if smoke else None
         )
         print(f"{label} driver call {call.object_id}", flush=True)
+        transient = 0
         while True:
             try:
                 summary = call.get(timeout=_WAIT_SECONDS)
                 break
             except TimeoutError:
                 print(f"{label} still running", flush=True)
+                transient = 0
+            except (ModalConnectionError, ModalInternalError) as error:
+                # A slow Modal API is not the point failing: tearing the app down
+                # here killed a healthy eval at 15% (L0 step 180, 2026-10-07).
+                transient += 1
+                if transient > _TRANSIENT_POLL_RETRIES:
+                    raise
+                print(f"{label} poll failed ({error!r}); retrying", flush=True)
+                time.sleep(30)
         print(f"{label} done: {json.dumps(summary)}", flush=True)
         return 0 if summary.get("complete") else 1
     finally:

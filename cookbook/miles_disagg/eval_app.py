@@ -45,10 +45,22 @@ POINT = evaluation.EvalPoint(
     view=os.environ["EVAL_VIEW"],
 )
 # The view's serving configuration; EVAL_ENGINES resizes its fixed fleet for speed.
+# EVAL_SESSIONS_PER_ENGINE lowers each engine's load: at long contexts a full engine
+# decodes slowly enough that ordinary turns reach the turn time limit.
 POOL = spec.POOLS[POINT.view]
 if engines := os.environ.get("EVAL_ENGINES"):
     POOL = dataclasses.replace(
         POOL, min_containers=int(engines), max_containers=int(engines)
+    )
+if sessions := os.environ.get("EVAL_SESSIONS_PER_ENGINE"):
+    POOL = dataclasses.replace(POOL, target_inputs=int(sessions))
+# EVAL_SOFT_WATCHDOG_TIMEOUT makes SGLang log its running batch and a py-spy stack of
+# each stalled process after that many seconds without progress, without killing it,
+# so an engine that hangs records why before the sidecar watchdog replaces it.
+if soft_watchdog := os.environ.get("EVAL_SOFT_WATCHDOG_TIMEOUT"):
+    POOL = dataclasses.replace(
+        POOL,
+        sglang_args={**POOL.sglang_args, "--soft-watchdog-timeout": soft_watchdog},
     )
 APP_NAME = evaluation.app_name(spec.NAME, exp.APP_NAME, POINT)
 POINT_DIR = STITCH_PATH / evaluation.results_path(spec, POINT)
@@ -61,6 +73,8 @@ POINT_ENVIRONMENT = {
     "EVAL_VERSION": str(POINT.version),
     "EVAL_VIEW": POINT.view,
     "EVAL_ENGINES": os.environ.get("EVAL_ENGINES", ""),
+    "EVAL_SESSIONS_PER_ENGINE": os.environ.get("EVAL_SESSIONS_PER_ENGINE", ""),
+    "EVAL_SOFT_WATCHDOG_TIMEOUT": os.environ.get("EVAL_SOFT_WATCHDOG_TIMEOUT", ""),
     **STORE.image_environment,
 }
 

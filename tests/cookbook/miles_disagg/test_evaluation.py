@@ -490,6 +490,41 @@ def test_eval_engines_resizes_the_pool_fleet(monkeypatch):
     assert eval_app.POINT_ENVIRONMENT["EVAL_ENGINES"] == "32"
 
 
+def test_eval_sessions_per_engine_lowers_each_engines_load(monkeypatch):
+    monkeypatch.setenv("EXPERIMENT_CONFIG", "qwen3_6_35b_a3b_hetero_icepop")
+    monkeypatch.setenv("EVAL_CONFIG", "swebench_pro_hetero")
+    monkeypatch.setenv("EVAL_RUN", "r03")
+    monkeypatch.setenv("EVAL_VERSION", "50")
+    monkeypatch.setenv("EVAL_VIEW", "bf16")
+    monkeypatch.setenv("EVAL_ENGINES", "16")
+    monkeypatch.setenv("EVAL_SESSIONS_PER_ENGINE", "24")
+    monkeypatch.delitem(sys.modules, "cookbook.miles_disagg.eval_app", raising=False)
+
+    eval_app = importlib.import_module("cookbook.miles_disagg.eval_app")
+
+    assert (eval_app.POOL.min_containers, eval_app.POOL.target_inputs) == (16, 24)
+    assert eval_app.POOL.sglang_args == spec.POOLS["bf16"].sglang_args
+    assert eval_app.POINT_ENVIRONMENT["EVAL_SESSIONS_PER_ENGINE"] == "24"
+
+
+def test_eval_soft_watchdog_adds_sglangs_stall_dump(monkeypatch):
+    monkeypatch.setenv("EXPERIMENT_CONFIG", "qwen3_6_35b_a3b_hetero_icepop")
+    monkeypatch.setenv("EVAL_CONFIG", "swebench_pro_hetero")
+    monkeypatch.setenv("EVAL_RUN", "r03")
+    monkeypatch.setenv("EVAL_VERSION", "50")
+    monkeypatch.setenv("EVAL_VIEW", "bf16")
+    monkeypatch.setenv("EVAL_SOFT_WATCHDOG_TIMEOUT", "30")
+    monkeypatch.delitem(sys.modules, "cookbook.miles_disagg.eval_app", raising=False)
+
+    eval_app = importlib.import_module("cookbook.miles_disagg.eval_app")
+
+    assert eval_app.POOL.sglang_args == {
+        **spec.POOLS["bf16"].sglang_args,
+        "--soft-watchdog-timeout": "30",
+    }
+    assert eval_app.POINT_ENVIRONMENT["EVAL_SOFT_WATCHDOG_TIMEOUT"] == "30"
+
+
 def test_eval_driver_keeps_every_workers_log_lines(monkeypatch):
     from cookbook.miles_disagg import trainer_image
 
