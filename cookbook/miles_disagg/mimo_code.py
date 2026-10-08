@@ -1,16 +1,16 @@
-"""Write pinned MiMo code tasks for the Modal SWE mini-swe-agent adapter.
+"""Write pinned MiMo code tasks for the Miles Harbor agent function.
 
-For each task, add `environment/setup.sh` (the adapter runs it; Harbor ran the
-healthcheck command instead) and one `train.jsonl` row. Skip the tasks in
-`mimo_code_excluded.tsv`. The recipe must set MODAL_SWE_CPUS=2 and
-MODAL_SWE_MEMORY_MIB=8192 (the value in every `task.toml`).
+Copy each Harbor task, add a git prune to its healthcheck command, limit the
+agent's network, and write one `train.jsonl` row. Skip the tasks in
+`mimo_code_excluded.tsv`. Point HARBOR_TASKS_DIR at `<data_root>/tasks`, and put
+the model server's host in HARBOR_AGENT_ALLOWED_HOSTS.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import shlex
+import re
 import shutil
 import subprocess
 import tempfile
@@ -30,27 +30,55 @@ def _excluded() -> set[str]:
     }
 
 
-def _setup_script(config: dict) -> str:
-    """Run the MiMo setup, then delete unreachable git objects.
+def _prune(workdir: str) -> str:
+    """Delete unreachable git objects once, after MiMo setup.
 
     Some images keep future commits as unreachable objects, and the agent can read
     them (the fix leaks). MiMo setup deletes them only when a branch or tag reaches
     them. Broken refs make gc fail, so delete them first. Skip if MiMo setup hid
     `.git`. `gc.cruftPacks=false` deletes unreachable objects instead of packing them.
     """
-    workdir = shlex.quote(config["environment"]["workdir"])
-    setup_command = config["environment"]["healthcheck"]["command"]
+    if not re.fullmatch(r"[\w/.-]+", workdir):
+        raise ValueError(f"Unexpected workdir: {workdir!r}")
     return (
-        f"#!/bin/bash\n{setup_command} || exit\n"
-        f"cd {workdir} || exit\n"
-        "[ -d .git ] || exit 0\n"
-        "for ref in $(cd .git && find refs -type f); do\n"
-        '  git rev-parse -q --verify "$ref^{object}" >/dev/null ||\n'
-        '    git update-ref -d --no-deref "$ref"\n'
-        "done\n"
+        "test -f /var/lib/mimo/pruned && exit 0; "
+        f"cd {workdir} || exit 1; "
+        "if [ -d .git ]; then "
+        "for ref in $(cd .git && find refs -type f); do "
+        'git rev-parse -q --verify "$ref^{object}" >/dev/null || '
+        'git update-ref -d --no-deref "$ref"; '
+        "done; "
         "git reflog expire --expire=now --all && "
-        "git -c gc.pruneExpire=now -c gc.cruftPacks=false gc --quiet --prune=now\n"
+        "git -c gc.pruneExpire=now -c gc.cruftPacks=false gc --quiet --prune=now "
+        "|| exit 1; "
+        "fi; "
+        "touch /var/lib/mimo/pruned"
     )
+
+
+def _copy_task(source_dir: Path, task_dir: Path) -> dict:
+    """Copy one task, append the prune to its healthcheck, and limit agent network.
+
+    While the agent runs, the sandbox can reach only the hosts in Miles'
+    HARBOR_AGENT_ALLOWED_HOSTS (the model server), so the agent cannot look up the
+    fix online. Setup and grading keep the task's public network.
+    """
+    shutil.copytree(source_dir, task_dir)
+    path = task_dir / "task.toml"
+    text, config = path.read_text(), tomllib.loads(path.read_text())
+    healthcheck = config["environment"]["healthcheck"]
+    prune = _prune(config["environment"]["workdir"])
+    healthcheck["command"] = f"{healthcheck['command']} && bash -c '{prune}'"
+    head, header, tail = text.partition("[environment.healthcheck]\n")
+    line = next(x for x in tail.splitlines(True) if x.startswith("command = "))
+    new_line = f"command = {json.dumps(healthcheck['command'])}\n"
+    text = head + header + tail.replace(line, new_line, 1)
+    config["agent"]["network_mode"] = "allowlist"
+    text = text.replace("[agent]\n", '[agent]\nnetwork_mode = "allowlist"\n', 1)
+    if tomllib.loads(text) != config:
+        raise RuntimeError(f"task.toml edit changed more than intended: {path}")
+    path.write_text(text)
+    return config
 
 
 def prepare_mimo_code(data_root: Path) -> Path:
@@ -83,16 +111,12 @@ def _write_tasks(source: Path, data_root: Path) -> Path:
         if source_dir.name in excluded:
             continue
         task_dir = tasks_root / source_dir.name
-        shutil.copytree(source_dir, task_dir)
-        config = tomllib.loads((task_dir / "task.toml").read_text())
-        (task_dir / "environment" / "setup.sh").write_text(_setup_script(config))
+        config = _copy_task(source_dir, task_dir)
         prompt_rows.append(
             {
                 "prompt": (task_dir / "instruction.md").read_text(),
                 "metadata": {
                     "instance_id": source_dir.name,
-                    "task_dir": str(task_dir),
-                    "sandbox_cwd": config["environment"]["workdir"],
                     "agent_name": "mini-swe-agent",
                     "source_dataset": SOURCE_DATASET,
                     "source_revision": SOURCE_REVISION,
