@@ -248,7 +248,7 @@ def test_qwen36_mimo_code_uses_validated_context_and_code_tasks():
     recipe = _recipe("qwen3_6_35b_a3b_mimo_code")
     cfg = recipe.miles
 
-    assert cfg.prompt_data.endswith("/mimo-v2-6-rl-oss/code.jsonl")
+    assert cfg.prompt_data.endswith("/mimo-v2-6-rl-oss-pruned/code.jsonl")
     assert cfg.max_seq_len == 262_144
     assert cfg.rollout_top_p == 0.95
     assert cfg.rollout_top_k == 1024
@@ -582,7 +582,7 @@ def test_hetero_recipes_share_the_fleet_data_and_run_shape(name):
     assert recipe.ROLLOUT_WEIGHT_VIEWS == base.ROLLOUT_WEIGHT_VIEWS
     assert cfg.rollout_temperature == 1.0
     assert cfg.advantage_estimator == "grpo"
-    assert cfg.prompt_data.endswith("/mimo-v2-6-rl-oss/code.jsonl")
+    assert cfg.prompt_data.endswith("/mimo-v2-6-rl-oss-pruned/code.jsonl")
     assert not cfg.use_rollout_routing_replay
     assert (
         cfg.rollout_batch_size,

@@ -13,6 +13,8 @@ import tempfile
 import tomllib
 from pathlib import Path
 
+from cookbook.miles_disagg.task_history import PRUNE_LATER_HISTORY
+
 EVALUATOR_REVISION = "ca10a60a5fcae51e6948ffe1485d4153d421e6c5"
 
 # SWE-bench Pro V2 as Scale released it (2026-09-22): the HuggingFace rows and the
@@ -85,16 +87,7 @@ cd /app
 # The image's clone carries the repository's later history, the fix commit included,
 # where `git log --all` finds it. Keep only what the task starts from: drop every ref
 # HEAD does not contain, every remote, and the objects only they reached.
-git for-each-ref --format='%(if)%(symref)%(then)%(refname)%(end)' | sed '/^$/d' |
-    while read -r ref; do git symbolic-ref --delete "$ref"; done
-git for-each-ref --format='delete %(refname)' --no-merged=HEAD | git update-ref --stdin
-git for-each-ref --format='delete %(refname)' refs/remotes | git update-ref --stdin
-git remote | while read -r remote; do git config --remove-section "remote.$remote"; done
-rm -f .git/FETCH_HEAD .git/ORIG_HEAD .git/MERGE_HEAD
-git stash clear
-git reflog expire --expire=now --all
-git gc --prune=now --quiet
-
+{PRUNE_LATER_HISTORY}
 baseline_tree=$(git write-tree)
 baseline_commit=$(
     printf '%s\n' 'Miles SWE-bench Pro policy baseline' |

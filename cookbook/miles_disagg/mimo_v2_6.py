@@ -9,8 +9,14 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Iterable
 
+from cookbook.miles_disagg.task_history import PRUNE_LATER_HISTORY
+
 DATASET_ID = "XiaomiMiMo/MiMo-V2.6-RL-oss"
 DATASET_REVISION = "639865fd3374018d6cb29b9fb82dd531406fcf5f"
+# The prepared data's directory under the data volume. Its code tasks' setup confines
+# each repository to the task's start (see _code_setup_script); tasks prepared under the
+# earlier name, mimo-v2-6-rl-oss, leave the later history and file times in place.
+DATA_DIRNAME = "mimo-v2-6-rl-oss-pruned"
 
 _SOURCE_FILES = {
     "code": "code.parquet",
@@ -175,6 +181,32 @@ def normalize_rows(
     return output
 
 
+# Code tasks the prepared data leaves out, each with its reason; the file says how they
+# were found.
+EXCLUDED_CODE_TASKS_PATH = Path(__file__).with_name("mimo_v2_6_code_excluded.json")
+
+
+def excluded_code_tasks(path: Path = EXCLUDED_CODE_TASKS_PATH) -> dict[str, str]:
+    data = json.loads(path.read_text())
+    if data["dataset_revision"] != DATASET_REVISION:
+        raise ValueError(f"{path.name} was checked against another dataset revision")
+    unknown = set(data["tasks"].values()) - set(data["reasons"])
+    if unknown:
+        raise ValueError(f"{path.name}: undefined reasons {sorted(unknown)}")
+    return data["tasks"]
+
+
+def drop_excluded(
+    rows: list[dict[str, Any]], excluded: dict[str, str]
+) -> list[dict[str, Any]]:
+    """The rows whose task is not excluded; every excluded task must be one of them."""
+    identities = {row["metadata"]["instance_id"] for row in rows}
+    missing = set(excluded) - identities
+    if missing:
+        raise ValueError(f"excluded tasks not in the data: {sorted(missing)[:5]}")
+    return [row for row in rows if row["metadata"]["instance_id"] not in excluded]
+
+
 def _write_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     with temporary.open("w") as handle:
@@ -209,6 +241,36 @@ if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   GIT_COMMITTER_NAME=MiMo GIT_COMMITTER_EMAIL=mimo@example.invalid \\
     git commit -q -m baseline --allow-empty
 fi
+
+# The released images keep the repository's later history, the fix commit included: in
+# the reflog (/testbed images) or under upstream refs (/workspace/repo images). Keep only
+# what the task starts from. Some images also keep a ref to an object or ref they lack
+# (an origin/HEAD whose target is gone); git passes over such broken refs everywhere but
+# in gc, which then fails, so drop them first.
+common_dir=$(cd "$(git rev-parse --git-common-dir)" && pwd)
+{{ (cd "$common_dir" && find refs -type f)
+    sed -n 's|^[0-9a-f]* \\(refs/.*\\)$|\\1|p' "$common_dir/packed-refs" 2>/dev/null || true; }} |
+    sort -u | git cat-file --batch-check 2>/dev/null | sed -n 's/ missing$//p' |
+    while read -r ref; do
+        git update-ref --no-deref -d "$ref" 2>/dev/null || rm -f -- "$common_dir/$ref"
+    done
+# gc never prunes a pack marked .keep, or .promisor (left by a partial clone), so the
+# history in one would stay. The images fetch nothing lazily (no remote, no network), so
+# drop the marks.
+rm -f "$common_dir"/objects/pack/*.keep "$common_dir"/objects/pack/*.promisor
+{PRUNE_LATER_HISTORY}
+# File times record how the image was built: the files the fix touched are often newer
+# than the rest. Give every tracked file, and each directory holding one, the time of
+# setup. Never an older time: some images keep build output compiled from the fixed
+# code, and a source older than its output would let a build tool reuse it, so the
+# unfixed tree would pass. Sources newer than every output make builds start fresh.
+pinned=$(mktemp)
+git ls-files -z | xargs -0 -r touch -c -h -r "$pinned" --
+git ls-tree -r -d -z --name-only HEAD | xargs -0 -r touch -c -h -r "$pinned" --
+touch -c -h -r "$pinned" .
+rm -f "$pinned"
+git update-index -q --refresh >/dev/null 2>&1 || true
+
 base=$(git rev-parse HEAD)
 git update-ref refs/miles/task-baseline "$base"
 """
@@ -301,6 +363,7 @@ def prepare_mimo_v2_6(data_root: Path) -> Path:
     if len(image_mapping) != 3764:
         raise RuntimeError(f"expected 3764 image mappings; got {len(image_mapping)}")
 
+    excluded = excluded_code_tasks()
     all_rows: list[dict[str, Any]] = []
     domain_counts: dict[str, int] = {}
     used_images: set[str] = set()
@@ -320,15 +383,16 @@ def prepare_mimo_v2_6(data_root: Path) -> Path:
             raise RuntimeError(
                 f"{domain}: expected {expected} rows; got {len(normalized)}"
             )
-        domain_counts[domain] = len(normalized)
-        if domain == "code":
-            for row in normalized:
-                _materialize_code_task(code_task_root, row)
         used_images.update(
             row["metadata"]["image"]
             for row in normalized
             if row["metadata"]["image"] is not None
         )
+        if domain == "code":
+            normalized = drop_excluded(normalized, excluded)
+            for row in normalized:
+                _materialize_code_task(code_task_root, row)
+        domain_counts[domain] = len(normalized)
         _write_jsonl(data_root / f"{domain}.jsonl", normalized)
         all_rows.extend(normalized)
 
@@ -340,11 +404,12 @@ def prepare_mimo_v2_6(data_root: Path) -> Path:
     output_path = data_root / "train.jsonl"
     _write_jsonl(output_path, all_rows)
     manifest = {
-        "schema": 1,
+        "schema": 2,
         "dataset": DATASET_ID,
         "revision": DATASET_REVISION,
         "rows": len(all_rows),
         "rows_by_domain": domain_counts,
+        "excluded_code_tasks": len(excluded),
         "images": len(used_images),
         "source_sha256": source_hashes,
         "normalizations": {
@@ -352,6 +417,8 @@ def prepare_mimo_v2_6(data_root: Path) -> Path:
             "routing": "domain replaces the overloaded source agent_name",
             "webdev": "routed as webdev despite the released mimo_swe_agent label",
             "source_scope": "tables and image mapping only; general task bundles are not materialized",
+            "code_task_repository": "setup keeps only the history HEAD contains (no other refs, remotes, stash, reflog or unreachable objects) and gives tracked files the setup time",
+            "code_task_exclusions": "mimo_v2_6_code_excluded.json",
         },
     }
     temporary = data_root / "manifest.json.tmp"

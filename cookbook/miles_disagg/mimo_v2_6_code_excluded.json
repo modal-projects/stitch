@@ -1,0 +1,16 @@
+{
+  "dataset_revision": "639865fd3374018d6cb29b9fb82dd531406fcf5f",
+  "checked": "2026-10-08, every code task in its image with the training sandbox (default CPU, 8 GiB, network blocked) and the pruned setup: the leftover history and file times after setup, and an empty patch graded in a fresh sandbox, once with the setup as written and once with tracked files pinned to 2000-01-01; an empty patch that passed was graded again with the original, unpruned setup",
+  "reasons": {
+    "passes_unfixed": "the empty patch passes in the task image, with the original setup too: the unfixed tree passes the task's tests",
+    "keeps_fixed_build_output": "the image keeps build output compiled from the fixed code: an empty patch passes when the sources look older than that output, and an agent could read the fix in it"
+  },
+  "tasks": {
+    "format-code-task-001225": "passes_unfixed",
+    "format-code-task-001597": "passes_unfixed",
+    "format-code-task-001339": "keeps_fixed_build_output",
+    "format-code-task-002077": "keeps_fixed_build_output",
+    "format-code-task-002544": "keeps_fixed_build_output",
+    "format-code-task-002652": "keeps_fixed_build_output"
+  }
+}
