@@ -13,8 +13,8 @@ default runtime:
 DEFAULT_SGLANG_RUNTIME = SGLangRuntime(
     image="lmsysorg/sglang:v0.5.20",
     repository="https://github.com/modal-projects/sglang.git",
-    branch="stitch-sglang-v0.5.20",
-    commit="7686f6b711fc274986eb311f2e7b6df7e13a7cd3",
+    branch="stitch-sglang-hetero",
+    commit="25d7c62b2b8f7eae7f3a0b45807d36ea8fbaac9c",
 )
 ```
 
@@ -26,6 +26,11 @@ The branch is upstream v0.5.20 plus four independently reviewable layers:
 | Verified materialization | Apply and fold complete XOR delta lineages in canonical checkpoint space, verify the published checksum, and durably materialize disk targets. |
 | CPU staging | Build bounded rank-ready host images while serving, optionally keep the canonical checkpoint on local NVMe, then commit every runtime storage in place. |
 | Serving correctness | Preserve request aborts, routed-expert state, and sampling masks across data-parallel and speculative paths, and surface scheduler-process failures. |
+
+The pin is `stitch-sglang-hetero`: the same layers plus the upstream support-mode
+sampling log probabilities and array sampling-mask transport (both expected in v0.5.21),
+and `top_logprobs_in_meta_info_only`, which keeps score centering's 128 candidates per
+token out of the OpenAI logprobs. Score-centered training needs these.
 
 The branch history keeps these physical responsibilities in separate commits;
 the immutable pin above is the executable definition of the stack.

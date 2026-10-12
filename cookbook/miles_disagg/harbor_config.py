@@ -17,6 +17,36 @@ TRAINER_IMAGE_RUN_COMMANDS = (
 )
 
 
+# Score centering (arXiv:2609.20807) in place of #267's IcePop, with the settings of the
+# score-centering recipes on feat/heterogeneous-swe-e2e. Sampling covers the full vocabulary:
+# the loss is exact on the sampler's top-128 recorded candidates and models the rest.
+SCORE_CENTERING = {
+    "loss_type": "score_centering",
+    "score_centering_top_k": 128,
+    "score_centering_is": "none",
+    "disable_grpo_std_normalization": True,  # group-centered rewards, as in the paper
+    "calculate_per_token_loss": True,
+    "use_rollout_logprobs": True,  # the loss scores the trainer against the sampler
+    "skip_actor_forward_only": False,
+    "use_tis": False,
+    "custom_tis_function_path": None,
+    "tis_clip_low": None,
+    "tis_clip": None,
+    "rollout_top_p": 1.0,
+    "rollout_top_k": -1,
+    # No DFlash: this Miles pin has no score centering for speculative decoding.
+    "sglang_speculative_algorithm": None,
+    # This Miles pin retries a stale-version 409 itself, from these settings.
+    "rollout_request_max_attempts": 1200,
+    "rollout_request_retry_interval": 1.0,
+}
+
+
+def without_speculative_decoding(server_args: dict[str, str]) -> dict[str, str]:
+    """SGLang server arguments with the speculative-decoding flags removed."""
+    return {k: v for k, v in server_args.items() if not k.startswith("--speculative-")}
+
+
 def arguments(tasks_root: str) -> dict:
     """Miles workload settings: the Harbor agent function and its reward."""
     args = swebench_config.arguments()

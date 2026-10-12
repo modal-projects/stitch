@@ -2,8 +2,9 @@
 
 Tasks: the mix `mixture-v0-phase1` on the harbor-envs Volume (terminal twice per epoch, general,
 cyber), 64K tokens per rollout. The zero-variance filter drops groups whose attempts all score the
-same, so each step trains on 32 groups that have a signal. Same model, checkpoints, serving and loss
-as qwen3_8_27b_swebench (#267): IcePop until the Miles pin has score centering. The agent is
+same, so each step trains on 32 groups that have a signal. Same model, checkpoints and serving
+as qwen3_8_27b_swebench (#267), but with score centering (harbor_config.SCORE_CENTERING) in
+place of IcePop, and without DFlash. The agent is
 terminus-2: it calls the model from the rollout worker, so sandboxes need no route to the session
 servers. Not here yet: a validation set (eval_interval).
 
@@ -27,11 +28,9 @@ TORCH_DIST_CHECKPOINT_PATH = base.TORCH_DIST_CHECKPOINT_PATH
 SERVED_CHECKPOINT_FORMAT = base.SERVED_CHECKPOINT_FORMAT
 CHECKPOINT_PREP_REQUIRES_GPU = base.CHECKPOINT_PREP_REQUIRES_GPU
 LOCAL_CHECKPOINT_PATH = None
-DRAFT_MODEL = base.DRAFT_MODEL
-DRAFT_REVISION = base.DRAFT_REVISION
 PREP_ENV = base.PREP_ENV
 SGLANG_SERVER_ENV = base.SGLANG_SERVER_ENV
-SGLANG_SERVER_ARGS = base.SGLANG_SERVER_ARGS
+SGLANG_SERVER_ARGS = harbor_config.without_speculative_decoding(base.SGLANG_SERVER_ARGS)
 MAX_SEQ_LEN = base.MAX_SEQ_LEN
 SIDECAR_COMMIT_MODE = base.SIDECAR_COMMIT_MODE
 SIDECAR_FLUSH_CACHE_ON_COMMIT = base.SIDECAR_FLUSH_CACHE_ON_COMMIT
@@ -92,4 +91,4 @@ class _MixV0(base._Miles):
         pass  # the mix is prepared outside Stitch, on the harbor-envs Volume
 
 
-miles = _MixV0(**harbor_config.arguments(TASKS_ROOT))
+miles = _MixV0(**harbor_config.arguments(TASKS_ROOT), **harbor_config.SCORE_CENTERING)

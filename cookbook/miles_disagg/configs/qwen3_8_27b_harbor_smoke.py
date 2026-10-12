@@ -2,7 +2,8 @@
 
 Tests the loop, not learning: the harbor-envs Volume, task setup, the non-root agent
 (terminal), the separate grader (code), rewards into the trainer, and two training steps.
-Same model, checkpoints, serving and loss as qwen3_8_27b_swebench (#267). The agent is
+Same model, checkpoints and serving as qwen3_8_27b_swebench (#267), with score centering
+in place of IcePop and without DFlash. The agent is
 terminus-2: it calls the model from the rollout worker, so sandboxes need no route to the
 session servers.
 """
@@ -24,11 +25,9 @@ TORCH_DIST_CHECKPOINT_PATH = base.TORCH_DIST_CHECKPOINT_PATH
 SERVED_CHECKPOINT_FORMAT = base.SERVED_CHECKPOINT_FORMAT
 CHECKPOINT_PREP_REQUIRES_GPU = base.CHECKPOINT_PREP_REQUIRES_GPU
 LOCAL_CHECKPOINT_PATH = None
-DRAFT_MODEL = base.DRAFT_MODEL
-DRAFT_REVISION = base.DRAFT_REVISION
 PREP_ENV = base.PREP_ENV
 SGLANG_SERVER_ENV = base.SGLANG_SERVER_ENV
-SGLANG_SERVER_ARGS = base.SGLANG_SERVER_ARGS
+SGLANG_SERVER_ARGS = harbor_config.without_speculative_decoding(base.SGLANG_SERVER_ARGS)
 MAX_SEQ_LEN = base.MAX_SEQ_LEN
 SIDECAR_COMMIT_MODE = base.SIDECAR_COMMIT_MODE
 SIDECAR_FLUSH_CACHE_ON_COMMIT = base.SIDECAR_FLUSH_CACHE_ON_COMMIT
@@ -84,4 +83,4 @@ class _Smoke(base._Miles):
         pass  # the tasks are prepared outside Stitch, on the harbor-envs Volume
 
 
-miles = _Smoke(**harbor_config.arguments(TASKS_ROOT))
+miles = _Smoke(**harbor_config.arguments(TASKS_ROOT), **harbor_config.SCORE_CENTERING)

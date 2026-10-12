@@ -44,6 +44,23 @@ def test_harbor_recipes_are_valid(name):
     validate_recipe(_recipe(name))
 
 
+@pytest.mark.parametrize(
+    "name", ["qwen3_8_27b_harbor_smoke", "qwen3_8_27b_harbor_mix_v0"]
+)
+def test_harbor_recipes_train_with_score_centering_without_dflash(name):
+    recipe = _recipe(name)
+    args = recipe.miles.cli_args()
+
+    assert args[args.index("--loss-type") + 1] == "score_centering"
+    assert args[args.index("--score-centering-top-k") + 1] == "128"
+    assert "--use-tis" not in args and "--custom-tis-function-path" not in args
+    assert args[args.index("--rollout-top-p") + 1] == "1.0"
+    assert args[args.index("--rollout-top-k") + 1] == "-1"
+    assert "--sglang-speculative-algorithm" not in args
+    assert not [k for k in recipe.SGLANG_SERVER_ARGS if k.startswith("--speculative-")]
+    assert args[args.index("--rollout-request-max-attempts") + 1] == "1200"
+
+
 def test_harbor_mix_drops_groups_without_signal():
     recipe = _recipe("qwen3_8_27b_harbor_mix_v0")
 

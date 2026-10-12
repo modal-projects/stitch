@@ -3,17 +3,18 @@
 Stitch installs an immutable Miles revision over a dated trainer image:
 
 ```python
-MILES_IMAGE_TAG = "radixark/miles:dev-202609231228"
+MILES_IMAGE_TAG = "radixark/miles:dev-202609290439"
 MILES_REPO_URL = "https://github.com/modal-projects/miles.git"
-MILES_REPO_REF = "78204b5ba7a73b95bc271a0052fc7bc2521ad18a"
+MILES_REPO_REF = "0fe16fcb5ed5fba9bd3aef43f7b03f60ee774bd0"
 ```
 
 The image supplies the compiled CUDA, Transformer Engine, and Megatron-LM
-environment. The source pin belongs to
-`modal-projects/miles:stitch-miles`: upstream Miles main at
-`41c5e38b94`, followed by reviewed changes that remain open upstream and the
-branch-only Modal SWE adapter. Stitch no longer patches Miles at container
-startup.
+environment. The source pin belongs to `modal-projects/miles:stitch-miles-hetero`:
+upstream Miles main at `41c5e38b94`, the Stitch changes below, and score-centered
+policy gradients (`loss_type = "score_centering"`). This pin retries a rollout
+request's 409 itself (`rollout_request_max_attempts`, `rollout_request_retry_interval`),
+and calls the request hook with the session id as its second argument. It does not
+carry `stitch-miles`' commit for delta-history cleanup on resume (#3875 below). Stitch no longer patches Miles at container startup.
 
 ## Carried behavior
 
@@ -22,7 +23,7 @@ startup.
 | Partial rollout groups | [#3702](https://github.com/radixark/miles/pull/3702) | Optionally retain completed trajectories from aborted groups when at least two survive, using dynamic global batch sizing. |
 | Resume and saving | [#2688](https://github.com/radixark/miles/pull/2688), [#3616](https://github.com/radixark/miles/pull/3616) | Preserve explicit resume selection and retain declared source-owned tensors. |
 | External fleet | [#3236](https://github.com/radixark/miles/pull/3236), [#3344](https://github.com/radixark/miles/pull/3344) | Treat one opaque URL as the rollout fleet and expose a request-policy hook with explicit arguments. |
-| Delta resume cleanup | [#3875](https://github.com/radixark/miles/pull/3875) | Preserve replay history through the resumed version and prune only the abandoned suffix. |
+| Delta resume cleanup (not in this pin) | [#3875](https://github.com/radixark/miles/pull/3875) | Preserve replay history through the resumed version and prune only the abandoned suffix. |
 | Disk delta | [#3237](https://github.com/radixark/miles/pull/3237) | Match emitted tensor names, shapes, dtypes, and raw checkpoint layouts before XOR encoding. |
 | NVFP4 | [#3601](https://github.com/radixark/miles/pull/3601) | Adapt Qwen3.6 NVFP4 rollout checkpoints. |
 | Modal SWE | Branch-only | Provide the Modal Sandbox transport and verified mini-SWE agent adapter used by these recipes; upstream Miles does not ship this provider-specific example. |
