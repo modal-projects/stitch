@@ -149,6 +149,16 @@ train_volumes = {
     # Recipe-owned data, e.g. prepared Harbor task sets: {mount path: modal.Volume}.
     **getattr(exp, "TRAINER_EXTRA_VOLUMES", {}),
 }
+train_secrets = [
+    *STORE_SECRETS,
+    *(
+        [modal.Secret.from_name("wandb-secret")]
+        if getattr(miles_cfg, "use_wandb", False)
+        else []
+    ),
+    # Recipe-owned settings for rollout workers, e.g. a grader's judge token: [modal.Secret].
+    *getattr(exp, "TRAINER_EXTRA_SECRETS", ()),
+]
 
 app = modal.App(APP_NAME)
 
@@ -281,14 +291,7 @@ _MULTINODE = miles_cfg.n_train_nodes > 1
     cloud=modal_cfg.cloud,
     region=modal_cfg.region,
     volumes=train_volumes,
-    secrets=[
-        *STORE_SECRETS,
-        *(
-            [modal.Secret.from_name("wandb-secret")]
-            if getattr(miles_cfg, "use_wandb", False)
-            else []
-        ),
-    ],
+    secrets=train_secrets,
     ephemeral_disk=modal_cfg.trainer_ephemeral_disk_mib,
     timeout=24 * 60 * MINUTES,
     startup_timeout=20 * MINUTES,

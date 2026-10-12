@@ -37,6 +37,24 @@ def test_maintained_training_recipes_have_consistent_checkpoints_and_resume(name
     validate_resumable_config(recipe.miles)
 
 
+@pytest.mark.parametrize(
+    "name", ["qwen3_8_27b_harbor_smoke", "qwen3_8_27b_harbor_mix_v0"]
+)
+def test_harbor_recipes_are_valid(name):
+    validate_recipe(_recipe(name))
+
+
+def test_harbor_mix_drops_groups_without_signal():
+    recipe = _recipe("qwen3_8_27b_harbor_mix_v0")
+
+    validate_resumable_config(recipe.miles)
+    assert recipe.miles.dynamic_sampling_filter_path.endswith(
+        "check_reward_nonzero_std"
+    )
+    assert recipe.miles.environment["HARBOR_TASKS_DIR"] == f"{recipe.TASKS_ROOT}/tasks"
+    assert recipe.miles.prompt_data == f"{recipe.TASKS_ROOT}/train.jsonl"
+
+
 def test_training_and_serving_must_use_the_same_checkpoint():
     recipe = _recipe("qwen3_4b_math")
     recipe.miles.hf_checkpoint = "/checkpoints/another-model"
