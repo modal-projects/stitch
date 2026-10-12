@@ -42,6 +42,27 @@ def test_trainer_mounts_kernel_cache_volume(monkeypatch):
     assert app.train_volumes[str(KERNEL_CACHE_PATH)].name == "kernel-cache"
 
 
+def test_trainer_mounts_recipe_extra_volumes(monkeypatch):
+    import modal
+
+    recipe = SimpleNamespace(**vars(qwen3_4b_math))
+    extra = modal.Volume.from_name("recipe-data")
+    recipe.TRAINER_EXTRA_VOLUMES = {"/recipe-data": extra}
+    monkeypatch.setitem(
+        sys.modules, "cookbook.miles_disagg.configs.extra_volume_test_recipe", recipe
+    )
+    monkeypatch.setenv("EXPERIMENT_CONFIG", "extra_volume_test_recipe")
+    monkeypatch.setenv("RUN_ID", "test-run")
+    monkeypatch.delenv("STITCH_STORE_BACKEND", raising=False)
+    monkeypatch.delenv("MILES_LOCAL_DIR", raising=False)
+    monkeypatch.delitem(sys.modules, "cookbook.miles_disagg.app", raising=False)
+
+    app = importlib.import_module("cookbook.miles_disagg.app")
+
+    assert app.train_volumes["/recipe-data"] is extra
+    assert app.train_volumes[str(KERNEL_CACHE_PATH)].name == "kernel-cache"
+
+
 @pytest.mark.parametrize("entrypoint", ["app", "prep_app"])
 def test_invalid_recipe_fails_before_image_construction(monkeypatch, entrypoint):
     recipe = SimpleNamespace(**vars(qwen3_4b_math))

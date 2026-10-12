@@ -146,6 +146,8 @@ train_volumes = {
     str(DATA_PATH): data_volume,
     str(STITCH_PATH): run_volume,
     str(KERNEL_CACHE_PATH): kernel_cache_volume,
+    # Recipe-owned data, e.g. prepared Harbor task sets: {mount path: modal.Volume}.
+    **getattr(exp, "TRAINER_EXTRA_VOLUMES", {}),
 }
 
 app = modal.App(APP_NAME)
