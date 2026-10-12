@@ -236,7 +236,10 @@ class Server:
             flush_cache_on_commit=exp.SIDECAR_FLUSH_CACHE_ON_COMMIT,
             run_id=RUN_ID,
             startup_timeout=SERVER_STARTUP_TIMEOUT,
-            engine_health_timeout=getattr(exp, "SIDECAR_ENGINE_HEALTH_TIMEOUT", 5.0),
+            engine_health_timeout=getattr(exp, "SIDECAR_ENGINE_HEALTH_TIMEOUT", 30.0),
+            response_keepalive_after=getattr(
+                exp, "SIDECAR_RESPONSE_KEEPALIVE_AFTER", None
+            ),
         )
 
     @modal.exit()
