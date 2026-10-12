@@ -8,11 +8,10 @@ session servers.
 """
 
 import dataclasses
-import json
 
 import modal as modal_sdk
 
-from cookbook.miles_disagg import swebench_config
+from cookbook.miles_disagg import harbor_config
 from cookbook.miles_disagg.configs import qwen3_8_27b_swebench as base
 
 APP_NAME = "stitch-qwen3-8-27b-harbor-smoke"
@@ -35,14 +34,8 @@ SIDECAR_COMMIT_MODE = base.SIDECAR_COMMIT_MODE
 SIDECAR_FLUSH_CACHE_ON_COMMIT = base.SIDECAR_FLUSH_CACHE_ON_COMMIT
 SGLANG_DELTA_UPDATE_MODE = base.SGLANG_DELTA_UPDATE_MODE
 
-# terminus-2 needs Harbor's Miles branch (truncation policy for TITO); pip cannot resolve it.
-# Install into the interpreter that runs the trainer and Ray (the image's /opt/sglang venv).
-HARBOR_REF = "917b3c1be7cf6553a7a9fe25de8adb6f8e639287"  # harbor-miles-v0.20.0
-TRAINER_EXTRA_PIP_PACKAGES = ("uv",)
-TRAINER_IMAGE_RUN_COMMANDS = (
-    "uv pip install --python /opt/sglang/bin/python "
-    f'"harbor[modal] @ git+https://github.com/harbor-framework/harbor@{HARBOR_REF}" "modal==1.5.3"',
-)
+TRAINER_EXTRA_PIP_PACKAGES = harbor_config.TRAINER_EXTRA_PIP_PACKAGES
+TRAINER_IMAGE_RUN_COMMANDS = harbor_config.TRAINER_IMAGE_RUN_COMMANDS
 TASKS_ROOT = "/harbor-envs/smoke-20261012"
 # Trial logs go to their own Volume: Stitch reloads the run Volume (/stitch) when it publishes
 # weights, and that reload fails while Harbor holds a trial file open there.
@@ -63,21 +56,6 @@ modal = dataclasses.replace(
 )
 
 
-def _arguments() -> dict:
-    args = swebench_config.arguments()
-    for key in (
-        "custom_rollout_log_function_path",
-        "session_sample_picker_path",
-        "session_sample_postprocessor_path",
-    ):
-        args.pop(key)
-    return args | {
-        "prompt_data": f"{TASKS_ROOT}/train.jsonl",
-        "custom_agent_function_path": "harbor_agent_function.run",
-        "custom_rm_path": "generate.reward_func",
-    }
-
-
 class _Smoke(base._Miles):
     num_rollout = 2
     rollout_batch_size = 2
@@ -91,32 +69,19 @@ class _Smoke(base._Miles):
     wandb_group = "qwen3-8-27b-harbor-smoke"
     prometheus_run_name = wandb_group
 
-    environment = {
-        "PYTHONPATH": (
-            "/root/Megatron-LM:/root/miles:/root/miles/examples/experimental/harbor"
-            ":/root/miles/examples/swe-agent-harbor-docker"
-        ),
-        "CUDA_DEVICE_MAX_CONNECTIONS": "1",
-        "RAY_health_check_timeout_ms": "60000",
-        "RAY_health_check_failure_threshold": "30",
-        "LITELLM_LOG": "ERROR",
-        "HARBOR_ENV_TYPE": "modal",
-        "HARBOR_TASKS_DIR": f"{TASKS_ROOT}/tasks",
-        "HARBOR_TRIALS_DIR": "/harbor-trials",
-        "HARBOR_ENV_KWARGS": json.dumps(
-            {"app_name": "qwen3-8-27b-harbor-smoke-sandboxes"}
-        ),
-        "AGENT_MODEL_NAME": "model",
-        "AGENT_TIMEOUT": "900",
-        "AGENT_TRIAL_TIMEOUT": "3600",
-        "AGENT_MAX_INPUT_TOKENS": str(MAX_SEQ_LEN - 8192),
-        "AGENT_MAX_OUTPUT_TOKENS": "8192",
-        "HARBOR_MAX_SEQ_LEN": str(MAX_SEQ_LEN),
-        "HARBOR_AGENT_MAX_ITERATIONS": "30",
-    }
+    environment = harbor_config.environment(
+        tasks_root=TASKS_ROOT,
+        trials_dir="/harbor-trials",
+        sandbox_app="qwen3-8-27b-harbor-smoke-sandboxes",
+        max_seq_len=MAX_SEQ_LEN,
+        max_output_tokens=8192,
+        agent_timeout=900,
+        trial_timeout=3600,
+        max_turns=30,
+    )
 
     def prepare_data(self) -> None:
         pass  # the tasks are prepared outside Stitch, on the harbor-envs Volume
 
 
-miles = _Smoke(**_arguments())
+miles = _Smoke(**harbor_config.arguments(TASKS_ROOT))
