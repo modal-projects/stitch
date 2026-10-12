@@ -57,7 +57,11 @@ def environment(
         "HARBOR_ENV_TYPE": "modal",
         "HARBOR_TASKS_DIR": f"{tasks_root}/tasks",
         "HARBOR_TRIALS_DIR": trials_dir,
-        "HARBOR_ENV_KWARGS": json.dumps({"app_name": sandbox_app}),
+        # Harbor's default sandbox lifetime is 24 h, so a sandbox of a stopped run keeps running.
+        # Let each sandbox live only a little longer than its trial.
+        "HARBOR_ENV_KWARGS": json.dumps(
+            {"app_name": sandbox_app, "sandbox_timeout_secs": trial_timeout + 600}
+        ),
         "AGENT_MODEL_NAME": "model",
         "AGENT_TIMEOUT": str(agent_timeout),
         "AGENT_TRIAL_TIMEOUT": str(trial_timeout),

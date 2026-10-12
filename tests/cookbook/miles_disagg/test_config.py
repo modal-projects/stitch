@@ -53,6 +53,9 @@ def test_harbor_mix_drops_groups_without_signal():
     )
     assert recipe.miles.environment["HARBOR_TASKS_DIR"] == f"{recipe.TASKS_ROOT}/tasks"
     assert recipe.miles.prompt_data == f"{recipe.TASKS_ROOT}/train.jsonl"
+    sandbox = json.loads(recipe.miles.environment["HARBOR_ENV_KWARGS"])
+    trial_timeout = int(recipe.miles.environment["AGENT_TRIAL_TIMEOUT"])
+    assert trial_timeout < sandbox["sandbox_timeout_secs"] < 24 * 3600
 
 
 def test_training_and_serving_must_use_the_same_checkpoint():
