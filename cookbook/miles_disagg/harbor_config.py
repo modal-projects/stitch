@@ -5,7 +5,22 @@ Tasks are prepared outside Stitch as Harbor task folders plus one train.jsonl on
 
 import json
 
+from cookbook.common.serving_image import SGLangRuntime
 from cookbook.miles_disagg import swebench_config
+
+# The stack that runs score centering on feat/heterogeneous-swe-e2e. Other recipes keep
+# Stitch's default pins. This Miles retries a rollout request's 409 from its own settings
+# and lacks stitch-miles' delta-history cleanup on resume (#3875).
+MILES_IMAGE_TAG = "radixark/miles:dev-202609290439"
+MILES_REPO_REF = "0fe16fcb5ed5fba9bd3aef43f7b03f60ee774bd0"  # stitch-miles-hetero
+SGLANG_RUNTIME = SGLangRuntime(
+    image="lmsysorg/sglang:v0.5.20",
+    repository="https://github.com/modal-projects/sglang.git",
+    branch="stitch-sglang-hetero",  # returns the sampler's candidates for score centering
+    commit="25d7c62b2b8f7eae7f3a0b45807d36ea8fbaac9c",
+)
+# Long turns get their response started and kept alive, as on feat/heterogeneous-swe-e2e.
+SIDECAR_RESPONSE_KEEPALIVE_AFTER = 60.0
 
 # terminus-2 needs Harbor's Miles branch (truncation policy for TITO); pip cannot resolve it.
 # Install into the interpreter that runs the trainer and Ray (the image's /opt/sglang venv).
@@ -30,6 +45,7 @@ SCORE_CENTERING = {
     "skip_actor_forward_only": False,
     "use_tis": False,
     "custom_tis_function_path": None,
+    "get_mismatch_metrics": None,  # this Miles requires a TIS function for them
     "tis_clip_low": None,
     "tis_clip": None,
     "rollout_top_p": 1.0,

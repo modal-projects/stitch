@@ -85,6 +85,7 @@ image = trainer_image.build_trainer_image(
     experiment=EXPERIMENT,
     run_id=RUN_ID,
     miles_repo_ref=getattr(exp, "MILES_REPO_REF", trainer_image.MILES_REPO_REF),
+    miles_image_tag=getattr(exp, "MILES_IMAGE_TAG", trainer_image.MILES_IMAGE_TAG),
     miles_local=MILES_LOCAL_DIR,
     extra_pip_packages=(
         *getattr(exp, "TRAINER_EXTRA_PIP_PACKAGES", ()),

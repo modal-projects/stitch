@@ -19,9 +19,9 @@ from cookbook.common import trainer_image as common_trainer_image
 
 # Dated tag, never `latest`: Modal caches from_registry per tag string and won't re-pull
 # a moved mutable tag, so `latest` silently serves whatever was first pulled.
-MILES_IMAGE_TAG = "radixark/miles:dev-202609290439"
+MILES_IMAGE_TAG = "radixark/miles:dev-202609231228"
 MILES_REPO_URL = "https://github.com/modal-projects/miles.git"
-MILES_REPO_REF = "0fe16fcb5ed5fba9bd3aef43f7b03f60ee774bd0"
+MILES_REPO_REF = "78204b5ba7a73b95bc271a0052fc7bc2521ad18a"
 
 MILES_ROOT = "/root/miles"
 # Source-only megatron.training must be on PYTHONPATH.
@@ -39,6 +39,7 @@ def build_trainer_image(
     experiment: str,
     run_id: str | None = None,
     miles_repo_ref: str = MILES_REPO_REF,
+    miles_image_tag: str = MILES_IMAGE_TAG,
     miles_local: str | None = None,
     extra_pip_packages: tuple[str, ...] = (),
     image_run_commands: tuple[str, ...] = (),
@@ -49,7 +50,7 @@ def build_trainer_image(
     trainer-side delta encoder's codecs. stitch + the cookbook package are mounted so the
     trainer, Ray actors, and the sidecar subprocess resolve their imports."""
     image = (
-        modal.Image.from_registry(MILES_IMAGE_TAG)
+        modal.Image.from_registry(miles_image_tag)
         .entrypoint([])
         # RDMA/EFA userspace so multi-node NCCL binds EFA under rdma=True instead of TCP.
         .apt_install(

@@ -59,6 +59,24 @@ def test_harbor_recipes_train_with_score_centering_without_dflash(name):
     assert "--sglang-speculative-algorithm" not in args
     assert not [k for k in recipe.SGLANG_SERVER_ARGS if k.startswith("--speculative-")]
     assert args[args.index("--rollout-request-max-attempts") + 1] == "1200"
+    assert "--get-mismatch-metrics" not in args
+
+
+@pytest.mark.parametrize(
+    "name", ["qwen3_8_27b_harbor_smoke", "qwen3_8_27b_harbor_mix_v0"]
+)
+def test_only_harbor_recipes_pin_the_score_centering_stack(name):
+    from cookbook.common import serving_image
+    from cookbook.miles_disagg import harbor_config, trainer_image
+
+    recipe = _recipe(name)
+
+    assert recipe.MILES_REPO_REF == harbor_config.MILES_REPO_REF
+    assert recipe.MILES_IMAGE_TAG == harbor_config.MILES_IMAGE_TAG
+    assert recipe.SGLANG_RUNTIME.branch == "stitch-sglang-hetero"
+    assert recipe.SIDECAR_RESPONSE_KEEPALIVE_AFTER == 60.0
+    assert trainer_image.MILES_REPO_REF != harbor_config.MILES_REPO_REF
+    assert serving_image.DEFAULT_SGLANG_RUNTIME.branch != "stitch-sglang-hetero"
 
 
 def test_harbor_mix_drops_groups_without_signal():
