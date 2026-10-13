@@ -2,6 +2,7 @@ import importlib
 import sys
 from types import SimpleNamespace
 
+import modal
 import pytest
 
 from cookbook.common.constants import KERNEL_CACHE_PATH
@@ -50,8 +51,6 @@ def test_trainer_mounts_kernel_cache_volume(monkeypatch):
 
 
 def test_trainer_mounts_recipe_extra_volumes(monkeypatch):
-    import modal
-
     recipe = SimpleNamespace(**vars(qwen3_4b_math))
     extra = modal.Volume.from_name("recipe-data")
     recipe.TRAINER_EXTRA_VOLUMES = {"/recipe-data": extra}
@@ -71,8 +70,6 @@ def test_trainer_mounts_recipe_extra_volumes(monkeypatch):
 
 
 def test_trainer_gets_recipe_extra_secrets(monkeypatch):
-    import modal
-
     recipe = SimpleNamespace(**vars(qwen3_4b_math))
     extra = modal.Secret.from_name("recipe-settings")
     recipe.TRAINER_EXTRA_SECRETS = [extra]
