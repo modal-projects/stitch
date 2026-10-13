@@ -1,0 +1,95 @@
+"""Mixture v0, phase 1: Qwen3.8-27B on MiMo terminal, general and cyber through Miles' Harbor path.
+
+Tasks: the mix `mixture-v0-phase1` on the harbor-envs Volume (terminal twice per epoch, general,
+cyber), 64K tokens per rollout. The zero-variance filter drops groups whose attempts all score the
+same, so each step trains on 32 groups that have a signal. Same model, checkpoints, serving and loss
+as qwen3_8_27b_swebench (#267): IcePop until the Miles pin has score centering. The agent is
+terminus-2: it calls the model from the rollout worker, so sandboxes need no route to the session
+servers. Not here yet: a validation set (eval_interval).
+
+Watch the first steps: the kept share per set, step time, grader errors and judge load.
+"""
+
+import dataclasses
+
+import modal as modal_sdk
+
+from cookbook.miles_disagg import harbor_config
+from cookbook.miles_disagg.configs import qwen3_8_27b_swebench as base
+
+APP_NAME = "stitch-qwen3-8-27b-harbor-mix-v0"
+EXPERIMENT_VOLUME_NAME = "stitch-miles-qwen3-8-27b-harbor-mix-v0"
+SOURCE_MODEL = base.SOURCE_MODEL
+SOURCE_REVISION = base.SOURCE_REVISION
+BF16_CHECKPOINT_PATH = base.BF16_CHECKPOINT_PATH
+ROLLOUT_CHECKPOINT_PATH = base.ROLLOUT_CHECKPOINT_PATH
+TORCH_DIST_CHECKPOINT_PATH = base.TORCH_DIST_CHECKPOINT_PATH
+SERVED_CHECKPOINT_FORMAT = base.SERVED_CHECKPOINT_FORMAT
+CHECKPOINT_PREP_REQUIRES_GPU = base.CHECKPOINT_PREP_REQUIRES_GPU
+LOCAL_CHECKPOINT_PATH = None
+DRAFT_MODEL = base.DRAFT_MODEL
+DRAFT_REVISION = base.DRAFT_REVISION
+PREP_ENV = base.PREP_ENV
+SGLANG_SERVER_ENV = base.SGLANG_SERVER_ENV
+SGLANG_SERVER_ARGS = base.SGLANG_SERVER_ARGS
+MAX_SEQ_LEN = base.MAX_SEQ_LEN
+SIDECAR_COMMIT_MODE = base.SIDECAR_COMMIT_MODE
+SIDECAR_FLUSH_CACHE_ON_COMMIT = base.SIDECAR_FLUSH_CACHE_ON_COMMIT
+SGLANG_DELTA_UPDATE_MODE = base.SGLANG_DELTA_UPDATE_MODE
+
+TRAINER_EXTRA_PIP_PACKAGES = harbor_config.TRAINER_EXTRA_PIP_PACKAGES
+TRAINER_IMAGE_RUN_COMMANDS = harbor_config.TRAINER_IMAGE_RUN_COMMANDS
+TASKS_ROOT = "/harbor-envs/mixture-v0-phase1"
+# Trial logs go to their own Volume: Stitch reloads the run Volume (/stitch) when it publishes
+# weights, and that reload fails while Harbor holds a trial file open there.
+TRAINER_EXTRA_VOLUMES = {
+    "/harbor-envs": modal_sdk.Volume.from_name("harbor-envs"),
+    "/harbor-trials": modal_sdk.Volume.from_name(
+        "harbor-mix-v0-trials", create_if_missing=True, version=2
+    ),
+}
+# General's grader calls an LLM judge. Its task.toml reads MIMO_JUDGE_URL, MIMO_TEXT_JUDGE and
+# HF_TOKEN (the judge token) from the rollout worker's environment. This Secret holds all three.
+TRAINER_EXTRA_SECRETS = [modal_sdk.Secret.from_name("mimo-judge")]
+
+# 8 rollout containers x 16 requests each. Raise to #267's 16 containers (256) once the
+# first steps show that sandboxes, graders and the judge keep up.
+AGENT_CONCURRENCY = 128
+
+modal = dataclasses.replace(
+    base.modal, rollout_min_containers=8, rollout_max_containers=8
+)
+
+
+class _MixV0(base._Miles):
+    # About one epoch: ~1,900 sampled prompts, about half kept, 32 kept groups per step.
+    num_rollout = 30
+    save_interval = 10
+    dynamic_sampling_filter_path = (
+        "miles.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std"
+    )
+    sglang_server_concurrency = AGENT_CONCURRENCY
+    async_max_concurrent_samples = AGENT_CONCURRENCY
+    wandb_project = "agent-rl"  # not the team's fully-async-rl-modal project
+    wandb_group = "qwen3-8-27b-harbor-mix-v0-phase1"
+    prometheus_run_name = wandb_group
+
+    environment = harbor_config.environment(
+        tasks_root=TASKS_ROOT,
+        trials_dir="/harbor-trials",
+        sandbox_app="qwen3-8-27b-harbor-mix-v0-sandboxes",
+        max_seq_len=MAX_SEQ_LEN,
+        # #267's reply cap; the smoke run used it too.
+        max_output_tokens=8192,
+        # One hour for every set, as in our eval: 4x terminal's 900 s, 1x general's and cyber's 3,600 s.
+        agent_timeout=3600,
+        trial_timeout=7200,
+        # The 64K context ends most episodes first; this cap only stops loops.
+        max_turns=200,
+    )
+
+    def prepare_data(self) -> None:
+        pass  # the mix is prepared outside Stitch, on the harbor-envs Volume
+
+
+miles = _MixV0(**harbor_config.arguments(TASKS_ROOT))

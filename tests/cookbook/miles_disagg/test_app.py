@@ -2,6 +2,7 @@ import importlib
 import sys
 from types import SimpleNamespace
 
+import modal
 import pytest
 
 from cookbook.common.constants import KERNEL_CACHE_PATH
@@ -11,7 +12,14 @@ from cookbook.miles_disagg.configs import qwen3_4b_math
 
 @pytest.mark.parametrize("entrypoint", ["app", "prep_app"])
 @pytest.mark.parametrize(
-    "recipe", ["qwen3_4b_math", "qwen3_6_35b_a3b_nvfp4", "glm5_3_nvfp4"]
+    "recipe",
+    [
+        "qwen3_4b_math",
+        "qwen3_6_35b_a3b_nvfp4",
+        "glm5_3_nvfp4",
+        "qwen3_8_27b_harbor_smoke",
+        "qwen3_8_27b_harbor_mix_v0",
+    ],
 )
 def test_maintained_recipes_import_through_deployment_entrypoints(
     monkeypatch, entrypoint, recipe
@@ -40,6 +48,44 @@ def test_trainer_mounts_kernel_cache_volume(monkeypatch):
     app = importlib.import_module("cookbook.miles_disagg.app")
 
     assert app.train_volumes[str(KERNEL_CACHE_PATH)].name == "kernel-cache"
+
+
+def test_trainer_mounts_recipe_extra_volumes(monkeypatch):
+    recipe = SimpleNamespace(**vars(qwen3_4b_math))
+    extra = modal.Volume.from_name("recipe-data")
+    recipe.TRAINER_EXTRA_VOLUMES = {"/recipe-data": extra}
+    monkeypatch.setitem(
+        sys.modules, "cookbook.miles_disagg.configs.extra_volume_test_recipe", recipe
+    )
+    monkeypatch.setenv("EXPERIMENT_CONFIG", "extra_volume_test_recipe")
+    monkeypatch.setenv("RUN_ID", "test-run")
+    monkeypatch.delenv("STITCH_STORE_BACKEND", raising=False)
+    monkeypatch.delenv("MILES_LOCAL_DIR", raising=False)
+    monkeypatch.delitem(sys.modules, "cookbook.miles_disagg.app", raising=False)
+
+    app = importlib.import_module("cookbook.miles_disagg.app")
+
+    assert app.train_volumes["/recipe-data"] is extra
+    assert app.train_volumes[str(KERNEL_CACHE_PATH)].name == "kernel-cache"
+
+
+def test_trainer_gets_recipe_extra_secrets(monkeypatch):
+    recipe = SimpleNamespace(**vars(qwen3_4b_math))
+    extra = modal.Secret.from_name("recipe-settings")
+    recipe.TRAINER_EXTRA_SECRETS = [extra]
+    monkeypatch.setitem(
+        sys.modules, "cookbook.miles_disagg.configs.extra_secret_test_recipe", recipe
+    )
+    monkeypatch.setenv("EXPERIMENT_CONFIG", "extra_secret_test_recipe")
+    monkeypatch.setenv("RUN_ID", "test-run")
+    monkeypatch.delenv("STITCH_STORE_BACKEND", raising=False)
+    monkeypatch.delenv("MILES_LOCAL_DIR", raising=False)
+    monkeypatch.delitem(sys.modules, "cookbook.miles_disagg.app", raising=False)
+
+    app = importlib.import_module("cookbook.miles_disagg.app")
+
+    assert app.train_secrets[-1] is extra
+    assert app.train_secrets[: len(app.STORE_SECRETS)] == app.STORE_SECRETS
 
 
 @pytest.mark.parametrize("entrypoint", ["app", "prep_app"])
