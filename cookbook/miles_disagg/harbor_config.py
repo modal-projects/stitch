@@ -32,16 +32,18 @@ TRAINER_IMAGE_RUN_COMMANDS = (
 )
 
 
-# Score centering (arXiv:2609.20807) in place of #267's IcePop, with the settings of the
-# score-centering recipes on feat/heterogeneous-swe-e2e. Sampling covers the full vocabulary:
-# the loss is exact on the sampler's top-128 recorded candidates and models the rest.
+# Score centering (arXiv:2609.20807) in place of #267's IcePop, as in the recipe
+# qwen3_6_35b_a3b_hetero_score_centering_mis_top_p on feat/heterogeneous-swe-e2e (score
+# centering, masked importance sampling, top-p sampling with support replay). Score centering
+# alone, or IcePop's masking alone, collapsed there.
 SCORE_CENTERING = {
     "loss_type": "score_centering",
     "score_centering_top_k": 128,
-    # Samples can be up to max_weight_staleness versions old, so weight each token by
-    # min(trainer / sampler probability, 2) instead of 1 ("none" is exact only on-policy).
-    "score_centering_is": "tis",
-    "score_centering_tis_clip": 2.0,
+    # Each token's score is weighted by its trainer / sampler probability ratio inside
+    # [0.5, 5] and by zero outside it.
+    "score_centering_is": "mis",
+    "score_centering_mis_low": 0.5,
+    "score_centering_mis_high": 5.0,
     "disable_grpo_std_normalization": True,  # group-centered rewards, as in the paper
     "calculate_per_token_loss": True,
     "use_rollout_logprobs": True,  # the loss scores the trainer against the sampler
@@ -53,8 +55,11 @@ SCORE_CENTERING = {
     "get_mismatch_metrics": None,
     "tis_clip_low": None,
     "tis_clip": None,
-    "rollout_top_p": 1.0,
-    "rollout_top_k": -1,
+    # Samplers draw from the top-p 0.97 nucleus, at most 64 tokens. Miles then replays that
+    # support in the trainer, and the 128 recorded candidates hold all of it, so centering
+    # is exact.
+    "rollout_top_p": 0.97,
+    "rollout_top_k": 64,
     # No DFlash: this Miles pin has no score centering for speculative decoding.
     "sglang_speculative_algorithm": None,
     # This Miles pin retries a stale-version 409 itself, from these settings.

@@ -54,11 +54,12 @@ def test_harbor_recipes_train_with_score_centering_without_dflash(name):
 
     assert args[args.index("--loss-type") + 1] == "score_centering"
     assert args[args.index("--score-centering-top-k") + 1] == "128"
-    assert args[args.index("--score-centering-is") + 1] == "tis"
-    assert args[args.index("--score-centering-tis-clip") + 1] == "2.0"
+    assert args[args.index("--score-centering-is") + 1] == "mis"
+    assert args[args.index("--score-centering-mis-low") + 1] == "0.5"
+    assert args[args.index("--score-centering-mis-high") + 1] == "5.0"
     assert "--use-tis" not in args and "--custom-tis-function-path" not in args
-    assert args[args.index("--rollout-top-p") + 1] == "1.0"
-    assert args[args.index("--rollout-top-k") + 1] == "-1"
+    assert args[args.index("--rollout-top-p") + 1] == "0.97"
+    assert args[args.index("--rollout-top-k") + 1] == "64"
     assert "--sglang-speculative-algorithm" not in args
     assert not [k for k in recipe.SGLANG_SERVER_ARGS if k.startswith("--speculative-")]
     assert args[args.index("--rollout-request-max-attempts") + 1] == "1200"
