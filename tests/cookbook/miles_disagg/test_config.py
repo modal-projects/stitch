@@ -5,7 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from cookbook.miles_disagg import nvfp4
+from cookbook.common import serving_image
+from cookbook.miles_disagg import harbor_config, nvfp4, trainer_image
 from cookbook.miles_disagg.config import MilesConfig, validate_recipe
 from cookbook.miles_disagg.resume import validate_resumable_config
 
@@ -66,9 +67,6 @@ def test_harbor_recipes_train_with_score_centering_without_dflash(name):
     "name", ["qwen3_8_27b_harbor_smoke", "qwen3_8_27b_harbor_mix_v0"]
 )
 def test_only_harbor_recipes_pin_the_score_centering_stack(name):
-    from cookbook.common import serving_image
-    from cookbook.miles_disagg import harbor_config, trainer_image
-
     recipe = _recipe(name)
 
     assert recipe.MILES_REPO_REF == harbor_config.MILES_REPO_REF
