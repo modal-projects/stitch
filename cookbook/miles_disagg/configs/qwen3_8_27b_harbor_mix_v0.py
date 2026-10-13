@@ -64,7 +64,13 @@ modal = dataclasses.replace(
 )
 
 
+# Qwen3.8 thinks at length: at #267's 8K cap, 16 of 16 TermGrade attempts on Spindle and 2 of 2 in
+# a baseline ended on an over-long reply. Our MiMo eval found 16K covers the 90th percentile reply.
+REPLY_TOKENS = 16_384
+
+
 class _MixV0(base._Miles):
+    rollout_max_response_len = REPLY_TOKENS
     # About one epoch: ~1,900 sampled prompts, about half kept, 32 kept groups per step.
     num_rollout = 30
     save_interval = 10
@@ -82,8 +88,7 @@ class _MixV0(base._Miles):
         trials_dir="/harbor-trials",
         sandbox_app="qwen3-8-27b-harbor-mix-v0-sandboxes",
         max_seq_len=MAX_SEQ_LEN,
-        # #267's reply cap; the smoke run used it too.
-        max_output_tokens=8192,
+        max_output_tokens=REPLY_TOKENS,
         # One hour for every set, as in our eval: 4x terminal's 900 s, 1x general's and cyber's 3,600 s.
         agent_timeout=3600,
         trial_timeout=7200,
