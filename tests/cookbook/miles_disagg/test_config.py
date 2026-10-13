@@ -54,6 +54,8 @@ def test_harbor_recipes_train_with_score_centering_without_dflash(name):
 
     assert args[args.index("--loss-type") + 1] == "score_centering"
     assert args[args.index("--score-centering-top-k") + 1] == "128"
+    assert args[args.index("--score-centering-is") + 1] == "tis"
+    assert args[args.index("--score-centering-tis-clip") + 1] == "2.0"
     assert "--use-tis" not in args and "--custom-tis-function-path" not in args
     assert args[args.index("--rollout-top-p") + 1] == "1.0"
     assert args[args.index("--rollout-top-k") + 1] == "-1"

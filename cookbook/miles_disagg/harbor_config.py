@@ -38,14 +38,19 @@ TRAINER_IMAGE_RUN_COMMANDS = (
 SCORE_CENTERING = {
     "loss_type": "score_centering",
     "score_centering_top_k": 128,
-    "score_centering_is": "none",
+    # Samples can be up to max_weight_staleness versions old, so weight each token by
+    # min(trainer / sampler probability, 2) instead of 1 ("none" is exact only on-policy).
+    "score_centering_is": "tis",
+    "score_centering_tis_clip": 2.0,
     "disable_grpo_std_normalization": True,  # group-centered rewards, as in the paper
     "calculate_per_token_loss": True,
     "use_rollout_logprobs": True,  # the loss scores the trainer against the sampler
     "skip_actor_forward_only": False,
     "use_tis": False,
     "custom_tis_function_path": None,
-    "get_mismatch_metrics": None,  # this Miles requires a TIS function for them
+    # The score-centering loss logs its own train-rollout mismatch (train_rollout_kl);
+    # this flag adds the policy-loss path's metrics and needs a TIS function there.
+    "get_mismatch_metrics": None,
     "tis_clip_low": None,
     "tis_clip": None,
     "rollout_top_p": 1.0,
