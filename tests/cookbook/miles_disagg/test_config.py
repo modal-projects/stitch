@@ -64,6 +64,8 @@ def test_harbor_recipes_train_with_score_centering_without_dflash(name):
     assert not [k for k in recipe.SGLANG_SERVER_ARGS if k.startswith("--speculative-")]
     assert args[args.index("--rollout-request-max-attempts") + 1] == "1200"
     assert "--get-mismatch-metrics" not in args
+    kwargs = json.loads(args[args.index("--apply-chat-template-kwargs") + 1])
+    assert kwargs == {"reasoning_effort": "medium"}
 
 
 @pytest.mark.parametrize(
