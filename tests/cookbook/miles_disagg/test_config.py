@@ -1,4 +1,6 @@
+import dataclasses
 import json
+import sys
 from copy import deepcopy
 from importlib import import_module
 from types import SimpleNamespace
@@ -96,6 +98,39 @@ def test_harbor_mix_drops_groups_without_signal():
     sandbox = json.loads(recipe.miles.environment["HARBOR_ENV_KWARGS"])
     trial_timeout = int(recipe.miles.environment["AGENT_TRIAL_TIMEOUT"])
     assert trial_timeout < sandbox["sandbox_timeout_secs"] < 24 * 3600
+
+
+@dataclasses.dataclass(frozen=True)
+class _Binding:
+    kwargs: object
+    env: object
+
+
+def test_harbor_terminus_gets_no_env_in_the_task_shell(monkeypatch):
+    miles_harbor = SimpleNamespace(
+        HARNESS_BINDINGS={
+            name: _Binding(kwargs="k", env=lambda url, key: {"OPENAI_API_KEY": key})
+            for name in ("terminus-2", "terminus-1", "terminus", "claude-code")
+        },
+        run="miles-run",
+    )
+    monkeypatch.setitem(sys.modules, "harbor_agent_function", miles_harbor)
+    monkeypatch.delitem(
+        sys.modules, "cookbook.miles_disagg.harbor_agent", raising=False
+    )
+
+    agent = import_module("cookbook.miles_disagg.harbor_agent")
+
+    bindings = miles_harbor.HARNESS_BINDINGS
+    assert bindings["terminus-2"].env("url", "key") == {}
+    assert bindings["terminus-2"].kwargs == "k"
+    assert bindings["claude-code"].env("url", "key") == {"OPENAI_API_KEY": "key"}
+    assert agent.run == "miles-run"
+    recipe = _recipe("qwen3_8_27b_harbor_mix_v0")
+    assert (
+        recipe.miles.custom_agent_function_path
+        == "cookbook.miles_disagg.harbor_agent.run"
+    )
 
 
 def test_training_and_serving_must_use_the_same_checkpoint():

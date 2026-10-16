@@ -84,7 +84,8 @@ def arguments(tasks_root: str) -> dict:
         args.pop(key)
     return args | {
         "prompt_data": f"{tasks_root}/train.jsonl",
-        "custom_agent_function_path": "harbor_agent_function.run",
+        # Miles' function, minus the env that broke terminus on old tmux (harbor_agent.py).
+        "custom_agent_function_path": "cookbook.miles_disagg.harbor_agent.run",
         "custom_rm_path": "generate.reward_func",
         # Qwen3.8's template defaults to xhigh effort; the effort ablations favor medium.
         "apply_chat_template_kwargs": {"reasoning_effort": "medium"},
