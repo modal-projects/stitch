@@ -57,6 +57,11 @@ EXPERIMENT = os.environ[
 MILES_LOCAL_DIR = os.environ.get(
     "MILES_LOCAL_DIR"
 )  # optional dev overlay of a local miles checkout
+# Optional: the environment that holds the W&B Secret, the Hugging Face cache and recipe data when
+# the run deploys to another environment. Baked into both images, so a container's re-import
+# resolves the same.
+DATA_ENV = os.environ.get("STITCH_DATA_ENV") or None
+DATA_ENV_IMAGE_ENV = {"STITCH_DATA_ENV": DATA_ENV} if DATA_ENV else {}
 
 exp = importlib.import_module(f"cookbook.miles_disagg.configs.{EXPERIMENT}")
 validate_recipe(exp)
@@ -92,7 +97,7 @@ image = trainer_image.build_trainer_image(
         *STORE_DEPLOYMENT.extra_packages,
     ),
     image_run_commands=getattr(exp, "TRAINER_IMAGE_RUN_COMMANDS", ()),
-    extra_env=STORE_DEPLOYMENT.image_environment,
+    extra_env={**STORE_DEPLOYMENT.image_environment, **DATA_ENV_IMAGE_ENV},
 )
 server_image = serving_image.build_serving_image(
     hf_cache_path=str(HF_CACHE_PATH),
@@ -102,6 +107,7 @@ server_image = serving_image.build_serving_image(
     extra_env={
         **(getattr(exp, "SGLANG_SERVER_ENV", None) or {}),
         **STORE_DEPLOYMENT.image_environment,
+        **DATA_ENV_IMAGE_ENV,
     },
     runtime=getattr(exp, "SGLANG_RUNTIME", serving_image.DEFAULT_SGLANG_RUNTIME),
 )
@@ -113,7 +119,7 @@ if MILES_LOCAL_DIR:
     )
 
 hf_cache_volume = modal.Volume.from_name(
-    "huggingface-cache", create_if_missing=True, version=2
+    "huggingface-cache", environment_name=DATA_ENV, create_if_missing=True, version=2
 )
 data_volume = modal.Volume.from_name("miles-data", create_if_missing=True, version=2)
 checkpoint_volume = modal.Volume.from_name(
@@ -153,7 +159,7 @@ train_volumes = {
 train_secrets = [
     *STORE_SECRETS,
     *(
-        [modal.Secret.from_name("wandb-secret")]
+        [modal.Secret.from_name("wandb-secret", environment_name=DATA_ENV)]
         if getattr(miles_cfg, "use_wandb", False)
         else []
     ),

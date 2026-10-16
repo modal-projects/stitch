@@ -4,9 +4,13 @@ Tasks are prepared outside Stitch as Harbor task folders plus one train.jsonl on
 """
 
 import json
+import os
 
 from cookbook.common.serving_image import SGLangRuntime
 from cookbook.miles_disagg import swebench_config
+
+# Environment of the recipe's task Volume and judge Secret, when it is not the run's environment.
+DATA_ENV = os.environ.get("STITCH_DATA_ENV") or None
 
 # The stack that runs score centering on feat/heterogeneous-swe-e2e. Other recipes keep
 # Stitch's default pins. This Miles retries a rollout request's 409 from its own settings

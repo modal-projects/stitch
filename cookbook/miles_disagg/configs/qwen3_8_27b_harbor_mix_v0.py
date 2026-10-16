@@ -52,14 +52,18 @@ TASKS_ROOT = "/harbor-envs/mixture-v0-phase1"
 # Trial logs go to their own Volume: Stitch reloads the run Volume (/stitch) when it publishes
 # weights, and that reload fails while Harbor holds a trial file open there.
 TRAINER_EXTRA_VOLUMES = {
-    "/harbor-envs": modal_sdk.Volume.from_name("harbor-envs"),
+    "/harbor-envs": modal_sdk.Volume.from_name(
+        "harbor-envs", environment_name=harbor_config.DATA_ENV
+    ),
     "/harbor-trials": modal_sdk.Volume.from_name(
         "harbor-mix-v0-trials", create_if_missing=True, version=2
     ),
 }
 # General's grader calls an LLM judge. Its task.toml reads MIMO_JUDGE_URL, MIMO_TEXT_JUDGE and
 # HF_TOKEN (the judge token) from the rollout worker's environment. This Secret holds all three.
-TRAINER_EXTRA_SECRETS = [modal_sdk.Secret.from_name("mimo-judge")]
+TRAINER_EXTRA_SECRETS = [
+    modal_sdk.Secret.from_name("mimo-judge", environment_name=harbor_config.DATA_ENV)
+]
 
 # 8 rollout containers x 16 requests each. Raise to #267's 16 containers (256) once the
 # first steps show that sandboxes, graders and the judge keep up.
