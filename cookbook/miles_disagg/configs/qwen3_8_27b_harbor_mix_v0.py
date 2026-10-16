@@ -30,7 +30,13 @@ CHECKPOINT_PREP_REQUIRES_GPU = base.CHECKPOINT_PREP_REQUIRES_GPU
 LOCAL_CHECKPOINT_PATH = None
 PREP_ENV = base.PREP_ENV
 SGLANG_SERVER_ENV = base.SGLANG_SERVER_ENV
-SGLANG_SERVER_ARGS = harbor_config.without_speculative_decoding(base.SGLANG_SERVER_ARGS)
+SGLANG_SERVER_ARGS = {
+    **harbor_config.without_speculative_decoding(base.SGLANG_SERVER_ARGS),
+    # #267's queue of 4 rejects overflow with 503 "The request queue is full", and terminus ends the
+    # trial, which Miles scores 0. With fewer servers up than planned, half the trials of a pilot
+    # failed so. A deeper queue makes them wait instead.
+    "--max-queued-requests": "64",
+}
 MAX_SEQ_LEN = base.MAX_SEQ_LEN
 SIDECAR_COMMIT_MODE = base.SIDECAR_COMMIT_MODE
 SIDECAR_FLUSH_CACHE_ON_COMMIT = base.SIDECAR_FLUSH_CACHE_ON_COMMIT

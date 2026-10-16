@@ -95,6 +95,7 @@ def test_harbor_mix_drops_groups_without_signal():
     assert recipe.miles.prompt_data == f"{recipe.TASKS_ROOT}/train.jsonl"
     assert recipe.miles.environment["AGENT_MAX_OUTPUT_TOKENS"] == "16384"
     assert recipe.miles.rollout_max_response_len == 16384
+    assert int(recipe.SGLANG_SERVER_ARGS["--max-queued-requests"]) >= 64
     sandbox = json.loads(recipe.miles.environment["HARBOR_ENV_KWARGS"])
     trial_timeout = int(recipe.miles.environment["AGENT_TRIAL_TIMEOUT"])
     assert trial_timeout < sandbox["sandbox_timeout_secs"] < 24 * 3600
