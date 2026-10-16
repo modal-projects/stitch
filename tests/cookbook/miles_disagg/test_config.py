@@ -41,14 +41,22 @@ def test_maintained_training_recipes_have_consistent_checkpoints_and_resume(name
 
 
 @pytest.mark.parametrize(
-    "name", ["qwen3_8_27b_harbor_smoke", "qwen3_8_27b_harbor_mix_v0"]
+    "name",
+    [
+        "qwen3_8_27b_harbor_smoke",
+        "qwen3_8_27b_harbor_mix_v0",
+    ],
 )
 def test_harbor_recipes_are_valid(name):
     validate_recipe(_recipe(name))
 
 
 @pytest.mark.parametrize(
-    "name", ["qwen3_8_27b_harbor_smoke", "qwen3_8_27b_harbor_mix_v0"]
+    "name",
+    [
+        "qwen3_8_27b_harbor_smoke",
+        "qwen3_8_27b_harbor_mix_v0",
+    ],
 )
 def test_harbor_recipes_train_with_score_centering_without_dflash(name):
     recipe = _recipe(name)
@@ -71,7 +79,11 @@ def test_harbor_recipes_train_with_score_centering_without_dflash(name):
 
 
 @pytest.mark.parametrize(
-    "name", ["qwen3_8_27b_harbor_smoke", "qwen3_8_27b_harbor_mix_v0"]
+    "name",
+    [
+        "qwen3_8_27b_harbor_smoke",
+        "qwen3_8_27b_harbor_mix_v0",
+    ],
 )
 def test_only_harbor_recipes_pin_the_score_centering_stack(name):
     recipe = _recipe(name)
@@ -95,10 +107,23 @@ def test_harbor_mix_drops_groups_without_signal():
     assert recipe.miles.prompt_data == f"{recipe.TASKS_ROOT}/train.jsonl"
     assert recipe.miles.environment["AGENT_MAX_OUTPUT_TOKENS"] == "16384"
     assert recipe.miles.rollout_max_response_len == 16384
-    assert int(recipe.SGLANG_SERVER_ARGS["--max-queued-requests"]) >= 64
     sandbox = json.loads(recipe.miles.environment["HARBOR_ENV_KWARGS"])
     trial_timeout = int(recipe.miles.environment["AGENT_TRIAL_TIMEOUT"])
     assert trial_timeout < sandbox["sandbox_timeout_secs"] < 24 * 3600
+
+
+def test_harbor_mix_serves_and_trains_at_128k():
+    recipe = _recipe("qwen3_8_27b_harbor_mix_v0")
+
+    assert recipe.MAX_SEQ_LEN == recipe.miles.max_seq_len == 131_072
+    assert recipe.SGLANG_SERVER_ARGS["--context-length"] == str(131_072 + 8)
+    assert recipe.miles.environment["HARBOR_MAX_SEQ_LEN"] == "131072"
+    assert recipe.miles.environment["AGENT_MAX_INPUT_TOKENS"] == str(131_072 - 16_384)
+    assert recipe.miles.context_parallel_size == 2
+    assert (
+        recipe.modal.rollout_min_containers == recipe.modal.rollout_max_containers == 16
+    )
+    assert recipe.miles.sglang_server_concurrency == 256
 
 
 @dataclasses.dataclass(frozen=True)
