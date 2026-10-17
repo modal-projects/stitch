@@ -3,7 +3,6 @@
 Tasks are prepared outside Stitch as Harbor task folders plus one train.jsonl on a Volume.
 """
 
-import base64
 import json
 import os
 
@@ -14,10 +13,10 @@ from cookbook.miles_disagg import swebench_config
 DATA_ENV = os.environ.get("STITCH_DATA_ENV") or None
 
 # The stack that runs score centering on feat/heterogeneous-swe-e2e. Other recipes keep
-# Stitch's default pins. This Miles retries a rollout request's 409 from its own settings
-# and lacks stitch-miles' delta-history cleanup on resume (#3875).
+# Stitch's default pins. This Miles retries a rollout request's 409 from its own settings,
+# carries stitch-miles' delta-history cleanup on resume (#3875) and sizes compact batches by rollouts.
 MILES_IMAGE_TAG = "radixark/miles:dev-202609290439"
-MILES_REPO_REF = "0fe16fcb5ed5fba9bd3aef43f7b03f60ee774bd0"  # stitch-miles-hetero
+MILES_REPO_REF = "28240cb3cf2408ec19fb4af3537413715aa7d843"  # stitch-miles-hetero + modal-projects/miles#18
 SGLANG_RUNTIME = SGLangRuntime(
     image="lmsysorg/sglang:v0.5.20",
     repository="https://github.com/modal-projects/sglang.git",
@@ -31,36 +30,6 @@ SIDECAR_RESPONSE_KEEPALIVE_AFTER = 60.0
 # Install into the interpreter that runs the trainer and Ray (the image's /opt/sglang venv).
 HARBOR_REF = "917b3c1be7cf6553a7a9fe25de8adb6f8e639287"  # harbor-miles-v0.20.0
 TRAINER_EXTRA_PIP_PACKAGES = ("uv",)
-# Miles skips the dynamic global batch size for a batch with compact rollouts (an agent session that yielded
-# several samples, e.g. after terminus-2 summarized its context), then fails its check
-# `use_dynamic_global_batch_size == (x is not None)` after the rollout. Size such a batch by rollouts: the most
-# whole rollouts, in order, whose samples split evenly over the DP ranks (each long sample is its own
-# micro-batch, and Miles' DP schedule needs a multiple of dp_size of them). Applied to the pinned Miles at image
-# build; the build fails if the line is gone or already patched.
-COMPACT_BATCH_PATCH = """
-import sys
-path = sys.argv[1]
-text = open(path).read()
-old = "    if not args.disable_rollout_trim_samples and not is_compact:\\n"
-new = (
-    "    if not args.disable_rollout_trim_samples and is_compact and args.use_dynamic_global_batch_size:\\n"
-    "        cfg = train_parallel_config\\n"
-    "        align = cfg['dp_size'] * (cfg['microbatch_group_size_per_vp_stage'] if (cfg['vpp_size'] or 1) > 1 else 1)\\n"
-    "        sizes = {}\\n"
-    "        for s in data:\\n"
-    "            key = s.rollout_id if s.rollout_id is not None else s.index\\n"
-    "            sizes[key] = sizes.get(key, 0) + 1\\n"
-    "        total, keep = 0, 0\\n"
-    "        for i, n in enumerate(sizes.values(), 1):\\n"
-    "            total += n\\n"
-    "            keep = i if total % align == 0 else keep\\n"
-    "        metadata['dynamic_global_batch_size'] = keep or len(sizes)\\n" + old
-)
-if text.count(old) != 1 or "is_compact and args.use_dynamic_global_batch_size" in text:
-    sys.exit(f"compact batch patch: {path} lacks the line or has the patch already")
-open(path, "w").write(text.replace(old, new))
-"""
-_PATCHED_FILE = "/root/miles/miles/ray/rollout/rollout_data_conversion.py"
 TRAINER_IMAGE_RUN_COMMANDS = (
     "uv pip install --python /opt/sglang/bin/python "
     f'"harbor[modal] @ git+https://github.com/harbor-framework/harbor@{HARBOR_REF}" "modal==1.5.3"',
@@ -69,7 +38,6 @@ TRAINER_IMAGE_RUN_COMMANDS = (
     # the real stack (see RAY_USE_UVLOOP in environment()). Without the package Miles falls back
     # (_MOONCAKE_AVAILABLE = False).
     "uv pip uninstall --python /opt/sglang/bin/python mooncake-transfer-engine-cuda13",
-    f"echo {base64.b64encode(COMPACT_BATCH_PATCH.encode()).decode()} | base64 -d | python3 - {_PATCHED_FILE}",
 )
 
 
