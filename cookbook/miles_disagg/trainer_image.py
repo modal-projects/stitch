@@ -39,6 +39,7 @@ def build_trainer_image(
     experiment: str,
     run_id: str | None = None,
     miles_repo_ref: str = MILES_REPO_REF,
+    miles_image_tag: str = MILES_IMAGE_TAG,
     miles_local: str | None = None,
     extra_pip_packages: tuple[str, ...] = (),
     image_run_commands: tuple[str, ...] = (),
@@ -49,7 +50,7 @@ def build_trainer_image(
     trainer-side delta encoder's codecs. stitch + the cookbook package are mounted so the
     trainer, Ray actors, and the sidecar subprocess resolve their imports."""
     image = (
-        modal.Image.from_registry(MILES_IMAGE_TAG)
+        modal.Image.from_registry(miles_image_tag)
         .entrypoint([])
         # RDMA/EFA userspace so multi-node NCCL binds EFA under rdma=True instead of TCP.
         .apt_install(
