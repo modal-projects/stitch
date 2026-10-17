@@ -321,11 +321,23 @@ def test_compact_batch_patch_sizes_compact_batches_by_rollouts(tmp_path):
     compact = rollouts + [
         SimpleNamespace(rollout_id=0, index=0)
     ]  # one session yielded 2 samples
-    assert namespace["postprocess_rollout_data"](args, compact, {"dp_size": 2})[1] == {
-        "dynamic_global_batch_size": 250
-    }
     assert (
-        namespace["postprocess_rollout_data"](args, rollouts, {"dp_size": 2})[1] == {}
+        namespace["postprocess_rollout_data"](
+            args,
+            compact,
+            {"dp_size": 2, "vpp_size": 1, "microbatch_group_size_per_vp_stage": 1},
+        )[1]
+        == {
+            "dynamic_global_batch_size": 251  # rollout 0 has 2 samples: 251 rollouts hold 252 samples, even
+        }
+    )
+    assert (
+        namespace["postprocess_rollout_data"](
+            args,
+            rollouts,
+            {"dp_size": 2, "vpp_size": 1, "microbatch_group_size_per_vp_stage": 1},
+        )[1]
+        == {}
     )
     assert (
         subprocess.run(command, shell=True).returncode != 0
