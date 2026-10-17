@@ -33,6 +33,11 @@ TRAINER_EXTRA_PIP_PACKAGES = ("uv",)
 TRAINER_IMAGE_RUN_COMMANDS = (
     "uv pip install --python /opt/sglang/bin/python "
     f'"harbor[modal] @ git+https://github.com/harbor-framework/harbor@{HARBOR_REF}" "modal==1.5.3"',
+    # Miles imports Mooncake in every Ray worker (object_store.py) though these recipes use the Ray object
+    # store. Its Go library (libetcd_wrapper.so) put Go's signal handler in front of every crash, which hid
+    # the real stack (see RAY_USE_UVLOOP in environment()). Without the package Miles falls back
+    # (_MOONCAKE_AVAILABLE = False).
+    "uv pip uninstall --python /opt/sglang/bin/python mooncake-transfer-engine-cuda13",
 )
 
 
@@ -116,6 +121,10 @@ def environment(
         "CUDA_DEVICE_MAX_CONNECTIONS": "1",
         "RAY_health_check_timeout_ms": "60000",
         "RAY_health_check_failure_threshold": "30",
+        # Ray installs uvloop in every worker, so each event loop of the rollout worker (Ray's, Miles',
+        # Modal's) is a uvloop loop. With 256 agents that worker segfaulted every 20-60 min in libuv's
+        # timer heap (heap_remove in uv_timer_stop). asyncio's own loop has no C timer heap to corrupt.
+        "RAY_USE_UVLOOP": "0",
         "LITELLM_LOG": "ERROR",
         "HARBOR_ENV_TYPE": "modal",
         "HARBOR_TASKS_DIR": f"{tasks_root}/tasks",

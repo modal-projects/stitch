@@ -112,6 +112,13 @@ def test_harbor_mix_drops_groups_without_signal():
     assert trial_timeout < sandbox["sandbox_timeout_secs"] < 24 * 3600
 
 
+@pytest.mark.parametrize(
+    "name", ["qwen3_8_27b_harbor_smoke", "qwen3_8_27b_harbor_mix_v0"]
+)
+def test_harbor_rollout_workers_run_without_uvloop(name):
+    assert _recipe(name).miles.environment["RAY_USE_UVLOOP"] == "0"
+
+
 def test_harbor_mix_serves_and_trains_at_128k():
     recipe = _recipe("qwen3_8_27b_harbor_mix_v0")
 
