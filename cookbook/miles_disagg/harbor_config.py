@@ -3,6 +3,7 @@
 Tasks are prepared outside Stitch as Harbor task folders plus one train.jsonl on a Volume.
 """
 
+import base64
 import json
 import os
 
@@ -30,6 +31,27 @@ SIDECAR_RESPONSE_KEEPALIVE_AFTER = 60.0
 # Install into the interpreter that runs the trainer and Ray (the image's /opt/sglang venv).
 HARBOR_REF = "917b3c1be7cf6553a7a9fe25de8adb6f8e639287"  # harbor-miles-v0.20.0
 TRAINER_EXTRA_PIP_PACKAGES = ("uv",)
+# Miles skips the dynamic global batch size for a batch with compact rollouts (an agent session that yielded
+# several samples, e.g. after terminus-2 summarized its context), then fails its check
+# `use_dynamic_global_batch_size == (x is not None)` after the rollout. Size such a batch by rollouts. Applied
+# to the pinned Miles at image build; the build fails if the line is gone.
+COMPACT_BATCH_PATCH = """
+import sys
+path = sys.argv[1]
+text = open(path).read()
+old = "    if not args.disable_rollout_trim_samples and not is_compact:\\n"
+new = (
+    "    if not args.disable_rollout_trim_samples and is_compact and args.use_dynamic_global_batch_size:\\n"
+    "        rollouts = len({s.rollout_id if s.rollout_id is not None else s.index for s in data})\\n"
+    "        metadata['dynamic_global_batch_size'] = _compute_dynamic_global_batch_size(\\n"
+    "            args, train_parallel_config=train_parallel_config, num_samples=rollouts\\n"
+    "        )\\n" + old
+)
+if text.count(old) != 1 or "is_compact and args.use_dynamic_global_batch_size" in text:
+    sys.exit(f"compact batch patch: {path} lacks the line or has the patch already")
+open(path, "w").write(text.replace(old, new))
+"""
+_PATCHED_FILE = "/root/miles/miles/ray/rollout/rollout_data_conversion.py"
 TRAINER_IMAGE_RUN_COMMANDS = (
     "uv pip install --python /opt/sglang/bin/python "
     f'"harbor[modal] @ git+https://github.com/harbor-framework/harbor@{HARBOR_REF}" "modal==1.5.3"',
@@ -38,6 +60,7 @@ TRAINER_IMAGE_RUN_COMMANDS = (
     # the real stack (see RAY_USE_UVLOOP in environment()). Without the package Miles falls back
     # (_MOONCAKE_AVAILABLE = False).
     "uv pip uninstall --python /opt/sglang/bin/python mooncake-transfer-engine-cuda13",
+    f"echo {base64.b64encode(COMPACT_BATCH_PATCH.encode()).decode()} | base64 -d | python3 - {_PATCHED_FILE}",
 )
 
 

@@ -1,5 +1,6 @@
 import dataclasses
 import json
+import subprocess
 import sys
 from copy import deepcopy
 from importlib import import_module
@@ -284,3 +285,48 @@ def test_mapping_arguments_are_encoded_as_json() -> None:
     index = args.index("--custom-rollout-request-hook-args")
 
     assert json.loads(args[index + 1]) == {"minimum_version": 7, "retry": True}
+
+
+# The lines of Miles' rollout_data_conversion.py (stitch-miles-hetero) that the compact batch patch edits.
+_MILES_POSTPROCESS = """def postprocess_rollout_data(args, data, train_parallel_config):
+    metadata = {}
+    is_compact = any(s.rollout_id is not None for s in data)
+
+    if not args.disable_rollout_trim_samples and not is_compact:
+        global_batch_size = args.global_batch_size
+    return data, metadata
+
+
+def _compute_dynamic_global_batch_size(args, train_parallel_config, num_samples):
+    return (num_samples // train_parallel_config["dp_size"]) * train_parallel_config["dp_size"]
+"""
+
+
+def test_compact_batch_patch_sizes_compact_batches_by_rollouts(tmp_path):
+    path = tmp_path / "rollout_data_conversion.py"
+    path.write_text(_MILES_POSTPROCESS)
+    command = harbor_config.TRAINER_IMAGE_RUN_COMMANDS[-1].replace(
+        harbor_config._PATCHED_FILE, str(path)
+    )
+    subprocess.run(command, shell=True, check=True)
+
+    namespace = {}
+    exec(path.read_text(), namespace)
+    args = SimpleNamespace(
+        disable_rollout_trim_samples=False,
+        use_dynamic_global_batch_size=True,
+        global_batch_size=256,
+    )
+    rollouts = [SimpleNamespace(rollout_id=None, index=i) for i in range(251)]
+    compact = rollouts + [
+        SimpleNamespace(rollout_id=0, index=0)
+    ]  # one session yielded 2 samples
+    assert namespace["postprocess_rollout_data"](args, compact, {"dp_size": 2})[1] == {
+        "dynamic_global_batch_size": 250
+    }
+    assert (
+        namespace["postprocess_rollout_data"](args, rollouts, {"dp_size": 2})[1] == {}
+    )
+    assert (
+        subprocess.run(command, shell=True).returncode != 0
+    )  # already patched: the build fails
