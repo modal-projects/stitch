@@ -119,6 +119,16 @@ def test_harbor_rollout_workers_run_without_uvloop(name):
     assert _recipe(name).miles.environment["RAY_USE_UVLOOP"] == "0"
 
 
+def test_harbor_mix_saves_every_step_and_waits_for_long_replies():
+    args = _recipe("qwen3_8_27b_harbor_mix_v0").miles.cli_args()
+
+    def value(flag):
+        return args[args.index(flag) + 1]
+
+    assert (value("--save-interval"), value("--save-retain-interval")) == ("1", "5")
+    assert value("--miles-router-timeout") == "3600"
+
+
 def test_harbor_mix_serves_and_trains_at_128k():
     recipe = _recipe("qwen3_8_27b_harbor_mix_v0")
 

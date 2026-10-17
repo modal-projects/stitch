@@ -84,8 +84,14 @@ class _MixV0(base._Miles):
     rollout_max_response_len = REPLY_TOKENS
     # About one epoch: ~1,900 sampled prompts, about half kept, 32 kept groups per step.
     num_rollout = 30
-    # A checkpoint and HF export every 5 steps: validation evals score each export.
-    save_interval = 5
+    # A checkpoint and HF export every step, so a crash or a preemption loses at most one step (Stitch resumes
+    # only from a saved and published pair). Megatron keeps every 5th torch_dist checkpoint and the last one
+    # (one is ~413 GiB); validation evals score every 5th HF export.
+    save_interval = 1
+    save_retain_interval = 5
+    # The session server's proxy deadline. #267's 300 s cut long replies (16K tokens at 128K context under
+    # load): 42-74 deadline errors per 10-15 min, about 11% of trials ended as AgentError (reward 0).
+    miles_router_timeout = 3600
     max_seq_len = MAX_SEQ_LEN
     # Two GPUs share each 128K sequence, so each GPU holds at most 64K tokens of it, as in #267.
     context_parallel_size = 2
