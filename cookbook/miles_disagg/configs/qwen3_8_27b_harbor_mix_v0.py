@@ -67,11 +67,12 @@ TRAINER_EXTRA_SECRETS = [
     modal_sdk.Secret.from_name("mimo-judge", environment_name=harbor_config.DATA_ENV)
 ]
 
-# 16 rollout containers x 16 requests each, as #267.
+# 256 agents, as #267, on 32 rollout containers (8 sessions each). On 16, the KV cache was ~88% full and
+# requests queued, and agents spent 89% of their time waiting for replies.
 AGENT_CONCURRENCY = 256
 
 modal = dataclasses.replace(
-    base.modal, rollout_min_containers=16, rollout_max_containers=16
+    base.modal, rollout_min_containers=32, rollout_max_containers=32
 )
 
 

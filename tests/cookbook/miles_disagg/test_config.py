@@ -138,7 +138,7 @@ def test_harbor_mix_serves_and_trains_at_128k():
     assert recipe.miles.environment["AGENT_MAX_INPUT_TOKENS"] == str(131_072 - 16_384)
     assert recipe.miles.context_parallel_size == 2
     assert (
-        recipe.modal.rollout_min_containers == recipe.modal.rollout_max_containers == 16
+        recipe.modal.rollout_min_containers == recipe.modal.rollout_max_containers == 32
     )
     assert recipe.miles.sglang_server_concurrency == 256
 
