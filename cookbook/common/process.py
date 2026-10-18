@@ -39,9 +39,10 @@ def start_sidecar(
     commit_mode: str,
     flush_cache_on_commit: bool = False,
     debug_requests: bool = False,
-    engine_health_timeout: float = 5.0,
+    engine_health_timeout: float = 30.0,
     proxy_max_connections: int = 100,
     proxy_max_keepalive_connections: int = 20,
+    response_keepalive_after: float | None = None,
 ) -> subprocess.Popen:
     """Launch the versioned rollout proxy (the shared sidecar) beside sglang."""
     # Empty settings normalize to unset: only set options reach the factory.
@@ -69,6 +70,7 @@ def start_sidecar(
         engine_health_timeout=engine_health_timeout,
         proxy_max_connections=proxy_max_connections,
         proxy_max_keepalive_connections=proxy_max_keepalive_connections,
+        response_keepalive_after=response_keepalive_after,
     )
     cmd = [
         "python3",

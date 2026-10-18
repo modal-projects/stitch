@@ -15,6 +15,10 @@ environment. The source pin belongs to
 branch-only Modal SWE adapter. Stitch no longer patches Miles at container
 startup.
 
+A recipe can pin its own stack with `MILES_IMAGE_TAG`, `MILES_REPO_REF` and
+`SGLANG_RUNTIME`. The Harbor recipes do (see `harbor_config.py`): they use
+`stitch-miles-hetero` for score centering.
+
 ## Carried behavior
 
 | Area | Upstream review | Responsibility |

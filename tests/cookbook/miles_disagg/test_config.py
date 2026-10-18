@@ -1,11 +1,14 @@
+import dataclasses
 import json
+import sys
 from copy import deepcopy
 from importlib import import_module
 from types import SimpleNamespace
 
 import pytest
 
-from cookbook.miles_disagg import nvfp4
+from cookbook.common import serving_image
+from cookbook.miles_disagg import harbor_config, nvfp4, trainer_image
 from cookbook.miles_disagg.config import MilesConfig, validate_recipe
 from cookbook.miles_disagg.resume import validate_resumable_config
 
@@ -38,10 +41,59 @@ def test_maintained_training_recipes_have_consistent_checkpoints_and_resume(name
 
 
 @pytest.mark.parametrize(
-    "name", ["qwen3_8_27b_harbor_smoke", "qwen3_8_27b_harbor_mix_v0"]
+    "name",
+    [
+        "qwen3_8_27b_harbor_smoke",
+        "qwen3_8_27b_harbor_mix_v0",
+    ],
 )
 def test_harbor_recipes_are_valid(name):
     validate_recipe(_recipe(name))
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "qwen3_8_27b_harbor_smoke",
+        "qwen3_8_27b_harbor_mix_v0",
+    ],
+)
+def test_harbor_recipes_train_with_score_centering_without_dflash(name):
+    recipe = _recipe(name)
+    args = recipe.miles.cli_args()
+
+    assert args[args.index("--loss-type") + 1] == "score_centering"
+    assert args[args.index("--score-centering-top-k") + 1] == "128"
+    assert args[args.index("--score-centering-is") + 1] == "mis"
+    assert args[args.index("--score-centering-mis-low") + 1] == "0.5"
+    assert args[args.index("--score-centering-mis-high") + 1] == "5.0"
+    assert "--use-tis" not in args and "--custom-tis-function-path" not in args
+    assert args[args.index("--rollout-top-p") + 1] == "0.97"
+    assert args[args.index("--rollout-top-k") + 1] == "64"
+    assert "--sglang-speculative-algorithm" not in args
+    assert not [k for k in recipe.SGLANG_SERVER_ARGS if k.startswith("--speculative-")]
+    assert args[args.index("--rollout-request-max-attempts") + 1] == "1200"
+    assert "--get-mismatch-metrics" not in args
+    kwargs = json.loads(args[args.index("--apply-chat-template-kwargs") + 1])
+    assert kwargs == {"reasoning_effort": "medium"}
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "qwen3_8_27b_harbor_smoke",
+        "qwen3_8_27b_harbor_mix_v0",
+    ],
+)
+def test_only_harbor_recipes_pin_the_score_centering_stack(name):
+    recipe = _recipe(name)
+
+    assert recipe.MILES_REPO_REF == harbor_config.MILES_REPO_REF
+    assert recipe.MILES_IMAGE_TAG == harbor_config.MILES_IMAGE_TAG
+    assert recipe.SGLANG_RUNTIME.branch == "stitch-sglang-hetero"
+    assert recipe.SIDECAR_RESPONSE_KEEPALIVE_AFTER == 60.0
+    assert trainer_image.MILES_REPO_REF != harbor_config.MILES_REPO_REF
+    assert serving_image.DEFAULT_SGLANG_RUNTIME.branch != "stitch-sglang-hetero"
 
 
 def test_harbor_mix_drops_groups_without_signal():
@@ -53,9 +105,75 @@ def test_harbor_mix_drops_groups_without_signal():
     )
     assert recipe.miles.environment["HARBOR_TASKS_DIR"] == f"{recipe.TASKS_ROOT}/tasks"
     assert recipe.miles.prompt_data == f"{recipe.TASKS_ROOT}/train.jsonl"
+    assert recipe.miles.environment["AGENT_MAX_OUTPUT_TOKENS"] == "16384"
+    assert recipe.miles.rollout_max_response_len == 16384
     sandbox = json.loads(recipe.miles.environment["HARBOR_ENV_KWARGS"])
     trial_timeout = int(recipe.miles.environment["AGENT_TRIAL_TIMEOUT"])
     assert trial_timeout < sandbox["sandbox_timeout_secs"] < 24 * 3600
+
+
+@pytest.mark.parametrize(
+    "name", ["qwen3_8_27b_harbor_smoke", "qwen3_8_27b_harbor_mix_v0"]
+)
+def test_harbor_rollout_workers_run_without_uvloop(name):
+    assert _recipe(name).miles.environment["RAY_USE_UVLOOP"] == "0"
+
+
+def test_harbor_mix_saves_every_step_and_waits_for_long_replies():
+    args = _recipe("qwen3_8_27b_harbor_mix_v0").miles.cli_args()
+
+    def value(flag):
+        return args[args.index(flag) + 1]
+
+    assert (value("--save-interval"), value("--save-retain-interval")) == ("1", "5")
+    assert value("--miles-router-timeout") == "3600"
+
+
+def test_harbor_mix_serves_and_trains_at_128k():
+    recipe = _recipe("qwen3_8_27b_harbor_mix_v0")
+
+    assert recipe.MAX_SEQ_LEN == recipe.miles.max_seq_len == 131_072
+    assert recipe.SGLANG_SERVER_ARGS["--context-length"] == str(131_072 + 8)
+    assert recipe.miles.environment["HARBOR_MAX_SEQ_LEN"] == "131072"
+    assert recipe.miles.environment["AGENT_MAX_INPUT_TOKENS"] == str(131_072 - 16_384)
+    assert recipe.miles.context_parallel_size == 2
+    assert (
+        recipe.modal.rollout_min_containers == recipe.modal.rollout_max_containers == 32
+    )
+    assert recipe.miles.sglang_server_concurrency == 256
+
+
+@dataclasses.dataclass(frozen=True)
+class _Binding:
+    kwargs: object
+    env: object
+
+
+def test_harbor_terminus_gets_no_env_in_the_task_shell(monkeypatch):
+    miles_harbor = SimpleNamespace(
+        HARNESS_BINDINGS={
+            name: _Binding(kwargs="k", env=lambda url, key: {"OPENAI_API_KEY": key})
+            for name in ("terminus-2", "terminus-1", "terminus", "claude-code")
+        },
+        run="miles-run",
+    )
+    monkeypatch.setitem(sys.modules, "harbor_agent_function", miles_harbor)
+    monkeypatch.delitem(
+        sys.modules, "cookbook.miles_disagg.harbor_agent", raising=False
+    )
+
+    agent = import_module("cookbook.miles_disagg.harbor_agent")
+
+    bindings = miles_harbor.HARNESS_BINDINGS
+    assert bindings["terminus-2"].env("url", "key") == {}
+    assert bindings["terminus-2"].kwargs == "k"
+    assert bindings["claude-code"].env("url", "key") == {"OPENAI_API_KEY": "key"}
+    assert agent.run == "miles-run"
+    recipe = _recipe("qwen3_8_27b_harbor_mix_v0")
+    assert (
+        recipe.miles.custom_agent_function_path
+        == "cookbook.miles_disagg.harbor_agent.run"
+    )
 
 
 def test_training_and_serving_must_use_the_same_checkpoint():
