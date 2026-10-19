@@ -45,6 +45,7 @@ def test_maintained_training_recipes_have_consistent_checkpoints_and_resume(name
     [
         "qwen3_8_27b_harbor_smoke",
         "qwen3_8_27b_harbor_mix_v0",
+        "qwen3_8_27b_harbor_mix_v1",
     ],
 )
 def test_harbor_recipes_are_valid(name):
@@ -56,6 +57,7 @@ def test_harbor_recipes_are_valid(name):
     [
         "qwen3_8_27b_harbor_smoke",
         "qwen3_8_27b_harbor_mix_v0",
+        "qwen3_8_27b_harbor_mix_v1",
     ],
 )
 def test_harbor_recipes_train_with_score_centering_without_dflash(name):
@@ -83,6 +85,7 @@ def test_harbor_recipes_train_with_score_centering_without_dflash(name):
     [
         "qwen3_8_27b_harbor_smoke",
         "qwen3_8_27b_harbor_mix_v0",
+        "qwen3_8_27b_harbor_mix_v1",
     ],
 )
 def test_only_harbor_recipes_pin_the_score_centering_stack(name):
@@ -96,8 +99,9 @@ def test_only_harbor_recipes_pin_the_score_centering_stack(name):
     assert serving_image.DEFAULT_SGLANG_RUNTIME.branch != "stitch-sglang-hetero"
 
 
-def test_harbor_mix_drops_groups_without_signal():
-    recipe = _recipe("qwen3_8_27b_harbor_mix_v0")
+@pytest.mark.parametrize("name", ["qwen3_8_27b_harbor_mix_v0", "qwen3_8_27b_harbor_mix_v1"])
+def test_harbor_mix_drops_groups_without_signal(name):
+    recipe = _recipe(name)
 
     validate_resumable_config(recipe.miles)
     assert recipe.miles.dynamic_sampling_filter_path.endswith(
@@ -113,14 +117,16 @@ def test_harbor_mix_drops_groups_without_signal():
 
 
 @pytest.mark.parametrize(
-    "name", ["qwen3_8_27b_harbor_smoke", "qwen3_8_27b_harbor_mix_v0"]
+    "name",
+    ["qwen3_8_27b_harbor_smoke", "qwen3_8_27b_harbor_mix_v0", "qwen3_8_27b_harbor_mix_v1"],
 )
 def test_harbor_rollout_workers_run_without_uvloop(name):
     assert _recipe(name).miles.environment["RAY_USE_UVLOOP"] == "0"
 
 
-def test_harbor_mix_saves_every_step_and_waits_for_long_replies():
-    args = _recipe("qwen3_8_27b_harbor_mix_v0").miles.cli_args()
+@pytest.mark.parametrize("name", ["qwen3_8_27b_harbor_mix_v0", "qwen3_8_27b_harbor_mix_v1"])
+def test_harbor_mix_saves_every_step_and_waits_for_long_replies(name):
+    args = _recipe(name).miles.cli_args()
 
     def value(flag):
         return args[args.index(flag) + 1]
@@ -129,8 +135,9 @@ def test_harbor_mix_saves_every_step_and_waits_for_long_replies():
     assert value("--miles-router-timeout") == "3600"
 
 
-def test_harbor_mix_serves_and_trains_at_128k():
-    recipe = _recipe("qwen3_8_27b_harbor_mix_v0")
+@pytest.mark.parametrize("name", ["qwen3_8_27b_harbor_mix_v0", "qwen3_8_27b_harbor_mix_v1"])
+def test_harbor_mix_serves_and_trains_at_128k(name):
+    recipe = _recipe(name)
 
     assert recipe.MAX_SEQ_LEN == recipe.miles.max_seq_len == 131_072
     assert recipe.SGLANG_SERVER_ARGS["--context-length"] == str(131_072 + 8)
@@ -141,6 +148,14 @@ def test_harbor_mix_serves_and_trains_at_128k():
         recipe.modal.rollout_min_containers == recipe.modal.rollout_max_containers == 32
     )
     assert recipe.miles.sglang_server_concurrency == 256
+
+
+def test_harbor_mix_v1_caps_agents_at_one_hour():
+    # Miles' Harbor function passes timeout_multiplier=2.0, and Harbor multiplies the override by it.
+    env = _recipe("qwen3_8_27b_harbor_mix_v1").miles.environment
+
+    assert env["AGENT_TIMEOUT"] == "1800"
+    assert env["HARBOR_TASKS_DIR"] == "/harbor-envs/mixture-v1/tasks"
 
 
 @dataclasses.dataclass(frozen=True)
