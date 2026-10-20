@@ -84,6 +84,8 @@ def create_app(
     from fastapi import FastAPI, Request
     from fastapi.responses import JSONResponse, Response
 
+    from stitch.relay import edit_json
+
     engine_url = engine.base_url().rstrip("/")
     blocked = engine.blocked_routes()
     timeout = httpx.Timeout(upstream_timeout, connect=10.0)
@@ -205,7 +207,7 @@ def create_app(
                 )
 
                 upstream_task = asyncio.ensure_future(
-                    client().request(request.method, f"{engine_url}/{path}", **kwargs)
+                    _fetch(client(), request.method, f"{engine_url}/{path}", **kwargs)
                 )
                 disconnect_task = asyncio.ensure_future(_watch_disconnect(request))
                 try:
@@ -226,7 +228,7 @@ def create_app(
                         await disconnect_task
 
                 try:
-                    resp = upstream_task.result()
+                    resp, content = upstream_task.result()
                 except httpx.RequestError as exc:
                     # The sidecar is still healthy when its colocated engine exits, wedges, or
                     # drops a connection. Surface that distinction to the pool so another replica
@@ -255,27 +257,56 @@ def create_app(
                     )
                 if "application/json" not in resp.headers.get("content-type", ""):
                     return Response(
-                        content=resp.content,
+                        content=memoryview(content),
                         status_code=resp.status_code,
                         media_type=resp.headers.get("content-type") or None,
                     )
-                data = resp.json()
                 current = (
                     status.applied
                 )  # capture while still pinned, before a commit advances it
         except ConstraintUnmet as exc:
             return JSONResponse(exc.error, status_code=409)
 
-        if (
-            is_versioned
-            and isinstance(data, dict)
-            and served is not None
-            and current is not None
-        ):
-            engine.stamp_response(data, served, current)
-        return JSONResponse(data, status_code=resp.status_code)
+        if is_versioned and served is not None and current is not None:
+
+            def stamp(data: Any) -> None:
+                if isinstance(data, dict):
+                    engine.stamp_response(data, served, current)
+
+            content = edit_json(content, stamp)
+        else:
+            content = memoryview(content)
+        return Response(
+            content=content,
+            status_code=resp.status_code,
+            media_type="application/json",
+        )
 
     return app
+
+
+async def _fetch(
+    client: Any, method: str, url: str, **kwargs: Any
+) -> tuple[Any, bytes | bytearray]:
+    """Sends one upstream request and returns the response with its whole body. A
+    body of known length is read into one buffer of that size, so it is never
+    held twice as chunks and their join."""
+    response = await client.send(
+        client.build_request(method, url, **kwargs), stream=True
+    )
+    try:
+        length = response.headers.get("content-length")
+        if length is None or "content-encoding" in response.headers:
+            return response, await response.aread()
+        content = bytearray(int(length))
+        received = 0
+        with memoryview(content) as view:
+            async for chunk in response.aiter_bytes():
+                view[received : received + len(chunk)] = chunk
+                received += len(chunk)
+        return response, content
+    finally:
+        await response.aclose()
 
 
 async def _abort(client: Any, engine_url: str, rid: str) -> None:

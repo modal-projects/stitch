@@ -13,6 +13,7 @@ import pytest
 
 import stitch.service as stitch_service
 from stitch.engines.base import Engine
+from stitch.engines.sglang import SGLangEngine
 from stitch.service import create_app
 from stitch.sync import AdmissionGate
 from stitch.types import PoolState, ReplicaState, VersionRef
@@ -69,14 +70,16 @@ class _FailingUpstream:
         self.abort_rids: list[str] = []
 
     async def request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
-        if url.endswith("/abort_request"):
-            self.abort_rids.append(kwargs["json"]["rid"])
-            return httpx.Response(200)
+        self.abort_rids.append(kwargs["json"]["rid"])
+        return httpx.Response(200)
+
+    def build_request(self, method: str, url: str, **_kwargs: Any) -> httpx.Request:
+        return httpx.Request(method, url)
+
+    async def send(self, request: httpx.Request, **_kwargs: Any) -> httpx.Response:
         self.started.set()
         await self.fail.wait()
-        raise httpx.ConnectError(
-            "all connection attempts failed", request=httpx.Request(method, url)
-        )
+        raise httpx.ConnectError("all connection attempts failed", request=request)
 
 
 class _HangingUpstream:
@@ -87,10 +90,14 @@ class _HangingUpstream:
         self.cancelled = asyncio.Event()
         self.abort_rids: list[str] = []
 
-    async def request(self, _method: str, url: str, **kwargs: Any) -> httpx.Response:
-        if url.endswith("/abort_request"):
-            self.abort_rids.append(kwargs["json"]["rid"])
-            return httpx.Response(200)
+    async def request(self, _method: str, _url: str, **kwargs: Any) -> httpx.Response:
+        self.abort_rids.append(kwargs["json"]["rid"])
+        return httpx.Response(200)
+
+    def build_request(self, method: str, url: str, **_kwargs: Any) -> httpx.Request:
+        return httpx.Request(method, url)
+
+    async def send(self, _request: httpx.Request, **_kwargs: Any) -> httpx.Response:
         self.started.set()
         try:
             await asyncio.Future()
@@ -107,8 +114,11 @@ class _MetricsUpstream:
         self.started = asyncio.Event()
         self.finish = asyncio.Event()
 
-    async def request(self, method: str, url: str, **_kwargs: Any) -> httpx.Response:
-        self.requests.append((method, url))
+    def build_request(self, method: str, url: str, **_kwargs: Any) -> httpx.Request:
+        return httpx.Request(method, url)
+
+    async def send(self, request: httpx.Request, **_kwargs: Any) -> httpx.Response:
+        self.requests.append((request.method, str(request.url)))
         self.started.set()
         await self.finish.wait()
         return httpx.Response(
@@ -118,8 +128,27 @@ class _MetricsUpstream:
         )
 
 
+class _JSONUpstream:
+    """Return one JSON body for every engine request."""
+
+    def __init__(self, body: bytes) -> None:
+        self.body = body
+
+    def build_request(self, method: str, url: str, **_kwargs: Any) -> httpx.Request:
+        return httpx.Request(method, url)
+
+    async def send(self, _request: httpx.Request, **_kwargs: Any) -> httpx.Response:
+        return httpx.Response(
+            200, content=self.body, headers={"content-type": "application/json"}
+        )
+
+
 async def _asgi_post(
-    app: Any, payload: dict[str, Any], *, disconnect_on: asyncio.Event | None = None
+    app: Any,
+    payload: dict[str, Any],
+    *,
+    disconnect_on: asyncio.Event | None = None,
+    path: str = "/generate",
 ):
     """Issue one request directly to the ASGI app, optionally disconnecting after its body."""
     body = json.dumps(payload).encode()
@@ -147,8 +176,8 @@ async def _asgi_post(
             "http_version": "1.1",
             "method": "POST",
             "scheme": "http",
-            "path": "/generate",
-            "raw_path": b"/generate",
+            "path": path,
+            "raw_path": path.encode(),
             "query_string": b"",
             "headers": [(b"content-type", b"application/json")],
             "client": ("127.0.0.1", 1234),
@@ -284,6 +313,32 @@ def test_client_disconnect_cancels_aborts_and_releases_admission(monkeypatch):
         assert status == 499
 
     asyncio.run(go())
+
+
+_CHAT = b'{"choices":[{"meta_info":{"weight_version":"3","routed_experts":"QUJD"}}],"x":1.2e-5}'
+_CHAT_STAMPED = (
+    b'{"choices":[{"meta_info":{"weight_version":"3","routed_experts":"QUJD",'
+    b'"weight_version_start":3,"weight_version_end":3}}],"x":1.2e-5,'
+    b'"weight_version_start":3,"weight_version_end":3}'
+)
+
+
+@pytest.mark.parametrize(
+    "path,relayed",
+    [("/v1/chat/completions", _CHAT_STAMPED), ("/v1/models", _CHAT)],
+    ids=["stamped", "unstamped"],
+)
+def test_proxy_relays_engine_bytes_around_the_stamps(monkeypatch, path, relayed):
+    gate_sidecar = _GateSidecar(VersionRef("run", 3))
+    engine = SGLangEngine("http://local-engine:8001", delta_update_mode="cpu")
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: _JSONUpstream(_CHAT))
+    app = create_app(gate_sidecar.gate, gate_sidecar, engine)
+
+    status, headers, response = asyncio.run(_asgi_post(app, {}, path=path))
+
+    assert status == 200
+    assert headers["content-type"] == "application/json"
+    assert response == relayed
 
 
 def test_metrics_bypasses_weight_admission_before_first_pointer(monkeypatch):
