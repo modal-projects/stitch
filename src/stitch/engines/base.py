@@ -89,7 +89,8 @@ class Engine:
         self, response: dict[str, Any], served: VersionRef, current: VersionRef
     ) -> None:
         """Record which version generated a response, in the engine's response shape
-        (e.g. sglang's meta_info vs OpenAI top-level). Mutates ``response`` in place."""
+        (e.g. sglang's meta_info vs OpenAI top-level). Mutates ``response`` in place.
+        Object members decode when read by key, so read only what the stamp needs."""
         raise NotImplementedError
 
     def base_url(self) -> str:

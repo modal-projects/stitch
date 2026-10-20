@@ -74,6 +74,7 @@ def build_serving_image(
             "autoinference-utils==0.2.3",  # sglang server lifecycle
             "fastapi",
             "httpx",
+            "msgspec",
             "uvicorn",  # the stitch sidecar
             "zstandard",
             "xxhash",

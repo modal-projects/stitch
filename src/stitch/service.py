@@ -12,7 +12,6 @@ demotes ``request`` to a required query param, 422-ing every call.
 
 import asyncio
 import contextlib
-import json
 import logging
 import time
 import uuid
@@ -84,6 +83,8 @@ def create_app(
     import httpx
     from fastapi import FastAPI, Request
     from fastapi.responses import JSONResponse, Response
+
+    from stitch.relay import edit_json
 
     engine_url = engine.base_url().rstrip("/")
     blocked = engine.blocked_routes()
@@ -260,21 +261,26 @@ def create_app(
                         status_code=resp.status_code,
                         media_type=resp.headers.get("content-type") or None,
                     )
-                data = json.loads(content)
                 current = (
                     status.applied
                 )  # capture while still pinned, before a commit advances it
         except ConstraintUnmet as exc:
             return JSONResponse(exc.error, status_code=409)
 
-        if (
-            is_versioned
-            and isinstance(data, dict)
-            and served is not None
-            and current is not None
-        ):
-            engine.stamp_response(data, served, current)
-        return JSONResponse(data, status_code=resp.status_code)
+        if is_versioned and served is not None and current is not None:
+
+            def stamp(data: Any) -> None:
+                if isinstance(data, dict):
+                    engine.stamp_response(data, served, current)
+
+            content = edit_json(content, stamp)
+        else:
+            content = memoryview(content)
+        return Response(
+            content=content,
+            status_code=resp.status_code,
+            media_type="application/json",
+        )
 
     return app
 
