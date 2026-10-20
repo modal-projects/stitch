@@ -21,7 +21,6 @@ from cookbook.miles_disagg.configs import qwen3_4b_math
         "qwen3_8_27b_harbor_smoke",
         "qwen3_8_27b_harbor_mix_v0",
         "qwen3_8_27b_harbor_mix_v1",
-        "qwen3_8_27b_harbor_mix_v1_h200",
         "qwen3_8_27b_harbor_mix_v1b",
     ],
 )

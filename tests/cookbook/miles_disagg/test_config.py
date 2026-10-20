@@ -46,7 +46,6 @@ def test_maintained_training_recipes_have_consistent_checkpoints_and_resume(name
         "qwen3_8_27b_harbor_smoke",
         "qwen3_8_27b_harbor_mix_v0",
         "qwen3_8_27b_harbor_mix_v1",
-        "qwen3_8_27b_harbor_mix_v1_h200",
         "qwen3_8_27b_harbor_mix_v1b",
     ],
 )
@@ -60,7 +59,6 @@ def test_harbor_recipes_are_valid(name):
         "qwen3_8_27b_harbor_smoke",
         "qwen3_8_27b_harbor_mix_v0",
         "qwen3_8_27b_harbor_mix_v1",
-        "qwen3_8_27b_harbor_mix_v1_h200",
         "qwen3_8_27b_harbor_mix_v1b",
     ],
 )
@@ -90,7 +88,6 @@ def test_harbor_recipes_train_with_score_centering_without_dflash(name):
         "qwen3_8_27b_harbor_smoke",
         "qwen3_8_27b_harbor_mix_v0",
         "qwen3_8_27b_harbor_mix_v1",
-        "qwen3_8_27b_harbor_mix_v1_h200",
         "qwen3_8_27b_harbor_mix_v1b",
     ],
 )
@@ -110,7 +107,6 @@ def test_only_harbor_recipes_pin_the_score_centering_stack(name):
     [
         "qwen3_8_27b_harbor_mix_v0",
         "qwen3_8_27b_harbor_mix_v1",
-        "qwen3_8_27b_harbor_mix_v1_h200",
         "qwen3_8_27b_harbor_mix_v1b",
     ],
 )
@@ -136,7 +132,6 @@ def test_harbor_mix_drops_groups_without_signal(name):
         "qwen3_8_27b_harbor_smoke",
         "qwen3_8_27b_harbor_mix_v0",
         "qwen3_8_27b_harbor_mix_v1",
-        "qwen3_8_27b_harbor_mix_v1_h200",
         "qwen3_8_27b_harbor_mix_v1b",
     ],
 )
@@ -149,7 +144,6 @@ def test_harbor_rollout_workers_run_without_uvloop(name):
     [
         "qwen3_8_27b_harbor_mix_v0",
         "qwen3_8_27b_harbor_mix_v1",
-        "qwen3_8_27b_harbor_mix_v1_h200",
         "qwen3_8_27b_harbor_mix_v1b",
     ],
 )
@@ -183,24 +177,6 @@ def test_harbor_mix_serves_and_trains_at_128k(name):
         recipe.modal.rollout_min_containers == recipe.modal.rollout_max_containers == 32
     )
     assert recipe.miles.sglang_server_concurrency == 256
-
-
-def test_harbor_mix_v1_h200_trainer_splits_each_sample_over_four_gpus():
-    recipe = _recipe("qwen3_8_27b_harbor_mix_v1_h200")
-    b300 = _recipe("qwen3_8_27b_harbor_mix_v1")
-
-    assert (recipe.modal.gpu, recipe.miles.context_parallel_size) == ("H200", 4)
-    assert recipe.modal == dataclasses.replace(b300.modal, gpu="H200")
-    assert (recipe.APP_NAME, recipe.EXPERIMENT_VOLUME_NAME) == (
-        b300.APP_NAME,
-        b300.EXPERIMENT_VOLUME_NAME,
-    )
-
-    def without_cp(args):
-        i = args.index("--context-parallel-size")
-        return args[:i] + args[i + 2 :]
-
-    assert without_cp(recipe.miles.cli_args()) == without_cp(b300.miles.cli_args())
 
 
 def test_harbor_mix_v1_caps_agents_at_one_hour():
