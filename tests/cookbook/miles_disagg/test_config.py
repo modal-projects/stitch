@@ -150,6 +150,11 @@ def test_harbor_mix_serves_and_trains_at_128k(name):
     assert recipe.miles.sglang_server_concurrency == 256
 
 
+def test_harbor_mix_v1_waits_10_min_for_an_attempts_token_record():
+    args = _recipe("qwen3_8_27b_harbor_mix_v1").miles.cli_args()
+    assert args[args.index("--session-samples-timeout") + 1] == "600"
+
+
 def test_harbor_mix_v1_caps_agents_at_one_hour():
     # Miles' Harbor function passes timeout_multiplier=2.0, and Harbor multiplies the override by it.
     env = _recipe("qwen3_8_27b_harbor_mix_v1").miles.environment
