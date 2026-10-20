@@ -69,14 +69,16 @@ class _FailingUpstream:
         self.abort_rids: list[str] = []
 
     async def request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
-        if url.endswith("/abort_request"):
-            self.abort_rids.append(kwargs["json"]["rid"])
-            return httpx.Response(200)
+        self.abort_rids.append(kwargs["json"]["rid"])
+        return httpx.Response(200)
+
+    def build_request(self, method: str, url: str, **_kwargs: Any) -> httpx.Request:
+        return httpx.Request(method, url)
+
+    async def send(self, request: httpx.Request, **_kwargs: Any) -> httpx.Response:
         self.started.set()
         await self.fail.wait()
-        raise httpx.ConnectError(
-            "all connection attempts failed", request=httpx.Request(method, url)
-        )
+        raise httpx.ConnectError("all connection attempts failed", request=request)
 
 
 class _HangingUpstream:
@@ -87,10 +89,14 @@ class _HangingUpstream:
         self.cancelled = asyncio.Event()
         self.abort_rids: list[str] = []
 
-    async def request(self, _method: str, url: str, **kwargs: Any) -> httpx.Response:
-        if url.endswith("/abort_request"):
-            self.abort_rids.append(kwargs["json"]["rid"])
-            return httpx.Response(200)
+    async def request(self, _method: str, _url: str, **kwargs: Any) -> httpx.Response:
+        self.abort_rids.append(kwargs["json"]["rid"])
+        return httpx.Response(200)
+
+    def build_request(self, method: str, url: str, **_kwargs: Any) -> httpx.Request:
+        return httpx.Request(method, url)
+
+    async def send(self, _request: httpx.Request, **_kwargs: Any) -> httpx.Response:
         self.started.set()
         try:
             await asyncio.Future()
@@ -107,8 +113,11 @@ class _MetricsUpstream:
         self.started = asyncio.Event()
         self.finish = asyncio.Event()
 
-    async def request(self, method: str, url: str, **_kwargs: Any) -> httpx.Response:
-        self.requests.append((method, url))
+    def build_request(self, method: str, url: str, **_kwargs: Any) -> httpx.Request:
+        return httpx.Request(method, url)
+
+    async def send(self, request: httpx.Request, **_kwargs: Any) -> httpx.Response:
+        self.requests.append((request.method, str(request.url)))
         self.started.set()
         await self.finish.wait()
         return httpx.Response(
