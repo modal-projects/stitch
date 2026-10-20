@@ -46,6 +46,7 @@ def test_maintained_training_recipes_have_consistent_checkpoints_and_resume(name
         "qwen3_8_27b_harbor_smoke",
         "qwen3_8_27b_harbor_mix_v0",
         "qwen3_8_27b_harbor_mix_v1",
+        "qwen3_8_27b_harbor_mix_v1b",
     ],
 )
 def test_harbor_recipes_are_valid(name):
@@ -58,6 +59,7 @@ def test_harbor_recipes_are_valid(name):
         "qwen3_8_27b_harbor_smoke",
         "qwen3_8_27b_harbor_mix_v0",
         "qwen3_8_27b_harbor_mix_v1",
+        "qwen3_8_27b_harbor_mix_v1b",
     ],
 )
 def test_harbor_recipes_train_with_score_centering_without_dflash(name):
@@ -86,6 +88,7 @@ def test_harbor_recipes_train_with_score_centering_without_dflash(name):
         "qwen3_8_27b_harbor_smoke",
         "qwen3_8_27b_harbor_mix_v0",
         "qwen3_8_27b_harbor_mix_v1",
+        "qwen3_8_27b_harbor_mix_v1b",
     ],
 )
 def test_only_harbor_recipes_pin_the_score_centering_stack(name):
@@ -99,7 +102,14 @@ def test_only_harbor_recipes_pin_the_score_centering_stack(name):
     assert serving_image.DEFAULT_SGLANG_RUNTIME.branch != "stitch-sglang-hetero"
 
 
-@pytest.mark.parametrize("name", ["qwen3_8_27b_harbor_mix_v0", "qwen3_8_27b_harbor_mix_v1"])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "qwen3_8_27b_harbor_mix_v0",
+        "qwen3_8_27b_harbor_mix_v1",
+        "qwen3_8_27b_harbor_mix_v1b",
+    ],
+)
 def test_harbor_mix_drops_groups_without_signal(name):
     recipe = _recipe(name)
 
@@ -118,13 +128,25 @@ def test_harbor_mix_drops_groups_without_signal(name):
 
 @pytest.mark.parametrize(
     "name",
-    ["qwen3_8_27b_harbor_smoke", "qwen3_8_27b_harbor_mix_v0", "qwen3_8_27b_harbor_mix_v1"],
+    [
+        "qwen3_8_27b_harbor_smoke",
+        "qwen3_8_27b_harbor_mix_v0",
+        "qwen3_8_27b_harbor_mix_v1",
+        "qwen3_8_27b_harbor_mix_v1b",
+    ],
 )
 def test_harbor_rollout_workers_run_without_uvloop(name):
     assert _recipe(name).miles.environment["RAY_USE_UVLOOP"] == "0"
 
 
-@pytest.mark.parametrize("name", ["qwen3_8_27b_harbor_mix_v0", "qwen3_8_27b_harbor_mix_v1"])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "qwen3_8_27b_harbor_mix_v0",
+        "qwen3_8_27b_harbor_mix_v1",
+        "qwen3_8_27b_harbor_mix_v1b",
+    ],
+)
 def test_harbor_mix_saves_every_step_and_waits_for_long_replies(name):
     args = _recipe(name).miles.cli_args()
 
@@ -135,7 +157,14 @@ def test_harbor_mix_saves_every_step_and_waits_for_long_replies(name):
     assert value("--miles-router-timeout") == "3600"
 
 
-@pytest.mark.parametrize("name", ["qwen3_8_27b_harbor_mix_v0", "qwen3_8_27b_harbor_mix_v1"])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "qwen3_8_27b_harbor_mix_v0",
+        "qwen3_8_27b_harbor_mix_v1",
+        "qwen3_8_27b_harbor_mix_v1b",
+    ],
+)
 def test_harbor_mix_serves_and_trains_at_128k(name):
     recipe = _recipe(name)
 
@@ -161,6 +190,36 @@ def test_harbor_mix_v1_caps_agents_at_one_hour():
 
     assert env["AGENT_TIMEOUT"] == "1800"
     assert env["HARBOR_TASKS_DIR"] == "/harbor-envs/mixture-v1/tasks"
+
+
+def test_harbor_mix_v1b_changes_only_the_task_mix_and_names():
+    # Runs v1 and v1b compare mixture weights, so every other setting must match, and no name is shared.
+    v1, v1b = (
+        _recipe("qwen3_8_27b_harbor_mix_v1"),
+        _recipe("qwen3_8_27b_harbor_mix_v1b"),
+    )
+    args = zip(v1.miles.cli_args(), v1b.miles.cli_args(), strict=True)
+    env, env_b = v1.miles.environment, v1b.miles.environment
+
+    # The W&B group and the Prometheus run name, then the prompt data.
+    assert {(a, b) for a, b in args if a != b} == {
+        ("qwen3-8-27b-harbor-mix-v1", "qwen3-8-27b-harbor-mix-v1b"),
+        ("/harbor-envs/mixture-v1/train.jsonl", "/harbor-envs/mixture-v1b/train.jsonl"),
+    }
+    assert {k for k in env | env_b if env.get(k) != env_b.get(k)} == {
+        "HARBOR_TASKS_DIR",
+        "HARBOR_ENV_KWARGS",
+    }
+    assert env_b["HARBOR_TASKS_DIR"] == "/harbor-envs/mixture-v1b/tasks"
+    assert json.loads(env_b["HARBOR_ENV_KWARGS"]) == {
+        "app_name": "qwen3-8-27b-harbor-mix-v1b-sandboxes",
+        "sandbox_timeout_secs": 7800,
+    }
+    assert v1b.modal == v1.modal
+    assert v1b.APP_NAME == "stitch-qwen3-8-27b-harbor-mix-v1b" != v1.APP_NAME
+    assert v1b.EXPERIMENT_VOLUME_NAME == "stitch-miles-qwen3-8-27b-harbor-mix-v1b"
+    assert v1b.EXPERIMENT_VOLUME_NAME != v1.EXPERIMENT_VOLUME_NAME
+    assert v1b.TRAINER_EXTRA_VOLUMES["/harbor-trials"].name == "harbor-mix-v1b-trials"
 
 
 @dataclasses.dataclass(frozen=True)
