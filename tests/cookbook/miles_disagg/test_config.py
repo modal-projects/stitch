@@ -48,7 +48,6 @@ def test_maintained_training_recipes_have_consistent_checkpoints_and_resume(name
         "qwen3_8_27b_harbor_mix_v1",
         "qwen3_8_27b_harbor_mix_v1_h200",
         "qwen3_8_27b_harbor_mix_v1b",
-        "qwen3_8_27b_harbor_mix_v1b_h200",
     ],
 )
 def test_harbor_recipes_are_valid(name):
@@ -63,7 +62,6 @@ def test_harbor_recipes_are_valid(name):
         "qwen3_8_27b_harbor_mix_v1",
         "qwen3_8_27b_harbor_mix_v1_h200",
         "qwen3_8_27b_harbor_mix_v1b",
-        "qwen3_8_27b_harbor_mix_v1b_h200",
     ],
 )
 def test_harbor_recipes_train_with_score_centering_without_dflash(name):
@@ -94,7 +92,6 @@ def test_harbor_recipes_train_with_score_centering_without_dflash(name):
         "qwen3_8_27b_harbor_mix_v1",
         "qwen3_8_27b_harbor_mix_v1_h200",
         "qwen3_8_27b_harbor_mix_v1b",
-        "qwen3_8_27b_harbor_mix_v1b_h200",
     ],
 )
 def test_only_harbor_recipes_pin_the_score_centering_stack(name):
@@ -115,7 +112,6 @@ def test_only_harbor_recipes_pin_the_score_centering_stack(name):
         "qwen3_8_27b_harbor_mix_v1",
         "qwen3_8_27b_harbor_mix_v1_h200",
         "qwen3_8_27b_harbor_mix_v1b",
-        "qwen3_8_27b_harbor_mix_v1b_h200",
     ],
 )
 def test_harbor_mix_drops_groups_without_signal(name):
@@ -142,7 +138,6 @@ def test_harbor_mix_drops_groups_without_signal(name):
         "qwen3_8_27b_harbor_mix_v1",
         "qwen3_8_27b_harbor_mix_v1_h200",
         "qwen3_8_27b_harbor_mix_v1b",
-        "qwen3_8_27b_harbor_mix_v1b_h200",
     ],
 )
 def test_harbor_rollout_workers_run_without_uvloop(name):
@@ -156,7 +151,6 @@ def test_harbor_rollout_workers_run_without_uvloop(name):
         "qwen3_8_27b_harbor_mix_v1",
         "qwen3_8_27b_harbor_mix_v1_h200",
         "qwen3_8_27b_harbor_mix_v1b",
-        "qwen3_8_27b_harbor_mix_v1b_h200",
     ],
 )
 def test_harbor_mix_saves_every_step_and_waits_for_long_replies(name):
@@ -246,27 +240,6 @@ def test_harbor_mix_v1b_changes_only_the_task_mix_and_names():
     assert v1b.EXPERIMENT_VOLUME_NAME != v1.EXPERIMENT_VOLUME_NAME
     assert v1b.TRAINER_EXTRA_VOLUMES["/harbor-trials"].name == "harbor-mix-v1b-trials"
 
-
-
-def test_harbor_mix_v1b_h200_is_v1b_on_the_h200_trainer():
-    # A and B must train on the same GPU type, so v1b on H200 matches v1 on H200.
-    recipe = _recipe("qwen3_8_27b_harbor_mix_v1b_h200")
-    b300 = _recipe("qwen3_8_27b_harbor_mix_v1b")
-    v1 = _recipe("qwen3_8_27b_harbor_mix_v1_h200")
-
-    assert recipe.modal == v1.modal == dataclasses.replace(b300.modal, gpu="H200")
-    assert recipe.miles.context_parallel_size == v1.miles.context_parallel_size == 4
-    assert (recipe.APP_NAME, recipe.EXPERIMENT_VOLUME_NAME) == (
-        b300.APP_NAME,
-        b300.EXPERIMENT_VOLUME_NAME,
-    )
-    assert recipe.miles.environment == b300.miles.environment
-
-    def without_cp(args):
-        i = args.index("--context-parallel-size")
-        return args[:i] + args[i + 2 :]
-
-    assert without_cp(recipe.miles.cli_args()) == without_cp(b300.miles.cli_args())
 
 @dataclasses.dataclass(frozen=True)
 class _Binding:
