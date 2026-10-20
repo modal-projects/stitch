@@ -78,3 +78,55 @@ def test_serve_startup_owns_weight_staging_args(
     assert sidecar_args["flush_cache_on_commit"] is True
     assert sidecar_args["proxy_max_connections"] == 256
     assert sidecar_args["proxy_max_keepalive_connections"] == 64
+
+
+@pytest.mark.parametrize("warmup_images", [0, 6])
+def test_serve_startup_warms_the_image_path(monkeypatch, warmup_images: int) -> None:
+    payloads: list[dict] = []
+
+    class Endpoint:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def start(self) -> None:
+            return None
+
+    endpoint_module = SimpleNamespace(
+        SGLangEndpoint=Endpoint,
+        start_heartbeat_thread=lambda *_args, **_kwargs: None,
+        warmup_chat_completions=lambda **kwargs: payloads.append(kwargs["payload"]),
+    )
+    monkeypatch.setitem(sys.modules, "autoinference_utils.endpoint", endpoint_module)
+    monkeypatch.setattr(server.process, "start_sidecar", lambda **_kwargs: object())
+    monkeypatch.setattr(server.process, "wait_http", lambda *_args: None)
+
+    server.serve_startup(
+        SimpleNamespace(),
+        model_name="model-a",
+        sglang_args={"--served-model-name": "served-a"},
+        concurrency=4,
+        bulletin_root="/bulletin/run-a",
+        local_checkpoint_dir=None,
+        delta_update_mode="cpu",
+        store_backend="modal_volume",
+        volume_name="weights",
+        s3_root=None,
+        s3_endpoint_url=None,
+        run_id="run-a",
+        commit_mode="in_place",
+        startup_timeout=60,
+        warmup_images=warmup_images,
+    )
+
+    text_warmup, *image_warmups = payloads
+    assert text_warmup["messages"][0]["content"] == "Reply with exactly OK."
+    assert len(image_warmups) == (1 if warmup_images else 0)
+    for payload in image_warmups:
+        assert payload["model"] == "served-a"
+        urls = [
+            part["image_url"]["url"]
+            for part in payload["messages"][0]["content"]
+            if part["type"] == "image_url"
+        ]
+        assert len(set(urls)) == warmup_images
+        assert all(url.startswith("data:image/png;base64,") for url in urls)
