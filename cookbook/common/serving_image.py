@@ -32,10 +32,20 @@ class SGLangRuntime:
 
 
 DEFAULT_SGLANG_RUNTIME = SGLangRuntime(
-    image="lmsysorg/sglang:v0.5.20",
+    # lmsysorg/sglang:v0.5.22 for linux/amd64.
+    image="lmsysorg/sglang@sha256:5fc09edb6a0bb1d5b6992b543723c66d08f86d7a507e951e87e0d05db4ac766e",
     repository="https://github.com/modal-projects/sglang.git",
-    branch="stitch-sglang-v0.5.20",
-    commit="7686f6b711fc274986eb311f2e7b6df7e13a7cd3",
+    branch="stitch-sglang-v0.5.22",
+    commit="bdaac6e3b906fc315f6886be546dedde308e4f8b",
+    # The image runs with SGLANG_RUST_BUILD_MODE=never, so a deleted extension
+    # cannot be rebuilt; the radix cache's default TreeCore is one of them.
+    build_products=(
+        "sglang/_version.py",
+        "sglang/srt/mem_cache/rust_tree_core/*.so",
+        "sglang/srt/rust_extensions/*.so",
+    ),
+    # The tool-schema check in serving_chat.py.
+    packages=("jsonschema-rs==0.58.6",),
 )
 
 _COOKBOOK_DIR = Path(__file__).resolve().parent.parent

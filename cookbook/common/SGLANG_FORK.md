@@ -11,14 +11,21 @@ default runtime:
 
 ```python
 DEFAULT_SGLANG_RUNTIME = SGLangRuntime(
-    image="lmsysorg/sglang:v0.5.20",
+    # lmsysorg/sglang:v0.5.22 for linux/amd64.
+    image="lmsysorg/sglang@sha256:5fc09edb6a0bb1d5b6992b543723c66d08f86d7a507e951e87e0d05db4ac766e",
     repository="https://github.com/modal-projects/sglang.git",
-    branch="stitch-sglang-v0.5.20",
-    commit="7686f6b711fc274986eb311f2e7b6df7e13a7cd3",
+    branch="stitch-sglang-v0.5.22",
+    commit="bdaac6e3b906fc315f6886be546dedde308e4f8b",
+    build_products=(
+        "sglang/_version.py",
+        "sglang/srt/mem_cache/rust_tree_core/*.so",
+        "sglang/srt/rust_extensions/*.so",
+    ),
+    packages=("jsonschema-rs==0.58.6",),
 )
 ```
 
-The branch is upstream v0.5.20 plus four independently reviewable layers:
+The branch is upstream v0.5.22 plus four independently reviewable layers:
 
 | Layer | Responsibility |
 | --- | --- |
@@ -28,13 +35,20 @@ The branch is upstream v0.5.20 plus four independently reviewable layers:
 | Serving correctness | Preserve request aborts, routed-expert state, and sampling masks across data-parallel and speculative paths, and surface scheduler-process failures. |
 
 The branch history keeps these physical responsibilities in separate commits;
-the immutable pin above is the executable definition of the stack.
+the immutable pin above is the executable definition of the stack. The branch
+also carries upstream PR #43274, which checks tool schemas with jsonschema-rs,
+so the runtime installs `jsonschema-rs`.
 
 The image and immutable source pin stay together so the Python overlay remains
-ABI-compatible with the image's CUDA and C++ extensions. SGLang v0.5.20 includes
-Kimi K3, so all cookbook recipes now use this one runtime line. The fork's MXFP4
-staging path transforms runtime layouts on GPU before caching rank-ready host
-images.
+ABI-compatible with the image's CUDA and C++ extensions. All cookbook recipes
+use this one runtime line. The fork's MXFP4 staging path transforms runtime
+layouts on GPU before caching rank-ready host images.
+
+The v0.5.22 image builds its Rust extensions, including the radix cache's
+default TreeCore, into `python/sglang`, and it runs with
+`SGLANG_RUST_BUILD_MODE=never`. The runtime declares those files as
+`build_products`, which the overlay restores after replacing the package
+sources. The image build fails if one is missing.
 
 ## API
 
