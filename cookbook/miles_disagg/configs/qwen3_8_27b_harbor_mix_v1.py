@@ -91,6 +91,9 @@ class _MixV1(base._Miles):
     # The session server's proxy deadline. #267's 300 s cut long replies (16K tokens at 128K context under
     # load): 42-74 deadline errors per 10-15 min, about 11% of trials ended as AgentError (reward 0).
     miles_router_timeout = 3600
+    # Miles drops a graded attempt when fetching its token record from the session server takes longer
+    # (default 120 s). At 120 s a mix v1 run lost a third of its graded attempts, most of them long ones.
+    session_samples_timeout = 600
     max_seq_len = MAX_SEQ_LEN
     # Two GPUs share each 128K sequence, so each GPU holds at most 64K tokens of it, as in #267.
     context_parallel_size = 2
