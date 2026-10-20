@@ -9,6 +9,9 @@ private sglang on SGLANG_PORT).
 
 from __future__ import annotations
 
+import base64
+import struct
+import zlib
 from typing import Any
 
 from . import process
@@ -36,10 +39,13 @@ def serve_startup(
     engine_health_timeout: float = 5.0,
     proxy_max_connections: int = 100,
     proxy_max_keepalive_connections: int = 20,
+    warmup_images: int = 0,
 ) -> None:
     """Start sglang + the versioned-proxy sidecar on a Server replica (from ``@modal.enter``).
     SGLang starts directly from the immutable boot checkpoint. The sidecar enters
-    rotation after its update destination is initialized and it has caught up."""
+    rotation after its update destination is initialized and it has caught up.
+    ``warmup_images`` > 0 also sends one request with that many images, so the
+    vision path compiles before the replica takes traffic."""
     from autoinference_utils.endpoint import (
         SGLangEndpoint,
         start_heartbeat_thread,
@@ -83,6 +89,14 @@ def serve_startup(
         request_timeout=120.0,
         max_attempts_per_request=3,
     )
+    if warmup_images:
+        warmup_chat_completions(
+            port=SGLANG_PORT,
+            payload=image_warmup_payload(served_model_name, warmup_images),
+            successful_requests=1,
+            request_timeout=600.0,
+            max_attempts_per_request=3,
+        )
     replica.sidecar = process.start_sidecar(
         sidecar_port=SIDECAR_PORT,
         sglang_port=SGLANG_PORT,
@@ -133,6 +147,40 @@ def serve_startup(
         f"Rollout server ready: model={served_model_name}, "
         f"boot_version={boot_version}, target_inputs={concurrency}"
     )
+
+
+def image_warmup_payload(model: str, images: int) -> dict:
+    """A chat request with distinct 720p images, so no cache can answer it."""
+    content: list[dict] = [
+        {"type": "image_url", "image_url": {"url": _png_data_url(1280, 720, shade)}}
+        for shade in range(images)
+    ]
+    content.append({"type": "text", "text": "Reply with exactly OK."})
+    return {
+        "model": model,
+        "messages": [{"role": "user", "content": content}],
+        "max_tokens": 8,
+        "temperature": 0,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+
+
+def _png_data_url(width: int, height: int, shade: int) -> str:
+    """A solid-gray RGB PNG, built without an imaging library."""
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        crc = zlib.crc32(kind + data)
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", crc)
+
+    header = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    rows = (b"\x00" + bytes([shade % 256]) * (3 * width)) * height
+    png = (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", header)
+        + chunk(b"IDAT", zlib.compress(rows))
+        + chunk(b"IEND", b"")
+    )
+    return "data:image/png;base64," + base64.b64encode(png).decode()
 
 
 def serve_stop(replica: Any) -> None:
