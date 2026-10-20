@@ -24,6 +24,11 @@ class SGLangRuntime:
     repository: str
     branch: str
     commit: str
+    # Files the image's editable install generated inside python/sglang, such
+    # as compiled Rust extensions, which the overlay keeps.
+    build_products: tuple[str, ...] = ()
+    # Packages the overlay imports that the image does not install.
+    packages: tuple[str, ...] = ()
 
 
 DEFAULT_SGLANG_RUNTIME = SGLangRuntime(
@@ -58,15 +63,7 @@ def build_serving_image(
     """Build the rollout-pool image for one experiment config."""
     return (
         modal.Image.from_registry(runtime.image)
-        .run_commands(
-            "rm -rf /tmp/stitch-sglang-overlay"
-            f" && git clone --filter=blob:none --single-branch --branch {runtime.branch}"
-            f" {runtime.repository} /tmp/stitch-sglang-overlay"
-            f" && git -C /tmp/stitch-sglang-overlay checkout --detach {runtime.commit}"
-            " && rm -rf /sgl-workspace/sglang/python/sglang"
-            " && cp -a /tmp/stitch-sglang-overlay/python/. /sgl-workspace/sglang/python/"
-            " && rm -rf /tmp/stitch-sglang-overlay"
-        )
+        .run_commands(_overlay_command(runtime))
         .run_commands(
             f"rm -rf {hf_cache_path}"
         )  # baked HF cache must not shadow the mounted volume
@@ -79,6 +76,7 @@ def build_serving_image(
             "xxhash",
             "blake3",  # engine-side weight-staging checksum
             "fastsafetensors",
+            *runtime.packages,
             *extra_packages,
         )
         .env(
@@ -97,3 +95,26 @@ def build_serving_image(
             str(_COOKBOOK_DIR), remote_path="/root/cookbook", ignore=["**/__pycache__"]
         )
     )
+
+
+def _overlay_command(runtime: SGLangRuntime) -> str:
+    """Replace the image's sglang package with the pinned fork's sources."""
+    checkout = "/tmp/stitch-sglang-overlay"
+    python_dir = "/sgl-workspace/sglang/python"
+    products = "/tmp/stitch-sglang-build-products.tar"
+    steps = [
+        f"rm -rf {checkout}",
+        f"git clone --filter=blob:none --single-branch --branch {runtime.branch}"
+        f" {runtime.repository} {checkout}",
+        f"git -C {checkout} checkout --detach {runtime.commit}",
+    ]
+    if runtime.build_products:
+        # tar fails the build when a listed product is missing from the image.
+        steps.append(
+            f"(cd {python_dir} && tar -cf {products} {' '.join(runtime.build_products)})"
+        )
+    steps += [f"rm -rf {python_dir}/sglang", f"cp -a {checkout}/python/. {python_dir}/"]
+    if runtime.build_products:
+        steps.append(f"tar -xf {products} -C {python_dir} && rm {products}")
+    steps.append(f"rm -rf {checkout}")
+    return " && ".join(steps)
