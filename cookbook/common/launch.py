@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from stitch.pools.modal_flash import proxy_auth_headers
+
 
 def resolve_config(
     cfg: Any,
@@ -48,6 +50,7 @@ def materialize_node_local_yaml(
 
 def deploy_pool_and_spawn(run: Any) -> Any:
     """Deploy a run's pool, wait for its floor, then spawn its trainer."""
+    proxy_auth_headers(required=True)
     run.app.deploy()
     return _await_floor_and_spawn(run)
 
@@ -56,6 +59,7 @@ def spawn_on_pool(run: Any) -> Any:
     """Spawn a run's trainer on its already-deployed pool. Never deploys: a
     missing pool fails fast with the deploy command rather than silently
     replace a live one."""
+    proxy_auth_headers(required=True)
     if not pool_reachable(run):
         raise SystemExit(
             f"No deployed pool for {run.APP_NAME!r}. Deploy it first:\n"

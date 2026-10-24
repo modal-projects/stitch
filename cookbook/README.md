@@ -59,6 +59,32 @@ uv run --extra modal modal secret create -e "$MODAL_ENVIRONMENT" \
 Preparation jobs use `huggingface-secret`. Recipes that enable W&B logging use
 `wandb-secret`.
 
+Rollout Servers require [Modal Proxy Tokens](https://modal.com/docs/guide/webhook-proxy-auth).
+Create a token with `uv run modal workspace proxy-tokens create`, then authorize
+it for this environment and export its returned ID and secret for local clients:
+
+```bash
+export MODAL_PROXY_TOKEN_ID=wk-your-token-id
+export MODAL_PROXY_TOKEN_SECRET=ws-your-token-secret
+uv run modal workspace proxy-tokens allow "$MODAL_PROXY_TOKEN_ID" "$MODAL_ENVIRONMENT"
+uv run modal secret create -e "$MODAL_ENVIRONMENT" stitch-proxy-auth \
+  MODAL_PROXY_TOKEN_ID="$MODAL_PROXY_TOKEN_ID" \
+  MODAL_PROXY_TOKEN_SECRET="$MODAL_PROXY_TOKEN_SECRET"
+```
+
+Use the actual `wk-` and `ws-` values returned by Modal. These are separate from
+Modal SDK credentials. Set `STITCH_PROXY_AUTH_SECRET` before deployment to use
+a different Secret name; it defaults to `stitch-proxy-auth`. Trainers and fleet
+probes receive this Secret. Local launchers, publishers, and smoke checks read
+the two exported variables. Servers enforce authentication at Modal's proxy
+and do not need the client Secret.
+
+External standalone clients must include `pool.gateway_headers()` in HTTP
+requests to `pool.gateway_url()`. OpenAI clients can instead use
+`f"{os.environ['MODAL_PROXY_TOKEN_ID']}.{os.environ['MODAL_PROXY_TOKEN_SECRET']}"`
+as their API key. Replica routing, readiness checks, wake notifications, and
+the Miles rollout hook attach credentials automatically.
+
 ### 3. Choose a checkpoint store
 
 Modal Volumes are the default checkpoint store. Select S3 when policy

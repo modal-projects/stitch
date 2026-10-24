@@ -31,8 +31,8 @@ build-backend = "hatchling.build"
 packages = ["src/stitch"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
-python_files = ["test_*.py"]
+testpaths = ["tests", "src", "cookbook", "tools"]
+python_files = ["test_*.py", "*_test.py"]
 addopts = ["--import-mode=importlib"]
 pythonpath = ["src", "."]
 

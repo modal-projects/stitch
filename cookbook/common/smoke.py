@@ -7,7 +7,7 @@ import json
 import time
 import urllib.request
 
-from stitch.pools.modal_flash import ModalFlashPool
+from stitch.pools.modal_flash import ModalFlashPool, proxy_auth_headers
 from stitch.types import VersionRef
 
 
@@ -26,6 +26,7 @@ def smoke_flash_pool(
     """Poll until the pool serves completions at ``weight_version`` — through the gateway (Flash
     holds the request through a scaled-down pool's cold start) and then each live replica's
     ``/server_info``."""
+    headers = proxy_auth_headers(required=True)
     pool = ModalFlashPool(app_name, cls_name)
     deadline = time.time() + timeout_seconds
     last_error: str | None = None
@@ -35,7 +36,8 @@ def smoke_flash_pool(
             print(f"Gateway URL: {gateway}")
             # A fresh pool has no claimed run, so version 0 is unpinnable — an exact-version
             # request would 409. Gate on plain serving until a run has claimed the pool.
-            if _get_json(f"{gateway}/server_info", timeout=60).get("run_id") is None:
+            info = _get_json(f"{gateway}/server_info", headers=headers, timeout=60)
+            if info.get("run_id") is None:
                 if weight_version != 0:
                     raise RuntimeError(
                         f"pool is unclaimed; cannot serve expected weight version {weight_version}"
@@ -43,6 +45,7 @@ def smoke_flash_pool(
                 data = _post_json(
                     f"{gateway}/v1/chat/completions",
                     _completion(model_name),
+                    headers=headers,
                     timeout=900,
                 )
                 _check_serves(data)
@@ -51,13 +54,14 @@ def smoke_flash_pool(
             data = _post_json(
                 f"{gateway}/v1/chat/completions",
                 _completion(model_name, weight_version),
+                headers=headers,
                 timeout=900,
             )
             print(f"Gateway completion: {data}")
             _check_completion(data, weight_version)
             for target in pool.discover_replicas():
-                url, headers = pool.replica_request(target, "/server_info")
-                info = _get_json(url, headers=headers, timeout=30)
+                url, replica_headers = pool.replica_request(target, "/server_info")
+                info = _get_json(url, headers=replica_headers, timeout=30)
                 print(f"{target} server_info={info}")
                 _check_version(_applied_version(info), weight_version, target)
             return
@@ -125,11 +129,13 @@ def _get_json(url: str, *, timeout: float, headers: dict | None = None) -> dict:
         return json.load(resp)
 
 
-def _post_json(url: str, payload: dict, *, timeout: float) -> dict:
+def _post_json(
+    url: str, payload: dict, *, timeout: float, headers: dict | None = None
+) -> dict:
     request = urllib.request.Request(
         url,
         data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json"},
+        headers={**(headers or {}), "Content-Type": "application/json"},
     )
     with urllib.request.urlopen(request, timeout=timeout) as resp:
         return json.load(resp)

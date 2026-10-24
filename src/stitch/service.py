@@ -458,7 +458,9 @@ def await_pool_ready(
                 try:
                     gateway = (await pool.gateway_url_async()).rstrip("/")
                     async with httpx.AsyncClient(trust_env=False) as client:
-                        response = await client.get(f"{gateway}/health", timeout=10)
+                        response = await client.get(
+                            f"{gateway}/health", headers=pool.gateway_headers(), timeout=10
+                        )
                     if response.status_code == 200:
                         return True
                 except Exception:  # noqa: BLE001
