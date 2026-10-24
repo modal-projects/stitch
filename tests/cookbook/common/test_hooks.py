@@ -480,3 +480,9 @@ if __name__ == "__main__":
         t()
         print(f"  ok  {t.__name__}")
     print(f"common hooks harness: {len(tests)} PASS")
+
+
+@pytest.fixture(autouse=True)
+def proxy_credentials(monkeypatch):
+    monkeypatch.setenv("MODAL_PROXY_TOKEN_ID", "wk-test")
+    monkeypatch.setenv("MODAL_PROXY_TOKEN_SECRET", "ws-test")

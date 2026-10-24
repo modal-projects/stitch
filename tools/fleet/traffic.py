@@ -76,10 +76,14 @@ async def run(
 ) -> dict[str, Any]:
     import httpx
 
+    from stitch.pools.modal_flash import proxy_auth_headers
+
     rows: list[dict[str, Any]] = []
     floor = _VersionFloor(gateway) if lag is not None else None
     deadline = time.time() + duration
-    async with httpx.AsyncClient(timeout=3600.0, trust_env=False) as client:
+    async with httpx.AsyncClient(
+        timeout=3600.0, trust_env=False, headers=proxy_auth_headers(required=True)
+    ) as client:
         if floor:
             await floor.start(client)
         workers = [

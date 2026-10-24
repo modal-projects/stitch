@@ -20,7 +20,7 @@ from uuid import uuid4
 import modal
 import modal.experimental
 
-from cookbook.common import launch, ray_cluster, server, serving_image, storage
+from cookbook.common import auth, launch, ray_cluster, server, serving_image, storage
 from cookbook.common.constants import (
     CHECKPOINTS_PATH,
     DATA_PATH,
@@ -197,7 +197,6 @@ SGLANG_SERVER_ARGS = {
     port=SIDECAR_PORT,
     routing_region=modal_cfg.routing_region,
     experimental_options={"kv_aware_routing": True},
-    unauthenticated=True,
     exit_grace_period=60 * MINUTES,
     startup_timeout=SERVER_STARTUP_TIMEOUT,
 )
@@ -280,6 +279,7 @@ _MULTINODE = miles_cfg.n_train_nodes > 1
     region=modal_cfg.region,
     volumes=train_volumes,
     secrets=[
+        auth.proxy_auth_secret(),
         *STORE_SECRETS,
         *(
             [modal.Secret.from_name("wandb-secret")]

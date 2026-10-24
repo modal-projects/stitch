@@ -25,6 +25,10 @@ class Pool:
         """The single URL rollout traffic is sent to (the pool's front door)."""
         raise NotImplementedError
 
+    def gateway_headers(self) -> dict[str, str]:
+        """Authentication headers for requests to the pool gateway."""
+        return {}
+
     def discover_replicas(self) -> list[str]:
         """Base URLs of the currently-live replicas — a point-in-time snapshot of a *dynamic*
         pool (replicas join and leave as it autoscales), so the list can already be stale when

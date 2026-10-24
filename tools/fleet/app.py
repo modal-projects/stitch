@@ -12,6 +12,8 @@ import json
 
 import modal
 
+from cookbook.common.auth import proxy_auth_secret
+
 RESULTS_ROOT = "/probe-results"
 MINUTES = 60
 
@@ -23,12 +25,15 @@ results_volume = modal.Volume.from_name(
 image = (
     modal.Image.debian_slim(python_version="3.12")
     .pip_install("httpx")
-    .add_local_python_source("stitch", "tools")
+    .add_local_python_source("stitch", "tools", "cookbook")
 )
 
 
 @app.function(
-    image=image, volumes={RESULTS_ROOT: results_volume}, timeout=120 * MINUTES
+    image=image,
+    volumes={RESULTS_ROOT: results_volume},
+    secrets=[proxy_auth_secret()],
+    timeout=120 * MINUTES,
 )
 def poll(
     pool_app: str,
@@ -50,7 +55,10 @@ def poll(
 
 
 @app.function(
-    image=image, volumes={RESULTS_ROOT: results_volume}, timeout=120 * MINUTES
+    image=image,
+    volumes={RESULTS_ROOT: results_volume},
+    secrets=[proxy_auth_secret()],
+    timeout=120 * MINUTES,
 )
 def traffic(
     pool_app: str,
