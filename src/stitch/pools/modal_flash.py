@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from concurrent.futures import ThreadPoolExecutor
 from functools import cache
 from typing import Any
@@ -21,6 +22,20 @@ from stitch.pools.base import Pool
 from stitch.types import VersionRef
 
 logger = logging.getLogger(__name__)
+
+
+def proxy_auth_headers(*, required: bool = False) -> dict[str, str]:
+    """Read a Modal Proxy Token from the client environment (distinct from SDK auth)."""
+    token_id = os.environ.get("MODAL_PROXY_TOKEN_ID")
+    token_secret = os.environ.get("MODAL_PROXY_TOKEN_SECRET")
+    if token_id and token_secret:
+        return {"Modal-Key": token_id, "Modal-Secret": token_secret}
+    if required or token_id or token_secret:
+        raise ValueError(
+            "Set both MODAL_PROXY_TOKEN_ID and MODAL_PROXY_TOKEN_SECRET "
+            "to a Proxy Token scoped to the pool's Modal environment"
+        )
+    return {}
 
 
 class ModalFlashPool(Pool):
@@ -46,7 +61,13 @@ class ModalFlashPool(Pool):
         host = replica.split("://", 1)[-1].rstrip("/")
         if ":" not in host:
             host = f"{host}:443"
-        return f"{self._upstream_url()}{path}", {"modal-flash-upstream": host}
+        return f"{self._upstream_url()}{path}", {
+            **self.gateway_headers(),
+            "modal-flash-upstream": host,
+        }
+
+    def gateway_headers(self) -> dict[str, str]:
+        return proxy_auth_headers()
 
     def gateway_url(self) -> str:
         return self._require_gateway(self._server().get_url())

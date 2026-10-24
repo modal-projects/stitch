@@ -15,6 +15,7 @@ import pytest
 
 import stitch.service as stitch_service
 from stitch.engines.base import Engine
+from stitch.pools.base import Pool as BasePool
 from stitch.service import create_app
 from stitch.sync import AdmissionGate
 from stitch.types import PoolState, ReplicaState, VersionRef
@@ -720,7 +721,7 @@ def test_await_pool_ready_waits_for_replica_threshold(monkeypatch) -> None:
     async def no_sleep(_seconds):
         pass
 
-    class Pool:
+    class Pool(BasePool):
         async def gateway_url_async(self):
             return "http://gateway"
 
@@ -758,7 +759,7 @@ def test_await_pool_ready_excludes_replicas_ahead_of_latest(monkeypatch) -> None
     async def no_sleep(_seconds):
         pass
 
-    class Pool:
+    class Pool(BasePool):
         async def gateway_url_async(self):
             return "http://gateway"
 

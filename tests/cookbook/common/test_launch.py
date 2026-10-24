@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
+
 from cookbook.common import launch
 from stitch import service
 
@@ -39,3 +41,9 @@ def test_deploy_pool_waits_for_readiness_before_spawning(monkeypatch) -> None:
         ("ready", "app-run", {"replica_floor": 32}),
         "spawn",
     ]
+
+
+@pytest.fixture(autouse=True)
+def proxy_credentials(monkeypatch):
+    monkeypatch.setenv("MODAL_PROXY_TOKEN_ID", "wk-test")
+    monkeypatch.setenv("MODAL_PROXY_TOKEN_SECRET", "ws-test")

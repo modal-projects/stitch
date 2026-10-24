@@ -45,3 +45,9 @@ def test_unclaimed_pool_can_serve_base(monkeypatch) -> None:
         weight_version=0,
         timeout_seconds=0,
     )
+
+
+@pytest.fixture(autouse=True)
+def proxy_credentials(monkeypatch):
+    monkeypatch.setenv("MODAL_PROXY_TOKEN_ID", "wk-test")
+    monkeypatch.setenv("MODAL_PROXY_TOKEN_SECRET", "ws-test")

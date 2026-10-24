@@ -38,9 +38,10 @@ def main() -> None:
         args.run_id or os.environ.get("RUN_ID") or uuid.uuid4().hex[:8]
     )
 
-    from stitch.pools.modal_flash import ModalFlashPool
+    from stitch.pools.modal_flash import ModalFlashPool, proxy_auth_headers
     from stitch.service import await_pool_ready
 
+    proxy_auth_headers(required=True)
     run = importlib.import_module("cookbook.standalone.app")
     print(f"Deploying pool {run.APP_NAME}", flush=True)
     run.app.deploy()

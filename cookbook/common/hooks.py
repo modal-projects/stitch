@@ -14,7 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from stitch.pools.modal_flash import ModalFlashPool
+from stitch.pools.modal_flash import ModalFlashPool, proxy_auth_headers
 from stitch.publish import constrain_request
 from stitch.publisher import Publisher, TrainerComms
 from stitch.stores.base import Store
@@ -97,6 +97,7 @@ async def gated_rollout_request_hook(
         lag=lag,
         exact=exact,
     )
+    headers.update(proxy_auth_headers(required=True))
     request["headers"] = headers
     request["max_attempts"] = int(
         getattr(

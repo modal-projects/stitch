@@ -120,7 +120,6 @@ SGLANG_SERVER_ARGS = {
     port=SIDECAR_PORT,
     routing_region=modal_cfg.routing_region,
     experimental_options={"kv_aware_routing": True},
-    unauthenticated=True,
     exit_grace_period=60 * MINUTES,
     startup_timeout=SERVER_STARTUP_TIMEOUT,
 )
