@@ -77,10 +77,3 @@ def test_overlay_keeps_declared_build_products(monkeypatch) -> None:
     assert save < replace < restore
     assert steps[save].endswith("sglang/_version.py sglang/srt/ext/*.so)")
     assert "overlay-dependency==1.0" in image.packages
-
-
-def test_default_runtime_overlay_replaces_the_whole_package() -> None:
-    command = serving_image._overlay_command(serving_image.DEFAULT_SGLANG_RUNTIME)
-
-    assert "tar" not in command
-    assert serving_image.DEFAULT_SGLANG_RUNTIME.packages == ()

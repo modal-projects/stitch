@@ -48,7 +48,10 @@ server_image = serving_image.build_serving_image(
     hf_cache_path=str(HF_CACHE_PATH),
     experiment=EXPERIMENT,
     run_id=RUN_ID,
-    extra_packages=STORE_DEPLOYMENT.extra_packages,
+    extra_packages=(
+        *STORE_DEPLOYMENT.extra_packages,
+        *getattr(exp, "SGLANG_EXTRA_PACKAGES", ()),
+    ),
     extra_env={
         **(getattr(exp, "SGLANG_SERVER_ENV", None) or {}),
         **STORE_DEPLOYMENT.image_environment,
