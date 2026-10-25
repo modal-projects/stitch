@@ -19,7 +19,7 @@ from cookbook.common import trainer_image as common_trainer_image
 
 # Dated tag, never `latest`: Modal caches from_registry per tag string and won't re-pull
 # a moved mutable tag, so `latest` silently serves whatever was first pulled.
-MILES_IMAGE_TAG = "radixark/miles:dev-202609231228"
+MILES_IMAGE_TAG = "radixark/miles:dev-202610180955@sha256:61ddd6ad0d6991b5aa58028937289f588c35e1fa461f16752de88ba93064203d"
 MILES_REPO_URL = "https://github.com/modal-projects/miles.git"
 MILES_REPO_REF = "78204b5ba7a73b95bc271a0052fc7bc2521ad18a"
 
