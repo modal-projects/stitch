@@ -47,6 +47,8 @@ def test_maintained_training_recipes_have_consistent_checkpoints_and_resume(name
         "qwen3_8_27b_harbor_mix_v0",
         "qwen3_8_27b_harbor_mix_v1",
         "qwen3_8_27b_harbor_mix_v1b",
+        "qwen3_8_27b_harbor_mix_v2",
+        "qwen3_8_27b_harbor_mix_v2b",
     ],
 )
 def test_harbor_recipes_are_valid(name):
@@ -60,6 +62,8 @@ def test_harbor_recipes_are_valid(name):
         "qwen3_8_27b_harbor_mix_v0",
         "qwen3_8_27b_harbor_mix_v1",
         "qwen3_8_27b_harbor_mix_v1b",
+        "qwen3_8_27b_harbor_mix_v2",
+        "qwen3_8_27b_harbor_mix_v2b",
     ],
 )
 def test_harbor_recipes_train_with_score_centering_without_dflash(name):
@@ -89,6 +93,8 @@ def test_harbor_recipes_train_with_score_centering_without_dflash(name):
         "qwen3_8_27b_harbor_mix_v0",
         "qwen3_8_27b_harbor_mix_v1",
         "qwen3_8_27b_harbor_mix_v1b",
+        "qwen3_8_27b_harbor_mix_v2",
+        "qwen3_8_27b_harbor_mix_v2b",
     ],
 )
 def test_only_harbor_recipes_pin_the_score_centering_stack(name):
@@ -108,6 +114,8 @@ def test_only_harbor_recipes_pin_the_score_centering_stack(name):
         "qwen3_8_27b_harbor_mix_v0",
         "qwen3_8_27b_harbor_mix_v1",
         "qwen3_8_27b_harbor_mix_v1b",
+        "qwen3_8_27b_harbor_mix_v2",
+        "qwen3_8_27b_harbor_mix_v2b",
     ],
 )
 def test_harbor_mix_drops_groups_without_signal(name):
@@ -133,6 +141,8 @@ def test_harbor_mix_drops_groups_without_signal(name):
         "qwen3_8_27b_harbor_mix_v0",
         "qwen3_8_27b_harbor_mix_v1",
         "qwen3_8_27b_harbor_mix_v1b",
+        "qwen3_8_27b_harbor_mix_v2",
+        "qwen3_8_27b_harbor_mix_v2b",
     ],
 )
 def test_harbor_rollout_workers_run_without_uvloop(name):
@@ -145,6 +155,8 @@ def test_harbor_rollout_workers_run_without_uvloop(name):
         "qwen3_8_27b_harbor_mix_v0",
         "qwen3_8_27b_harbor_mix_v1",
         "qwen3_8_27b_harbor_mix_v1b",
+        "qwen3_8_27b_harbor_mix_v2",
+        "qwen3_8_27b_harbor_mix_v2b",
     ],
 )
 def test_harbor_mix_saves_every_step_and_waits_for_long_replies(name):
@@ -163,6 +175,8 @@ def test_harbor_mix_saves_every_step_and_waits_for_long_replies(name):
         "qwen3_8_27b_harbor_mix_v0",
         "qwen3_8_27b_harbor_mix_v1",
         "qwen3_8_27b_harbor_mix_v1b",
+        "qwen3_8_27b_harbor_mix_v2",
+        "qwen3_8_27b_harbor_mix_v2b",
     ],
 )
 def test_harbor_mix_serves_and_trains_at_128k(name):
@@ -192,34 +206,35 @@ def test_harbor_mix_v1_caps_agents_at_one_hour():
     assert env["HARBOR_TASKS_DIR"] == "/harbor-envs/mixture-v1/tasks"
 
 
-def test_harbor_mix_v1b_changes_only_the_task_mix_and_names():
-    # Runs v1 and v1b compare mixture weights, so every other setting must match, and no name is shared.
-    v1, v1b = (
-        _recipe("qwen3_8_27b_harbor_mix_v1"),
-        _recipe("qwen3_8_27b_harbor_mix_v1b"),
-    )
-    args = zip(v1.miles.cli_args(), v1b.miles.cli_args(), strict=True)
-    env, env_b = v1.miles.environment, v1b.miles.environment
+@pytest.mark.parametrize("old, new", [("v1", "v1b"), ("v1", "v2"), ("v1b", "v2b")])
+def test_harbor_mix_variants_change_only_the_task_mix_and_names(old, new):
+    # Runs on these mixes compare task mixes, so every other setting must match, and no name is shared.
+    a, b = (_recipe(f"qwen3_8_27b_harbor_mix_{v}") for v in (old, new))
+    args = zip(a.miles.cli_args(), b.miles.cli_args(), strict=True)
+    env, env_b = a.miles.environment, b.miles.environment
 
     # The W&B group and the Prometheus run name, then the prompt data.
-    assert {(a, b) for a, b in args if a != b} == {
-        ("qwen3-8-27b-harbor-mix-v1", "qwen3-8-27b-harbor-mix-v1b"),
-        ("/harbor-envs/mixture-v1/train.jsonl", "/harbor-envs/mixture-v1b/train.jsonl"),
+    assert {(x, y) for x, y in args if x != y} == {
+        (f"qwen3-8-27b-harbor-mix-{old}", f"qwen3-8-27b-harbor-mix-{new}"),
+        (
+            f"/harbor-envs/mixture-{old}/train.jsonl",
+            f"/harbor-envs/mixture-{new}/train.jsonl",
+        ),
     }
     assert {k for k in env | env_b if env.get(k) != env_b.get(k)} == {
         "HARBOR_TASKS_DIR",
         "HARBOR_ENV_KWARGS",
     }
-    assert env_b["HARBOR_TASKS_DIR"] == "/harbor-envs/mixture-v1b/tasks"
+    assert env_b["HARBOR_TASKS_DIR"] == f"/harbor-envs/mixture-{new}/tasks"
     assert json.loads(env_b["HARBOR_ENV_KWARGS"]) == {
-        "app_name": "qwen3-8-27b-harbor-mix-v1b-sandboxes",
+        "app_name": f"qwen3-8-27b-harbor-mix-{new}-sandboxes",
         "sandbox_timeout_secs": 7800,
     }
-    assert v1b.modal == v1.modal
-    assert v1b.APP_NAME == "stitch-qwen3-8-27b-harbor-mix-v1b" != v1.APP_NAME
-    assert v1b.EXPERIMENT_VOLUME_NAME == "stitch-miles-qwen3-8-27b-harbor-mix-v1b"
-    assert v1b.EXPERIMENT_VOLUME_NAME != v1.EXPERIMENT_VOLUME_NAME
-    assert v1b.TRAINER_EXTRA_VOLUMES["/harbor-trials"].name == "harbor-mix-v1b-trials"
+    assert b.modal == a.modal
+    assert b.APP_NAME == f"stitch-qwen3-8-27b-harbor-mix-{new}" != a.APP_NAME
+    assert b.EXPERIMENT_VOLUME_NAME == f"stitch-miles-qwen3-8-27b-harbor-mix-{new}"
+    assert b.EXPERIMENT_VOLUME_NAME != a.EXPERIMENT_VOLUME_NAME
+    assert b.TRAINER_EXTRA_VOLUMES["/harbor-trials"].name == f"harbor-mix-{new}-trials"
 
 
 @dataclasses.dataclass(frozen=True)
