@@ -13,8 +13,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Reject private dependency sources
+        run: python .github/scripts/check_public_dependencies.py
       - uses: astral-sh/setup-uv@v6
+      - name: Install locked dependencies from public PyPI
+        run: uv sync --locked --default-index https://pypi.org/simple
       - name: Reject unauthenticated endpoints and servers
-        run: uv run python tools/check_endpoint_auth.py
+        run: uv run --locked python tools/check_endpoint_auth.py
       - name: Test
-        run: uv run pytest
+        run: uv run --locked pytest
