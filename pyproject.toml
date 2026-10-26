@@ -31,10 +31,10 @@ build-backend = "hatchling.build"
 packages = ["src/stitch"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests", "src", "cookbook", "tools"]
+testpaths = ["tests", "src", "cookbook", "tools", ".github/scripts"]
 python_files = ["test_*.py", "*_test.py"]
 addopts = ["--import-mode=importlib"]
-pythonpath = ["src", "."]
+pythonpath = ["src", ".", ".github/scripts"]
 
 [tool.ruff]
 target-version = "py311"
