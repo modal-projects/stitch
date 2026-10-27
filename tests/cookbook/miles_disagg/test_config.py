@@ -237,6 +237,22 @@ def test_harbor_mix_variants_change_only_the_task_mix_and_names(old, new):
     assert b.TRAINER_EXTRA_VOLUMES["/harbor-trials"].name == f"harbor-mix-{new}-trials"
 
 
+def test_harbor_mix_v2b_h200_changes_only_the_trainer_gpu_and_split():
+    # The same run on H200: names and every other setting match, so it can stand in for the B300 recipe.
+    a, b = (_recipe(name) for name in ("qwen3_8_27b_harbor_mix_v2b", "qwen3_8_27b_harbor_mix_v2b_h200"))
+    args_a, args_b = a.miles.cli_args(), b.miles.cli_args()
+
+    changed = {(x, y) for x, y in zip(args_a, args_b, strict=True) if x != y}
+    assert changed == {("2", "4")}
+    assert args_b[args_b.index("--tensor-model-parallel-size") + 1] == "4"
+    assert args_b[args_b.index("--context-parallel-size") + 1] == "2"
+    assert b.modal == dataclasses.replace(a.modal, gpu="H200")
+    assert b.miles.environment == a.miles.environment
+    assert (b.APP_NAME, b.EXPERIMENT_VOLUME_NAME) == (a.APP_NAME, a.EXPERIMENT_VOLUME_NAME)
+    validate_recipe(b)
+    validate_resumable_config(b.miles)
+
+
 @dataclasses.dataclass(frozen=True)
 class _Binding:
     kwargs: object
