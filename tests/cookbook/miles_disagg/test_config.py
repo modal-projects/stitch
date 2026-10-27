@@ -253,6 +253,25 @@ def test_harbor_mix_v2b_h200_changes_only_the_trainer_gpu_and_split():
     validate_resumable_config(b.miles)
 
 
+def test_harbor_mix_v2_and_v2b_on_two_h200_machines_differ_as_the_b300_recipes_do():
+    # v2 vs v2b on H200 must compare only task mixes, exactly as the B300 pair does.
+    def changes(old, new):
+        a, b = (_recipe(f"qwen3_8_27b_harbor_mix_{v}") for v in (old, new))
+        args = {(x, y) for x, y in zip(a.miles.cli_args(), b.miles.cli_args(), strict=True) if x != y}
+        env = {k for k in a.miles.environment | b.miles.environment if a.miles.environment.get(k) != b.miles.environment.get(k)}
+        return args, env, a.modal == b.modal, a.APP_NAME != b.APP_NAME
+
+    assert changes("v2_h200x2", "v2b_h200x2") == changes("v2", "v2b")
+    h200 = _recipe("qwen3_8_27b_harbor_mix_v2_h200x2")
+    assert h200.modal == dataclasses.replace(_recipe("qwen3_8_27b_harbor_mix_v2").modal, gpu="H200")
+    assert (h200.APP_NAME, h200.EXPERIMENT_VOLUME_NAME) == (
+        "stitch-qwen3-8-27b-harbor-mix-v2",
+        "stitch-miles-qwen3-8-27b-harbor-mix-v2",
+    )
+    validate_recipe(h200)
+    validate_resumable_config(h200.miles)
+
+
 def test_harbor_mix_v2b_h200x2_only_adds_a_second_trainer_machine():
     a, b = (_recipe(name) for name in ("qwen3_8_27b_harbor_mix_v2b_h200", "qwen3_8_27b_harbor_mix_v2b_h200x2"))
     args_a, args_b = a.miles.cli_args(), b.miles.cli_args()
