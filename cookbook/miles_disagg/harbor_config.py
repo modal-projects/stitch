@@ -15,10 +15,11 @@ DATA_ENV = os.environ.get("STITCH_DATA_ENV") or None
 # The stack that runs score centering on feat/heterogeneous-swe-e2e. Other recipes keep
 # Stitch's default pins. This Miles retries a rollout request's 409 from its own settings,
 # carries stitch-miles' delta-history cleanup on resume (#3875), sizes compact batches by rollouts and
-# repeats a session's samples POST after a timeout or a dropped connection (those lost the attempt).
+# repeats a session's samples POST after a timeout or a dropped connection (those lost the attempt), and
+# stores HF exports in the base checkpoint's dtypes, so deltas after a resume still apply on live replicas.
 MILES_IMAGE_TAG = "radixark/miles:dev-202609290439"
-# stitch-miles-hetero + modal-projects/miles#18 + the samples-POST retry (branch anthonyhe/collect-retry)
-MILES_REPO_REF = "e4cf080cc2c6676ef18ebdf56bef66a32da2b286"
+# stitch-miles-hetero + modal-projects/miles#18 + the two fixes above (branch anthonyhe/collect-retry)
+MILES_REPO_REF = "eab27f8047a57af92d495af9ac9d94bde0f8b896"
 SGLANG_RUNTIME = SGLangRuntime(
     image="lmsysorg/sglang:v0.5.20",
     repository="https://github.com/modal-projects/sglang.git",
