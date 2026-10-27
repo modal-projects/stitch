@@ -253,6 +253,19 @@ def test_harbor_mix_v2b_h200_changes_only_the_trainer_gpu_and_split():
     validate_resumable_config(b.miles)
 
 
+def test_harbor_mix_v2b_h200x2_only_adds_a_second_trainer_machine():
+    a, b = (_recipe(name) for name in ("qwen3_8_27b_harbor_mix_v2b_h200", "qwen3_8_27b_harbor_mix_v2b_h200x2"))
+    args_a, args_b = a.miles.cli_args(), b.miles.cli_args()
+
+    assert {(x, y) for x, y in zip(args_a, args_b, strict=True) if x != y} == {("1", "2")}
+    assert args_b[args_b.index("--actor-num-nodes") + 1] == "2"
+    assert (b.miles.n_train_nodes, a.miles.n_train_nodes) == (2, 1)
+    assert b.modal == a.modal and b.miles.environment == a.miles.environment
+    assert (b.APP_NAME, b.EXPERIMENT_VOLUME_NAME) == (a.APP_NAME, a.EXPERIMENT_VOLUME_NAME)
+    validate_recipe(b)
+    validate_resumable_config(b.miles)
+
+
 @dataclasses.dataclass(frozen=True)
 class _Binding:
     kwargs: object
