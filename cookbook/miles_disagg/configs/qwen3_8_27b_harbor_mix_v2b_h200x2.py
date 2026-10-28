@@ -14,6 +14,7 @@ from cookbook.miles_disagg.configs.qwen3_8_27b_harbor_mix_v2b_h200 import *  # n
 
 class _MixV2bH200x2(h200._MixV2bH200):
     actor_num_nodes = 2
+    environment = {**h200._MixV2bH200.environment, **harbor_config.MULTI_MACHINE_ENVIRONMENT}
 
 
 miles = _MixV2bH200x2(**harbor_config.arguments(h200.v2b.TASKS_ROOT), **harbor_config.SCORE_CENTERING)

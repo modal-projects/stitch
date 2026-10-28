@@ -15,11 +15,12 @@ DATA_ENV = os.environ.get("STITCH_DATA_ENV") or None
 # The stack that runs score centering on feat/heterogeneous-swe-e2e. Other recipes keep
 # Stitch's default pins. This Miles retries a rollout request's 409 from its own settings,
 # carries stitch-miles' delta-history cleanup on resume (#3875), sizes compact batches by rollouts and
-# repeats a session's samples POST after a timeout or a dropped connection (those lost the attempt), and
-# stores HF exports in the base checkpoint's dtypes, so deltas after a resume still apply on live replicas.
+# repeats a session's samples POST after a timeout or a dropped connection (those lost the attempt),
+# stores HF exports in the base checkpoint's dtypes, so deltas after a resume still apply on live replicas,
+# and only logs a coroutine that LiteLLM drops (its strict async hook killed the rollout worker for it).
 MILES_IMAGE_TAG = "radixark/miles:dev-202609290439"
-# stitch-miles-hetero + modal-projects/miles#18 + the two fixes above (branch anthonyhe/collect-retry)
-MILES_REPO_REF = "eab27f8047a57af92d495af9ac9d94bde0f8b896"
+# stitch-miles-hetero + modal-projects/miles#18 + the fixes above (branch anthonyhe/collect-retry)
+MILES_REPO_REF = "2c12b3b33df3322a267763e77d458d3ac45fcd2c"
 SGLANG_RUNTIME = SGLangRuntime(
     image="lmsysorg/sglang:v0.5.20",
     repository="https://github.com/modal-projects/sglang.git",
@@ -28,6 +29,10 @@ SGLANG_RUNTIME = SGLangRuntime(
 )
 # Long turns get their response started and kept alive, as on feat/heterogeneous-swe-e2e.
 SIDECAR_RESPONSE_KEEPALIVE_AFTER = 60.0
+
+# NCCL's RAS health monitor (on by default since NCCL 2.24) segfaulted a trainer rank of a two-machine
+# run (ras/peers.cc) during a checkpoint save. It only monitors, so trainers on several machines turn it off.
+MULTI_MACHINE_ENVIRONMENT = {"NCCL_RAS_ENABLE": "0"}
 
 # terminus-2 needs Harbor's Miles branch (truncation policy for TITO); pip cannot resolve it.
 # Install into the interpreter that runs the trainer and Ray (the image's /opt/sglang venv).

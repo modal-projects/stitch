@@ -279,7 +279,8 @@ def test_harbor_mix_v2b_h200x2_only_adds_a_second_trainer_machine():
     assert {(x, y) for x, y in zip(args_a, args_b, strict=True) if x != y} == {("1", "2")}
     assert args_b[args_b.index("--actor-num-nodes") + 1] == "2"
     assert (b.miles.n_train_nodes, a.miles.n_train_nodes) == (2, 1)
-    assert b.modal == a.modal and b.miles.environment == a.miles.environment
+    assert b.modal == a.modal
+    assert b.miles.environment == a.miles.environment | {"NCCL_RAS_ENABLE": "0"}
     assert (b.APP_NAME, b.EXPERIMENT_VOLUME_NAME) == (a.APP_NAME, a.EXPERIMENT_VOLUME_NAME)
     validate_recipe(b)
     validate_resumable_config(b.miles)

@@ -18,6 +18,7 @@ class _MixV2H200x2(v2._MixV2):
     tensor_model_parallel_size = 4
     context_parallel_size = 2
     actor_num_nodes = 2
+    environment = {**v2._MixV2.environment, **harbor_config.MULTI_MACHINE_ENVIRONMENT}
 
 
 miles = _MixV2H200x2(**harbor_config.arguments(v2.TASKS_ROOT), **harbor_config.SCORE_CENTERING)
