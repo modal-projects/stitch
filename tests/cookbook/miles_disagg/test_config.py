@@ -286,6 +286,34 @@ def test_harbor_mix_v2b_h200x2_only_adds_a_second_trainer_machine():
     validate_resumable_config(b.miles)
 
 
+def test_harbor_mix_v2_h200x2_long_only_trains_longer():
+    a, b = (_recipe(n) for n in ("qwen3_8_27b_harbor_mix_v2_h200x2", "qwen3_8_27b_harbor_mix_v2_h200x2_long"))
+    assert {(x, y) for x, y in zip(a.miles.cli_args(), b.miles.cli_args(), strict=True) if x != y} == {("55", "155")}
+    assert (b.miles.environment, b.modal) == (a.miles.environment, a.modal)
+    # The same names, so a v2 run resumes here.
+    assert (b.APP_NAME, b.EXPERIMENT_VOLUME_NAME) == (a.APP_NAME, a.EXPERIMENT_VOLUME_NAME)
+    validate_recipe(b)
+    validate_resumable_config(b.miles)
+
+
+def test_harbor_mix_v2_h200x2_lr3x_changes_only_the_learning_rate_steps_and_names():
+    a, b = (_recipe(n) for n in ("qwen3_8_27b_harbor_mix_v2_h200x2", "qwen3_8_27b_harbor_mix_v2_h200x2_lr3x"))
+    assert {(x, y) for x, y in zip(a.miles.cli_args(), b.miles.cli_args(), strict=True) if x != y} == {
+        ("1e-06", "3e-06"),
+        ("55", "155"),
+        ("qwen3-8-27b-harbor-mix-v2", "qwen3-8-27b-harbor-mix-v2-lr3x"),
+    }
+    env = a.miles.environment | b.miles.environment
+    assert {k for k in env if a.miles.environment.get(k) != b.miles.environment.get(k)} == {"HARBOR_ENV_KWARGS"}
+    assert b.modal == a.modal
+    assert (b.APP_NAME, b.EXPERIMENT_VOLUME_NAME) == (
+        "stitch-qwen3-8-27b-harbor-mix-v2-lr3x",
+        "stitch-miles-qwen3-8-27b-harbor-mix-v2-lr3x",
+    )
+    validate_recipe(b)
+    validate_resumable_config(b.miles)
+
+
 @dataclasses.dataclass(frozen=True)
 class _Binding:
     kwargs: object
