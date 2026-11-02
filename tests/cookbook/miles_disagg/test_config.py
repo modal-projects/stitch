@@ -314,6 +314,48 @@ def test_harbor_mix_v2_h200x2_lr3x_changes_only_the_learning_rate_steps_and_name
     validate_resumable_config(b.miles)
 
 
+def test_harbor_mix_v2_h200x2_reply12k_changes_only_the_reply_limit_steps_and_names():
+    # Only the reply limit changes: the agent keeps v2's input budget, and evals keep 16,384 per reply.
+    a, b = (_recipe(n) for n in ("qwen3_8_27b_harbor_mix_v2_h200x2", "qwen3_8_27b_harbor_mix_v2_h200x2_reply12k"))
+    assert {(x, y) for x, y in zip(a.miles.cli_args(), b.miles.cli_args(), strict=True) if x != y} == {
+        ("16384", "12288"),
+        ("55", "35"),
+        ("qwen3-8-27b-harbor-mix-v2", "qwen3-8-27b-harbor-mix-v2-reply12k"),
+    }
+    env = a.miles.environment | b.miles.environment
+    assert {k for k in env if a.miles.environment.get(k) != b.miles.environment.get(k)} == {
+        "AGENT_MAX_OUTPUT_TOKENS",
+        "HARBOR_ENV_KWARGS",
+    }
+    assert b.miles.environment["AGENT_MAX_OUTPUT_TOKENS"] == "12288"
+    assert b.modal == a.modal
+    assert (b.APP_NAME, b.EXPERIMENT_VOLUME_NAME) == (
+        "stitch-qwen3-8-27b-harbor-mix-v2-reply12k",
+        "stitch-miles-qwen3-8-27b-harbor-mix-v2-reply12k",
+    )
+    assert b.TRAINER_EXTRA_VOLUMES["/harbor-trials"].name == "harbor-mix-v2-reply12k-trials"
+    validate_recipe(b)
+    validate_resumable_config(b.miles)
+
+
+def test_harbor_mix_v2_h200x2_reply12k_lr2x_changes_only_the_learning_rate_and_names():
+    a, b = (_recipe(n) for n in ("qwen3_8_27b_harbor_mix_v2_h200x2_reply12k", "qwen3_8_27b_harbor_mix_v2_h200x2_reply12k_lr2x"))
+    assert {(x, y) for x, y in zip(a.miles.cli_args(), b.miles.cli_args(), strict=True) if x != y} == {
+        ("1e-06", "2e-06"),
+        ("qwen3-8-27b-harbor-mix-v2-reply12k", "qwen3-8-27b-harbor-mix-v2-reply12k-lr2x"),
+    }
+    env = a.miles.environment | b.miles.environment
+    assert {k for k in env if a.miles.environment.get(k) != b.miles.environment.get(k)} == {"HARBOR_ENV_KWARGS"}
+    assert b.modal == a.modal
+    assert (b.APP_NAME, b.EXPERIMENT_VOLUME_NAME) == (
+        "stitch-qwen3-8-27b-harbor-mix-v2-reply12k-lr2x",
+        "stitch-miles-qwen3-8-27b-harbor-mix-v2-reply12k-lr2x",
+    )
+    assert b.TRAINER_EXTRA_VOLUMES["/harbor-trials"].name == "harbor-mix-v2-reply12k-lr2x-trials"
+    validate_recipe(b)
+    validate_resumable_config(b.miles)
+
+
 @dataclasses.dataclass(frozen=True)
 class _Binding:
     kwargs: object
