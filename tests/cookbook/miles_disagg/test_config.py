@@ -356,6 +356,28 @@ def test_harbor_mix_v2_h200x2_reply12k_lr2x_changes_only_the_learning_rate_and_n
     validate_resumable_config(b.miles)
 
 
+def test_harbor_mix_v3a_h200x2_changes_only_the_tasks_and_names():
+    a, b = (_recipe(n) for n in ("qwen3_8_27b_harbor_mix_v2_h200x2", "qwen3_8_27b_harbor_mix_v3a_h200x2"))
+    assert {(x, y) for x, y in zip(a.miles.cli_args(), b.miles.cli_args(), strict=True) if x != y} == {
+        ("/harbor-envs/mixture-v2/train.jsonl", "/harbor-envs/mixture-v3a/train.jsonl"),
+        ("qwen3-8-27b-harbor-mix-v2", "qwen3-8-27b-harbor-mix-v3a"),
+    }
+    env = a.miles.environment | b.miles.environment
+    assert {k for k in env if a.miles.environment.get(k) != b.miles.environment.get(k)} == {
+        "HARBOR_TASKS_DIR",
+        "HARBOR_ENV_KWARGS",
+    }
+    assert b.miles.environment["HARBOR_TASKS_DIR"] == "/harbor-envs/mixture-v3a/tasks"
+    assert b.modal == a.modal
+    assert (b.APP_NAME, b.EXPERIMENT_VOLUME_NAME) == (
+        "stitch-qwen3-8-27b-harbor-mix-v3a",
+        "stitch-miles-qwen3-8-27b-harbor-mix-v3a",
+    )
+    assert b.TRAINER_EXTRA_VOLUMES["/harbor-trials"].name == "harbor-mix-v3a-trials"
+    validate_recipe(b)
+    validate_resumable_config(b.miles)
+
+
 @dataclasses.dataclass(frozen=True)
 class _Binding:
     kwargs: object
