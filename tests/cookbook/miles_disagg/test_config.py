@@ -428,13 +428,14 @@ def test_harbor_mix_b300_s2_changes_only_the_trainer_seed_and_names(mix):
     validate_resumable_config(b.miles)
 
 
-def test_harbor_mix_v3a_h200x2_cv_is_the_same_run_with_volumes_in_training_team():
-    a, b = (_recipe(n) for n in ("qwen3_8_27b_harbor_mix_v3a_h200x2", "qwen3_8_27b_harbor_mix_v3a_h200x2_cv"))
+@pytest.mark.parametrize("mix", ["v3a", "v3b"])
+def test_harbor_mix_h200x2_cv_is_the_same_run_with_volumes_in_training_team(mix):
+    a, b = (_recipe(f"qwen3_8_27b_harbor_mix_{mix}_h200x2{s}") for s in ("", "_cv"))
     assert a.miles.cli_args() == b.miles.cli_args() and b.modal == a.modal
     env = a.miles.environment | b.miles.environment
     assert {k for k in env if a.miles.environment.get(k) != b.miles.environment.get(k)} == {"MODAL_IMAGE_BUILDER_VERSION"}
     assert (b.APP_NAME, b.EXPERIMENT_VOLUME_NAME, b.EXPERIMENT_VOLUME_ENV) == (a.APP_NAME, a.EXPERIMENT_VOLUME_NAME, "training-team")
-    assert b.TRAINER_EXTRA_VOLUMES["/harbor-trials"].name == "harbor-mix-v3a-trials"
+    assert b.TRAINER_EXTRA_VOLUMES["/harbor-trials"].name == f"harbor-mix-{mix}-trials"
     validate_recipe(b)
     validate_resumable_config(b.miles)
 
