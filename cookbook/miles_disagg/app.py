@@ -121,14 +121,24 @@ if MILES_LOCAL_DIR:
 hf_cache_volume = modal.Volume.from_name(
     "huggingface-cache", environment_name=DATA_ENV, create_if_missing=True, version=2
 )
+# Recipe-owned: the Modal environment of the run Volume and the base checkpoints when the run
+# computes in another one (None: the app's). The store opens the run Volume as "<environment>/<name>".
+VOLUME_ENV = getattr(exp, "EXPERIMENT_VOLUME_ENV", None)
+STORE_VOLUME_NAME = (
+    f"{VOLUME_ENV}/{exp.EXPERIMENT_VOLUME_NAME}"
+    if VOLUME_ENV
+    else exp.EXPERIMENT_VOLUME_NAME
+)
 data_volume = modal.Volume.from_name("miles-data", create_if_missing=True, version=2)
 checkpoint_volume = modal.Volume.from_name(
     "miles-checkpoints",
+    environment_name=VOLUME_ENV,
     create_if_missing=True,
     version=2,
 )
 run_volume = modal.Volume.from_name(
     exp.EXPERIMENT_VOLUME_NAME,
+    environment_name=VOLUME_ENV,
     create_if_missing=True,
     version=2,
 )
@@ -236,7 +246,7 @@ class Server:
             local_checkpoint_dir=exp.LOCAL_CHECKPOINT_PATH,
             delta_update_mode=exp.SGLANG_DELTA_UPDATE_MODE,
             store_backend=store_config["stitch_store_backend"],
-            volume_name=exp.EXPERIMENT_VOLUME_NAME,
+            volume_name=STORE_VOLUME_NAME,
             s3_root=store_config.get("stitch_s3_root"),
             s3_endpoint_url=store_config.get("stitch_s3_endpoint_url"),
             commit_mode=exp.SIDECAR_COMMIT_MODE,
@@ -274,7 +284,7 @@ def _boot_checkpoint(store_config: dict) -> tuple[str, int]:
         store_config["stitch_store_backend"],
         local_root=RUN_DIR,
         run_id=RUN_ID,
-        volume_name=exp.EXPERIMENT_VOLUME_NAME,
+        volume_name=STORE_VOLUME_NAME,
     )
     latest = store.read_pointer()
     if latest is None:
@@ -406,7 +416,7 @@ class Trainer:
         # coordinates travel through the dedicated hook-args contract.
         run_config = {
             **STORE_DEPLOYMENT.hook_config(APP_NAME),
-            "experiment_volume_name": exp.EXPERIMENT_VOLUME_NAME,
+            "experiment_volume_name": STORE_VOLUME_NAME,
             "run_id": RUN_ID,
             "update_weight_disk_dir": cfg.update_weight_disk_dir,
         }

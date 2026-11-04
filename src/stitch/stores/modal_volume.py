@@ -97,9 +97,13 @@ class ModalVolumeStore(Store):
 
 
 def _volume(name: str):
+    """A Volume by name; "<environment>/<name>" opens it in another Modal environment."""
     import modal
 
-    return modal.Volume.from_name(name, version=2, create_if_missing=True)
+    environment, _, name = name.rpartition("/")
+    return modal.Volume.from_name(
+        name, environment_name=environment or None, version=2, create_if_missing=True
+    )
 
 
 def _atomic_write(path: Path, text: str) -> None:

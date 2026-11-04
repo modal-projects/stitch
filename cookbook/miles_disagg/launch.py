@@ -79,7 +79,11 @@ def _cancel_recorded_trainer_call(run: Any) -> None:
     never briefly runs two trainers against one run."""
     import modal
 
-    volume = modal.Volume.from_name(run.exp.EXPERIMENT_VOLUME_NAME, version=2)
+    volume = modal.Volume.from_name(
+        run.exp.EXPERIMENT_VOLUME_NAME,
+        environment_name=getattr(run.exp, "EXPERIMENT_VOLUME_ENV", None),
+        version=2,
+    )
     call_id = read_trainer_call(volume, os.environ["RUN_ID"])
     if call_id is None:
         return

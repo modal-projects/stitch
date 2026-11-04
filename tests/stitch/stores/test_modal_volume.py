@@ -10,7 +10,10 @@ import json
 import tempfile
 from pathlib import Path
 
+import modal
+
 from stitch.publish import publish_version
+from stitch.stores import modal_volume
 from stitch.stores.modal_volume import ModalVolumeStore
 from stitch.types import VersionKind, VersionRef
 
@@ -119,6 +122,18 @@ def test_runs_sharing_a_volume_have_independent_state() -> None:
         assert second.read_pointer() == VersionRef("run-b", 0)
         assert Path(first.materialize(VersionRef("run-a", 1))).is_dir()
         assert not Path(second.materialize(VersionRef("run-b", 1))).exists()
+
+
+def test_volume_name_may_name_its_environment(monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(
+        modal.Volume,
+        "from_name",
+        lambda name, **kw: calls.append((name, kw["environment_name"])),
+    )
+    modal_volume._volume("stitch-run")
+    modal_volume._volume("training-team/stitch-run")
+    assert calls == [("stitch-run", None), ("stitch-run", "training-team")]
 
 
 if __name__ == "__main__":

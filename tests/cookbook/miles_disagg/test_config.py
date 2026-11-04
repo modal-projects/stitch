@@ -400,6 +400,34 @@ def test_harbor_mix_v3b_h200x2_changes_only_the_tasks_and_names():
     validate_resumable_config(b.miles)
 
 
+@pytest.mark.parametrize("mix", ["v3a", "v3b"])
+def test_harbor_mix_b300_s2_changes_only_the_trainer_seed_and_names(mix):
+    a, b = (_recipe(f"qwen3_8_27b_harbor_mix_{mix}_{s}") for s in ("h200x2", "b300_s2"))
+    fa, fb = (dict(zip(r.miles.cli_args(), [*r.miles.cli_args()[1:], None], strict=True)) for r in (a, b))
+    assert {k for k in fa | fb if k.startswith("--") and fa.get(k) != fb.get(k)} == {
+        "--actor-num-nodes",
+        "--tensor-model-parallel-size",
+        "--rollout-seed",
+        "--wandb-group",
+        "--prometheus-run-name",
+    }
+    assert (fb["--actor-num-nodes"], fb["--tensor-model-parallel-size"], fb["--rollout-seed"]) == ("1", "2", "43")
+    env = a.miles.environment | b.miles.environment
+    assert {k for k in env if a.miles.environment.get(k) != b.miles.environment.get(k)} == {
+        "HARBOR_ENV_KWARGS",
+        "MODAL_IMAGE_BUILDER_VERSION",
+    }
+    assert dataclasses.replace(b.modal, gpu="H200") == a.modal and b.modal.gpu == "B300"
+    assert (b.APP_NAME, b.EXPERIMENT_VOLUME_NAME, b.EXPERIMENT_VOLUME_ENV) == (
+        f"stitch-qwen3-8-27b-harbor-mix-{mix}-s2",
+        f"stitch-miles-qwen3-8-27b-harbor-mix-{mix}-s2",
+        "training-team",
+    )
+    assert b.TRAINER_EXTRA_VOLUMES["/harbor-trials"].name == f"harbor-mix-{mix}-s2-trials"
+    validate_recipe(b)
+    validate_resumable_config(b.miles)
+
+
 @dataclasses.dataclass(frozen=True)
 class _Binding:
     kwargs: object
