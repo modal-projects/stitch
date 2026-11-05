@@ -428,6 +428,31 @@ def test_harbor_mix_b300_s2_changes_only_the_trainer_seed_and_names(mix):
     validate_resumable_config(b.miles)
 
 
+@pytest.mark.parametrize(("name", "seed"), [("lr2x", "42"), ("lr2x_s2", "43")])
+def test_harbor_mix_v3b_lr2x_changes_only_the_lr_seed_and_names(name, seed):
+    a, b = (_recipe(f"qwen3_8_27b_harbor_mix_v3b_b300_{s}") for s in ("s2", name))
+    fa, fb = (dict(zip(r.miles.cli_args(), [*r.miles.cli_args()[1:], None], strict=True)) for r in (a, b))
+    seed_changed = {"--rollout-seed"} if seed != fa["--rollout-seed"] else set()
+    assert {k for k in fa | fb if k.startswith("--") and fa.get(k) != fb.get(k)} == {
+        "--lr",
+        "--wandb-group",
+        "--prometheus-run-name",
+    } | seed_changed
+    assert (float(fb["--lr"]), fb["--rollout-seed"]) == (2e-6, seed)
+    env = a.miles.environment | b.miles.environment
+    assert {k for k in env if a.miles.environment.get(k) != b.miles.environment.get(k)} == {"HARBOR_ENV_KWARGS"}
+    assert b.modal == a.modal
+    suffix = name.replace("_", "-")
+    assert (b.APP_NAME, b.EXPERIMENT_VOLUME_NAME, b.EXPERIMENT_VOLUME_ENV) == (
+        f"stitch-qwen3-8-27b-harbor-mix-v3b-{suffix}",
+        f"stitch-miles-qwen3-8-27b-harbor-mix-v3b-{suffix}",
+        "training-team",
+    )
+    assert b.TRAINER_EXTRA_VOLUMES["/harbor-trials"].name == f"harbor-mix-v3b-{suffix}-trials"
+    validate_recipe(b)
+    validate_resumable_config(b.miles)
+
+
 @pytest.mark.parametrize("mix", ["v3a", "v3b"])
 def test_harbor_mix_h200x2_cv_is_the_same_run_with_volumes_in_training_team(mix):
     a, b = (_recipe(f"qwen3_8_27b_harbor_mix_{mix}_h200x2{s}") for s in ("", "_cv"))
