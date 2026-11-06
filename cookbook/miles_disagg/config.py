@@ -9,11 +9,14 @@ Modal-infra half of an experiment is ``common.config.ModalConfig``.
 from __future__ import annotations
 
 import json
+import shlex
 from pathlib import Path
 from typing import Any
 
 from cookbook.common.config import validate_serving_config
+from cookbook.common.constants import START_PATH
 from cookbook.miles_disagg import nvfp4
+from cookbook.miles_disagg.trainer_image import MILES_ROOT
 
 _MILES_SKIP = {"environment", "async_mode", "megatron_model_type"}
 # Fields miles reads as YAML files; inline dicts are materialized before launch.
@@ -106,6 +109,20 @@ class MilesConfig:
         return cfg
 
 
+def train_command(cfg: MilesConfig) -> str:
+    """The trainer's command: Miles' train script with the model's Megatron arguments and the config's."""
+    train_script = f"{MILES_ROOT}/{'train_async.py' if cfg.async_mode else 'train.py'}"
+    args = cfg.cli_args()
+    if cfg.megatron_model_type:
+        from miles.utils.external_utils.model_args_utils import load_model_args
+
+        args = [
+            *shlex.split(load_model_args(cfg.megatron_model_type)),
+            *args,
+        ]
+    return shlex.join(["python3", train_script, *args])
+
+
 def validate_recipe(recipe: Any) -> None:
     """Check checkpoint and deployment agreements before constructing Modal images."""
     cfg = recipe.miles
@@ -127,8 +144,12 @@ def validate_recipe(recipe: Any) -> None:
             )
     else:
         raise ValueError(f"Unsupported SERVED_CHECKPOINT_FORMAT: {served_format!r}")
+    reference = getattr(recipe, "TORCH_DIST_CHECKPOINT_PATH", None)
+    if getattr(recipe, "START_VOLUME", None) is None and any(
+        Path(p).is_relative_to(START_PATH) for p in (served, masters, reference) if p
+    ):
+        raise ValueError(f"Checkpoints under {START_PATH} require START_VOLUME")
     if getattr(cfg, "megatron_to_hf_mode", None) == "raw":
-        reference = getattr(recipe, "TORCH_DIST_CHECKPOINT_PATH", None)
         ref_load = getattr(cfg, "ref_load", None)
         if not reference or not ref_load or Path(ref_load) != Path(reference):
             raise ValueError(

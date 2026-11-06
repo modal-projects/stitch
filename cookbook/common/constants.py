@@ -10,6 +10,7 @@ CHECKPOINTS_PATH = Path("/checkpoints")
 DATA_PATH = Path("/data")
 STITCH_PATH = Path("/stitch")
 DRAFT_PATH = Path("/draft")
+START_PATH = Path("/start")  # a recipe's START_VOLUME: the run's starting checkpoint
 SGLANG_CACHE_PATH = (
     "/root/.cache/sglang"  # sglang kernel/JIT cache; survives cold starts
 )

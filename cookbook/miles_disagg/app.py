@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import importlib
 import os
-import shlex
 import shutil
 import subprocess
 import tempfile
@@ -33,12 +32,14 @@ from cookbook.common.constants import (
     SERVER_STARTUP_TIMEOUT,
     SGLANG_CACHE_PATH,
     SIDECAR_PORT,
+    START_PATH,
     STITCH_PATH,
 )
 from cookbook.miles_disagg import trainer_image
 from cookbook.miles_disagg.config import (
     YAML_CONFIG_FIELDS,
     MilesConfig,
+    train_command,
     validate_recipe,
 )
 from cookbook.miles_disagg.resume import (
@@ -156,6 +157,12 @@ draft_volume = (
 kernel_cache_volume = modal.Volume.from_name(
     modal_cfg.kernel_cache_volume, create_if_missing=True, version=2
 )
+# Recipe-owned: the Volume with the run's starting checkpoint (e.g. an SFT run's exports) instead of a
+# prepared SOURCE_MODEL. The trainer and the rollout servers mount it at START_PATH, where the recipe's
+# checkpoint paths point.
+start_volumes = (
+    {str(START_PATH): exp.START_VOLUME} if getattr(exp, "START_VOLUME", None) else {}
+)
 
 train_volumes = {
     str(HF_CACHE_PATH): hf_cache_volume,
@@ -163,8 +170,21 @@ train_volumes = {
     str(DATA_PATH): data_volume,
     str(STITCH_PATH): run_volume,
     str(KERNEL_CACHE_PATH): kernel_cache_volume,
+    **start_volumes,
     # Recipe-owned data, e.g. prepared Harbor task sets: {mount path: modal.Volume}.
     **getattr(exp, "TRAINER_EXTRA_VOLUMES", {}),
+}
+server_volumes = {
+    str(HF_CACHE_PATH): hf_cache_volume,
+    str(CHECKPOINTS_PATH): checkpoint_volume,
+    **(
+        {str(STITCH_PATH): run_volume}
+        if STORE_DEPLOYMENT.backend == storage.MODAL_VOLUME
+        else {}
+    ),
+    SGLANG_CACHE_PATH: sglang_cache_volume,
+    **({str(DRAFT_PATH): draft_volume.read_only()} if draft_volume is not None else {}),
+    **start_volumes,
 }
 train_secrets = [
     auth.proxy_auth_secret(),
@@ -201,21 +221,7 @@ SGLANG_SERVER_ARGS = {
     cpu=modal_cfg.rollout_cpu,
     cloud=modal_cfg.cloud,
     compute_region=modal_cfg.region,
-    volumes={
-        str(HF_CACHE_PATH): hf_cache_volume,
-        str(CHECKPOINTS_PATH): checkpoint_volume,
-        **(
-            {str(STITCH_PATH): run_volume}
-            if STORE_DEPLOYMENT.backend == storage.MODAL_VOLUME
-            else {}
-        ),
-        SGLANG_CACHE_PATH: sglang_cache_volume,
-        **(
-            {str(DRAFT_PATH): draft_volume.read_only()}
-            if draft_volume is not None
-            else {}
-        ),
-    },
+    volumes=server_volumes,
     min_containers=modal_cfg.rollout_min_containers,
     max_containers=modal_cfg.rollout_max_containers,
     target_concurrency=ROLLOUT_CONCURRENCY,
@@ -437,7 +443,7 @@ class Trainer:
             checkpoint_fields=("hf_checkpoint", "load", "ref_load", "critic_load"),
             yaml_fields=YAML_CONFIG_FIELDS,
         )
-        cmd = _build_train_cmd(cfg)
+        cmd = train_command(cfg)
 
         # Claim the version already served by the pool before Miles publishes.
         from cookbook.common import hooks
@@ -486,19 +492,6 @@ class Trainer:
                     )
                 except Exception as exc:  # noqa: BLE001
                     print(f"WARNING: could not commit train log: {exc}")
-
-
-def _build_train_cmd(cfg: MilesConfig) -> str:
-    train_script = f"{MILES_ROOT}/{'train_async.py' if cfg.async_mode else 'train.py'}"
-    args = cfg.cli_args()
-    if cfg.megatron_model_type:
-        from miles.utils.external_utils.model_args_utils import load_model_args
-
-        args = [
-            *shlex.split(load_model_args(cfg.megatron_model_type)),
-            *args,
-        ]
-    return shlex.join(["python3", train_script, *args])
 
 
 # ── Entrypoints (preparation lives in a separate app: cookbook.miles_disagg.prep_app) ──
