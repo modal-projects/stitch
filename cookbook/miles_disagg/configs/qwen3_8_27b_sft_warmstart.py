@@ -26,7 +26,7 @@ TRAINER_EXTRA_VOLUMES = {
     "/sft-data": modal_sdk.Volume.from_name("sft-data", environment_name=harbor_config.DATA_ENV)
 }
 DATA = "/sft-data/warmstart-v1/train.jsonl"
-DATA_ROWS = 20_000  # trajectories in DATA (its manifest.json)
+DATA_ROWS = 16_089  # trajectories in DATA (its manifest.json)
 BATCH = 128
 STEPS = DATA_ROWS // BATCH  # one epoch
 # The RL recipe's model, checkpoint, split and memory settings; its rollout, reward and weight-sync settings stay out.
