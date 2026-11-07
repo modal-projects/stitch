@@ -99,8 +99,8 @@ miles = _Sft(
     rollout_batch_size=BATCH,
     global_batch_size=BATCH,
     # Miles packs micro-batches of up to max_tokens_per_gpu x the CP size (64K tokens), half of what one 128K RL
-    # sample puts on each GPU. At RL's 4,096, each micro-batch held one ~17K-token trajectory, and the trainer ran at
-    # about a quarter of RL's speed (4,900 vs 16,000 tokens/s).
+    # sample puts on each GPU. At RL's 4,096, each micro-batch held one ~17K-token trajectory: the first step took
+    # 495 s, against 280 s here; the second step here took 134 s (17,900 tokens/s, RL's speed).
     max_tokens_per_gpu=32_768,
     lr=1e-5,
     lr_decay_style="cosine",
