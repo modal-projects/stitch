@@ -130,6 +130,15 @@ def test_sft_recipe_runs_miles_sft_with_the_rl_model_and_no_rollouts():
     assert Path(sft.CHAT_TEMPLATE_IN_IMAGE.replace("/root/cookbook", str(cookbook))) == sft.CHAT_TEMPLATE
 
 
+def test_sft_smoke_changes_only_the_steps_and_names():
+    smoke, full = _recipe("qwen3_8_27b_sft_warmstart_smoke"), _recipe("qwen3_8_27b_sft_warmstart")
+    fields, full_fields = smoke.miles._fields(), full.miles._fields()
+    assert {k for k in fields | full_fields if fields.get(k) != full_fields.get(k)} == {
+        "num_rollout", "save_interval", "wandb_group"
+    }
+    assert smoke.miles.num_rollout == smoke.miles.save_interval == 2 and full.miles.num_rollout == full.STEPS
+
+
 def test_sft_app_runs_only_the_trainer(monkeypatch, tmp_path):
     monkeypatch.setenv("EXPERIMENT_CONFIG", "qwen3_8_27b_sft_warmstart")
     monkeypatch.setenv("RUN_ID", "test-run")
