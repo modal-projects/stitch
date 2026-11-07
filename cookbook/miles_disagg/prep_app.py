@@ -32,16 +32,20 @@ exp = importlib.import_module(f"cookbook.miles_disagg.configs.{EXPERIMENT}")
 validate_recipe(exp)
 modal_cfg = exp.modal
 miles_cfg = exp.miles
+# As in app.py: the Hugging Face cache may live in another environment, baked into the image so a
+# container's re-import resolves the same Volume.
+DATA_ENV = os.environ.get("STITCH_DATA_ENV") or None
 
 image = trainer_image.build_trainer_image(
     hf_cache_path=str(HF_CACHE_PATH),
     experiment=EXPERIMENT,
     miles_repo_ref=prep.pinned_miles_revision(exp),
     miles_image_tag=getattr(exp, "MILES_IMAGE_TAG", trainer_image.MILES_IMAGE_TAG),
+    extra_env={"STITCH_DATA_ENV": DATA_ENV} if DATA_ENV else None,
 )
 
 hf_cache_volume = modal.Volume.from_name(
-    "huggingface-cache", create_if_missing=True, version=2
+    "huggingface-cache", environment_name=DATA_ENV, create_if_missing=True, version=2
 )
 data_volume = modal.Volume.from_name("miles-data", create_if_missing=True, version=2)
 checkpoint_volume = modal.Volume.from_name(
