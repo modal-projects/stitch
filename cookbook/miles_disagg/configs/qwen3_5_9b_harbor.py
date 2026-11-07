@@ -26,6 +26,14 @@ SOURCE_REVISION = "c202236235762e1c871ad0ccb60c8ee5ba337b9a"
 BF16_CHECKPOINT_PATH = CHECKPOINTS_PATH / "qwen3-5-9b-c2022362-bf16"
 ROLLOUT_CHECKPOINT_PATH = BF16_CHECKPOINT_PATH
 TORCH_DIST_CHECKPOINT_PATH = CHECKPOINTS_PATH / "qwen3-5-9b-c2022362-torch-dist-tp2"
+# Harbor at the 27B recipes' pin plus one parser fix (modal-projects/harbor, branch anthonyhe/terminus-blank-tag):
+# a reply with blank brackets such as "< >" no longer crashes Terminus-2 and ends the trial.
+HARBOR_REF = "d703931b444b3846df4c97b75abbc5510779b8b8"
+TRAINER_IMAGE_RUN_COMMANDS = (
+    "uv pip install --python /opt/sglang/bin/python "
+    f'"harbor[modal] @ git+https://github.com/modal-projects/harbor@{HARBOR_REF}" "modal==1.5.3"',
+    *harbor_config.TRAINER_IMAGE_RUN_COMMANDS[1:],
+)
 TRAINER_EXTRA_VOLUMES = {
     "/harbor-envs": v2.TRAINER_EXTRA_VOLUMES["/harbor-envs"],
     "/harbor-trials": modal_sdk.Volume.from_name(
