@@ -2,9 +2,10 @@
 
 Trainer only (cookbook.miles_disagg.sft_app): Miles' SFT path (--loss-type sft_loss, miles.rollout.sft_rollout) with
 --debug-train-only starts no SGLang engine, and the app deploys no rollout pool. Full weights on one 8 x B300
-machine with the RL recipe's model, checkpoints, split (TP 2 x CP 2 x DP 2) and memory settings. One epoch of the
-data set (cookbook.miles_disagg.sft_data), 128 trajectories per step, peak learning rate 1e-5 (10% warmup, cosine
-decay to 1e-6), HF exports at 50% and 100% of the steps. Messages render with sft.CHAT_TEMPLATE, as in RL.
+machine with the RL recipe's model, checkpoints, split (TP 2 x CP 2 x DP 2) and memory settings, but larger
+micro-batches. One epoch of the data set (cookbook.miles_disagg.sft_data), 128 trajectories per step, peak learning
+rate 1e-5 (10% warmup, cosine decay to 1e-6), HF exports at 50% and 100% of the steps. Messages render with
+sft.CHAT_TEMPLATE, as in RL.
 
     EXPERIMENT_CONFIG=qwen3_8_27b_sft_warmstart MODAL_ENVIRONMENT=<env> \
         uv run --extra modal modal run --detach -m cookbook.miles_disagg.sft_app
@@ -49,7 +50,6 @@ SHARED = (
     "context_parallel_size",
     "distributed_timeout_minutes",
     "use_dynamic_batch_size",
-    "max_tokens_per_gpu",
     "log_probs_chunk_size",
     "recompute_granularity",
     "recompute_method",
@@ -98,6 +98,10 @@ miles = _Sft(
     num_rollout=STEPS,
     rollout_batch_size=BATCH,
     global_batch_size=BATCH,
+    # Miles packs micro-batches of up to max_tokens_per_gpu x the CP size (64K tokens), half of what one 128K RL
+    # sample puts on each GPU. At RL's 4,096, each micro-batch held one ~17K-token trajectory, and the trainer ran at
+    # about a quarter of RL's speed (4,900 vs 16,000 tokens/s).
+    max_tokens_per_gpu=32_768,
     lr=1e-5,
     lr_decay_style="cosine",
     min_lr=1e-6,
