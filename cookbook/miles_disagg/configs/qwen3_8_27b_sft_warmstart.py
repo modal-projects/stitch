@@ -39,7 +39,6 @@ SHARED = (
     "transformer_impl",
     "bf16",
     "hf_export_source_tensor_prefixes",
-    "max_seq_len",
     "actor_num_nodes",
     "actor_num_gpus_per_node",
     "num_gpus_per_node",
