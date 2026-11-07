@@ -28,11 +28,11 @@ ROLLOUT_CHECKPOINT_PATH = BF16_CHECKPOINT_PATH
 TORCH_DIST_CHECKPOINT_PATH = CHECKPOINTS_PATH / "qwen3-5-9b-c2022362-torch-dist-tp2"
 # Harbor at the 27B recipes' pin plus one parser fix (modal-projects/harbor, branch anthonyhe/terminus-blank-tag):
 # a reply with blank brackets such as "< >" no longer crashes Terminus-2 and ends the trial.
-HARBOR_REF = "d703931b444b3846df4c97b75abbc5510779b8b8"
+HARBOR_REF = "611da466c821938e33d63c12a906642b1774b3d7"
 TRAINER_IMAGE_RUN_COMMANDS = (
     "uv pip install --python /opt/sglang/bin/python "
     f'"harbor[modal] @ git+https://github.com/modal-projects/harbor@{HARBOR_REF}" "modal==1.5.3"',
-    *harbor_config.TRAINER_IMAGE_RUN_COMMANDS[1:],
+    "uv pip uninstall --python /opt/sglang/bin/python mooncake-transfer-engine-cuda13",
 )
 TRAINER_EXTRA_VOLUMES = {
     "/harbor-envs": v2.TRAINER_EXTRA_VOLUMES["/harbor-envs"],
@@ -76,5 +76,6 @@ class _Qwen35_9B(v2._MixV2):
 
 
 _arguments = harbor_config.arguments(v2.TASKS_ROOT)
-_arguments.pop("apply_chat_template_kwargs")  # Qwen3.5's template has no reasoning effort
+# Qwen3.5's template has no reasoning effort
+_arguments.pop("apply_chat_template_kwargs")
 miles = _Qwen35_9B(**_arguments, **harbor_config.SCORE_CENTERING)

@@ -55,6 +55,26 @@ def test_harbor_recipes_are_valid(name):
     validate_recipe(_recipe(name))
 
 
+def test_9b_recipe_installs_the_harbor_parser_fix_and_27b_keeps_its_pin():
+    nine_b = _recipe("qwen3_5_9b_harbor")
+    commands = nine_b.TRAINER_IMAGE_RUN_COMMANDS
+
+    validate_recipe(nine_b)
+    assert (
+        "git+https://github.com/modal-projects/harbor@"
+        "611da466c821938e33d63c12a906642b1774b3d7" in commands[0]
+    )
+    assert commands[1:] == harbor_config.TRAINER_IMAGE_RUN_COMMANDS[1:]
+    assert (
+        _recipe("qwen3_8_27b_harbor_mix_v2").TRAINER_IMAGE_RUN_COMMANDS
+        == harbor_config.TRAINER_IMAGE_RUN_COMMANDS
+    )
+    assert (
+        f"harbor-framework/harbor@{harbor_config.HARBOR_REF}"
+        in harbor_config.TRAINER_IMAGE_RUN_COMMANDS[0]
+    )
+
+
 @pytest.mark.parametrize(
     "name",
     [
