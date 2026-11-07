@@ -73,9 +73,11 @@ app = modal.App(f"{exp.APP_NAME}-{RUN_ID}")
 
 
 def run_paths(cfg: MilesConfig, run_dir: Path) -> MilesConfig:
-    """Save to and resume from the run's directory: the base checkpoint (ref_load) seeds a fresh run."""
+    """Save to and resume from the run's directory: the base checkpoint (ref_load) seeds a fresh run. A resumed run
+    keeps the learning-rate schedule it saved; without the flag, Miles steps the restored schedule again."""
     cfg.save = cfg.load = str(run_dir / "checkpoints")
     cfg.save_hf = str(run_dir / cfg.save_hf)
+    cfg.use_checkpoint_opt_param_scheduler = True
     return cfg
 
 

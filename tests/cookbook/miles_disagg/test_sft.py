@@ -149,10 +149,11 @@ def test_sft_app_runs_only_the_trainer(monkeypatch, tmp_path):
     assert set(sft_app.app.registered_functions) == {"train"} and not sft_app.app.registered_classes
     assert sft_app.volumes["/sft-data"] is sft_app.exp.TRAINER_EXTRA_VOLUMES["/sft-data"]
     cfg = sft_app.run_paths(MilesConfig.from_payload(sft_app.miles_cfg.to_payload()), tmp_path)
-    assert (cfg.save, cfg.load, cfg.save_hf) == (
+    assert (cfg.save, cfg.load, cfg.save_hf, cfg.use_checkpoint_opt_param_scheduler) == (
         str(tmp_path / "checkpoints"),
         str(tmp_path / "checkpoints"),
         str(tmp_path / "hf_checkpoints/step_{rollout_id:06d}"),
+        True,
     )
 
 
