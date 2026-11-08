@@ -1,13 +1,13 @@
-"""Qwen3.5-9B on our Harbor tasks: the model part of a smaller, weaker test model.
+"""Qwen3.5-9B on our Harbor tasks: a smaller, weaker test model (smoke run and base recipe).
 
 The settings of the Qwen3.8-27B Harbor recipes (score centering, Terminus-2, 128K tokens per rollout, 16K reply
 cap, one hour per agent), with the model changed. Qwen3.5-9B has the same hybrid architecture as Qwen3.8-27B, with
 32 layers instead of 64. Its chat template family is qwen35: the Hub template with preserve_thinking. That template
 has no reasoning effort, so this recipe drops `reasoning_effort`.
 
-For now this module only prepares the model folder (prep_app::prepare_checkpoints, CPU only). The trainer and
-rollout layout is provisional, and the names are those of a smoke run (`*-smoke` Volumes are not auto-evaluated).
-The task mix and the runs come later.
+Tasks: mixture-9b-v1, the tasks the 9B solved 1 to 3 of 4 times in its difficulty filter (no cyber: the 9B is at
+its floor there). As is, this is the 5-step smoke run (`*-smoke` Volumes are not auto-evaluated); the learning-rate
+runs subclass it with their own names, length and learning rate.
 """
 
 import dataclasses
@@ -26,6 +26,8 @@ SOURCE_REVISION = "c202236235762e1c871ad0ccb60c8ee5ba337b9a"
 BF16_CHECKPOINT_PATH = CHECKPOINTS_PATH / "qwen3-5-9b-c2022362-bf16"
 ROLLOUT_CHECKPOINT_PATH = BF16_CHECKPOINT_PATH
 TORCH_DIST_CHECKPOINT_PATH = CHECKPOINTS_PATH / "qwen3-5-9b-c2022362-torch-dist-tp2"
+# Tasks the 9B solved 1-3 of 4 in its difficulty filter (PLAN.md section 0.10).
+TASKS_ROOT = "/harbor-envs/mixture-9b-v1"
 # Harbor at the 27B recipes' pin plus one parser fix (modal-projects/harbor, branch anthonyhe/terminus-blank-tag):
 # a reply with blank brackets such as "< >" no longer crashes Terminus-2 and ends the trial.
 HARBOR_REF = "611da466c821938e33d63c12a906642b1774b3d7"
@@ -58,12 +60,13 @@ class _Qwen35_9B(v2._MixV2):
     hf_checkpoint = str(ROLLOUT_CHECKPOINT_PATH)
     ref_load = str(TORCH_DIST_CHECKPOINT_PATH)
     tito_model = "qwen35"
+    num_rollout = 5  # the smoke run; the learning-rate runs set their own
     wandb_group = "qwen3-5-9b-harbor-smoke"
     prometheus_run_name = wandb_group
     environment = {
         **v2._MixV2.environment,
         **harbor_config.environment(
-            tasks_root=v2.TASKS_ROOT,
+            tasks_root=TASKS_ROOT,
             trials_dir="/harbor-trials",
             sandbox_app="qwen3-5-9b-harbor-smoke-sandboxes",
             max_seq_len=v2._MixV2.max_seq_len,
@@ -75,7 +78,7 @@ class _Qwen35_9B(v2._MixV2):
     }
 
 
-_arguments = harbor_config.arguments(v2.TASKS_ROOT)
+_arguments = harbor_config.arguments(TASKS_ROOT)
 # Qwen3.5's template has no reasoning effort
 _arguments.pop("apply_chat_template_kwargs")
 miles = _Qwen35_9B(**_arguments, **harbor_config.SCORE_CENTERING)
