@@ -1,9 +1,15 @@
 """SFT with plain special-token text: control-token strings inside assistant messages train as plain tokens; the
 turn markers and the user's text keep their control tokens."""
 
+import importlib
+from types import SimpleNamespace
+
 import pytest
 
+from cookbook.common.constants import START_PATH
 from cookbook.miles_disagg import sft, sft_plain_tokens
+from cookbook.miles_disagg.config import validate_recipe
+from cookbook.miles_disagg.resume import validate_resumable_config
 from cookbook.miles_disagg.configs import qwen3_8_27b_sft_plain_tokens as recipe
 from cookbook.miles_disagg.configs import qwen3_8_27b_sft_warmstart as warm
 from cookbook.miles_disagg.configs import qwen3_8_27b_swebench as base
@@ -73,3 +79,19 @@ def test_recipe_trains_with_the_plain_token_rollout_on_the_warm_start_model():
     assert flag("--prompt-data") == recipe.DATA and flag("--num-rollout") == str(recipe.STEPS)
     assert flag("--hf-checkpoint") == warm.miles.hf_checkpoint
     assert "/root" in recipe.miles.environment["PYTHONPATH"].split(":")
+
+
+def test_practice_rl_starts_from_the_plain_token_run_with_a_small_short_batch():
+    rl = SimpleNamespace(**vars(importlib.import_module("cookbook.miles_disagg.configs.qwen3_8_27b_harbor_ptb_practice")))
+    args = rl.miles.cli_args()
+    flag = lambda name: args[args.index(name) + 1]  # noqa: E731
+    run = START_PATH / rl.SFT_RUN
+    assert flag("--hf-checkpoint") == str(run / f"hf_checkpoints/step_{recipe.STEPS - 1:06d}")
+    assert flag("--ref-load") == str(run / "checkpoints")
+    assert rl.START_VOLUME.name == recipe.EXPERIMENT_VOLUME_NAME
+    assert flag("--prompt-data") == "/harbor-envs/ptb-practice-v3-train/train.jsonl"
+    assert (flag("--rollout-batch-size"), flag("--num-rollout"), flag("--save-interval")) == ("16", "20", "10")
+    assert rl.miles.environment["AGENT_TIMEOUT"] == "900"
+    assert rl.modal.rollout_min_containers == rl.modal.rollout_max_containers == 16
+    validate_recipe(rl)
+    validate_resumable_config(rl.miles)
