@@ -75,6 +75,53 @@ def test_9b_recipe_installs_the_harbor_parser_fix_and_27b_keeps_its_pin():
     )
 
 
+def test_9b_lr_runs_change_only_lr_seed_length_tasks_and_names():
+    smoke = _recipe("qwen3_5_9b_harbor").miles
+    names = set()
+    for k, lr in (("1x", 1e-6), ("2x", 2e-6), ("4x", 4e-6)):
+        for seed in (42, 43):
+            recipe = _recipe(f"qwen3_5_9b_harbor_lr{k}_s{seed}")
+            validate_recipe(recipe)
+            fields, base = recipe.miles._fields(), smoke._fields()
+            assert (fields["lr"], fields["rollout_seed"], fields["num_rollout"]) == (
+                lr,
+                seed,
+                40,
+            )
+            assert fields["prompt_data"] == "/harbor-envs/mixture-9b-v2/train.jsonl"
+            assert {
+                key
+                for key in fields.keys() | base.keys()
+                if fields.get(key) != base.get(key)
+            } <= {
+                "lr",
+                "rollout_seed",
+                "num_rollout",
+                "prompt_data",
+                "wandb_group",
+                "prometheus_run_name",
+            }
+            env, smoke_env = recipe.miles.environment, smoke.environment
+            assert {
+                key
+                for key in env.keys() | smoke_env.keys()
+                if env.get(key) != smoke_env.get(key)
+            } == {
+                "HARBOR_TASKS_DIR",
+                "HARBOR_ENV_KWARGS",
+            }
+            assert env["HARBOR_TASKS_DIR"] == "/harbor-envs/mixture-9b-v2/tasks"
+            names.add(
+                (
+                    recipe.APP_NAME,
+                    recipe.EXPERIMENT_VOLUME_NAME,
+                    env["HARBOR_ENV_KWARGS"],
+                    fields["wandb_group"],
+                )
+            )
+    assert len({name for row in names for name in row}) == 6 * 4
+
+
 @pytest.mark.parametrize(
     "name",
     [
@@ -259,7 +306,10 @@ def test_harbor_mix_variants_change_only_the_task_mix_and_names(old, new):
 
 def test_harbor_mix_v2b_h200_changes_only_the_trainer_gpu_and_split():
     # The same run on H200: names and every other setting match, so it can stand in for the B300 recipe.
-    a, b = (_recipe(name) for name in ("qwen3_8_27b_harbor_mix_v2b", "qwen3_8_27b_harbor_mix_v2b_h200"))
+    a, b = (
+        _recipe(name)
+        for name in ("qwen3_8_27b_harbor_mix_v2b", "qwen3_8_27b_harbor_mix_v2b_h200")
+    )
     args_a, args_b = a.miles.cli_args(), b.miles.cli_args()
 
     changed = {(x, y) for x, y in zip(args_a, args_b, strict=True) if x != y}
@@ -268,7 +318,10 @@ def test_harbor_mix_v2b_h200_changes_only_the_trainer_gpu_and_split():
     assert args_b[args_b.index("--context-parallel-size") + 1] == "2"
     assert b.modal == dataclasses.replace(a.modal, gpu="H200")
     assert b.miles.environment == a.miles.environment
-    assert (b.APP_NAME, b.EXPERIMENT_VOLUME_NAME) == (a.APP_NAME, a.EXPERIMENT_VOLUME_NAME)
+    assert (b.APP_NAME, b.EXPERIMENT_VOLUME_NAME) == (
+        a.APP_NAME,
+        a.EXPERIMENT_VOLUME_NAME,
+    )
     validate_recipe(b)
     validate_resumable_config(b.miles)
 
@@ -277,13 +330,23 @@ def test_harbor_mix_v2_and_v2b_on_two_h200_machines_differ_as_the_b300_recipes_d
     # v2 vs v2b on H200 must compare only task mixes, exactly as the B300 pair does.
     def changes(old, new):
         a, b = (_recipe(f"qwen3_8_27b_harbor_mix_{v}") for v in (old, new))
-        args = {(x, y) for x, y in zip(a.miles.cli_args(), b.miles.cli_args(), strict=True) if x != y}
-        env = {k for k in a.miles.environment | b.miles.environment if a.miles.environment.get(k) != b.miles.environment.get(k)}
+        args = {
+            (x, y)
+            for x, y in zip(a.miles.cli_args(), b.miles.cli_args(), strict=True)
+            if x != y
+        }
+        env = {
+            k
+            for k in a.miles.environment | b.miles.environment
+            if a.miles.environment.get(k) != b.miles.environment.get(k)
+        }
         return args, env, a.modal == b.modal, a.APP_NAME != b.APP_NAME
 
     assert changes("v2_h200x2", "v2b_h200x2") == changes("v2", "v2b")
     h200 = _recipe("qwen3_8_27b_harbor_mix_v2_h200x2")
-    assert h200.modal == dataclasses.replace(_recipe("qwen3_8_27b_harbor_mix_v2").modal, gpu="H200")
+    assert h200.modal == dataclasses.replace(
+        _recipe("qwen3_8_27b_harbor_mix_v2").modal, gpu="H200"
+    )
     assert (h200.APP_NAME, h200.EXPERIMENT_VOLUME_NAME) == (
         "stitch-qwen3-8-27b-harbor-mix-v2",
         "stitch-miles-qwen3-8-27b-harbor-mix-v2",
@@ -293,38 +356,74 @@ def test_harbor_mix_v2_and_v2b_on_two_h200_machines_differ_as_the_b300_recipes_d
 
 
 def test_harbor_mix_v2b_h200x2_only_adds_a_second_trainer_machine():
-    a, b = (_recipe(name) for name in ("qwen3_8_27b_harbor_mix_v2b_h200", "qwen3_8_27b_harbor_mix_v2b_h200x2"))
+    a, b = (
+        _recipe(name)
+        for name in (
+            "qwen3_8_27b_harbor_mix_v2b_h200",
+            "qwen3_8_27b_harbor_mix_v2b_h200x2",
+        )
+    )
     args_a, args_b = a.miles.cli_args(), b.miles.cli_args()
 
-    assert {(x, y) for x, y in zip(args_a, args_b, strict=True) if x != y} == {("1", "2")}
+    assert {(x, y) for x, y in zip(args_a, args_b, strict=True) if x != y} == {
+        ("1", "2")
+    }
     assert args_b[args_b.index("--actor-num-nodes") + 1] == "2"
     assert (b.miles.n_train_nodes, a.miles.n_train_nodes) == (2, 1)
     assert b.modal == a.modal
     assert b.miles.environment == a.miles.environment | {"NCCL_RAS_ENABLE": "0"}
-    assert (b.APP_NAME, b.EXPERIMENT_VOLUME_NAME) == (a.APP_NAME, a.EXPERIMENT_VOLUME_NAME)
+    assert (b.APP_NAME, b.EXPERIMENT_VOLUME_NAME) == (
+        a.APP_NAME,
+        a.EXPERIMENT_VOLUME_NAME,
+    )
     validate_recipe(b)
     validate_resumable_config(b.miles)
 
 
 def test_harbor_mix_v2_h200x2_long_only_trains_longer():
-    a, b = (_recipe(n) for n in ("qwen3_8_27b_harbor_mix_v2_h200x2", "qwen3_8_27b_harbor_mix_v2_h200x2_long"))
-    assert {(x, y) for x, y in zip(a.miles.cli_args(), b.miles.cli_args(), strict=True) if x != y} == {("55", "155")}
+    a, b = (
+        _recipe(n)
+        for n in (
+            "qwen3_8_27b_harbor_mix_v2_h200x2",
+            "qwen3_8_27b_harbor_mix_v2_h200x2_long",
+        )
+    )
+    assert {
+        (x, y)
+        for x, y in zip(a.miles.cli_args(), b.miles.cli_args(), strict=True)
+        if x != y
+    } == {("55", "155")}
     assert (b.miles.environment, b.modal) == (a.miles.environment, a.modal)
     # The same names, so a v2 run resumes here.
-    assert (b.APP_NAME, b.EXPERIMENT_VOLUME_NAME) == (a.APP_NAME, a.EXPERIMENT_VOLUME_NAME)
+    assert (b.APP_NAME, b.EXPERIMENT_VOLUME_NAME) == (
+        a.APP_NAME,
+        a.EXPERIMENT_VOLUME_NAME,
+    )
     validate_recipe(b)
     validate_resumable_config(b.miles)
 
 
 def test_harbor_mix_v2_h200x2_lr3x_changes_only_the_learning_rate_steps_and_names():
-    a, b = (_recipe(n) for n in ("qwen3_8_27b_harbor_mix_v2_h200x2", "qwen3_8_27b_harbor_mix_v2_h200x2_lr3x"))
-    assert {(x, y) for x, y in zip(a.miles.cli_args(), b.miles.cli_args(), strict=True) if x != y} == {
+    a, b = (
+        _recipe(n)
+        for n in (
+            "qwen3_8_27b_harbor_mix_v2_h200x2",
+            "qwen3_8_27b_harbor_mix_v2_h200x2_lr3x",
+        )
+    )
+    assert {
+        (x, y)
+        for x, y in zip(a.miles.cli_args(), b.miles.cli_args(), strict=True)
+        if x != y
+    } == {
         ("1e-06", "3e-06"),
         ("55", "155"),
         ("qwen3-8-27b-harbor-mix-v2", "qwen3-8-27b-harbor-mix-v2-lr3x"),
     }
     env = a.miles.environment | b.miles.environment
-    assert {k for k in env if a.miles.environment.get(k) != b.miles.environment.get(k)} == {"HARBOR_ENV_KWARGS"}
+    assert {
+        k for k in env if a.miles.environment.get(k) != b.miles.environment.get(k)
+    } == {"HARBOR_ENV_KWARGS"}
     assert b.modal == a.modal
     assert (b.APP_NAME, b.EXPERIMENT_VOLUME_NAME) == (
         "stitch-qwen3-8-27b-harbor-mix-v2-lr3x",
@@ -336,14 +435,26 @@ def test_harbor_mix_v2_h200x2_lr3x_changes_only_the_learning_rate_steps_and_name
 
 def test_harbor_mix_v2_h200x2_reply12k_changes_only_the_reply_limit_steps_and_names():
     # Only the reply limit changes: the agent keeps v2's input budget, and evals keep 16,384 per reply.
-    a, b = (_recipe(n) for n in ("qwen3_8_27b_harbor_mix_v2_h200x2", "qwen3_8_27b_harbor_mix_v2_h200x2_reply12k"))
-    assert {(x, y) for x, y in zip(a.miles.cli_args(), b.miles.cli_args(), strict=True) if x != y} == {
+    a, b = (
+        _recipe(n)
+        for n in (
+            "qwen3_8_27b_harbor_mix_v2_h200x2",
+            "qwen3_8_27b_harbor_mix_v2_h200x2_reply12k",
+        )
+    )
+    assert {
+        (x, y)
+        for x, y in zip(a.miles.cli_args(), b.miles.cli_args(), strict=True)
+        if x != y
+    } == {
         ("16384", "12288"),
         ("55", "35"),
         ("qwen3-8-27b-harbor-mix-v2", "qwen3-8-27b-harbor-mix-v2-reply12k"),
     }
     env = a.miles.environment | b.miles.environment
-    assert {k for k in env if a.miles.environment.get(k) != b.miles.environment.get(k)} == {
+    assert {
+        k for k in env if a.miles.environment.get(k) != b.miles.environment.get(k)
+    } == {
         "AGENT_MAX_OUTPUT_TOKENS",
         "HARBOR_ENV_KWARGS",
     }
@@ -353,37 +464,70 @@ def test_harbor_mix_v2_h200x2_reply12k_changes_only_the_reply_limit_steps_and_na
         "stitch-qwen3-8-27b-harbor-mix-v2-reply12k",
         "stitch-miles-qwen3-8-27b-harbor-mix-v2-reply12k",
     )
-    assert b.TRAINER_EXTRA_VOLUMES["/harbor-trials"].name == "harbor-mix-v2-reply12k-trials"
+    assert (
+        b.TRAINER_EXTRA_VOLUMES["/harbor-trials"].name
+        == "harbor-mix-v2-reply12k-trials"
+    )
     validate_recipe(b)
     validate_resumable_config(b.miles)
 
 
 def test_harbor_mix_v2_h200x2_reply12k_lr2x_changes_only_the_learning_rate_and_names():
-    a, b = (_recipe(n) for n in ("qwen3_8_27b_harbor_mix_v2_h200x2_reply12k", "qwen3_8_27b_harbor_mix_v2_h200x2_reply12k_lr2x"))
-    assert {(x, y) for x, y in zip(a.miles.cli_args(), b.miles.cli_args(), strict=True) if x != y} == {
+    a, b = (
+        _recipe(n)
+        for n in (
+            "qwen3_8_27b_harbor_mix_v2_h200x2_reply12k",
+            "qwen3_8_27b_harbor_mix_v2_h200x2_reply12k_lr2x",
+        )
+    )
+    assert {
+        (x, y)
+        for x, y in zip(a.miles.cli_args(), b.miles.cli_args(), strict=True)
+        if x != y
+    } == {
         ("1e-06", "2e-06"),
-        ("qwen3-8-27b-harbor-mix-v2-reply12k", "qwen3-8-27b-harbor-mix-v2-reply12k-lr2x"),
+        (
+            "qwen3-8-27b-harbor-mix-v2-reply12k",
+            "qwen3-8-27b-harbor-mix-v2-reply12k-lr2x",
+        ),
     }
     env = a.miles.environment | b.miles.environment
-    assert {k for k in env if a.miles.environment.get(k) != b.miles.environment.get(k)} == {"HARBOR_ENV_KWARGS"}
+    assert {
+        k for k in env if a.miles.environment.get(k) != b.miles.environment.get(k)
+    } == {"HARBOR_ENV_KWARGS"}
     assert b.modal == a.modal
     assert (b.APP_NAME, b.EXPERIMENT_VOLUME_NAME) == (
         "stitch-qwen3-8-27b-harbor-mix-v2-reply12k-lr2x",
         "stitch-miles-qwen3-8-27b-harbor-mix-v2-reply12k-lr2x",
     )
-    assert b.TRAINER_EXTRA_VOLUMES["/harbor-trials"].name == "harbor-mix-v2-reply12k-lr2x-trials"
+    assert (
+        b.TRAINER_EXTRA_VOLUMES["/harbor-trials"].name
+        == "harbor-mix-v2-reply12k-lr2x-trials"
+    )
     validate_recipe(b)
     validate_resumable_config(b.miles)
 
 
 def test_harbor_mix_v3a_h200x2_changes_only_the_tasks_and_names():
-    a, b = (_recipe(n) for n in ("qwen3_8_27b_harbor_mix_v2_h200x2", "qwen3_8_27b_harbor_mix_v3a_h200x2"))
-    assert {(x, y) for x, y in zip(a.miles.cli_args(), b.miles.cli_args(), strict=True) if x != y} == {
+    a, b = (
+        _recipe(n)
+        for n in (
+            "qwen3_8_27b_harbor_mix_v2_h200x2",
+            "qwen3_8_27b_harbor_mix_v3a_h200x2",
+        )
+    )
+    assert {
+        (x, y)
+        for x, y in zip(a.miles.cli_args(), b.miles.cli_args(), strict=True)
+        if x != y
+    } == {
         ("/harbor-envs/mixture-v2/train.jsonl", "/harbor-envs/mixture-v3a/train.jsonl"),
         ("qwen3-8-27b-harbor-mix-v2", "qwen3-8-27b-harbor-mix-v3a"),
     }
     env = a.miles.environment | b.miles.environment
-    assert {k for k in env if a.miles.environment.get(k) != b.miles.environment.get(k)} == {
+    assert {
+        k for k in env if a.miles.environment.get(k) != b.miles.environment.get(k)
+    } == {
         "HARBOR_TASKS_DIR",
         "HARBOR_ENV_KWARGS",
     }
@@ -399,13 +543,28 @@ def test_harbor_mix_v3a_h200x2_changes_only_the_tasks_and_names():
 
 
 def test_harbor_mix_v3b_h200x2_changes_only_the_tasks_and_names():
-    a, b = (_recipe(n) for n in ("qwen3_8_27b_harbor_mix_v3a_h200x2", "qwen3_8_27b_harbor_mix_v3b_h200x2"))
-    assert {(x, y) for x, y in zip(a.miles.cli_args(), b.miles.cli_args(), strict=True) if x != y} == {
-        ("/harbor-envs/mixture-v3a/train.jsonl", "/harbor-envs/mixture-v3b/train.jsonl"),
+    a, b = (
+        _recipe(n)
+        for n in (
+            "qwen3_8_27b_harbor_mix_v3a_h200x2",
+            "qwen3_8_27b_harbor_mix_v3b_h200x2",
+        )
+    )
+    assert {
+        (x, y)
+        for x, y in zip(a.miles.cli_args(), b.miles.cli_args(), strict=True)
+        if x != y
+    } == {
+        (
+            "/harbor-envs/mixture-v3a/train.jsonl",
+            "/harbor-envs/mixture-v3b/train.jsonl",
+        ),
         ("qwen3-8-27b-harbor-mix-v3a", "qwen3-8-27b-harbor-mix-v3b"),
     }
     env = a.miles.environment | b.miles.environment
-    assert {k for k in env if a.miles.environment.get(k) != b.miles.environment.get(k)} == {
+    assert {
+        k for k in env if a.miles.environment.get(k) != b.miles.environment.get(k)
+    } == {
         "HARBOR_TASKS_DIR",
         "HARBOR_ENV_KWARGS",
     }
@@ -423,7 +582,10 @@ def test_harbor_mix_v3b_h200x2_changes_only_the_tasks_and_names():
 @pytest.mark.parametrize("mix", ["v3a", "v3b"])
 def test_harbor_mix_b300_s2_changes_only_the_trainer_seed_and_names(mix):
     a, b = (_recipe(f"qwen3_8_27b_harbor_mix_{mix}_{s}") for s in ("h200x2", "b300_s2"))
-    fa, fb = (dict(zip(r.miles.cli_args(), [*r.miles.cli_args()[1:], None], strict=True)) for r in (a, b))
+    fa, fb = (
+        dict(zip(r.miles.cli_args(), [*r.miles.cli_args()[1:], None], strict=True))
+        for r in (a, b)
+    )
     assert {k for k in fa | fb if k.startswith("--") and fa.get(k) != fb.get(k)} == {
         "--actor-num-nodes",
         "--tensor-model-parallel-size",
@@ -431,9 +593,15 @@ def test_harbor_mix_b300_s2_changes_only_the_trainer_seed_and_names(mix):
         "--wandb-group",
         "--prometheus-run-name",
     }
-    assert (fb["--actor-num-nodes"], fb["--tensor-model-parallel-size"], fb["--rollout-seed"]) == ("1", "2", "43")
+    assert (
+        fb["--actor-num-nodes"],
+        fb["--tensor-model-parallel-size"],
+        fb["--rollout-seed"],
+    ) == ("1", "2", "43")
     env = a.miles.environment | b.miles.environment
-    assert {k for k in env if a.miles.environment.get(k) != b.miles.environment.get(k)} == {
+    assert {
+        k for k in env if a.miles.environment.get(k) != b.miles.environment.get(k)
+    } == {
         "HARBOR_ENV_KWARGS",
         "MODAL_IMAGE_BUILDER_VERSION",
     }
@@ -443,7 +611,9 @@ def test_harbor_mix_b300_s2_changes_only_the_trainer_seed_and_names(mix):
         f"stitch-miles-qwen3-8-27b-harbor-mix-{mix}-s2",
         "training-team",
     )
-    assert b.TRAINER_EXTRA_VOLUMES["/harbor-trials"].name == f"harbor-mix-{mix}-s2-trials"
+    assert (
+        b.TRAINER_EXTRA_VOLUMES["/harbor-trials"].name == f"harbor-mix-{mix}-s2-trials"
+    )
     validate_recipe(b)
     validate_resumable_config(b.miles)
 
@@ -451,7 +621,10 @@ def test_harbor_mix_b300_s2_changes_only_the_trainer_seed_and_names(mix):
 @pytest.mark.parametrize(("name", "seed"), [("lr2x", "42"), ("lr2x_s2", "43")])
 def test_harbor_mix_v3b_lr2x_changes_only_the_lr_seed_and_names(name, seed):
     a, b = (_recipe(f"qwen3_8_27b_harbor_mix_v3b_b300_{s}") for s in ("s2", name))
-    fa, fb = (dict(zip(r.miles.cli_args(), [*r.miles.cli_args()[1:], None], strict=True)) for r in (a, b))
+    fa, fb = (
+        dict(zip(r.miles.cli_args(), [*r.miles.cli_args()[1:], None], strict=True))
+        for r in (a, b)
+    )
     seed_changed = {"--rollout-seed"} if seed != fa["--rollout-seed"] else set()
     assert {k for k in fa | fb if k.startswith("--") and fa.get(k) != fb.get(k)} == {
         "--lr",
@@ -460,7 +633,9 @@ def test_harbor_mix_v3b_lr2x_changes_only_the_lr_seed_and_names(name, seed):
     } | seed_changed
     assert (float(fb["--lr"]), fb["--rollout-seed"]) == (2e-6, seed)
     env = a.miles.environment | b.miles.environment
-    assert {k for k in env if a.miles.environment.get(k) != b.miles.environment.get(k)} == {"HARBOR_ENV_KWARGS"}
+    assert {
+        k for k in env if a.miles.environment.get(k) != b.miles.environment.get(k)
+    } == {"HARBOR_ENV_KWARGS"}
     assert b.modal == a.modal
     suffix = name.replace("_", "-")
     assert (b.APP_NAME, b.EXPERIMENT_VOLUME_NAME, b.EXPERIMENT_VOLUME_ENV) == (
@@ -468,7 +643,10 @@ def test_harbor_mix_v3b_lr2x_changes_only_the_lr_seed_and_names(name, seed):
         f"stitch-miles-qwen3-8-27b-harbor-mix-v3b-{suffix}",
         "training-team",
     )
-    assert b.TRAINER_EXTRA_VOLUMES["/harbor-trials"].name == f"harbor-mix-v3b-{suffix}-trials"
+    assert (
+        b.TRAINER_EXTRA_VOLUMES["/harbor-trials"].name
+        == f"harbor-mix-v3b-{suffix}-trials"
+    )
     validate_recipe(b)
     validate_resumable_config(b.miles)
 
@@ -478,8 +656,14 @@ def test_harbor_mix_h200x2_cv_is_the_same_run_with_volumes_in_training_team(mix)
     a, b = (_recipe(f"qwen3_8_27b_harbor_mix_{mix}_h200x2{s}") for s in ("", "_cv"))
     assert a.miles.cli_args() == b.miles.cli_args() and b.modal == a.modal
     env = a.miles.environment | b.miles.environment
-    assert {k for k in env if a.miles.environment.get(k) != b.miles.environment.get(k)} == {"MODAL_IMAGE_BUILDER_VERSION"}
-    assert (b.APP_NAME, b.EXPERIMENT_VOLUME_NAME, b.EXPERIMENT_VOLUME_ENV) == (a.APP_NAME, a.EXPERIMENT_VOLUME_NAME, "training-team")
+    assert {
+        k for k in env if a.miles.environment.get(k) != b.miles.environment.get(k)
+    } == {"MODAL_IMAGE_BUILDER_VERSION"}
+    assert (b.APP_NAME, b.EXPERIMENT_VOLUME_NAME, b.EXPERIMENT_VOLUME_ENV) == (
+        a.APP_NAME,
+        a.EXPERIMENT_VOLUME_NAME,
+        "training-team",
+    )
     assert b.TRAINER_EXTRA_VOLUMES["/harbor-trials"].name == f"harbor-mix-{mix}-trials"
     validate_recipe(b)
     validate_resumable_config(b.miles)

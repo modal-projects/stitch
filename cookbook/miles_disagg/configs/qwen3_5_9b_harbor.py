@@ -7,8 +7,8 @@ has no reasoning effort, so this recipe drops `reasoning_effort`.
 
 Tasks: tasks the 9B solved 1 to 3 of 4 times in its difficulty filter (no cyber: the 9B is at its floor there). As
 is, this is the 5-step smoke run (`*-smoke` Volumes are not auto-evaluated) on mixture-9b-smoke, the filter's first
-sample. The learning-rate runs subclass it with the full mix (mixture-9b-v1), their own names, length and learning
-rate.
+sample. The learning-rate runs (qwen3_5_9b_harbor_lr) subclass it with the full mix (mixture-9b-v2), their own
+names, length, learning rate and seed.
 """
 
 import dataclasses
