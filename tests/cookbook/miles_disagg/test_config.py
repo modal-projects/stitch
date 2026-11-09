@@ -606,3 +606,28 @@ def test_mapping_arguments_are_encoded_as_json() -> None:
     index = args.index("--custom-rollout-request-hook-args")
 
     assert json.loads(args[index + 1]) == {"minimum_version": 7, "retry": True}
+
+
+def test_harbor_launch_stops_on_rows_without_an_allowed_agent():
+    rows = [
+        {"metadata": {"instance_id": "ok", "agent_name": "terminus-2"}},
+        {"metadata": {"instance_id": "no-agent"}},
+        {"metadata": {"instance_id": "mini", "agent_name": "mini-swe-agent"}},
+    ]
+    data = "\n".join(json.dumps(r) for r in rows).encode()
+    read = []
+    volume = SimpleNamespace(read_file=lambda p: read.append(p) or iter([data]))
+    exp = SimpleNamespace(
+        miles=SimpleNamespace(
+            prompt_data="/harbor-envs/mix/train.jsonl",
+            custom_agent_function_path="cookbook.miles_disagg.harbor_agent.run",
+        ),
+        TRAINER_EXTRA_VOLUMES={"/harbor-envs": volume},
+    )
+
+    with pytest.raises(SystemExit, match=r"train.jsonl: 2 of 3 rows.*'no-agent'"):
+        harbor_config.check_train_rows(exp)
+    assert read == ["/mix/train.jsonl"]
+
+    exp.miles.custom_agent_function_path = "other.run"
+    harbor_config.check_train_rows(exp)  # not a Harbor recipe: no check
