@@ -5,7 +5,7 @@ posttrain, 300 tasks, oracle-validated). They run on 4-CPU sandboxes and grade t
 20- or 30-minute limit, so the agent limit here is 15 minutes x Miles' timeout multiplier 2.0. Small and short:
 16 kept groups of 8 attempts per step (128 agents on 16 rollout containers), 20 steps, a checkpoint and HF export at
 steps 10 and 20. Otherwise qwen3_8_27b_harbor_mix_v3b_b300_s2 (B300 trainer, score centering, 16K replies, 128K
-context). Placeholder: set SFT_RUN to the SFT run's id.
+context).
 """
 
 import dataclasses
