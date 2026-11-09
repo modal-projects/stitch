@@ -20,7 +20,7 @@ MILES_REPO_REF = warm.MILES_REPO_REF
 modal = warm.modal
 TRAINER_EXTRA_VOLUMES = warm.TRAINER_EXTRA_VOLUMES
 DATA = "/sft-data/plain-tokens-v1/train.jsonl"
-DATA_ROWS = 800  # rows in DATA (its manifest.json)
+DATA_ROWS = 852  # rows in DATA (its manifest.json)
 BATCH = 32
 STEPS = DATA_ROWS // BATCH  # one epoch
 
