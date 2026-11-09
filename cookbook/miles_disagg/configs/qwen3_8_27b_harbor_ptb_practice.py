@@ -18,7 +18,7 @@ from cookbook.miles_disagg.configs import qwen3_8_27b_harbor_mix_v3b_b300_s2 as 
 from cookbook.miles_disagg.configs import qwen3_8_27b_sft_plain_tokens as sft_run
 from cookbook.miles_disagg.configs.qwen3_8_27b_harbor_mix_v3b_b300_s2 import *  # noqa: F403
 
-SFT_RUN = "SFT_RUN_ID"  # placeholder
+SFT_RUN = "a6d58819"  # the plain-token SFT run
 START_VOLUME = modal_sdk.Volume.from_name(
     sft_run.EXPERIMENT_VOLUME_NAME, environment_name=sft_run.EXPERIMENT_VOLUME_ENV
 )
