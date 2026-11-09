@@ -26,6 +26,7 @@ import time
 import uuid
 from typing import Any
 
+from cookbook.miles_disagg import harbor_config
 from cookbook.miles_disagg.resume import read_trainer_call, validate_resumable_config
 
 _CANCEL_TIMEOUT = 10 * 60
@@ -47,6 +48,7 @@ def main() -> None:
         raise SystemExit("MODAL_ENVIRONMENT must name the environment for this run")
     experiment = os.environ["EXPERIMENT_CONFIG"]
     exp = importlib.import_module(f"cookbook.miles_disagg.configs.{experiment}")
+    harbor_config.check_train_rows(exp)
 
     from cookbook.common import launch
 

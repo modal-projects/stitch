@@ -90,6 +90,42 @@ def without_speculative_decoding(server_args: dict[str, str]) -> dict[str, str]:
     return {k: v for k, v in server_args.items() if not k.startswith("--speculative-")}
 
 
+# Harnesses that run offline in our sandboxes. Miles falls back to mini-swe-agent for a row with
+# no agent_name, and its install needs the internet, so every attempt of that row fails.
+AGENT_NAMES = frozenset({"terminus-2"})
+
+
+def check_train_rows(exp) -> None:
+    """Stop a Harbor launch if a train.jsonl row names no agent, or one outside AGENT_NAMES."""
+    path = getattr(exp.miles, "prompt_data", "")
+    if not getattr(exp.miles, "custom_agent_function_path", "").startswith(
+        "cookbook.miles_disagg.harbor_agent"
+    ):
+        return
+    volumes = getattr(exp, "TRAINER_EXTRA_VOLUMES", {}).items()
+    mount, volume = next(
+        ((m, v) for m, v in volumes if path.startswith(m.rstrip("/") + "/")),
+        (None, None),
+    )
+    if volume is None:
+        raise SystemExit(f"{path}: no TRAINER_EXTRA_VOLUMES mount holds this file")
+    rows = [
+        json.loads(line)
+        for line in b"".join(volume.read_file(path[len(mount) :])).splitlines()
+        if line.strip()
+    ]
+    bad = [
+        r["metadata"]
+        for r in rows
+        if r["metadata"].get("agent_name") not in AGENT_NAMES
+    ]
+    if bad:
+        raise SystemExit(
+            f"{path}: {len(bad)} of {len(rows)} rows name no allowed agent {sorted(AGENT_NAMES)}; "
+            f"first: {bad[0].get('instance_id')!r} (agent_name={bad[0].get('agent_name')!r})"
+        )
+
+
 def arguments(tasks_root: str) -> dict:
     """Miles workload settings: the Harbor agent function and its reward."""
     args = swebench_config.arguments()
