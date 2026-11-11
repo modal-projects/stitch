@@ -1,3 +1,4 @@
+import asyncio
 import dataclasses
 import json
 import sys
@@ -700,6 +701,83 @@ def test_harbor_terminus_gets_no_env_in_the_task_shell(monkeypatch):
         recipe.miles.custom_agent_function_path
         == "cookbook.miles_disagg.harbor_agent.run"
     )
+
+
+def test_harbor_length_controlled_agent_lowers_only_long_passes(monkeypatch):
+    async def miles_run(*args, **kwargs):
+        return dict(kwargs["result"])
+
+    miles_harbor = SimpleNamespace(
+        HARNESS_BINDINGS={
+            name: _Binding(kwargs="k", env=lambda url, key: {})
+            for name in ("terminus-2", "terminus-1", "terminus")
+        },
+        run=miles_run,
+    )
+    monkeypatch.setitem(sys.modules, "harbor_agent_function", miles_harbor)
+    monkeypatch.delitem(
+        sys.modules, "cookbook.miles_disagg.harbor_agent", raising=False
+    )
+    agent = import_module("cookbook.miles_disagg.harbor_agent")
+    budget = agent.LENGTH_BUDGET
+
+    def reward(value, tokens):
+        result = {"reward": value, "agent_metrics": {"n_output_tokens": tokens}}
+        return asyncio.run(agent.run_length_controlled(result=result))["reward"]
+
+    assert reward(1.0, budget) == 1.0
+    assert reward(1.0, budget * 3 // 2) == pytest.approx(0.75)
+    assert reward(1.0, budget * 5) == pytest.approx(0.5)
+    assert reward(0.0, budget * 5) == 0.0  # failing fast never pays
+    assert (
+        asyncio.run(
+            agent.run_length_controlled(result={"reward": 1.0, "agent_metrics": {}})
+        )["reward"]
+        == 1.0
+    )
+
+
+def test_9b_from40_pair_differs_only_in_the_length_control():
+    start = "/checkpoints/qwen3-5-9b-lr2x-s42-step40"
+    a, b = _recipe("qwen3_5_9b_harbor_from40_a"), _recipe("qwen3_5_9b_harbor_from40_b")
+    source = _recipe("qwen3_5_9b_harbor_lr2x_s42").miles._fields()
+    for recipe in (a, b):
+        validate_recipe(recipe)
+        fields = recipe.miles._fields()
+        assert (fields["lr"], fields["rollout_seed"], fields["num_rollout"]) == (
+            2e-6,
+            44,
+            40,
+        )
+        assert (fields["hf_checkpoint"], fields["ref_load"]) == (
+            f"{start}-bf16",
+            f"{start}-torch-dist-tp2",
+        )
+        assert str(recipe.ROLLOUT_CHECKPOINT_PATH) == fields["hf_checkpoint"]
+        assert {
+            key
+            for key in fields.keys() | source.keys()
+            if fields.get(key) != source.get(key)
+        } <= {
+            "rollout_seed",
+            "hf_checkpoint",
+            "ref_load",
+            "wandb_group",
+            "prometheus_run_name",
+            "custom_agent_function_path",
+        }
+    fa, fb = a.miles._fields(), b.miles._fields()
+    assert fa["custom_agent_function_path"] == "cookbook.miles_disagg.harbor_agent.run"
+    assert (
+        fb["custom_agent_function_path"]
+        == "cookbook.miles_disagg.harbor_agent.run_length_controlled"
+    )
+    assert {key for key in fa.keys() | fb.keys() if fa.get(key) != fb.get(key)} == {
+        "custom_agent_function_path",
+        "wandb_group",
+        "prometheus_run_name",
+    }
+    assert a.EXPERIMENT_VOLUME_NAME != b.EXPERIMENT_VOLUME_NAME
 
 
 def test_training_and_serving_must_use_the_same_checkpoint():
