@@ -17,11 +17,17 @@ TASKS_ROOT = "/harbor-envs/mixture-9b-v2"
 
 
 def run(
-    name: str, lr: float, seed: int, start: str | None = None, agent: str | None = None
+    name: str,
+    lr: float,
+    seed: int,
+    start: str | None = None,
+    agent: str | None = None,
+    tasks: str = "mixture-9b-v2",
 ) -> dict:
     """The module globals of one run, e.g. run("lr1x-s42", 1e-6, 42). `start`: start from other weights, a
     miles-checkpoints folder stem with `<stem>-bf16` and `<stem>-torch-dist-tp2` (fresh optimizer); `agent`: a Harbor
-    agent function other than the default."""
+    agent function other than the default; `tasks`: another mix on the harbor-envs Volume."""
+    tasks_root = f"/harbor-envs/{tasks}"
     bf16 = CHECKPOINTS_PATH / f"{start}-bf16" if start else smoke.BF16_CHECKPOINT_PATH
     torch_dist = (
         CHECKPOINTS_PATH / f"{start}-torch-dist-tp2"
@@ -38,7 +44,7 @@ def run(
         environment = {
             **smoke._Qwen35_9B.environment,
             **harbor_config.environment(
-                tasks_root=TASKS_ROOT,
+                tasks_root=tasks_root,
                 trials_dir="/harbor-trials",
                 sandbox_app=f"qwen3-5-9b-harbor-{name}-sandboxes",
                 max_seq_len=smoke._Qwen35_9B.max_seq_len,
@@ -51,7 +57,7 @@ def run(
 
     _Run.lr = lr
     _Run.rollout_seed = seed
-    arguments = harbor_config.arguments(TASKS_ROOT)
+    arguments = harbor_config.arguments(tasks_root)
     # Qwen3.5's template has no reasoning effort
     arguments.pop("apply_chat_template_kwargs")
     if agent:
@@ -62,7 +68,7 @@ def run(
         "TORCH_DIST_CHECKPOINT_PATH": torch_dist,
         "APP_NAME": f"stitch-qwen3-5-9b-harbor-{name}",
         "EXPERIMENT_VOLUME_NAME": f"stitch-miles-qwen3-5-9b-harbor-{name}",
-        "TASKS_ROOT": TASKS_ROOT,
+        "TASKS_ROOT": tasks_root,
         "TRAINER_EXTRA_VOLUMES": {
             **smoke.TRAINER_EXTRA_VOLUMES,
             "/harbor-trials": modal_sdk.Volume.from_name(

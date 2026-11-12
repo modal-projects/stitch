@@ -780,6 +780,46 @@ def test_9b_from40_pair_differs_only_in_the_length_control():
     assert a.EXPERIMENT_VOLUME_NAME != b.EXPERIMENT_VOLUME_NAME
 
 
+def test_9b_from80_pair_differs_only_in_the_tasks():
+    start = "/checkpoints/qwen3-5-9b-lr2x-from40-a-step80"
+    c, d = _recipe("qwen3_5_9b_harbor_from80_c"), _recipe("qwen3_5_9b_harbor_from80_d")
+    for recipe in (c, d):
+        validate_recipe(recipe)
+        fields = recipe.miles._fields()
+        assert (fields["lr"], fields["rollout_seed"], fields["num_rollout"]) == (
+            2e-6,
+            45,
+            40,
+        )
+        assert (fields["hf_checkpoint"], fields["ref_load"]) == (
+            f"{start}-bf16",
+            f"{start}-torch-dist-tp2",
+        )
+        assert (
+            fields["custom_agent_function_path"]
+            == "cookbook.miles_disagg.harbor_agent.run"
+        )
+    fc, fd = c.miles._fields(), d.miles._fields()
+    assert fc["prompt_data"] == "/harbor-envs/mixture-9b-v2/train.jsonl"
+    assert fd["prompt_data"] == "/harbor-envs/mixture-9b-v3-cyber/train.jsonl"
+    assert {key for key in fc.keys() | fd.keys() if fc.get(key) != fd.get(key)} == {
+        "prompt_data",
+        "wandb_group",
+        "prometheus_run_name",
+    }
+    ec, ed = c.miles.environment, d.miles.environment
+    assert {key for key in ec.keys() | ed.keys() if ec.get(key) != ed.get(key)} == {
+        "HARBOR_TASKS_DIR",
+        "HARBOR_ENV_KWARGS",
+    }
+    assert ed["HARBOR_TASKS_DIR"] == "/harbor-envs/mixture-9b-v3-cyber/tasks"
+    assert (c.TASKS_ROOT, d.TASKS_ROOT) == (
+        "/harbor-envs/mixture-9b-v2",
+        "/harbor-envs/mixture-9b-v3-cyber",
+    )
+    assert c.EXPERIMENT_VOLUME_NAME != d.EXPERIMENT_VOLUME_NAME
+
+
 def test_training_and_serving_must_use_the_same_checkpoint():
     recipe = _recipe("qwen3_4b_math")
     recipe.miles.hf_checkpoint = "/checkpoints/another-model"
