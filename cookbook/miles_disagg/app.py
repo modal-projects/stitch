@@ -322,7 +322,17 @@ _MULTINODE = miles_cfg.n_train_nodes > 1
     ),
     single_use_containers=True,
     include_source=False,
-    **({"experimental_options": {"efa_enabled": True}} if _MULTINODE else {}),
+    # Clustered functions can land on workspace-reserved capacity; keep training off it.
+    **(
+        {
+            "experimental_options": {
+                "efa_enabled": True,
+                "exclude_reserved_capacity": True,
+            }
+        }
+        if _MULTINODE
+        else {}
+    ),
 )
 @(
     modal.experimental.clustered(miles_cfg.n_train_nodes, rdma=True)
