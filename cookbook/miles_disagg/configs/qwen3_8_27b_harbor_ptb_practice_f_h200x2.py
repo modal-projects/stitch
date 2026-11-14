@@ -1,7 +1,7 @@
 """20 more RL steps on the post-training practice tasks from step 20 of the first practice run (weights only), on a
 set aimed at shipping a model early and improving it within a budget, with the trainer on two 8 x H200 machines as
-qwen3_8_27b_harbor_ptb_practice_e_h200x2. Only the task set, the names and the time limits (the longest tasks take
-45 minutes) differ from that recipe.
+qwen3_8_27b_harbor_ptb_practice_e_h200x2. Only the task set, the names and the agent limit (the longest tasks take 30
+minutes) differ from that recipe.
 """
 
 import modal as modal_sdk
@@ -35,8 +35,8 @@ class _PtbPracticeF(eh._PtbPracticeEH200x2):
             sandbox_app="qwen3-8-27b-ptb-practice-f-sandboxes",
             max_seq_len=eh.e.first.s2.b300._MixV2.max_seq_len,
             max_output_tokens=eh.e.first.s2.b300._MixV2.rollout_max_response_len,
-            agent_timeout=1400,  # x 2.0 = 46.7 minutes: the 45-minute budget tasks fit
-            trial_timeout=5400,
+            agent_timeout=960,  # x 2.0 = 32 minutes: the 30-minute tasks fit
+            trial_timeout=3600,
             max_turns=200,
         ),
     }
