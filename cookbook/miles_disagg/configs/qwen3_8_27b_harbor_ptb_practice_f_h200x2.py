@@ -12,7 +12,7 @@ from cookbook.miles_disagg.configs import qwen3_8_27b_harbor_ptb_practice_e_h200
 
 APP_NAME = "stitch-qwen3-8-27b-ptb-practice-f"
 EXPERIMENT_VOLUME_NAME = "stitch-miles-qwen3-8-27b-ptb-practice-f"
-TASKS_ROOT = "/harbor-envs/ptb-practice-f-train"
+TASKS_ROOT = "/harbor-envs/ptb-practice-f2-train"
 TRAINER_EXTRA_VOLUMES = {
     **eh.TRAINER_EXTRA_VOLUMES,
     "/harbor-trials": modal_sdk.Volume.from_name(
