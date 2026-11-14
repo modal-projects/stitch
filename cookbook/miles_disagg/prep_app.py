@@ -117,7 +117,14 @@ _TORCH_DIST_MULTINODE = modal_cfg.torch_dist_prep_nodes > 1
     secrets=[modal.Secret.from_name("huggingface-secret")],
     include_source=False,
     **(
-        {"experimental_options": {"efa_enabled": True}} if _TORCH_DIST_MULTINODE else {}
+        {
+            "experimental_options": {
+                "efa_enabled": True,
+                "exclude_reserved_capacity": True,
+            }
+        }
+        if _TORCH_DIST_MULTINODE
+        else {}
     ),
 )
 @(
