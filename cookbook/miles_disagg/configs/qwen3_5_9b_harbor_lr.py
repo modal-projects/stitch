@@ -14,6 +14,11 @@ from cookbook.miles_disagg.configs import qwen3_5_9b_harbor as smoke
 from cookbook.miles_disagg.configs.qwen3_5_9b_harbor import *  # noqa: F403
 
 TASKS_ROOT = "/harbor-envs/mixture-9b-v2"
+# On-policy distillation (harbor_opd.py) runs Stitch's Miles pin plus one change: SGLang OPD on rollout log-probs is
+# allowed with sampling-support replay (modal-projects/miles, branch anthonyhe/opd-sglang-support-replay).
+OPD_MILES_REF = "3fc5b306c15f6577cc20511c9779199dc4a82f00"
+# The 27B teacher: a Modal Endpoint (Qwen/Qwen3.8-27B, our pinned bf16 checkpoint) in training-team, SGLang's /generate.
+OPD_TEACHER_URL = ""
 
 
 def run(
@@ -23,10 +28,13 @@ def run(
     start: str | None = None,
     agent: str | None = None,
     tasks: str = "mixture-9b-v2",
+    steps: int = 40,
+    opd: dict | None = None,
 ) -> dict:
     """The module globals of one run, e.g. run("lr1x-s42", 1e-6, 42). `start`: start from other weights, a
     miles-checkpoints folder stem with `<stem>-bf16` and `<stem>-torch-dist-tp2` (fresh optimizer); `agent`: a Harbor
-    agent function other than the default; `tasks`: another mix on the harbor-envs Volume."""
+    agent function other than the default; `tasks`: another mix on the harbor-envs Volume; `opd`: on-policy
+    distillation from a teacher server, {"coef": --opd-kl-coef, "url": the teacher's /generate}."""
     tasks_root = f"/harbor-envs/{tasks}"
     bf16 = CHECKPOINTS_PATH / f"{start}-bf16" if start else smoke.BF16_CHECKPOINT_PATH
     torch_dist = (
@@ -38,7 +46,7 @@ def run(
     class _Run(smoke._Qwen35_9B):
         hf_checkpoint = str(bf16)
         ref_load = str(torch_dist)
-        num_rollout = 40
+        num_rollout = steps
         wandb_group = f"qwen3-5-9b-harbor-{name}"
         prometheus_run_name = wandb_group
         environment = {
@@ -62,7 +70,19 @@ def run(
     arguments.pop("apply_chat_template_kwargs")
     if agent:
         arguments["custom_agent_function_path"] = agent
+    if opd:
+        arguments |= {
+            "use_opd": True,
+            "opd_type": "sglang",
+            "opd_kl_coef": opd["coef"],
+            "rm_url": opd["url"],
+            "reward_key": "harbor",
+            "custom_rm_path": "cookbook.miles_disagg.harbor_opd.teacher_reward",
+            "custom_reward_post_process_path": "cookbook.miles_disagg.harbor_opd.post_process_rewards",
+            "session_sample_postprocessor_path": "cookbook.miles_disagg.harbor_opd.session_postprocess",
+        }
     return {
+        **({"MILES_REPO_REF": OPD_MILES_REF} if opd else {}),
         "BF16_CHECKPOINT_PATH": bf16,
         "ROLLOUT_CHECKPOINT_PATH": bf16,
         "TORCH_DIST_CHECKPOINT_PATH": torch_dist,

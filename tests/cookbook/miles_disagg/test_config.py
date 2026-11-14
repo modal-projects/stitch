@@ -4,7 +4,7 @@ import json
 import sys
 from copy import deepcopy
 from importlib import import_module
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -819,6 +819,142 @@ def test_9b_from80_pair_differs_only_in_the_tasks():
     )
     assert c.EXPERIMENT_VOLUME_NAME != d.EXPERIMENT_VOLUME_NAME
 
+
+
+def test_9b_opd_arm_is_arm_c_plus_distillation():
+    c, opd = _recipe("qwen3_5_9b_harbor_from80_c"), _recipe("qwen3_5_9b_harbor_from80_opd")
+    smoke = _recipe("qwen3_5_9b_harbor_from80_opd_smoke")
+    fc, fo = c.miles._fields(), opd.miles._fields()
+    for recipe in (opd, smoke):
+        validate_recipe(recipe)
+        assert recipe.MILES_REPO_REF == "3fc5b306c15f6577cc20511c9779199dc4a82f00"
+    assert c.MILES_REPO_REF == harbor_config.MILES_REPO_REF
+    assert (fo["use_opd"], fo["opd_type"], fo["reward_key"]) == (True, "sglang", "harbor")
+    builder = import_module("cookbook.miles_disagg.configs.qwen3_5_9b_harbor_lr")
+    assert fo["rm_url"] == builder.OPD_TEACHER_URL and fo["use_rollout_logprobs"]
+    assert {key for key in fc.keys() | fo.keys() if fc.get(key) != fo.get(key)} == {
+        "use_opd",
+        "opd_type",
+        "opd_kl_coef",
+        "rm_url",
+        "reward_key",
+        "custom_rm_path",
+        "custom_reward_post_process_path",
+        "session_sample_postprocessor_path",
+        "hf_checkpoint",
+        "ref_load",
+        "wandb_group",
+        "prometheus_run_name",
+    }
+    assert fo["hf_checkpoint"] == "/checkpoints/qwen3-5-9b-lr2x-from40-a-step80-opd-bf16"
+    ec, eo = c.miles.environment, opd.miles.environment
+    assert {key for key in ec.keys() | eo.keys() if ec.get(key) != eo.get(key)} == {"HARBOR_ENV_KWARGS"}
+    assert smoke.miles._fields()["num_rollout"] == 3
+    assert smoke.EXPERIMENT_VOLUME_NAME != opd.EXPERIMENT_VOLUME_NAME
+
+
+def _harbor_opd(monkeypatch, normalize=None):
+    torch = ModuleType("torch")
+    torch.float32 = "float32"
+    torch.tensor = lambda values, dtype=None: (list(values), dtype)
+    conversion = ModuleType("miles.ray.rollout.train_data_conversion")
+    conversion._normalize_rewards_by_rollout = normalize
+    postprocess = ModuleType("miles.rollout.session.v2.postprocessor_hub.default_postprocess")
+
+    def default_postprocess(leaf_samples, session_metadata):
+        for sample in leaf_samples:
+            sample.reward = (session_metadata.get("agent") or {}).get("reward")
+        return leaf_samples
+
+    postprocess.default_postprocess = default_postprocess
+    for name in (
+        "miles",
+        "miles.ray",
+        "miles.ray.rollout",
+        "miles.rollout",
+        "miles.rollout.session",
+        "miles.rollout.session.v2",
+        "miles.rollout.session.v2.postprocessor_hub",
+    ):
+        monkeypatch.setitem(sys.modules, name, ModuleType(name))
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    monkeypatch.setitem(sys.modules, conversion.__name__, conversion)
+    monkeypatch.setitem(sys.modules, postprocess.__name__, postprocess)
+    monkeypatch.delitem(sys.modules, "cookbook.miles_disagg.harbor_opd", raising=False)
+    return import_module("cookbook.miles_disagg.harbor_opd")
+
+
+def test_harbor_opd_keeps_the_harbor_reward_for_the_teacher_reward_function(monkeypatch):
+    opd = _harbor_opd(monkeypatch)
+    samples = [SimpleNamespace(metadata={}, reward=None) for _ in range(2)]
+    out = opd.session_postprocess(samples, {"agent": {"reward": 1.0}})
+    assert [(s.reward, s.metadata["harbor_reward"]) for s in out] == [(None, 1.0), (None, 1.0)]
+    out = opd.session_postprocess([SimpleNamespace(metadata={}, reward=None)], {"agent": {}})
+    assert (out[0].reward, out[0].metadata["harbor_reward"]) == (None, 0.0)
+
+
+def test_harbor_opd_scores_the_response_tokens_and_falls_back_to_the_sampler(monkeypatch):
+    opd = _harbor_opd(monkeypatch)
+    monkeypatch.setenv("MODAL_PROXY_TOKEN_ID", "wk-test")
+    monkeypatch.setenv("MODAL_PROXY_TOKEN_SECRET", "ws-test")
+    sent = []
+
+    class Response:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        def raise_for_status(self):
+            pass
+
+        async def json(self):
+            return {"meta_info": {"input_token_logprobs": [[None, 1, None], [-0.1, 2, None], [-0.2, 3, None], [-0.3, 4, None]]}}
+
+    class Session:
+        def __init__(self, timeout=None):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        def post(self, url, json, headers):
+            sent.append((url, json["input_ids"], json["logprob_start_len"], headers["Modal-Key"]))
+            return Response()
+
+    monkeypatch.setattr(opd.aiohttp, "ClientSession", Session)
+    args = SimpleNamespace(rm_url="https://teacher/generate")
+    sample = SimpleNamespace(tokens=[1, 2, 3, 4], response_length=2, metadata={"harbor_reward": 1.0},
+                             rollout_log_probs=[-0.5, -0.6])
+    out = asyncio.run(opd.teacher_reward(args, sample))
+    assert out == {"harbor": 1.0, "teacher_log_probs": [-0.2, -0.3]}
+    assert sent == [("https://teacher/generate", [1, 2, 3, 4], 0, "wk-test")]
+
+    async def no_wait(seconds):
+        pass
+
+    monkeypatch.setattr(opd.asyncio, "sleep", no_wait)
+    sample.response_length = 4  # 3 scored positions cannot cover a 4-token response: a failure, then the fallback
+    sample.rollout_log_probs = [-0.4, -0.5, -0.6, -0.7]
+    out = asyncio.run(opd.teacher_reward(args, sample))
+    assert out == {"harbor": 1.0, "teacher_log_probs": [-0.4, -0.5, -0.6, -0.7], "teacher_failed": True}
+
+
+def test_harbor_opd_post_process_stores_teacher_log_probs_and_keeps_harbor_rewards(monkeypatch):
+    opd = _harbor_opd(monkeypatch, normalize=lambda args, samples, raw, sizes: [r - 0.5 for r in raw])
+    samples = [
+        SimpleNamespace(reward={"harbor": r, "teacher_log_probs": [-0.1]}, get_reward_value=lambda a, r=r: r)
+        for r in (1.0, 0.0)
+    ]
+    args = SimpleNamespace(advantage_estimator="grpo", rewards_normalization=True)
+    assert opd.post_process_rewards(args, samples) == ([1.0, 0.0], [0.5, -0.5])
+    assert samples[0].teacher_log_probs == ([-0.1], "float32")
+    args.rewards_normalization = False
+    assert opd.post_process_rewards(args, samples) == ([1.0, 0.0], [1.0, 0.0])
 
 def test_training_and_serving_must_use_the_same_checkpoint():
     recipe = _recipe("qwen3_4b_math")
