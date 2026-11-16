@@ -157,7 +157,7 @@ def _node(cls):
     memory=config.pool.memory,
     volumes=volumes,
     env=ENV,
-    experimental_options={"kv_aware_routing": True, **config.pool.experimental_options},
+    experimental_options=config.server_options,
 )
 @_node
 class EnginePool:

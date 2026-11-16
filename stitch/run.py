@@ -30,7 +30,7 @@ class PoolConfig:
     # An engine's start: loading the checkpoint, then catching up through every version.
     startup_timeout: int = 3600
     exit_grace_period: int = 0
-    experimental_options: dict[str, str | bool] = field(default_factory=dict)
+    experimental_options: dict[str, str | bool | int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -56,6 +56,19 @@ class RunConfig:
     def versions_volume(self) -> str:
         """The Volume the trainer commits each version to and the engines reload: STITCH_VERSIONS_VOLUME."""
         return self.volumes[self.mount_of(self.versions)]
+
+    @property
+    def server_options(self) -> dict[str, str | bool | int]:
+        """The engines' Server options: Modal's KV-aware router, pinning each request to one of the engine's DP ranks."""
+        options = {"kv_aware_routing": True, **self.pool.experimental_options}
+        ranks = self.engine.dp_ranks
+        if ranks > 1:
+            given = options.setdefault("kv_aware_routing_dp_size", ranks)
+            if given != ranks:
+                raise ValueError(
+                    f"kv_aware_routing_dp_size {given} is not the engine's {ranks} DP ranks"
+                )
+        return options
 
     def mount_of(self, path: str) -> str:
         """The mount in `volumes` that `path` is under."""

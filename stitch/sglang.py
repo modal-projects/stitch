@@ -27,6 +27,16 @@ class SGLangConfig:
                 f"pause mode {self.pause_mode!r} is not one of {PAUSE_MODES}"
             )
 
+    @property
+    def dp_ranks(self) -> int:
+        """The engine's DP ranks as SGLang counts them: replicas times attention-DP groups."""
+        args = self.server_args
+        replicas = args.get("--dp-size", args.get("--data-parallel-size", "1"))
+        groups = args.get(
+            "--attn-dp-size", args.get("--attention-data-parallel-size", "1")
+        )
+        return int(replicas) * int(groups)
+
 
 class SGLang:
     """Serves a checkpoint; the endpoints that drive the engine need an admin key only this holds."""
@@ -47,8 +57,8 @@ class SGLang:
             extra_server_args={
                 # SGLang's own default, as Miles' engines get; autoinference-utils would pick fastokens.
                 "--tokenizer-backend": "huggingface",
-                # Modal keeps a routing key on one engine; with DP attention each rank has its own prefix
-                # cache, so the engine keeps the key on one rank too.
+                # A request Modal's router does not pin to a DP rank keeps its routing key on one rank,
+                # whose prefix cache it reuses.
                 "--load-balance-method": "routing_key",
                 **config.server_args,
                 "--enable-weight-delta": "",

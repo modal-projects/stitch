@@ -154,3 +154,17 @@ def test_engine_env_defaults_unless_the_run_says_otherwise(fake):
 def test_an_unknown_pause_mode_is_refused():
     with pytest.raises(ValueError, match="pause mode"):
         SGLangConfig(server_args={}, pause_mode="drain")
+
+
+@pytest.mark.parametrize(
+    "server_args, ranks",
+    [
+        ({"--tp-size": "4", "--attn-dp-size": "4"}, 4),
+        # the deprecated spelling: SGLang moves the width into attention DP, the same 8 ranks
+        ({"--tp-size": "8", "--dp-size": "8", "--enable-dp-attention": ""}, 8),
+        ({"--tp-size": "4", "--attention-data-parallel-size": "4"}, 4),
+        ({"--tp-size": "4"}, 1),
+    ],
+)
+def test_dp_ranks_count_as_sglang_does(server_args, ranks):
+    assert SGLangConfig(server_args=server_args).dp_ranks == ranks

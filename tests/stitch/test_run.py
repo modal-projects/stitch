@@ -105,3 +105,30 @@ def test_versions_on_the_checkpoints_volume_warn(monkeypatch, recwarn):
     recwarn.clear()
     create_run(CONFIG)
     assert not recwarn.list
+
+
+def test_the_router_pins_requests_to_the_engines_dp_ranks():
+    dp = dataclasses.replace(
+        CONFIG,
+        engine=SGLangConfig(server_args={"--tp-size": "4", "--attn-dp-size": "4"}),
+    )
+    assert CONFIG.server_options == {"kv_aware_routing": True}
+    assert dp.server_options == {
+        "kv_aware_routing": True,
+        "kv_aware_routing_dp_size": 4,
+    }
+    same = dataclasses.replace(
+        dp,
+        pool=dataclasses.replace(
+            dp.pool, experimental_options={"kv_aware_routing_dp_size": 4}
+        ),
+    )
+    assert same.server_options == dp.server_options
+    other = dataclasses.replace(
+        dp,
+        pool=dataclasses.replace(
+            dp.pool, experimental_options={"kv_aware_routing_dp_size": 2}
+        ),
+    )
+    with pytest.raises(ValueError, match="not the engine's 4 DP ranks"):
+        _ = other.server_options
