@@ -140,5 +140,5 @@ def test_open_route_serves_a_filter_per_port_and_publishes_tunnels(monkeypatch):
         "30000": "https://t31000.modal.host",
         "30001": "https://t31001.modal.host",
     }
-    assert env["HARBOR_AGENT_ALLOWED_HOSTS"] == "t31000.modal.host,t31001.modal.host"
+    assert env[session_tunnel.HOSTS_ENV] == "t31000.modal.host,t31001.modal.host"
     stack.close()

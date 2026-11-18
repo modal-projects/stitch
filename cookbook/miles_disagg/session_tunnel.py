@@ -9,7 +9,7 @@ ends at a filter in front of its session server, not at the server itself. The f
 - answers a 409 from the session server (a request that extends a reply cut off at the reply limit) with a 400,
   which OpenCode does not retry (it retries a 409 five times over about a minute).
 Rollout workers read the tunnel URLs from SESSION_TUNNELS (set before Ray starts) and give the agent
-`<tunnel url>/sessions/<id>`; HARBOR_AGENT_ALLOWED_HOSTS opens the tunnel hosts for the agent phase of offline tasks.
+`<tunnel url>/sessions/<id>`; SESSION_TUNNEL_HOSTS opens the tunnel hosts in offline tasks' sandboxes.
 """
 
 import asyncio
@@ -34,6 +34,9 @@ except ImportError:  # outside the trainer image (tests)
     uvicorn = None
 
 TUNNELS_ENV = "SESSION_TUNNELS"
+# The tunnel hosts are allowed from sandbox creation on (harbor_agent.py), not only in the agent phase: an offline
+# task's sandbox is created with no domain allowlist, and Modal cannot turn domain filtering on while it runs.
+HOSTS_ENV = "SESSION_TUNNEL_HOSTS"
 FILTER_PORT_OFFSET = 1000  # the filter for session-server port p listens on p + 1000
 SESSION_ID = re.compile(r"[0-9a-f]{32}")  # Miles' session ids: uuid4().hex
 TITLE_PROMPT = "You are a title generator"
@@ -137,7 +140,7 @@ def open_route(host_ip: str, ports: list[int]) -> tuple[contextlib.ExitStack, di
     urls = {str(port): stack.enter_context(modal.forward(port + FILTER_PORT_OFFSET)).url for port in ports}
     print(f"[session-tunnel] {len(urls)} tunnels open for session-server ports {ports}", flush=True)
     hosts = ",".join(urlsplit(url).hostname for url in urls.values())
-    return stack, {TUNNELS_ENV: json.dumps(urls), "HARBOR_AGENT_ALLOWED_HOSTS": hosts}
+    return stack, {TUNNELS_ENV: json.dumps(urls), HOSTS_ENV: hosts}
 
 
 def public_session_url(base_url: str) -> str:

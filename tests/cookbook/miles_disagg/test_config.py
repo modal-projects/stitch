@@ -1,6 +1,8 @@
 import asyncio
 import dataclasses
 import json
+import os
+import re
 import sys
 from copy import deepcopy
 from importlib import import_module
@@ -479,6 +481,16 @@ def _opencode_kwargs(url, key, sampling, model, max_seq_len):
     return {"opencode_config": {"provider": {"openai-compatible": provider}}}
 
 
+class _EnvConfig:
+    """Stands in for Harbor's EnvironmentConfig (a pydantic model)."""
+
+    def __init__(self, extra_allowed_hosts=None):
+        self.extra_allowed_hosts = extra_allowed_hosts or []
+
+    def model_copy(self, update):
+        return _EnvConfig(**update)
+
+
 def _harbor_agent(monkeypatch):
     """Import harbor_agent over a fake Miles harbor_agent_function; returns (module, fake, run calls)."""
     calls = []
@@ -494,6 +506,8 @@ def _harbor_agent(monkeypatch):
         }
         | {"opencode": _Binding(kwargs=_opencode_kwargs, env=lambda url, key: {"OPENAI_BASE_URL": url}, model_name="m")},
         run=miles_run,
+        _environment_config=lambda: _EnvConfig(),
+        _allowed_hosts=lambda var: [h for h in re.split(r"[,\s]+", os.getenv(var, "")) if h],
     )
     monkeypatch.setitem(sys.modules, "harbor_agent_function", miles_harbor)
     monkeypatch.delitem(sys.modules, "cookbook.miles_disagg.harbor_agent", raising=False)
@@ -702,3 +716,11 @@ def test_opencode_smoke_is_one_step_on_one_machine_from_the_practice_start():
     assert smoke.APP_NAME != last.APP_NAME and smoke.EXPERIMENT_VOLUME_NAME != last.EXPERIMENT_VOLUME_NAME
     for terminus in ("qwen3_8_27b_harbor_ptb_practice_f_h200x2", "qwen3_8_27b_harbor_mix_v2"):
         assert "--session-message-matcher" not in _recipe(terminus).miles.cli_args()
+
+
+def test_the_tunnel_hosts_are_allowed_from_sandbox_creation(monkeypatch):
+    agent, _, _ = _harbor_agent(monkeypatch)
+    monkeypatch.delenv("SESSION_TUNNEL_HOSTS", raising=False)
+    assert agent._environment_config().extra_allowed_hosts == []
+    monkeypatch.setenv("SESSION_TUNNEL_HOSTS", "t31000.modal.host,t31001.modal.host")
+    assert agent._environment_config().extra_allowed_hosts == ["t31000.modal.host", "t31001.modal.host"]

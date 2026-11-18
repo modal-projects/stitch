@@ -46,6 +46,19 @@ miles_harbor.HARNESS_BINDINGS[OPENCODE_AGENT] = dataclasses.replace(
     _MILES_OPENCODE, kwargs=_opencode_kwargs, env=_no_env
 )
 
+_MILES_ENVIRONMENT_CONFIG = miles_harbor._environment_config
+
+
+def _environment_config():
+    """Miles' environment config, with the session tunnels' hosts allowed from sandbox creation on (an agent-phase
+    allowlist fails on Modal: an offline task's sandbox starts with no domain allowlist, which cannot be enabled later)."""
+    config = _MILES_ENVIRONMENT_CONFIG()
+    hosts = miles_harbor._allowed_hosts(session_tunnel.HOSTS_ENV)
+    return config.model_copy(update={"extra_allowed_hosts": hosts}) if hosts else config
+
+
+miles_harbor._environment_config = _environment_config
+
 
 async def run(base_url, prompt, request_kwargs=None, metadata=None, **kwargs):
     if (metadata or {}).get("agent_name") == harbor_config.OPENCODE:
