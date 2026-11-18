@@ -31,7 +31,7 @@ ENV = {
 }
 # The evaluation reminds at 9, 8, ..., 1 hours and 30 minutes left of 10 hours, and re-prompts while at least 30
 # minutes are left: the same fractions of the time left when the agent starts.
-REMINDER_FRACTIONS = (0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1, 0.05)
+REMINDER_FRACTIONS = (0.5, 0.25, 0.1, 0.05)  # 4 marks: each stops a generation, so fewer than the eval's 10
 MIN_LEFT_FRACTION = 0.05
 POLL_S = 5  # the evaluation polls every 20-60 s in 10 hours
 QUICK_FAIL_S = 60  # a pass that fails within this time made no progress

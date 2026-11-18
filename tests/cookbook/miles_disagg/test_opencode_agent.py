@@ -144,7 +144,7 @@ def _run(oc, monkeypatch, limit, passes):
 
 def test_a_reminder_stops_the_pass_and_a_cut_off_reply_ends_the_trial(oc, monkeypatch):
     sandbox, agent = _run(oc, monkeypatch, 1200, [
-        (600, SIMPLE_STEP, True),  # still working at the first mark (90% of 20 minutes left)
+        (700, SIMPLE_STEP, True),  # still working at the first mark (50% of 20 minutes left)
         (30, CUT_OFF_WITH_TOOL, False),
         (30, SIMPLE_STEP, True),  # never reached
     ])
@@ -152,7 +152,7 @@ def test_a_reminder_stops_the_pass_and_a_cut_off_reply_ends_the_trial(oc, monkey
     first, second = sandbox.calls
     assert first == ("", f"TASK\n\n{oc.RULE_NOTE}", False)
     assert second[0] == "--continue" and second[2]
-    assert second[1] == oc.REMINDER.format(hours=0, minutes=17)  # stopped at the mark (1,080 s left), 1 s later
+    assert second[1] == oc.REMINDER.format(hours=0, minutes=9)  # stopped at the mark (600 s left), 1 s later
     assert agent.opencode_written == [("write-config", oc.ENV)]
     assert sandbox.sessions == 2
 
