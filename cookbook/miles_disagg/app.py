@@ -35,7 +35,7 @@ from cookbook.common.constants import (
     START_PATH,
     STITCH_PATH,
 )
-from cookbook.miles_disagg import trainer_image
+from cookbook.miles_disagg import harbor_config, trainer_image
 from cookbook.miles_disagg.config import (
     YAML_CONFIG_FIELDS,
     MilesConfig,
@@ -100,6 +100,11 @@ image = trainer_image.build_trainer_image(
     image_run_commands=getattr(exp, "TRAINER_IMAGE_RUN_COMMANDS", ()),
     extra_env={**STORE_DEPLOYMENT.image_environment, **DATA_ENV_IMAGE_ENV},
 )
+with image.imports():
+    from cookbook.miles_disagg import session_tunnel
+# OpenCode recipes: the agents run inside task sandboxes and reach the session servers through
+# public tunnels that rank 0 opens (session_tunnel.py).
+OPENCODE_ROLLOUTS = harbor_config.agent_name(exp) == harbor_config.OPENCODE
 server_image = serving_image.build_serving_image(
     hf_cache_path=str(HF_CACHE_PATH),
     experiment=EXPERIMENT,
@@ -359,6 +364,14 @@ class Trainer:
         self.master_addr = master_addr
         self.rank = rank
         process.start_host_mem_monitor()  # per-node host-RAM trace
+        tunnel_env = {}
+        if OPENCODE_ROLLOUTS and rank == 0:
+            # Before Ray starts, so its workers inherit the tunnel URLs and hosts.
+            ports = [
+                miles_cfg.session_server_port + i
+                for i in range(miles_cfg.session_server_workers)
+            ]
+            self.tunnels, tunnel_env = session_tunnel.open_route(my_ip, ports)
         ray_cluster.start_ray_node(
             rank,
             master_addr,
@@ -371,6 +384,7 @@ class Trainer:
                 "TRITON_CACHE_DIR": str(KERNEL_CACHE_PATH / "triton"),
                 "TORCHINDUCTOR_CACHE_DIR": str(KERNEL_CACHE_PATH / "inductor"),
                 **miles_cfg.environment,
+                **tunnel_env,
             },
         )
 

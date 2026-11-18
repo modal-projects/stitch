@@ -27,6 +27,7 @@ from cookbook.miles_disagg.configs import qwen3_4b_math
         "qwen3_8_27b_harbor_mix_v2b_h200",
         "qwen3_8_27b_harbor_mix_v2b_h200x2",
         "qwen3_8_27b_harbor_mix_v2_h200x2",
+        "qwen3_8_27b_harbor_ptb_practice_oc_smoke",
     ],
 )
 def test_maintained_recipes_import_through_deployment_entrypoints(
@@ -44,6 +45,26 @@ def test_maintained_recipes_import_through_deployment_entrypoints(
     assert app.exp.__name__ == f"cookbook.miles_disagg.configs.{recipe}"
     assert app.modal_cfg is app.exp.modal
     assert app.miles_cfg is app.exp.miles
+
+
+@pytest.mark.parametrize(
+    ("recipe", "opencode"),
+    [
+        ("qwen3_8_27b_harbor_ptb_practice_oc_smoke", True),
+        ("qwen3_8_27b_harbor_ptb_practice_f_h200x2", False),
+        ("qwen3_4b_math", False),
+    ],
+)
+def test_only_opencode_recipes_open_session_tunnels(monkeypatch, recipe, opencode):
+    monkeypatch.setenv("EXPERIMENT_CONFIG", recipe)
+    monkeypatch.setenv("RUN_ID", "test-run")
+    monkeypatch.delenv("STITCH_STORE_BACKEND", raising=False)
+    monkeypatch.delenv("MILES_LOCAL_DIR", raising=False)
+    monkeypatch.delitem(sys.modules, "cookbook.miles_disagg.app", raising=False)
+
+    app = importlib.import_module("cookbook.miles_disagg.app")
+
+    assert app.OPENCODE_ROLLOUTS is opencode
 
 
 def test_trainer_mounts_kernel_cache_volume(monkeypatch):

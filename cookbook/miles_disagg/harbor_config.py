@@ -90,13 +90,33 @@ def without_speculative_decoding(server_args: dict[str, str]) -> dict[str, str]:
     return {k: v for k, v in server_args.items() if not k.startswith("--speculative-")}
 
 
-# Harnesses that run offline in our sandboxes. Miles falls back to mini-swe-agent for a row with
-# no agent_name, and its install needs the internet, so every attempt of that row fails.
-AGENT_NAMES = frozenset({"terminus-2"})
+# Harnesses that run offline in our sandboxes, by train.jsonl agent_name. terminus-2 calls the model from the
+# rollout worker. OpenCode runs in the sandbox and reaches the session servers through public tunnels
+# (session_tunnel.py), so its tasks need images with OpenCode installed. Miles falls back to mini-swe-agent for a
+# row with no agent_name, and its install needs the internet, so every attempt of that row fails.
+TERMINUS = "terminus-2"
+OPENCODE = "opencode"
+
+# Miles settings for OpenCode rollouts.
+OPENCODE_ARGUMENTS = {
+    # OpenCode replays a tool call's arguments as compact JSON, while SGLang returns them with spaces, so the strict
+    # matcher starts a new tree root at every turn. loose_tool_call compares arguments as JSON objects.
+    "session_message_matcher": "loose_tool_call",
+    # A time reminder stops OpenCode in the middle of a reply; the session server still stores that reply, as a leaf
+    # beside the branch the resumed session takes. This picker drops such leaves, and identical re-sends.
+    "session_sample_picker_path": "miles.rollout.session.v2.picker_hub.drop_rolled_back_leaves",
+    # The session servers run on the machine that serves the tunnels (rank 0).
+    "pin_rollout_manager_to_head": True,
+}
+
+
+def agent_name(exp) -> str:
+    """The agent a Harbor recipe runs (its HARBOR_AGENT, terminus-2 if unset); every train.jsonl row names it."""
+    return getattr(exp, "HARBOR_AGENT", TERMINUS)
 
 
 def check_train_rows(exp) -> None:
-    """Stop a Harbor launch if a train.jsonl row names no agent, or one outside AGENT_NAMES."""
+    """Stop a Harbor launch if a train.jsonl row names an agent other than the recipe's."""
     path = getattr(exp.miles, "prompt_data", "")
     if not getattr(exp.miles, "custom_agent_function_path", "").startswith(
         "cookbook.miles_disagg.harbor_agent"
@@ -114,20 +134,17 @@ def check_train_rows(exp) -> None:
         for line in b"".join(volume.read_file(path[len(mount) :])).splitlines()
         if line.strip()
     ]
-    bad = [
-        r["metadata"]
-        for r in rows
-        if r["metadata"].get("agent_name") not in AGENT_NAMES
-    ]
+    agent = agent_name(exp)
+    bad = [r["metadata"] for r in rows if r["metadata"].get("agent_name") != agent]
     if bad:
         raise SystemExit(
-            f"{path}: {len(bad)} of {len(rows)} rows name no allowed agent {sorted(AGENT_NAMES)}; "
+            f"{path}: {len(bad)} of {len(rows)} rows do not name the recipe's agent {agent!r}; "
             f"first: {bad[0].get('instance_id')!r} (agent_name={bad[0].get('agent_name')!r})"
         )
 
 
-def arguments(tasks_root: str) -> dict:
-    """Miles workload settings: the Harbor agent function and its reward."""
+def arguments(tasks_root: str, agent: str = TERMINUS) -> dict:
+    """Miles workload settings: the Harbor agent function and its reward, for the recipe's agent."""
     args = swebench_config.arguments()
     for key in (
         "custom_rollout_log_function_path",
@@ -135,14 +152,19 @@ def arguments(tasks_root: str) -> dict:
         "session_sample_postprocessor_path",
     ):
         args.pop(key)
-    return args | {
-        "prompt_data": f"{tasks_root}/train.jsonl",
-        # Miles' function, minus the env that broke terminus on old tmux (harbor_agent.py).
-        "custom_agent_function_path": "cookbook.miles_disagg.harbor_agent.run",
-        "custom_rm_path": "generate.reward_func",
-        # Qwen3.8's template defaults to xhigh effort; the effort ablations favor medium.
-        "apply_chat_template_kwargs": {"reasoning_effort": "medium"},
-    }
+    return (
+        args
+        | {
+            "prompt_data": f"{tasks_root}/train.jsonl",
+            # Miles' function, minus the env that broke terminus on old tmux; OpenCode rows run in the sandbox
+            # (harbor_agent.py).
+            "custom_agent_function_path": "cookbook.miles_disagg.harbor_agent.run",
+            "custom_rm_path": "generate.reward_func",
+            # Qwen3.8's template defaults to xhigh effort; the effort ablations favor medium.
+            "apply_chat_template_kwargs": {"reasoning_effort": "medium"},
+        }
+        | (OPENCODE_ARGUMENTS if agent == OPENCODE else {})
+    )
 
 
 def environment(

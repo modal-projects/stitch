@@ -1,3 +1,4 @@
+import asyncio
 import dataclasses
 import json
 import sys
@@ -469,33 +470,70 @@ def test_harbor_mix_h200x2_cv_is_the_same_run_with_volumes_in_training_team(mix)
 class _Binding:
     kwargs: object
     env: object
+    model_name: object = None
 
 
-def test_harbor_terminus_gets_no_env_in_the_task_shell(monkeypatch):
+def _opencode_kwargs(url, key, sampling, model, max_seq_len):
+    """Miles' OpenCode binding at 2c12b3b: the provider block of the OpenCode config."""
+    provider = {"npm": "@ai-sdk/openai-compatible", "options": {"baseURL": url, "apiKey": key}}
+    return {"opencode_config": {"provider": {"openai-compatible": provider}}}
+
+
+def _harbor_agent(monkeypatch):
+    """Import harbor_agent over a fake Miles harbor_agent_function; returns (module, fake, run calls)."""
+    calls = []
+
+    async def miles_run(base_url, prompt, request_kwargs=None, metadata=None, **kwargs):
+        calls.append((base_url, metadata))
+        return {"reward": 1.0}
+
     miles_harbor = SimpleNamespace(
         HARNESS_BINDINGS={
             name: _Binding(kwargs="k", env=lambda url, key: {"OPENAI_API_KEY": key})
             for name in ("terminus-2", "terminus-1", "terminus", "claude-code")
-        },
-        run="miles-run",
+        }
+        | {"opencode": _Binding(kwargs=_opencode_kwargs, env=lambda url, key: {"OPENAI_BASE_URL": url}, model_name="m")},
+        run=miles_run,
     )
     monkeypatch.setitem(sys.modules, "harbor_agent_function", miles_harbor)
-    monkeypatch.delitem(
-        sys.modules, "cookbook.miles_disagg.harbor_agent", raising=False
-    )
+    monkeypatch.delitem(sys.modules, "cookbook.miles_disagg.harbor_agent", raising=False)
+    return import_module("cookbook.miles_disagg.harbor_agent"), miles_harbor, calls
 
-    agent = import_module("cookbook.miles_disagg.harbor_agent")
+
+def test_harbor_terminus_gets_no_env_in_the_task_shell(monkeypatch):
+    agent, miles_harbor, calls = _harbor_agent(monkeypatch)
 
     bindings = miles_harbor.HARNESS_BINDINGS
     assert bindings["terminus-2"].env("url", "key") == {}
     assert bindings["terminus-2"].kwargs == "k"
     assert bindings["claude-code"].env("url", "key") == {"OPENAI_API_KEY": "key"}
-    assert agent.run == "miles-run"
+    metadata = {"instance_id": "t", "agent_name": "terminus-2"}
+    asyncio.run(agent.run(base_url="http://10.0.0.5:30001/sessions/s", prompt="p", metadata=metadata))
+    assert calls == [("http://10.0.0.5:30001/sessions/s", metadata)]
     recipe = _recipe("qwen3_8_27b_harbor_mix_v0")
     assert (
         recipe.miles.custom_agent_function_path
         == "cookbook.miles_disagg.harbor_agent.run"
     )
+
+
+def test_harbor_opencode_rows_run_our_agent_through_the_tunnel(monkeypatch):
+    monkeypatch.setenv("SESSION_TUNNELS", json.dumps({"30001": "https://b.modal.host"}))
+    agent, miles_harbor, calls = _harbor_agent(monkeypatch)
+
+    metadata = {"instance_id": "t", "agent_name": "opencode"}
+    asyncio.run(agent.run(base_url="http://10.0.0.5:30001/sessions/s", prompt="p", metadata=metadata))
+
+    assert calls == [("https://b.modal.host/sessions/s", {"instance_id": "t", "agent_name": agent.OPENCODE_AGENT})]
+    assert metadata["agent_name"] == "opencode"  # the sample's metadata is not changed
+    binding = miles_harbor.HARNESS_BINDINGS[agent.OPENCODE_AGENT]
+    assert binding.env("https://b.modal.host/sessions/s/v1", "dummy") == {}  # nothing in the task's shell
+    assert binding.model_name == "m"
+    options = binding.kwargs("https://x/v1", "dummy", {}, "openai/model", 131072)["opencode_config"]["provider"][
+        "openai-compatible"
+    ]["options"]
+    assert options == {"baseURL": "https://x/v1", "apiKey": "dummy", "headerTimeout": False}
+    assert miles_harbor.HARNESS_BINDINGS["opencode"].env("u", "k") == {"OPENAI_BASE_URL": "u"}  # Miles' own entry
 
 
 def test_training_and_serving_must_use_the_same_checkpoint():
@@ -625,9 +663,42 @@ def test_harbor_launch_stops_on_rows_without_an_allowed_agent():
         TRAINER_EXTRA_VOLUMES={"/harbor-envs": volume},
     )
 
-    with pytest.raises(SystemExit, match=r"train.jsonl: 2 of 3 rows.*'no-agent'"):
+    with pytest.raises(SystemExit, match=r"train.jsonl: 2 of 3 rows .*'terminus-2'.*'no-agent'"):
         harbor_config.check_train_rows(exp)
     assert read == ["/mix/train.jsonl"]
 
+    exp.HARBOR_AGENT = "opencode"  # an OpenCode recipe takes only OpenCode rows
+    with pytest.raises(SystemExit, match=r"train.jsonl: 3 of 3 rows .*'opencode'.*'ok'"):
+        harbor_config.check_train_rows(exp)
+
     exp.miles.custom_agent_function_path = "other.run"
     harbor_config.check_train_rows(exp)  # not a Harbor recipe: no check
+
+
+def test_opencode_smoke_is_one_step_on_one_machine_from_the_practice_start():
+    smoke = _recipe("qwen3_8_27b_harbor_ptb_practice_oc_smoke")
+    last = _recipe("qwen3_8_27b_harbor_ptb_practice_f_h200x2")
+    validate_recipe(smoke)
+    args = smoke.miles.cli_args()
+
+    def value(flag):
+        return args[args.index(flag) + 1]
+
+    assert harbor_config.agent_name(smoke) == "opencode"
+    assert value("--session-message-matcher") == "loose_tool_call"
+    assert value("--session-sample-picker-path").endswith("drop_rolled_back_leaves")
+    assert "--pin-rollout-manager-to-head" in args
+    assert (value("--rollout-batch-size"), value("--n-samples-per-prompt"), value("--global-batch-size")) == ("4", "2", "8")
+    assert value("--num-rollout") == "1"
+    assert "--save-interval" not in args and "--dynamic-sampling-filter-path" not in args
+    # One 8 x H200 machine: no clustered trainer, so no reserved capacity.
+    assert (smoke.modal.gpu, smoke.miles.n_train_nodes, smoke.miles.actor_num_gpus_per_node) == ("H200", 1, 8)
+    assert (smoke.miles.tensor_model_parallel_size, smoke.miles.context_parallel_size) == (4, 2)
+    # The checkpoint the last practice run started from.
+    assert (smoke.miles.hf_checkpoint, smoke.miles.ref_load) == (last.miles.hf_checkpoint, last.miles.ref_load)
+    assert smoke.START_VOLUME.name == last.START_VOLUME.name
+    assert smoke.miles.environment["HARBOR_TASKS_DIR"] == "/harbor-envs/ptb-practice-oc-smoke/tasks"
+    assert smoke.TRAINER_EXTRA_VOLUMES["/harbor-trials"].name == "harbor-ptb-practice-oc-smoke-trials"
+    assert smoke.APP_NAME != last.APP_NAME and smoke.EXPERIMENT_VOLUME_NAME != last.EXPERIMENT_VOLUME_NAME
+    for terminus in ("qwen3_8_27b_harbor_ptb_practice_f_h200x2", "qwen3_8_27b_harbor_mix_v2"):
+        assert "--session-message-matcher" not in _recipe(terminus).miles.cli_args()
