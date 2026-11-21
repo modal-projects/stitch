@@ -1,18 +1,25 @@
 """SGLang's calls as Stitch makes them, against a fake SGLang that records each request."""
 
 import json
+import sys
 import threading
+import types
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 
 import pytest
 
 from stitch.sglang import SGLang, SGLangConfig
 
+IDENTITY = {"engine_id": "e0", "rank_id": "0"}
+PUBLICATION = {
+    "manifest_path": "/v/s/weight_v000004/manifest.json",
+    "target_version": 4,
+}
+
 
 class FakeSGLang:
-    """Answers our endpoints as SGLang does; `refuse` makes the update fail with that message."""
+    """Answers the GPU-delta controls as SGLang does; `refuse` makes the update fail with that message."""
 
     def __init__(self):
         self.calls: list[tuple[str, dict, str]] = []
@@ -38,12 +45,13 @@ class FakeSGLang:
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
     def reply(self, path: str) -> tuple[int, dict]:
-        if path == "/prepare_weights_from_delta":
-            return 200, {"success": True, "stats": {"read_s": 1.0}}
-        if path == "/update_weights_from_delta" and self.refuse:
-            return 400, {"success": False, "message": self.refuse}
-        if path == "/update_weights_from_delta":
-            return 200, {"success": True, "stats": {"gpu_s": 0.1}}
+        if path == "/get_gpu_delta_info":
+            row = {"identity": IDENTITY, "stream_id": "s", "version": 3}
+            return 200, {"success": True, "participants": [row]}
+        if path == "/update_weights_from_gpu_delta" and self.refuse:
+            return 409, {"success": False, "message": self.refuse}
+        if path == "/update_weights_from_gpu_delta":
+            return 200, {"success": True, "timings": {"pause_s": 0.1}}
         return 200, {}
 
 
@@ -54,56 +62,95 @@ def fake():
     fake.server.shutdown()
 
 
+@pytest.fixture(autouse=True)
+def miles_session(monkeypatch):
+    """Miles' GPU-delta session, which engine images ship: its activation posts one update through the client."""
+    module = types.ModuleType(
+        "miles.backends.training_utils.weight_update.protocols.gpu_delta.session"
+    )
+
+    async def activate_engine(
+        client,
+        publication,
+        participants,
+        session_id,
+        weight_version,
+        timeout,
+        pause_mode,
+    ):
+        request = dict(
+            publication,
+            participants=participants,
+            session_id=session_id,
+            pause_mode=pause_mode,
+        )
+        if weight_version is not None:
+            request["weight_version"] = weight_version
+        return await client._make_request("update_weights_from_gpu_delta", request)
+
+    def committed_endpoint(info, participants, plan_digest):
+        assert participants == [IDENTITY] and plan_digest == "plan"
+        (row,) = info["participants"]
+        return row["stream_id"], row["version"]
+
+    module.activate_engine, module.committed_endpoint = (
+        activate_engine,
+        committed_endpoint,
+    )
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+
+
 def _sglang(fake: FakeSGLang, pause_mode: str = "in_place", env=None) -> SGLang:
     config = SGLangConfig(server_args={}, env=env or {}, pause_mode=pause_mode)
-    return SGLang("/ckpt", version=3, port=fake.port, config=config, startup_timeout=60)
+    return SGLang(
+        "/ckpt",
+        version=3,
+        port=fake.port,
+        config=config,
+        startup_timeout=60,
+        engine_id="e0",
+    )
 
 
-def _prepare_and_apply(sglang: SGLang, version: int) -> tuple:
-    manifest = Path("/v/manifest.json")
-    return sglang.prepare(manifest), sglang.apply(manifest, version)
+@pytest.mark.parametrize("mode", ["in_place", "retract"])
+def test_a_publication_applies_through_miles_activation_in_the_runs_pause_mode(
+    fake, mode
+):
+    sglang = _sglang(fake, mode)
+
+    sglang.committed("plan")
+    stats = sglang.apply(PUBLICATION, 4)
+
+    (info, update) = [(path, body) for path, body, _ in fake.calls]
+    assert info == ("/get_gpu_delta_info", {"engine_id": "e0"})
+    assert update[0] == "/update_weights_from_gpu_delta"
+    assert update[1]["participants"] == [IDENTITY] and update[1]["pause_mode"] == mode
+    assert (update[1]["manifest_path"], update[1]["weight_version"]) == (
+        PUBLICATION["manifest_path"],
+        "4",
+    )
+    assert stats == {"pause_s": 0.1} and sglang.version == 4
 
 
-def test_an_in_place_pause_never_flushes(fake):
-    sglang = _sglang(fake)
-    stats = _prepare_and_apply(sglang, 4)
-
-    assert [(path, body) for path, body, _ in fake.calls] == [
-        ("/prepare_weights_from_delta", {"manifest": "/v/manifest.json"}),
-        ("/pause_generation", {"mode": "in_place"}),
-        (
-            "/update_weights_from_delta",
-            {
-                "manifest": "/v/manifest.json",
-                "weight_version": "4",
-                "flush_cache": False,
-            },
-        ),
-        ("/continue_generation", {}),
-    ]
-    assert stats == ({"read_s": 1.0}, {"gpu_s": 0.1})
-    assert sglang.version == 4
-
-
-@pytest.mark.parametrize("mode", ["retract", "abort"])
-def test_other_pauses_flush_with_the_update(fake, mode):
-    _prepare_and_apply(_sglang(fake, mode), 4)
-
-    assert [(path, body.get("flush_cache")) for path, body, _ in fake.calls] == [
-        ("/prepare_weights_from_delta", None),
-        ("/pause_generation", None),
-        ("/update_weights_from_delta", True),
-        ("/continue_generation", None),
-    ]
-
-
-def test_a_refused_update_still_continues_and_raises_sglangs_reason(fake):
-    fake.refuse = "1 tensors differ from the trainer's after applying"
+def test_a_publication_before_the_last_of_a_catch_up_carries_no_label(fake):
     sglang = _sglang(fake)
 
-    with pytest.raises(RuntimeError, match="1 tensors differ"):
-        _prepare_and_apply(sglang, 4)
-    assert fake.calls[-1][0] == "/continue_generation"
+    sglang.committed("plan")
+    sglang.apply(PUBLICATION, None)
+
+    assert "weight_version" not in fake.calls[-1][1] and sglang.version == 3
+
+
+def test_the_committed_weights_are_the_receivers(fake):
+    assert _sglang(fake).committed("plan") == ("s", 3)
+
+
+def test_a_refused_update_raises_sglangs_reason_and_keeps_the_label(fake):
+    fake.refuse = "stale source: weights at s:2"
+    sglang = _sglang(fake)
+
+    with pytest.raises(RuntimeError, match="stale source"):
+        sglang.apply(PUBLICATION, 4)
     assert sglang.version == 3
 
 
@@ -119,21 +166,20 @@ def test_only_the_abort_before_the_container_ends_has_its_own_timeout(
 
     monkeypatch.setattr(urllib.request, "urlopen", recording)
     sglang = _sglang(fake)
-    _prepare_and_apply(sglang, 4)
+    sglang.committed("plan")
+    sglang.apply(PUBLICATION, 4)
     sglang.abort_all()
 
     assert timeouts == {
-        "prepare_weights_from_delta": None,
-        "pause_generation": None,
-        "update_weights_from_delta": None,
-        "continue_generation": None,
+        "get_gpu_delta_info": None,
+        "update_weights_from_gpu_delta": None,
         "abort_request": 60,
     }
 
 
 def test_every_call_carries_the_admin_key(fake):
     sglang = _sglang(fake)
-    _prepare_and_apply(sglang, 4)
+    sglang.apply(PUBLICATION, 4)
     sglang.abort_all()
 
     assert {auth for _, _, auth in fake.calls} == {f"Bearer {sglang.admin_key}"}
@@ -151,9 +197,11 @@ def test_engine_env_defaults_unless_the_run_says_otherwise(fake):
     assert env == {"SGLANG_DSA_FUSE_TOPK": "1"}
 
 
-def test_an_unknown_pause_mode_is_refused():
+@pytest.mark.parametrize("mode", ["drain", "abort"])
+def test_a_pause_sglangs_scheduler_lacks_is_refused(mode):
+    """An abort is a tokenizer-side abort, which no GPU-delta apply takes."""
     with pytest.raises(ValueError, match="pause mode"):
-        SGLangConfig(server_args={}, pause_mode="drain")
+        SGLangConfig(server_args={}, pause_mode=mode)
 
 
 @pytest.mark.parametrize(

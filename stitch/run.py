@@ -36,7 +36,8 @@ class PoolConfig:
 @dataclass(frozen=True)
 class RunConfig:
     """`image`: the engines' Docker image, with an SGLang that serves weight deltas, built on with `image_commands`.
-    `checkpoint` (version 0) and `versions` are paths under `volumes` (mount path -> Volume)."""
+    `checkpoint` (where every publication chain starts) and `versions` are paths under `volumes`
+    (mount path -> Volume)."""
 
     run_id: str
     image: str

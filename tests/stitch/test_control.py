@@ -97,14 +97,36 @@ class Engine:
 
 def test_an_engine_waits_for_the_run_to_start():
     service = _service()
-    assert service.open("e0", 0, None) == {"open": False, "head": 0, "start_id": None}
+    assert service.open("e0", 0, None) == {
+        "open": False,
+        "head": 0,
+        "start_id": None,
+        "publication": None,
+    }
 
-    start_id = service.start(3)["start_id"]
+    start_id = service.start(3, {"target_version": 3})["start_id"]
     assert service.open("e0", 3, start_id) == {
         "open": True,
         "head": 3,
         "start_id": start_id,
+        "publication": {"target_version": 3},
     }
+
+
+def test_engines_learn_the_heads_publication_from_the_start_and_each_version():
+    """An engine finds a version's files only through its publication, which only the trainer names."""
+    service = _service()
+    start = service.start(3, {"target_version": 1})["start_id"]
+    assert service.open("e0", -1, None)["publication"] == {"target_version": 1}
+
+    threading.Thread(
+        target=service.publish,
+        args=(4, 3, 3, start, {"target_version": 2}),
+        daemon=True,
+    ).start()
+    reply = service.next("e1", 3, 3, start)
+
+    assert (reply["head"], reply["publication"]) == (4, {"target_version": 2})
 
 
 def test_an_engine_opens_only_at_the_newest_version():
@@ -337,7 +359,12 @@ def test_a_version_some_engine_applied_is_published_without_the_ones_that_failed
 def test_a_restarted_service_moves_no_engine_until_the_trainer_names_its_start():
     service = _service(restarted=True)
 
-    assert service.open("e0", 2, "t1") == {"open": False, "head": 2, "start_id": None}
+    assert service.open("e0", 2, "t1") == {
+        "open": False,
+        "head": 2,
+        "start_id": None,
+        "publication": None,
+    }
     assert service.status()["head"] is None
 
 
@@ -382,7 +409,12 @@ def test_a_service_restarted_before_any_version_takes_the_run_from_the_trainers_
 
     service.status(2, "t1", 2)
 
-    assert service.open("e0", 2, None) == {"open": True, "head": 2, "start_id": "t1"}
+    assert service.open("e0", 2, None) == {
+        "open": True,
+        "head": 2,
+        "start_id": "t1",
+        "publication": None,
+    }
     with pytest.raises(Refused, match="from another start"):
         service.status(2, "t0", 2)
 

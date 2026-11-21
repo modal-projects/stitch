@@ -47,8 +47,7 @@ DAPO_TRAINING_ROLLOUT = (
 # Every reply carries its sampling support and routed experts.
 REPLAY_ROLLOUT = (
     DAPO_ROLLOUT
-    + "--rollout-top-p 0.9 --rollout-top-k 128 --use-rollout-sampling-support-replay "
-    + "--use-rollout-routing-replay "
+    + "--rollout-top-p 0.9 --rollout-top-k 128 --use-rollout-routing-replay "
 )
 # Filtered sampling without replay: the rollout records the sampler's own log-probs, and the
 # trainer scores the full vocabulary.

@@ -92,7 +92,7 @@ class Control:
 
         @web.post("/start")
         def start(body: dict) -> dict:
-            return service.start(int(body["version"]))
+            return service.start(int(body["version"]), body.get("publication"))
 
         @web.post("/versions")
         def versions(body: dict) -> dict:
@@ -102,6 +102,7 @@ class Control:
                     int(body["base_version"]),
                     int(body["start"]),
                     body["start_id"],
+                    body.get("publication"),
                 )
             except Refused as error:
                 raise HTTPException(409, str(error)) from None
@@ -165,10 +166,11 @@ class EnginePool:
     def enter(self):
         engine = SGLang(
             config.checkpoint,
-            version=0,
+            version=-1,
             port=PORT,
             config=config.engine,
             startup_timeout=config.pool.startup_timeout,
+            engine_id=os.environ["MODAL_TASK_ID"],
         )
         control = ControlClient(Control(), os.environ["MODAL_TASK_ID"], config.clocks)
         self.container = EngineContainer(

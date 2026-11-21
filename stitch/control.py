@@ -52,6 +52,8 @@ class ControlService:
         """The run's start and head are unknown until /start or, after a restart, the trainer's next call."""
         self.clocks = clocks
         self.head: int | None = None
+        # The head's publication as the trainer announced it: where an engine finds its files and its base.
+        self.publication: dict | None = None
         self.start_version: int | None = None
         self.start_id: str | None = None
         self.engines: dict[str, _Engine] = {}
@@ -69,10 +71,20 @@ class ControlService:
                 return self._end(engine_id, reason)
             engine = self._heard(engine_id, version)
             if self.head is None:
-                return {"open": False, "head": version, "start_id": self.start_id}
+                return {
+                    "open": False,
+                    "head": version,
+                    "start_id": self.start_id,
+                    "publication": None,
+                }
             engine.open = version == self.head
             self.condition.notify_all()
-            return {"open": engine.open, "head": self.head, "start_id": self.start_id}
+            return {
+                "open": engine.open,
+                "head": self.head,
+                "start_id": self.start_id,
+                "publication": self.publication,
+            }
 
     def next(
         self, engine_id: str, version: int, seen: int, start_id: str | None
@@ -97,6 +109,7 @@ class ControlService:
             return {
                 "head": seen if self.head is None else self.head,
                 "start_id": self.start_id,
+                "publication": self.publication,
             }
 
     def served(self, engine_id: str, version: int, stats: dict, start_id: str) -> dict:
@@ -125,12 +138,13 @@ class ControlService:
             self.ending[engine_id] = "it left"
             self.condition.notify_all()
 
-    def start(self, version: int) -> dict:
+    def start(self, version: int, publication: dict | None = None) -> dict:
         """The run starts, or resumes, at `version`: the versions after it are gone, so engines past
         it exit and the others go to it. The reply's start_id names this start in later calls."""
         with self.condition:
             self.trainer_heard = time.monotonic()
             self.start_version, self.start_id = version, secrets.token_hex(8)
+            self.publication = publication
             self._set_head(version)
             for engine_id, engine in self.engines.items():
                 if engine.version > version:
@@ -140,7 +154,12 @@ class ControlService:
             return {"start_id": self.start_id, **self._status()}
 
     def publish(
-        self, version: int, base_version: int, start_version: int, start_id: str
+        self,
+        version: int,
+        base_version: int,
+        start_version: int,
+        start_id: str,
+        publication: dict | None = None,
     ) -> dict:
         """Waits until every engine taking traffic serves `version` after `base_version`; returns their stats."""
         with self.condition:
@@ -151,6 +170,7 @@ class ControlService:
                     raise Refused(
                         f"version {version} (base {base_version}) does not follow the run's {self.head}"
                     )
+                self.publication = publication
                 self._set_head(version)
         return self._barrier(version, start_id)
 

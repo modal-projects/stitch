@@ -1,5 +1,8 @@
 """The engine container against the real control service, with a fake engine."""
 
+import hashlib
+import json
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -10,45 +13,50 @@ import pytest
 
 import stitch.engine
 from stitch.control import Clocks, ControlService, Failed, Refused
-from stitch.engine import ControlClient, EngineContainer
+from stitch.engine import (
+    PUBLICATION_FIELDS,
+    ControlClient,
+    EngineContainer,
+    publication_chain,
+)
 
 CLOCKS = Clocks(patience=2, lease=0.3)
+STREAM, PLAN = "s", "plan"
 
 
 class FakeEngine:
-    """`fail_prepare_at`: preparing that version fails; `hang_at`: applying that version never returns."""
+    """Weights at a committed (stream, version), (None, 0) for the checkpoint. `fail_at`: applying that
+    publication fails; `hang_at`: applying it never returns. Every publication must build on its weights."""
 
-    def __init__(
-        self,
-        fail_at=None,
-        on_apply=None,
-        apply_s: float = 0,
-        hang_at=None,
-        fail_prepare_at=None,
-    ):
-        self.version, self.applied, self.read, self.aborted = 0, [], [], False
+    def __init__(self, fail_at=None, on_apply=None, apply_s: float = 0, hang_at=None):
+        self.version, self.point = -1, (None, 0)
+        self.applied, self.read, self.aborted = [], [], False
         self.fail_at, self.on_apply, self.apply_s = fail_at, on_apply, apply_s
-        self.hang_at, self.fail_prepare_at = hang_at, fail_prepare_at
+        self.hang_at = hang_at
 
-    def prepare(self, manifest):
-        self.read.append(manifest.read_text())
-        if manifest.parent.name == f"weight_v{self.fail_prepare_at or 0:06d}":
-            raise RuntimeError(
-                "SGLang /prepare_weights_from_delta: [Errno 5] Input/output error"
-            )
-        return {"read_s": 0.0}
+    def committed(self, plan_digest):
+        assert plan_digest == PLAN
+        return self.point
 
-    def apply(self, manifest, version):
+    def apply(self, publication, version):
+        self.read.append(Path(publication["manifest_path"]).read_text())
         time.sleep(self.apply_s)
-        if version == self.hang_at:
+        target = publication["target_version"]
+        if target == self.hang_at:
             threading.Event().wait()
-        if version == self.fail_at:
-            raise RuntimeError(f"version {version} failed")
-        self.applied.append(version)
-        self.version = version
+        if target == self.fail_at:
+            raise RuntimeError(f"version {target} failed")
+        assert (
+            publication["base_stream_id"],
+            publication["base_version"],
+        ) == self.point
+        self.point = (publication["stream_id"], target)
+        self.applied.append(target)
+        if version is not None:
+            self.version = version
         if self.on_apply:
-            self.on_apply(version)
-        return {"applied": version}
+            self.on_apply(target)
+        return {"applied": target}
 
     def abort_all(self):
         self.aborted = True
@@ -72,8 +80,11 @@ class Call:
 
 @pytest.fixture
 def versions(tmp_path):
+    """One stream's publications 1-8, each built on the one before; the first on the checkpoint."""
+    base = (None, 0)
     for version in range(1, 9):
-        _write_manifest(tmp_path, version)
+        _publish_files(tmp_path, version, base)
+        base = (STREAM, version)
     return tmp_path
 
 
@@ -90,14 +101,44 @@ def no_sleep(monkeypatch):
     monkeypatch.setattr(stitch.engine, "time", clock)
 
 
-def _write_manifest(versions: Path, version: int, text: str = "{}") -> None:
-    (versions / f"weight_v{version:06d}").mkdir(exist_ok=True)
-    (versions / f"weight_v{version:06d}" / "manifest.json").write_text(text)
+def _publish_files(
+    versions: Path, target: int, base=(None, 0), stream: str = STREAM, note: str = ""
+) -> dict:
+    """A sealed publication's manifest, as the trainer writes it; returns its announcement."""
+    manifest = f"{stream}/weight_v{target:06d}/manifest.json"
+    record = {
+        "stream_id": stream,
+        "base_stream_id": base[0],
+        "base_version": base[1],
+        "target_version": target,
+        "plan_digest": PLAN,
+        "payload_checksum_format": "sha256",
+        "note": note,
+    }
+    path = versions / manifest
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(record))
+    return _announced(versions, manifest)
 
 
-def _start(service: ControlService, version: int) -> tuple[int, str]:
+def _announced(versions: Path, manifest: str) -> dict:
+    """The trainer's announcement of the publication at `manifest`."""
+    data = (versions / manifest).read_bytes()
+    record = json.loads(data)
+    return {
+        "manifest": manifest,
+        "manifest_sha256": hashlib.sha256(data).hexdigest(),
+        **{key: record[key] for key in PUBLICATION_FIELDS},
+    }
+
+
+def _pub(versions: Path, version: int, stream: str = STREAM) -> dict:
+    return _announced(versions, f"{stream}/weight_v{version:06d}/manifest.json")
+
+
+def _start(service: ControlService, version: int, publication: dict) -> tuple[int, str]:
     """The trainer's /start: what it sends back with each version."""
-    return version, service.start(version)["start_id"]
+    return version, service.start(version, publication)["start_id"]
 
 
 def _modal_class(**methods) -> SimpleNamespace:
@@ -141,29 +182,31 @@ def test_an_engine_waits_for_the_run_to_start(service, versions):
     opening.join(0.3)
     assert opening.is_alive() and engine.applied == []
 
-    service.start(2)
+    service.start(2, _pub(versions, 2))
     opening.join(5)
     assert engine.applied == [1, 2]
     assert service.status()["serving"] == {2: 1}
 
 
-def test_an_engine_catches_up_one_version_at_a_time_and_opens_at_the_newest(
+def test_an_engine_catches_up_along_the_chain_and_opens_at_the_newest(
     service, versions
 ):
-    service.start(3)
+    service.start(3, _pub(versions, 3))
     engine = FakeEngine()
     _container(service, engine, versions).open()
 
-    assert engine.applied == [1, 2, 3]
+    assert engine.applied == [1, 2, 3] and engine.version == 3
     assert service.status()["serving"] == {3: 1}
 
 
 def test_a_version_published_during_catch_up_is_applied_before_it_opens(
     service, versions
 ):
-    start = _start(service, 3)
+    start = _start(service, 3, _pub(versions, 3))
     engine = FakeEngine(
-        on_apply=lambda version: version == 2 and service.publish(4, 3, *start)
+        on_apply=lambda version: (
+            version == 2 and service.publish(4, 3, *start, _pub(versions, 4))
+        )
     )
     _container(service, engine, versions).open()
 
@@ -172,18 +215,18 @@ def test_a_version_published_during_catch_up_is_applied_before_it_opens(
 
 
 def test_an_open_engine_follows_each_version_and_reports_its_stats(service, versions):
-    start = _start(service, 3)
+    start = _start(service, 3, _pub(versions, 3))
     engine = FakeEngine()
     container = _container(service, engine, versions)
     container.open()
     ended = _run(container.listen, container.follow)
 
-    service.publish(4, 3, *start)
-    stats = service.publish(5, 4, *start)["engines"]["e0"]["stats"]
+    service.publish(4, 3, *start, _pub(versions, 4))
+    stats = service.publish(5, 4, *start, _pub(versions, 5))["engines"]["e0"]["stats"]
 
     assert engine.applied == [1, 2, 3, 4, 5]
-    assert stats["apply"]["applied"] == 5
-    service.start(2)
+    assert stats["applied"] == 5
+    service.start(2, _pub(versions, 2))
     time.sleep(0.3)
     assert ended == ["the control service ended this engine: the run resumed at 2"]
 
@@ -191,81 +234,92 @@ def test_an_open_engine_follows_each_version_and_reports_its_stats(service, vers
 def test_an_engine_stays_heard_while_a_version_applies_longer_than_the_lease(
     service, versions
 ):
-    start = _start(service, 3)
+    start = _start(service, 3, _pub(versions, 3))
     engine = FakeEngine()
     container = _container(service, engine, versions)
     container.open()
     engine.apply_s = 3 * CLOCKS.lease
     _run(container.listen, container.follow)
 
-    reply = service.publish(4, 3, *start)
+    reply = service.publish(4, 3, *start, _pub(versions, 4))
 
     assert reply["engines"]["e0"]["version"] == 4
     assert reply["seconds"] >= engine.apply_s
+
+
+def _volume(tmp_path):
+    """What the trainer has written, and this container's view of it, which a reload refreshes."""
+    trainer, view = tmp_path / "trainer", tmp_path / "view"
+    trainer.mkdir()
+    view.mkdir()
+    return trainer, view, lambda: shutil.copytree(trainer, view, dirs_exist_ok=True)
 
 
 def test_a_version_is_read_from_a_view_reloaded_after_it_was_announced(
     service, tmp_path
 ):
     """A trainer on two nodes commits version 4 node by node: a reload made while applying 3 sees 4's
-    manifest before the other node's file."""
-    volume = {version: "{}" for version in (1, 2)}
-
-    def reload():
-        for version, text in volume.items():
-            _write_manifest(tmp_path, version, text)
-
-    start = _start(service, 2)
+    manifest before the other node's write."""
+    trainer, view, reload = _volume(tmp_path)
+    for version in (1, 2):
+        _publish_files(
+            trainer, version, (STREAM, version - 1) if version > 1 else (None, 0)
+        )
+    reload()
+    start = _start(service, 2, _pub(trainer, 2))
     engine = FakeEngine()
-    container = _container(service, engine, tmp_path, reload)
+    container = _container(service, engine, view, reload)
     container.open()
     _run(container.listen, container.follow)
 
-    volume |= {3: "{}", 4: "first node only"}
-    service.publish(3, 2, *start)
-    volume[4] = "both nodes"
-    service.publish(4, 3, *start)
+    _publish_files(trainer, 3, (STREAM, 2))
+    _publish_files(trainer, 4, (STREAM, 3), note="first node only")
+    service.publish(3, 2, *start, _pub(trainer, 3))
+    four = _publish_files(trainer, 4, (STREAM, 3), note="both nodes")
+    service.publish(4, 3, *start, four)
 
     assert engine.applied == [1, 2, 3, 4]
-    assert engine.read[-1] == "both nodes"
+    assert json.loads(engine.read[-1])["note"] == "both nodes"
 
 
 def test_versions_that_skip_numbers_are_applied_in_order(service, tmp_path):
-    for version in (2, 4, 6):
-        _write_manifest(tmp_path, version)
-    start = _start(service, 4)
+    _publish_files(tmp_path, 2)
+    _publish_files(tmp_path, 4, (STREAM, 2))
+    _publish_files(tmp_path, 6, (STREAM, 4))
+    start = _start(service, 4, _pub(tmp_path, 4))
     engine = FakeEngine()
     container = _container(service, engine, tmp_path)
     container.open()
     _run(container.listen, container.follow)
 
-    service.publish(6, 4, *start)
+    service.publish(6, 4, *start, _pub(tmp_path, 6))
 
     assert engine.applied == [2, 4, 6]
 
 
-def test_a_prepare_that_fails_fails_the_version(service, versions):
-    start = _start(service, 3)
-    engine = FakeEngine(fail_prepare_at=4)
+def test_an_apply_that_fails_fails_the_version(service, versions):
+    start = _start(service, 3, _pub(versions, 3))
+    engine = FakeEngine(fail_at=4)
     container = _container(service, engine, versions)
     container.open()
     ended = _run(container.listen, container.follow)
 
     with pytest.raises(Failed, match="every open engine failed to apply version 4"):
-        service.publish(4, 3, *start)
+        service.publish(4, 3, *start, _pub(versions, 4))
 
     assert service.failed == {"e0": 4} and engine.version == 3
     time.sleep(0.3)
     assert set(ended) == {
-        f"version 4 from {versions}/weight_v000004/manifest.json: "
-        "SGLang /prepare_weights_from_delta: [Errno 5] Input/output error",
+        f"version 4 from {STREAM}/weight_v000004/manifest.json: version 4 failed",
         "the control service ended this engine: failed to apply version 4",
     }
 
 
 def test_an_engine_past_a_resumed_run_stops_catching_up(service, versions):
-    service.start(3)
-    engine = FakeEngine(on_apply=lambda version: version == 2 and service.start(1))
+    service.start(3, _pub(versions, 3))
+    engine = FakeEngine(
+        on_apply=lambda version: version == 2 and service.start(1, _pub(versions, 1))
+    )
 
     with pytest.raises(RuntimeError, match="from before the run's start at 1"):
         _container(service, engine, versions).open()
@@ -276,7 +330,7 @@ def test_a_failed_version_is_reported_then_requests_are_aborted_and_the_containe
 ):
     ended = []
     monkeypatch.setattr(stitch.engine, "terminate_container", lambda: ended.append(1))
-    start = _start(service, 3)
+    start = _start(service, 3, _pub(versions, 3))
     engine = FakeEngine(fail_at=4)
     container = _container(service, engine, versions)
     container.open()
@@ -285,7 +339,7 @@ def test_a_failed_version_is_reported_then_requests_are_aborted_and_the_containe
 
     def publish():
         try:
-            service.publish(4, 3, *start)
+            service.publish(4, 3, *start, _pub(versions, 4))
         except Failed as error:
             published.append(str(error))
 
@@ -339,15 +393,15 @@ def test_a_leaving_container_tells_the_control_service_without_waiting(versions)
 def test_a_version_cut_off_by_the_container_leaving_is_not_reported_failed(
     service, versions
 ):
-    _start(service, 3)
+    _start(service, 3, _pub(versions, 3))
     engine = FakeEngine(fail_at=4)
     container = _container(service, engine, versions)
     container.open()
     container.exit()
 
-    container.head = 4
+    container.head, container.publication = 4, _pub(versions, 4)
     with pytest.raises(RuntimeError, match="version 4"):
-        container._apply_next()
+        container._catch_up()
 
     assert service.failed == {}
 
@@ -357,7 +411,7 @@ def test_a_hung_apply_ends_the_container_after_the_patience_without_failing_the_
 ):
     ended = []
     monkeypatch.setattr(stitch.engine, "terminate_container", lambda: ended.append(1))
-    start = _start(service, 3)
+    start = _start(service, 3, _pub(versions, 3))
     engine = FakeEngine(hang_at=4)
     container = _container(service, engine, versions)
     container.open()
@@ -367,7 +421,7 @@ def test_a_hung_apply_ends_the_container_after_the_patience_without_failing_the_
         ).start()
     started = time.monotonic()
 
-    reply = service.publish(4, 3, *start)
+    reply = service.publish(4, 3, *start, _pub(versions, 4))
 
     assert reply["engines"] == {}
     assert time.monotonic() - started >= CLOCKS.patience
@@ -378,31 +432,61 @@ def test_a_hung_apply_ends_the_container_after_the_patience_without_failing_the_
 def test_under_a_new_start_the_volume_is_reloaded_before_the_next_apply(
     service, tmp_path
 ):
-    """Version 4, written before the trainer resumed at 3, is still in this container's view of the
-    Volume after the trainer removed it and wrote another 4."""
-    volume = {version: "{}" for version in (1, 2, 3)} | {4: "removed"}
-
-    def reload():
-        for version, text in volume.items():
-            _write_manifest(tmp_path, version, text)
-
-    _start(service, 3)
+    """A resume at 3 publishes a new stream on version 3; this container's view of the Volume predates it."""
+    trainer, view, reload = _volume(tmp_path)
+    for version in (1, 2, 3, 4):
+        _publish_files(
+            trainer, version, (STREAM, version - 1) if version > 1 else (None, 0)
+        )
+    reload()
+    _start(service, 3, _pub(trainer, 3))
     engine = FakeEngine()
-    container = _container(service, engine, tmp_path, reload)
+    container = _container(service, engine, view, reload)
     container.open()
     _run(container.listen, container.follow)
 
-    volume[4] = "new"
-    start = _start(service, 3)
-    service.publish(4, 3, *start)
+    start = _start(service, 3, _publish_files(trainer, 1, (STREAM, 3), stream="t"))
+    service.publish(4, 3, *start, _publish_files(trainer, 2, ("t", 1), stream="t"))
 
-    assert engine.read[-1] == "new"
+    assert engine.point == ("t", 2) and engine.version == 4
+    assert json.loads(engine.read[-1])["stream_id"] == "t"
+
+
+def test_a_joiner_after_a_resume_replays_the_resumed_stream_to_its_point_then_the_new_one(
+    service, versions
+):
+    """Versions 4-8 of the first stream came after the save the run resumed from: no engine applies them."""
+    start = _start(service, 3, _publish_files(versions, 1, (STREAM, 3), stream="t"))
+    service.publish(4, 3, *start, _publish_files(versions, 2, ("t", 1), stream="t"))
+    engine = FakeEngine()
+    _container(service, engine, versions).open()
+
+    assert engine.applied == [1, 2, 3, 1, 2] and engine.point == ("t", 2)
+    assert engine.version == 4
+
+
+def test_weights_the_run_resumed_before_are_off_its_chain(versions):
+    head = _publish_files(versions, 1, (STREAM, 3), stream="t")
+
+    assert [
+        p["target_version"] for p in publication_chain(versions, head, (None, 0))
+    ] == [1, 2, 3, 1]
+    with pytest.raises(RuntimeError, match="not on the run's publications to t:1"):
+        publication_chain(versions, head, (STREAM, 4))
+
+
+def test_a_head_manifest_unlike_its_announcement_is_refused(versions):
+    announced = _pub(versions, 4)
+    _publish_files(versions, 4, (STREAM, 3), note="rewritten")
+
+    with pytest.raises(RuntimeError, match="is not the announced publication"):
+        publication_chain(versions, announced, (STREAM, 3))
 
 
 def test_an_apply_begun_before_a_resume_ends_the_engine_once_it_finishes(
     service, versions
 ):
-    before = _start(service, 3)
+    before = _start(service, 3, _pub(versions, 3))
     engine = FakeEngine()
     container = _container(service, engine, versions)
     container.open()
@@ -412,15 +496,15 @@ def test_an_apply_begun_before_a_resume_ends_the_engine_once_it_finishes(
 
     def publish_before():
         try:
-            service.publish(4, 3, *before)
+            service.publish(4, 3, *before, _pub(versions, 4))
         except Refused as error:
             refused.append(str(error))
 
     threading.Thread(target=publish_before, daemon=True).start()
     time.sleep(0.1)  # applying version 4 from before
 
-    resumed = _start(service, 3)
-    reply = service.publish(4, 3, *resumed)
+    resumed = _start(service, 3, _pub(versions, 3))
+    reply = service.publish(4, 3, *resumed, _pub(versions, 4))
 
     assert reply["engines"] == {}
     assert refused == ["the call is from another start than the run's"]

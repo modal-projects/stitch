@@ -1,16 +1,16 @@
 """SGLang as Stitch's engine: one server in this container, run by autoinference-utils."""
 
-import contextlib
+import asyncio
 import json
 import secrets
 import urllib.error
 import urllib.request
+import uuid
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from autoinference_utils.endpoint import SGLangEndpoint
 
-PAUSE_MODES = ("in_place", "retract", "abort")
+PAUSE_MODES = ("in_place", "retract")
 
 
 @dataclass(frozen=True)
@@ -38,6 +38,16 @@ class SGLangConfig:
         return int(replicas) * int(groups)
 
 
+class _Receiver:
+    """The GPU-delta controls of this container's SGLang, as Miles' activation posts them."""
+
+    def __init__(self, sglang: "SGLang"):
+        self.sglang = sglang
+
+    async def _make_request(self, endpoint: str, payload: dict) -> dict:
+        return await asyncio.to_thread(self.sglang._post, f"/{endpoint}", payload)
+
+
 class SGLang:
     """Serves a checkpoint; the endpoints that drive the engine need an admin key only this holds."""
 
@@ -48,8 +58,11 @@ class SGLang:
         port: int,
         config: SGLangConfig,
         startup_timeout: int,
+        engine_id: str,
     ):
-        self.version, self.config = version, config
+        self.version, self.config, self.engine_id = version, config, engine_id
+        # The receiver's ranks, as the latest `committed` read them.
+        self.participants: list[dict] = []
         self.admin_key = secrets.token_urlsafe(32)
         self.endpoint = SGLangEndpoint(
             model_path=checkpoint,
@@ -57,11 +70,7 @@ class SGLang:
             extra_server_args={
                 # SGLang's own default, as Miles' engines get; autoinference-utils would pick fastokens.
                 "--tokenizer-backend": "huggingface",
-                # A request Modal's router does not pin to a DP rank keeps its routing key on one rank,
-                # whose prefix cache it reuses.
-                "--load-balance-method": "routing_key",
                 **config.server_args,
-                "--enable-weight-delta": "",
                 "--weight-version": str(version),
                 "--admin-api-key": self.admin_key,
             },
@@ -90,29 +99,35 @@ class SGLang:
         """From here on, SGLang exiting or failing its health checks for 60 s ends the container."""
         self.endpoint.watch(failure_timeout=60)
 
-    def prepare(self, manifest: Path) -> dict | None:
-        return self._post(
-            "/prepare_weights_from_delta", {"manifest": str(manifest)}
-        ).get("stats")
+    def committed(self, plan_digest: str) -> tuple[str | None, int]:
+        from miles.backends.training_utils.weight_update.protocols.gpu_delta.session import (
+            committed_endpoint,
+        )
 
-    def apply(self, manifest: Path, version: int) -> dict | None:
-        self._post("/pause_generation", {"mode": self.config.pause_mode})
-        try:
-            updated = self._post(
-                "/update_weights_from_delta",
-                {
-                    "manifest": str(manifest),
-                    "weight_version": str(version),
-                    "flush_cache": self.config.pause_mode != "in_place",
-                },
+        info = self._post("/get_gpu_delta_info", {"engine_id": self.engine_id})
+        self.participants = [row["identity"] for row in info["participants"]]
+        return committed_endpoint(info, self.participants, plan_digest)
+
+    def apply(self, publication: dict, version: int | None) -> dict | None:
+        """Miles' activation of this engine, on the receiver ranks `committed` read."""
+        from miles.backends.training_utils.weight_update.protocols.gpu_delta.session import (
+            activate_engine,
+        )
+
+        reply = asyncio.run(
+            activate_engine(
+                _Receiver(self),
+                publication,
+                self.participants,
+                uuid.uuid4().hex,
+                None if version is None else str(version),
+                None,
+                pause_mode=self.config.pause_mode,
             )
-        except BaseException:
-            with contextlib.suppress(OSError, RuntimeError):
-                self._post("/continue_generation", {})
-            raise
-        self._post("/continue_generation", {})
-        self.version = version
-        return updated.get("stats")
+        )
+        if version is not None:
+            self.version = version
+        return reply["timings"]
 
     def abort_all(self) -> None:
         """Ends every request in flight with finish_reason abort."""
