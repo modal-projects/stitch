@@ -7,7 +7,7 @@ through --rollout-external-engine-addrs, so the engine outlives the training run
 short and their reward is seeded random: the run exercises the infrastructure, not learning.
 
 With --resume-at S, a first run publishes two versions past S and stops; the run then resumes from
-its save at S into a fresh engine, which Miles labels and replays the kept versions into.
+its save at S into a fresh engine, which Miles brings to S with a publication from the checkpoint.
 
     modal run tests/e2e/harness.py --config glm5.3-cut-nvfp4
 """
@@ -35,19 +35,19 @@ from configs import CONFIGS, Config
 # MILES_SOURCE put local trees in their place while developing.
 SGLANG_REPO, SGLANG_BRANCH = (
     "https://github.com/modal-projects/sglang.git",
-    "stitch-sglang-miles",
+    "stitch-dev",
 )
 MILES_REPO, MILES_BRANCH = (
     "https://github.com/modal-projects/miles.git",
-    "stitch-miles-weight-delta",
+    "stitch-dev",
 )
 SGLANG_SOURCE, MILES_SOURCE = (
     os.environ.get("SGLANG_SOURCE"),
     os.environ.get("MILES_SOURCE"),
 )
-# A Miles build (sglang-miles 18a44326f6) for its Megatron, Megatron-Bridge and TransformerEngine;
+# A Miles build for its Megatron, Megatron-Bridge and TransformerEngine;
 # its Miles and SGLang trees are replaced by ours.
-MILES_IMAGE = "radixark/miles:dev-202611121556"
+MILES_IMAGE = "radixark/miles:dev-202611191721"
 MILES, MILES_OVERLAY = "/root/miles", "/root/miles-overlay"
 MILES_DIRS = ("miles", "miles_plugins", "scripts", "tools")
 MEGATRON_PATH = "/root/Megatron-LM"
@@ -148,7 +148,7 @@ TREES = [
 image = (
     modal.Image.from_registry(MILES_IMAGE)
     .run_commands(
-        "python3 -m pip install --no-deps nvidia-libnvcomp-cu13==5.3.0.16",
+        "python3 -m pip install --no-deps nvidia-libnvcomp-cu13==6.0.0.12",
         f"rm -rf {SGLANG_CACHE}",
     )
     .env({"E2E_REVISIONS": json.dumps(REVISIONS)})
@@ -160,12 +160,15 @@ image = image.add_local_file(
     Path(__file__).with_name("seeded_reward.py"), f"{REWARD_DIR}/seeded_reward.py"
 ).add_local_python_source("configs")
 # What a run's engines build onto MILES_IMAGE: our SGLang copied over the image's, so the files the image
-# built for its SGLang stay.
+# built for its SGLang stay, and our Miles, whose GPU-delta receiver SGLang imports.
 ENGINE_COMMANDS = [
-    "python3 -m pip install --no-deps nvidia-libnvcomp-cu13==5.3.0.16",
+    "python3 -m pip install --no-deps nvidia-libnvcomp-cu13==6.0.0.12",
     f"git clone --filter=blob:none --no-checkout {SGLANG_REPO} /tmp/sglang "
     f"&& git -C /tmp/sglang checkout --quiet {REVISIONS['sglang']} "
     f"&& cp -a /tmp/sglang/python/sglang/. {SGLANG}/ && rm -rf /tmp/sglang",
+    f"git clone --filter=blob:none --no-checkout {MILES_REPO} /tmp/miles "
+    f"&& git -C /tmp/miles checkout --quiet {REVISIONS['miles']} "
+    f"&& cp -a /tmp/miles/miles/. {MILES}/miles/ && rm -rf /tmp/miles",
 ]
 app = modal.App("weight-delta-e2e", image=image)
 checkpoints = modal.Volume.from_name("miles-checkpoints")
@@ -420,7 +423,6 @@ class Engine:
             "127.0.0.1",
             "--port",
             str(port),
-            "--enable-weight-delta",
             *shlex.split(config.engine_args),
         ]
         env = {**os.environ, **config.env, "CUDA_VISIBLE_DEVICES": gpus}
@@ -590,7 +592,7 @@ def recipe_args(
         f"{rollout}{loss}"
         "--optimizer adam --lr 1e-6 --lr-decay-style constant --weight-decay 0.1 "
         "--adam-beta1 0.9 --adam-beta2 0.98 "
-        "--update-weight-transfer-mode weight-delta --check-weight-transfer-checksum "
+        "--update-weight-transfer-mode gpu-delta "
         f"--update-weight-disk-dir {run_dir}/deltas "
         f"--actor-num-nodes 1 --actor-num-gpus-per-node {config.train_gpus} "
         f"--num-gpus-per-node {config.train_gpus} "
