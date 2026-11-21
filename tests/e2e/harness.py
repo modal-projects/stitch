@@ -61,7 +61,8 @@ SGLANG_CACHE = "/root/.cache/sglang"
 REWARD_DIR = "/root/stitch-e2e"
 CHECKPOINTS, DATA = "/checkpoints", "/data"
 SAVE = "/tmp/save"
-ENGINE_GPUS = "4,5,6,7"
+# The engine takes the GPUs after the trainer's, as many as its config asks for.
+ENGINE_GPU_START = 4
 CPUS = 64
 ENGINE_PORT = 30000
 NUM_ROLLOUT = 10
@@ -275,6 +276,10 @@ def main(
     print("e2e passed")
 
 
+def _engine_gpus(config: Config) -> str:
+    return ",".join(str(ENGINE_GPU_START + gpu) for gpu in range(config.engine_gpus))
+
+
 def _last_version(fully_async: bool, num_rollout: int) -> int:
     """train.py syncs after every training step but the last, train_async.py after every step."""
     return num_rollout if fully_async else num_rollout - 1
@@ -304,7 +309,7 @@ def _run(
         engine = Engine(
             f"{CHECKPOINTS}/{config.rollout_checkpoint}",
             config,
-            ENGINE_GPUS,
+            _engine_gpus(config),
             ENGINE_PORT,
             logs / log,
         )
@@ -343,7 +348,7 @@ def _run(
         reference = Engine(
             f"{SAVE}/hf/step_{_last_version(fully_async, num_rollout) - 1}",
             config,
-            ENGINE_GPUS,
+            _engine_gpus(config),
             ENGINE_PORT,
             logs / "reference.log",
         )
@@ -549,7 +554,7 @@ def _train_args(
     return (
         f"{recipe_args(config, run_dir)}--num-rollout {num_rollout} "
         f"--rollout-external-engine-addrs 127.0.0.1:{ENGINE_PORT} --router miles "
-        "--rollout-num-gpus 4 --rollout-num-gpus-per-engine 4 "
+        f"--rollout-num-gpus {config.engine_gpus} --rollout-num-gpus-per-engine {config.engine_gpus} "
         # By default, saves after the last two steps: one of them holds the last version published.
         f"--save {save}/torch_dist --save-hf {save}/hf/step_{{rollout_id}} "
         f"--save-interval {save_interval or num_rollout - 1} --no-save-optim "

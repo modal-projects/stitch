@@ -353,6 +353,21 @@ CONFIGS |= {
         "--speculative-num-draft-tokens 8 --moe-runner-backend flashinfer_cutedsl ",
         **_ONE_NODE,
     ),
+    # The DFlash2 recipe's engine (one GPU, the drafter from its own checkpoint) beside a 4-GPU trainer:
+    # the e2e harness' node layout.
+    "qwen3.6-35b-a3b-nvfp4-dflash2": replace(
+        CONFIGS["qwen3.6-35b-a3b-nvfp4"],
+        train_args=_QWEN3_6_NO_MTP_TRAIN
+        + "--expert-model-parallel-size 4 --max-tokens-per-gpu 8192 "
+        + _QWEN3_6_NVFP4_TRAIN
+        + _CPU_ADAM,
+        engine_args="--tp-size 1 "
+        + _QWEN3_5_SERVE
+        + "--speculative-algorithm DFLASH "
+        "--speculative-draft-model-path /checkpoints/qwen3-6-35b-a3b-dflash2 "
+        "--speculative-num-draft-tokens 8 --moe-runner-backend flashinfer_cutedsl ",
+        engine_gpus=1,
+    ),
     "qwen3.6-35b-a3b-fp8-node": replace(
         CONFIGS["qwen3.6-35b-a3b-fp8"],
         # Adam on the H200s leaves no room to train the MTP layer; engines draft with its base.
