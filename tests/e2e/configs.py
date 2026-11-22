@@ -18,7 +18,9 @@ class Config:
     env: dict[str, str] = field(default_factory=dict)
     # Written to a file for --te-precision-config-file
     te_precision_config: str | None = None
+    # Per trainer node.
     train_gpus: int = 4
+    train_nodes: int = 1
     engine_gpus: int = 4
     # LoRA adapter served and synced by disk-lora; else full weights by gpu-delta.
     served_lora: bool = False
@@ -504,6 +506,10 @@ CONFIGS["qwen3.6-35b-a3b-bf16-node-lora"] = replace(
     + _lora_engine(1),
     served_lora=True,
     **_ONE_NODE,
+)
+# Two trainer nodes: each node's ranks write and commit their own files.
+CONFIGS["qwen3.6-35b-a3b-bf16-2node-lora"] = replace(
+    CONFIGS["qwen3.6-35b-a3b-bf16-node-lora"], gpu="B200", train_nodes=2
 )
 # One engine over a node: DP attention, EP8, the adapter pinned.
 CONFIGS["qwen3.6-35b-a3b-bf16-node-lora-dp8"] = replace(

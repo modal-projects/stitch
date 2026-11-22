@@ -26,6 +26,7 @@ from datetime import datetime
 from pathlib import Path
 
 import modal
+import modal.experimental
 
 # The repo root here, for Stitch; "/" in the container, where this file is /root/endpoint.py.
 sys.path.insert(0, str(Path(__file__).parents[1].parent))
@@ -91,6 +92,7 @@ SETUPS = {
         name: Setup(engines=2, join_at=3)
         for name in (
             "qwen3.6-35b-a3b-bf16-node-lora",
+            "qwen3.6-35b-a3b-bf16-2node-lora",
             "qwen3.6-35b-a3b-fp8-node-lora",
             "qwen3.6-35b-a3b-nvfp4-node-lora",
             "qwen3.8-27b-bf16-node-lora",
@@ -152,6 +154,18 @@ def train_b200(
     return _train_against_run(name, SETUPS[setup], Path(run_dir), stitch_run, **options)
 
 
+@app.function(gpu="B200:8", **TRAINER)
+@modal.clustered(size=2)
+def train_b200_2node(
+    name: str, setup: str, run_dir: str, stitch_run: dict, options: dict
+) -> dict | None:
+    if modal.experimental.get_cluster_info().rank > 0:
+        harness.install_overlays()
+        _trainer_env(stitch_run)
+        harness.join_trainer(CONFIGS[name])
+    return _train_against_run(name, SETUPS[setup], Path(run_dir), stitch_run, **options)
+
+
 @app.function(gpu="H200:8", **TRAINER)
 @modal.clustered(size=1)
 def train_h200(
@@ -192,11 +206,7 @@ def _train_against_run(
             key: os.environ.get(key) for key in ("MODAL_REGION", "MODAL_CLOUD_PROVIDER")
         },
     }
-    # Ray's processes inherit them from `ray start`; arguments would reach W&B and the checkpoints.
-    os.environ["MILES_ROLLOUT_EXTERNAL_API_KEY"] = (
-        f"{os.environ['MODAL_PROXY_TOKEN_ID']}.{os.environ['MODAL_PROXY_TOKEN_SECRET']}"
-    )
-    os.environ["STITCH_VERSIONS_VOLUME"] = stitch_run["versions_volume"]
+    _trainer_env(stitch_run)
     pool = modal.Server.from_name(stitch_run["app_name"], "EnginePool")
     base_args = (
         f"{harness.recipe_args(config, run_dir, setup.rollout, setup.loss)}--num-rollout {num_rollout} "
@@ -259,6 +269,14 @@ def _train_against_run(
         (run_dir / "result.json").write_text(json.dumps(result, indent=1))
         harness.data.commit()
     return result
+
+
+def _trainer_env(stitch_run: dict) -> None:
+    # Ray's processes inherit them from `ray start`; arguments would reach W&B and the checkpoints.
+    os.environ["MILES_ROLLOUT_EXTERNAL_API_KEY"] = (
+        f"{os.environ['MODAL_PROXY_TOKEN_ID']}.{os.environ['MODAL_PROXY_TOKEN_SECRET']}"
+    )
+    os.environ["STITCH_VERSIONS_VOLUME"] = stitch_run["versions_volume"]
 
 
 def _join_once_published(setup: Setup, pool: modal.Server, stitch_run: dict) -> dict:
@@ -471,7 +489,11 @@ def main(
         "app_name": run_config.app_name,
         "versions_volume": run_config.versions_volume,
     }
-    train = {"B200": train_b200, "H200": train_h200, "B300": train_b300}[e2e.gpu]
+    train = (
+        train_b200_2node
+        if e2e.train_nodes == 2
+        else {"B200": train_b200, "H200": train_h200, "B300": train_b300}[e2e.gpu]
+    )
     try:
         options = dict(
             check_state=check_state, num_rollout=num_rollout, wandb_group=wandb_group

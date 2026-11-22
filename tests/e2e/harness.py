@@ -30,6 +30,7 @@ from glob import glob
 from pathlib import Path
 
 import modal
+import modal.experimental
 from configs import CONFIGS, Config
 
 # Our SGLang and Miles branches, at their heads when the image is built; SGLANG_SOURCE and
@@ -69,6 +70,7 @@ SAVE = "/tmp/save"
 ENGINE_GPU_START = 4
 CPUS = 64
 ENGINE_PORT = 30000
+RAY_PORT = 6379
 NUM_ROLLOUT = 10
 # Miles' name for its single adapter (miles.utils.lora.utils.LORA_ADAPTER_NAME).
 LORA_ADAPTER = "miles_lora"
@@ -619,14 +621,21 @@ class Engine:
 def train(
     config: Config, log: Path, train_args: str, fully_async: bool, cpus: int = CPUS // 4
 ) -> None:
-    """Miles' training script on a Ray cluster of the node's first GPUs; its ranks share `cpus`."""
+    """Miles' training script on a Ray cluster of each node's first GPUs; a node's ranks share `cpus`.
+
+    On several nodes this is the first; the others run join_trainer.
+    """
     gpus = config.train_gpus
     env = {**os.environ, "CUDA_VISIBLE_DEVICES": ",".join(map(str, range(gpus)))}
-    subprocess.run(
-        ["ray", "start", "--head", "--num-gpus", str(gpus), "--disable-usage-stats"],
-        env=env,
-        check=True,
-    )
+    head, cluster = "127.0.0.1", {}
+    start = ["ray", "start", "--head", "--num-gpus", str(gpus), "--disable-usage-stats"]
+    if config.train_nodes > 1:
+        head = modal.experimental.get_cluster_info().container_ipv4_ips[0]
+        start += [f"--node-ip-address={head}", f"--port={RAY_PORT}"]
+        cluster = {"GLOO_SOCKET_IFNAME": _interface(head)}
+    subprocess.run(start, env=env, check=True)
+    if config.train_nodes > 1:
+        _wait_for_nodes(config.train_nodes)
     from miles.utils.external_utils.model_args_utils import shell_safe_model_args
 
     runtime_env = {
@@ -639,8 +648,9 @@ def train(
             "OMP_NUM_THREADS": str(cpus // gpus),
             # Ahead of the container's own path: Modal's client and the local sources.
             "PYTHONPATH": f"{MILES}:{MEGATRON_PATH}:{REWARD_DIR}:{os.environ['PYTHONPATH']}",
-            "MASTER_ADDR": "127.0.0.1",
-            "no_proxy": "127.0.0.1",
+            "MASTER_ADDR": head,
+            "no_proxy": ",".join(sorted({"127.0.0.1", head})),
+            **cluster,
         }
     }
     command = (
@@ -664,6 +674,50 @@ def train(
             )
     finally:
         subprocess.run(["ray", "stop", "--force"], env=env)
+
+
+def join_trainer(config: Config) -> None:
+    """A trainer node after the first: joins the first's Ray cluster with its GPUs until it ends."""
+    info = modal.experimental.get_cluster_info()
+    head, node = info.container_ipv4_ips[0], info.container_ipv4_ips[info.rank]
+    env = {
+        **os.environ,
+        "CUDA_VISIBLE_DEVICES": ",".join(map(str, range(config.train_gpus))),
+    }
+    start = [
+        "ray",
+        "start",
+        f"--address={head}:{RAY_PORT}",
+        f"--node-ip-address={node}",
+    ]
+    start += ["--num-gpus", str(config.train_gpus), "--disable-usage-stats"]
+    # The first node starts its head when its own setup is done.
+    while subprocess.run(start, env=env).returncode != 0:
+        time.sleep(10)
+    # Modal stops this container with the first node's.
+    while True:
+        time.sleep(60)
+
+
+def _wait_for_nodes(nodes: int) -> None:
+    import ray
+
+    ray.init(address="auto")
+    try:
+        while sum(node["Alive"] for node in ray.nodes()) < nodes:
+            time.sleep(5)
+    finally:
+        ray.shutdown()
+
+
+def _interface(address: str) -> str:
+    """The network interface holding `address`: Modal's cluster network differs by GPU generation."""
+    import psutil
+
+    for name, addresses in psutil.net_if_addrs().items():
+        if any(entry.address == address for entry in addresses):
+            return name
+    raise RuntimeError(f"no interface holds {address}")
 
 
 def _train_args(
@@ -728,7 +782,7 @@ def recipe_args(
         "--adam-beta1 0.9 --adam-beta2 0.98 "
         f"--update-weight-transfer-mode {'disk-lora' if config.served_lora else 'gpu-delta'} "
         f"--update-weight-disk-dir {update_dir(config, run_dir)} "
-        f"--actor-num-nodes 1 --actor-num-gpus-per-node {config.train_gpus} "
+        f"--actor-num-nodes {config.train_nodes} --actor-num-gpus-per-node {config.train_gpus} "
         f"--num-gpus-per-node {config.train_gpus} "
         f"{te_precision}{config.train_args}"
     )
