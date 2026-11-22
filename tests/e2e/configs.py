@@ -60,12 +60,15 @@ DSV41_ENV = {
     "SGLANG_OPT_DEEPGEMM_HC_PRENORM": "0",
     "SGLANG_OPT_FUSE_WQA_WKV": "0",
 }
+# Full prefill, as Miles launches its engines: decoder SWA bounded replay is not numerically full
+# prefill, so rollouts would not match the trainer.
+_DSV41_FULL_PREFILL = "--no-enable-decoder-swa-bounded-replay "
 # The DSV4 override does not read the checkpoint's quantization before the MoE runner check, so the
 # flag names it. Under DP attention it would pick FlashMLA's mega kernel, which runs wo_a from an FP8
 # copy the trainer does not model; plain FlashMLA keeps wo_a in BF16, as Miles' TP rollouts run it.
 DSV41_NVFP4_ENGINE = (
     "--enable-dp-lm-head --quantization modelopt_fp4 --moe-runner-backend flashinfer_cutedsl "
-    "--dsv4-attn-backend flashmla "
+    "--dsv4-attn-backend flashmla " + _DSV41_FULL_PREFILL
 )
 
 # Adam on the CPU, as Miles' recipes run it where the training GPUs cannot hold the optimizer (they
@@ -579,6 +582,7 @@ CONFIGS["dsv4.1-cut-bf16-lora"] = replace(
     train_args=_DSV41_TRAIN + _EXPERT_LORA,
     engine_args="--tp-size 4 --ep-size 4 --moe-a2a-backend none --attention-backend dsv4 "
     "--moe-runner-backend triton --mem-fraction-static 0.7 "
+    + _DSV41_FULL_PREFILL
     + _lora_engine(1, targets=_DSV41_LORA_TARGETS),
     env=DSV41_ENV | {"SGLANG_DSV4_FP4_EXPERTS": "0"},
     served_lora=True,
@@ -588,5 +592,7 @@ CONFIGS["dsv4.1-cut-bf16-lora-dp4"] = replace(
     CONFIGS["dsv4.1-cut-bf16-lora"],
     engine_args=dp_attention(4)
     + "--enable-dp-lm-head --dsv4-attn-backend flashmla --moe-runner-backend triton "
-    "--mem-fraction-static 0.7 " + _lora_engine(2, targets=_DSV41_LORA_TARGETS),
+    "--mem-fraction-static 0.7 "
+    + _DSV41_FULL_PREFILL
+    + _lora_engine(2, targets=_DSV41_LORA_TARGETS),
 )
