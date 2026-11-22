@@ -506,13 +506,14 @@ def main(
                 for container in result["engines_at_end"]
             }
             if e2e.served_lora:
-                (version_dir,) = [
+                # A resumed run writes its versions again under a later tag, its start time.
+                version_dir = max(
                     entry.path
                     for entry in harness.data.listdir(
                         str(versions.relative_to(harness.DATA))
                     )
                     if entry.path.endswith(f"_v{num_rollout}")
-                ]
+                )
                 result["lora_slots"] = {
                     container: _engine_lora_slot(
                         container, run_dir, f"{harness.DATA}/{version_dir}"
