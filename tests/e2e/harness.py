@@ -1,6 +1,7 @@
 """Miles trains a model for a few steps while one SGLang engine serves its rollouts and takes
 every update as a weight delta. At the end, that engine must hold the same bytes, tensor for
-tensor on every GPU, as a fresh engine started from the trainer's own save of the last version.
+tensor on every GPU, as a fresh engine started from the trainer's own save of the last version, in the
+rollout checkpoint's dtypes as the trainer publishes it.
 
 One node: GPUs 0-3 train, GPUs 4-7 serve. The harness starts the engine and Miles reaches it
 through --rollout-external-engine-addrs, so the engine outlives the training run. Rollouts are
@@ -346,7 +347,10 @@ def _run(
         delta_state = engine.state()
         engine.stop()
         reference = Engine(
-            f"{SAVE}/hf/step_{_last_version(fully_async, num_rollout) - 1}",
+            in_checkpoint_dtypes(
+                Path(f"{SAVE}/hf/step_{_last_version(fully_async, num_rollout) - 1}"),
+                Path(CHECKPOINTS, config.rollout_checkpoint),
+            ),
             config,
             _engine_gpus(config),
             ENGINE_PORT,
@@ -646,6 +650,42 @@ def server_args(engine_args: str) -> dict[str, str]:
         else:
             args[flag] = f"{args[flag]} {word}".strip()
     return args
+
+
+def in_checkpoint_dtypes(save: Path, checkpoint: Path) -> Path:
+    """The trainer's save as it publishes it: each float tensor cast to the rollout checkpoint's dtype, as the
+    trainer casts every export before the XOR. Files that need no cast are linked."""
+    import torch
+    from safetensors import safe_open
+    from safetensors.torch import save_file
+
+    floats = {"F32": torch.float32, "BF16": torch.bfloat16, "F16": torch.float16}
+    canonical = {}
+    for path in checkpoint.glob("*.safetensors"):
+        with safe_open(path, "pt") as f:
+            canonical.update((name, f.get_slice(name).get_dtype()) for name in f.keys())
+    target = save.with_name(f"{save.name}-checkpoint-dtypes")
+    target.mkdir()
+    for path in save.iterdir():
+        casts = {}
+        if path.suffix == ".safetensors":
+            with safe_open(path, "pt") as f:
+                for name in f.keys():
+                    dtype, wanted = f.get_slice(name).get_dtype(), canonical.get(name)
+                    if dtype != wanted and dtype in floats and wanted in floats:
+                        casts[name] = floats[wanted]
+                if casts:
+                    tensors = {name: f.get_tensor(name) for name in f.keys()}
+                    metadata = f.metadata()
+        if not casts:
+            (target / path.name).symlink_to(path)
+            continue
+        save_file(
+            {name: t.to(casts.get(name, t.dtype)) for name, t in tensors.items()},
+            target / path.name,
+            metadata,
+        )
+    return target
 
 
 def tp_states(ranks: list[dict]) -> dict[str, dict[str, str]]:

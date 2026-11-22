@@ -74,12 +74,12 @@ def _glm5_3_flash_frozen(mtp_layer: int) -> tuple[str, ...]:
 
 
 _QWEN3_6 = dict(
-    bf16_checkpoint="qwen3-6-35b-a3b-bf16",
+    bf16_checkpoint="qwen3-6-35b-a3b-release-bf16",
     frozen=("model.visual.", ".input_scale"),
 )
 # Miles' model args for it train no MTP layer.
 _QWEN3_8 = dict(
-    bf16_checkpoint="qwen3-8-27b-bf16",
+    bf16_checkpoint="qwen3-8-27b-release-bf16",
     frozen=("model.visual.", "mtp."),
 )
 # Miles' GLM-5 recipes train no MTP layer (layer 78) and no expert bias.
@@ -132,7 +132,7 @@ DELTA_SETS = {
     ),
     "glm5.3-flash-cut-nvfp4": _delta_set(
         "glm5.3-flash-cut-nvfp4",
-        bf16_checkpoint="glm5-3-flash-bf16-5layer",
+        bf16_checkpoint="glm5-3-flash-cut5-bf16",
         frozen=_glm5_3_flash_frozen(mtp_layer=5),
     ),
     # Miles' V4.1 recipe trains no MTP layer either.
@@ -145,7 +145,7 @@ DELTA_SETS = {
     ),
     "dsv4.1-cut-nvfp4": _delta_set(
         "dsv4.1-cut-nvfp4",
-        bf16_checkpoint="deepseek-v4-1-flash-bf16-7layer",
+        bf16_checkpoint="deepseek-v4-1-flash-cut7-bf16",
         frozen=_DSV4_1_FROZEN,
     ),
     # The last four layers (RadixArk/Muse-Spark-Open-last4-partial), one tensor per expert as Miles exports.

@@ -1,9 +1,9 @@
 """The checkpoints an e2e config needs, made from a Hugging Face release with Miles' own tools.
 
-A rollout checkpoint holds what the trainer exports, under its names and in its dtypes. In BF16
-that is the release's bytes, with each fused expert tensor (all experts of a projection in one
-3-D tensor) split into the per-expert tensors Miles exports, and the tensors the trainer keeps in
-FP32 upcast; its fresh-launch check proves the result is its own first export. In FP8 or NVFP4 it
+A rollout checkpoint is the release, under the names Miles exports: in BF16 the release's bytes,
+with each fused expert tensor (all experts of a projection in one 3-D tensor) split into the
+per-expert tensors Miles exports. Its dtypes are canonical: the trainer casts each export to them,
+and SGLang may serve a tensor wider, which the receiver widens exactly. In FP8 or NVFP4 it
 is Miles' converter run on the BF16 one, on the GPU type that serves it and in the config's
 environment, as the trainer quantizes. The trainer loads Miles' torch_dist conversion of the
 release. A cut keeps some decoder layers of a BF16 checkpoint, renumbered, for a model too large
@@ -15,14 +15,13 @@ to test whole.
         --target qwen3-6-35b-a3b_torch_dist
     modal run tests/e2e/checkpoints.py::bf16 \
         --release hub/models--Qwen--Qwen3.6-35B-A3B/snapshots/995ad96eacd98c81ed38be0c5b274b04031597b0 \
-        --target qwen3-6-35b-a3b-bf16 --fp32 linear_attn.A_log
+        --target qwen3-6-35b-a3b-release-bf16
     modal run tests/e2e/checkpoints.py::quantize \
-        --tool fp8 --gpu H200 --source qwen3-6-35b-a3b-bf16 --target qwen3-6-35b-a3b-fp8-miles \
+        --tool fp8 --gpu H200 --source qwen3-6-35b-a3b-release-bf16 --target qwen3-6-35b-a3b-release-fp8-miles \
         --tool-args "--strategy block --block-size 128 128 --extra-high-precision-layers-hf ..."
     modal run tests/e2e/checkpoints.py::cut \
-        --source deepseek-v4-1-flash-1017-bf16 --target deepseek-v4-1-flash-bf16-7layer \
-        --layer-prefix layers. --layers 0,1,2,3,20,21,24 --drop mtp. --config '{...}' \
-        --fp32 engram.q_weight,engram.k_weight,compressor.norm.weight,indexer.k_norm.weight
+        --source deepseek-v4-1-flash-1017-bf16 --target deepseek-v4-1-flash-cut7-bf16 \
+        --layer-prefix layers. --layers 0,1,2,3,20,21,24 --drop mtp. --config '{...}'
 """
 
 import json
@@ -79,11 +78,10 @@ def torch_dist(model_type: str, source: str, target: str, extra_args: str = "") 
     checkpoints.commit()
 
 
-def _as_exported(name: str, tensor, fp32: tuple[str, ...]):
-    """The trainer's tensors for one release tensor: fused experts one tensor per expert, and the
-    tensors it keeps in FP32 upcast (exact from BF16)."""
+def _as_exported(name: str, tensor):
+    """The trainer's tensors for one release tensor: fused experts one tensor per expert."""
     if FUSED_EXPERTS.search(name) is None:
-        return [(name, tensor.float() if name.endswith(fp32) else tensor)]
+        return [(name, tensor)]
     module = name.rsplit(".", 1)[0]
     if name.endswith("down_proj"):
         return [(f"{module}.{i}.down_proj.weight", w) for i, w in enumerate(tensor)]
@@ -140,18 +138,15 @@ def _release_tensors(source_dir: Path, rename=lambda name: name):
 
 
 @app.function(cpu=16, memory=262144, timeout=4 * 3600, volumes=VOLUMES)
-def bf16(release: str, target: str, fp32: str = "") -> dict:
-    """`fp32`: comma-separated name suffixes of the tensors the trainer keeps in FP32 (Miles marks
-    them on the model definition)."""
+def bf16(release: str, target: str) -> dict:
     release_dir, target_dir = _path(release), _path(target)
     _copy_other_files(release_dir, target_dir)
-    suffixes = tuple(filter(None, fp32.split(",")))
     stats = _save_sharded(
         target_dir,
         (
             pair
             for name, tensor in _release_tensors(release_dir)
-            for pair in _as_exported(name, tensor, suffixes)
+            for pair in _as_exported(name, tensor)
         ),
     )
     checkpoints.commit()
@@ -166,16 +161,14 @@ def cut(
     layers: str,
     drop: str = "",
     config: str = "{}",
-    fp32: str = "",
 ) -> dict:
     """Keeps the decoder layers `layers` lists (comma-separated, renumbered from 0 in that order) and
-    every other tensor not under a `drop` prefix, `fp32` upcast as `bf16` does; `config` is JSON of
+    every other tensor not under a `drop` prefix; `config` is JSON of
     config.json fields to set (null removes one), a dotted key for a nested one."""
     source_dir, target_dir = _path(source), _path(target)
     _copy_other_files(source_dir, target_dir)
     new_index = {old: new for new, old in enumerate(map(int, layers.split(",")))}
     dropped = tuple(filter(None, drop.split(",")))
-    suffixes = tuple(filter(None, fp32.split(",")))
     layer = re.compile(rf"^{re.escape(layer_prefix)}(\d+)\.")
 
     def rename(name: str) -> str | None:
@@ -191,7 +184,7 @@ def cut(
         (
             pair
             for name, tensor in _release_tensors(source_dir, rename)
-            for pair in _as_exported(name, tensor, suffixes)
+            for pair in _as_exported(name, tensor)
         ),
     )
     config_path = target_dir / "config.json"

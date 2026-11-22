@@ -233,7 +233,7 @@ _QWEN3_6_NVFP4_ENGINE = (
 # Full models from here on. BF16 experts on Hopper run on the Triton MoE runner.
 _QWEN3_6 = Config(
     gpu="H200",
-    rollout_checkpoint="qwen3-6-35b-a3b-bf16",
+    rollout_checkpoint="qwen3-6-35b-a3b-release-bf16",
     trainer_checkpoint="qwen3-6-35b-a3b_torch_dist",
     megatron_model_type="qwen3.6-35B-A3B",
     train_args=_QWEN3_6_TRAIN
@@ -246,7 +246,7 @@ _QWEN3_6 = Config(
 )
 _QWEN3_8 = Config(
     gpu="H200",
-    rollout_checkpoint="qwen3-8-27b-bf16",
+    rollout_checkpoint="qwen3-8-27b-release-bf16",
     trainer_checkpoint="qwen3-8-27b_torch_dist",
     megatron_model_type="qwen3.8-27B",
     train_args=_QWEN3_8_TRAIN + "--max-tokens-per-gpu 8192 " + _CPU_ADAM,
@@ -279,8 +279,8 @@ CONFIGS = {
     # Layers 0-3, 20, 21 and 24 (tests/e2e/checkpoints.py::cut); the trainer reads the BF16 cut.
     "dsv4.1-cut-nvfp4": Config(
         gpu="B200",
-        rollout_checkpoint="deepseek-v4-1-flash-bf16-7layer-nvfp4",
-        trainer_checkpoint="deepseek-v4-1-flash-bf16-7layer",
+        rollout_checkpoint="deepseek-v4-1-flash-cut7-nvfp4",
+        trainer_checkpoint="deepseek-v4-1-flash-cut7-bf16",
         megatron_model_type="deepseek-v4.1-7layer",
         train_args=_DSV41_TRAIN + _DSV41_STREAMED_ADAM,
         engine_args=dp_attention(4) + DSV41_NVFP4_ENGINE + "--mem-fraction-static 0.7 ",
@@ -289,8 +289,8 @@ CONFIGS = {
     # Layers 0-4 and the MTP layer; the trainer reads the BF16 cut.
     "glm5.3-flash-cut-nvfp4": Config(
         gpu="B200",
-        rollout_checkpoint="glm5-3-flash-bf16-5layer-nvfp4",
-        trainer_checkpoint="glm5-3-flash-bf16-5layer",
+        rollout_checkpoint="glm5-3-flash-cut5-nvfp4",
+        trainer_checkpoint="glm5-3-flash-cut5-bf16",
         megatron_model_type="glm5.3-flash-5layer",
         train_args=_GLM53_FLASH_TRAIN,
         engine_args=dp_attention(4)
@@ -303,15 +303,17 @@ CONFIGS = {
     # Miles' converter run on the BF16 checkpoint, 128x128 blocks with FP32 scales, keeping
     # in BF16 what the official FP8 release keeps (tests/e2e/checkpoints.py).
     "qwen3.6-35b-a3b-fp8": replace(
-        _QWEN3_6, rollout_checkpoint="qwen3-6-35b-a3b-fp8-miles"
+        _QWEN3_6, rollout_checkpoint="qwen3-6-35b-a3b-release-fp8-miles"
     ),
-    "qwen3.8-27b-fp8": replace(_QWEN3_8, rollout_checkpoint="qwen3-8-27b-fp8-miles"),
+    "qwen3.8-27b-fp8": replace(
+        _QWEN3_8, rollout_checkpoint="qwen3-8-27b-release-fp8-miles"
+    ),
     # Routed experts NVFP4 (W4A16 on the CuTe DSL runner), the rest BF16. SGLang builds the MTP
     # draft unquantized from a serialized NVFP4 checkpoint on its own.
     "qwen3.6-35b-a3b-nvfp4": replace(
         _QWEN3_6,
         gpu="B200",
-        rollout_checkpoint="qwen3-6-35b-a3b-nvfp4-miles",
+        rollout_checkpoint="qwen3-6-35b-a3b-release-nvfp4-miles",
         train_args=_QWEN3_6_TRAIN
         + "--expert-model-parallel-size 4 --max-tokens-per-gpu 8192 "
         + _QWEN3_6_NVFP4_TRAIN
@@ -346,9 +348,7 @@ CONFIGS |= {
         + "--expert-model-parallel-size 8 "
         + _ONE_NODE_TOKENS
         + _QWEN3_6_NVFP4_TRAIN,
-        engine_args="--tp-size 1 "
-        + _QWEN3_5_SERVE
-        + "--speculative-algorithm DFLASH "
+        engine_args="--tp-size 1 " + _QWEN3_5_SERVE + "--speculative-algorithm DFLASH "
         "--speculative-draft-model-path /checkpoints/qwen3-6-35b-a3b-dflash2 "
         "--speculative-num-draft-tokens 8 --moe-runner-backend flashinfer_cutedsl ",
         **_ONE_NODE,
@@ -361,9 +361,7 @@ CONFIGS |= {
         + "--expert-model-parallel-size 4 --max-tokens-per-gpu 8192 "
         + _QWEN3_6_NVFP4_TRAIN
         + _CPU_ADAM,
-        engine_args="--tp-size 1 "
-        + _QWEN3_5_SERVE
-        + "--speculative-algorithm DFLASH "
+        engine_args="--tp-size 1 " + _QWEN3_5_SERVE + "--speculative-algorithm DFLASH "
         "--speculative-draft-model-path /checkpoints/qwen3-6-35b-a3b-dflash2 "
         "--speculative-num-draft-tokens 8 --moe-runner-backend flashinfer_cutedsl ",
         engine_gpus=1,
