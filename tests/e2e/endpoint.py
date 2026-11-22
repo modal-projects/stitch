@@ -86,6 +86,9 @@ class Setup:
 SETUPS = {
     "glm5.3-cut-nvfp4": Setup(engines=2, join_at=4, resume_at=2),
     "glm5.3-cut-fp8": Setup(engines=2, join_at=4, resume_at=2),
+    "glm5.3-flash-cut-nvfp4": Setup(engines=2, join_at=4, resume_at=2),
+    "glm5.3-flash-cut-nvfp4-pp2": Setup(engines=2, join_at=4, resume_at=2),
+    "dsv4.1-cut-nvfp4": Setup(engines=2, join_at=4, resume_at=2),
     "muse-spark-cut-bf16": Setup(engines=2, join_at=4, resume_at=2),
     "muse-spark-cut-bf16-merged-lora": Setup(engines=2, join_at=4),
     **{
