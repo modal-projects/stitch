@@ -231,6 +231,43 @@ def test_an_open_engine_follows_each_version_and_reports_its_stats(service, vers
     assert ended == ["the control service ended this engine: the run resumed at 2"]
 
 
+class FakeLoRAEngine:
+    """Serves whichever adapter version it applied last; it holds no committed weights."""
+
+    def __init__(self):
+        self.version, self.applied = -1, []
+
+    def committed(self, plan_digest):
+        raise AssertionError("a LoRA version builds on no committed weights")
+
+    def apply(self, publication, version):
+        self.applied.append((publication["lora_path"], version))
+        self.version = version
+        return {}
+
+
+def _lora(version: int) -> dict:
+    return {"kind": "lora", "lora_name": "a", "path": f"a_run_v{version}"}
+
+
+def test_an_engine_takes_only_the_newest_lora_version_then_each_one_after(
+    service, versions
+):
+    start = _start(service, 3, _lora(3))
+    engine = FakeLoRAEngine()
+    container = _container(service, engine, versions)
+    container.open()
+    _run(container.listen, container.follow)
+
+    service.publish(4, 3, *start, _lora(4))
+
+    assert engine.applied == [
+        (str(versions / "a_run_v3"), 3),
+        (str(versions / "a_run_v4"), 4),
+    ]
+    assert service.status()["serving"] == {4: 1}
+
+
 def test_an_engine_stays_heard_while_a_version_applies_longer_than_the_lease(
     service, versions
 ):

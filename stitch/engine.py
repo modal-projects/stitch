@@ -42,8 +42,8 @@ class Engine(Protocol):
         """From here on, the engine exiting or failing its health checks ends the container."""
 
     def committed(self, plan_digest: str) -> tuple[str | None, int]:
-        """The (stream, version) its weights end at, (None, 0) for the checkpoint it loaded; `plan_digest` is the
-        run's checkpoint plan, which its weights must share."""
+        """The (stream, version) its full weights end at, (None, 0) for the checkpoint it loaded; `plan_digest` is
+        the run's checkpoint plan, which its weights must share."""
 
     def apply(self, publication: dict, version: int | None) -> dict | None:
         """Prepares one publication while serving, then applies it inside a pause and labels the weights `version`
@@ -226,10 +226,7 @@ class EngineContainer:
             self.reload()
             self.view_head = head
         try:
-            committed = self.engine.committed(publication["plan_digest"])
-            chain = publication_chain(self.versions, publication, committed)
-            if not chain:
-                raise RuntimeError(f"its weights are already at {committed}")
+            chain = self._chain(publication)
             for earlier in chain[:-1]:
                 self.engine.apply(earlier, None)
             stats = self.engine.apply(chain[-1], head)
@@ -244,6 +241,19 @@ class EngineContainer:
         self.applied = (head, start_id)
         logger.info("version %d: %d publications, %s", head, len(chain), stats)
         return head, stats
+
+    def _chain(self, publication: dict) -> list[dict]:
+        """The publications that bring the engine to the head's, oldest first."""
+        if publication.get("kind") == "lora":
+            # Each LoRA version is the whole adapter: the head's alone, whatever the engine holds.
+            return [
+                publication | {"lora_path": str(self.versions / publication["path"])}
+            ]
+        committed = self.engine.committed(publication["plan_digest"])
+        chain = publication_chain(self.versions, publication, committed)
+        if not chain:
+            raise RuntimeError(f"its weights are already at {committed}")
+        return chain
 
 
 def _raise_on_exit(reply: dict) -> dict:

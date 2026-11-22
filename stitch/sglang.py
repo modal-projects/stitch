@@ -30,12 +30,26 @@ class SGLangConfig:
     @property
     def dp_ranks(self) -> int:
         """The engine's DP ranks as SGLang counts them: replicas times attention-DP groups."""
-        args = self.server_args
-        replicas = args.get("--dp-size", args.get("--data-parallel-size", "1"))
-        groups = args.get(
-            "--attn-dp-size", args.get("--attention-data-parallel-size", "1")
+        return self._replicas * self._attention_groups
+
+    @property
+    def attention_dp(self) -> bool:
+        """Whether SGLang runs attention DP, as Miles decides it; it then serves only pinned LoRA adapters."""
+        return self._attention_groups > 1 or (
+            "--enable-dp-attention" in self.server_args and self._replicas > 1
         )
-        return int(replicas) * int(groups)
+
+    @property
+    def _replicas(self) -> int:
+        args = self.server_args
+        return int(args.get("--dp-size", args.get("--data-parallel-size", "1")))
+
+    @property
+    def _attention_groups(self) -> int:
+        args = self.server_args
+        return int(
+            args.get("--attn-dp-size", args.get("--attention-data-parallel-size", "1"))
+        )
 
 
 class _Receiver:
@@ -109,7 +123,20 @@ class SGLang:
         return committed_endpoint(info, self.participants, plan_digest)
 
     def apply(self, publication: dict, version: int | None) -> dict | None:
-        """Miles' activation of this engine, on the receiver ranks `committed` read."""
+        """Miles' activation of this engine on the ranks `committed` read; a LoRA version replaces the adapter."""
+        if publication.get("kind") == "lora":
+            self._post(
+                "/update_lora_adapter",
+                {
+                    "lora_name": publication["lora_name"],
+                    "lora_path": publication["lora_path"],
+                    "weight_version": str(version),
+                    "pause_mode": self.config.pause_mode,
+                    "pinned": self.config.attention_dp,
+                },
+            )
+            self.version = version
+            return {}
         from miles.backends.training_utils.weight_update.protocols.gpu_delta.session import (
             activate_engine,
         )

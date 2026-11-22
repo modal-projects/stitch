@@ -100,8 +100,12 @@ def miles_session(monkeypatch):
     monkeypatch.setitem(sys.modules, module.__name__, module)
 
 
-def _sglang(fake: FakeSGLang, pause_mode: str = "in_place", env=None) -> SGLang:
-    config = SGLangConfig(server_args={}, env=env or {}, pause_mode=pause_mode)
+def _sglang(
+    fake: FakeSGLang, pause_mode: str = "in_place", env=None, server_args=None
+) -> SGLang:
+    config = SGLangConfig(
+        server_args=server_args or {}, env=env or {}, pause_mode=pause_mode
+    )
     return SGLang(
         "/ckpt",
         version=3,
@@ -130,6 +134,42 @@ def test_a_publication_applies_through_miles_activation_in_the_runs_pause_mode(
         "4",
     )
     assert stats == {"pause_s": 0.1} and sglang.version == 4
+
+
+@pytest.mark.parametrize(
+    "server_args, pinned",
+    [
+        ({"--tp-size": "4"}, False),
+        ({"--tp-size": "4", "--attn-dp-size": "4"}, True),
+        ({"--tp-size": "8", "--dp-size": "8", "--enable-dp-attention": ""}, True),
+    ],
+)
+def test_a_lora_version_replaces_the_adapter_pinned_under_attention_dp(
+    fake, server_args, pinned
+):
+    sglang = _sglang(fake, "retract", server_args=server_args)
+    publication = {
+        "kind": "lora",
+        "lora_name": "a",
+        "path": "a_v4",
+        "lora_path": "/v/a_v4",
+    }
+
+    stats = sglang.apply(publication, 4)
+
+    assert [(path, body) for path, body, _ in fake.calls] == [
+        (
+            "/update_lora_adapter",
+            {
+                "lora_name": "a",
+                "lora_path": "/v/a_v4",
+                "weight_version": "4",
+                "pause_mode": "retract",
+                "pinned": pinned,
+            },
+        )
+    ]
+    assert stats == {} and sglang.version == 4
 
 
 def test_a_publication_before_the_last_of_a_catch_up_carries_no_label(fake):
