@@ -18,13 +18,13 @@ SGLANG = (
     " && git -C /tmp/sglang checkout e2cf191a1b"
     " && cp -a /tmp/sglang/python/sglang/. /sgl-workspace/sglang/python/sglang/"
     " && git clone --filter=blob:none https://github.com/modal-projects/miles /tmp/miles"
-    " && git -C /tmp/miles checkout 0f30c3e631"
+    " && git -C /tmp/miles checkout f0402a5b0f"
     " && cp -a /tmp/miles/miles/. /root/miles/miles/"
 )
 
 run = create_run(RunConfig(
     run_id="my-run",
-    image="radixark/miles:dev-202611191721",
+    image="radixark/miles:dev-202611220647",
     image_commands=[SGLANG],
     volumes={"/models": "my-models", "/runs": "my-runs"},
     checkpoint="/models/my-model",  # every publication chain starts from it
