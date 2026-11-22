@@ -197,11 +197,6 @@ _QWEN3_6_NO_MTP_TRAIN = (
     "--use-precision-aware-optimizer "
     "--attention-softmax-in-fp32 --attention-backend flash --moe-token-dispatcher-type flex "
 )
-# The recipe as published: its MTP layer trained.
-_QWEN3_6_TRAIN = (
-    _QWEN3_6_NO_MTP_TRAIN
-    + "--enable-mtp-training --mtp-num-layers 1 --mtp-loss-scaling-factor 0.2 "
-)
 # Miles has no dense Qwen3.5 recipe. TP over the 4 training GPUs: at TP 1 a GPU would hold
 # 55 GB of BF16 weights and 110 GB of FP32 gradients.
 _QWEN3_8_TRAIN = (
@@ -240,7 +235,7 @@ _QWEN3_6 = Config(
     rollout_checkpoint="qwen3-6-35b-a3b-release-bf16",
     trainer_checkpoint="qwen3-6-35b-a3b_torch_dist",
     megatron_model_type="qwen3.6-35B-A3B",
-    train_args=_QWEN3_6_TRAIN
+    train_args=_QWEN3_6_NO_MTP_TRAIN
     + "--expert-model-parallel-size 4 --max-tokens-per-gpu 8192 "
     + _CPU_ADAM,
     engine_args=dp_attention(4)
@@ -318,7 +313,7 @@ CONFIGS = {
         _QWEN3_6,
         gpu="B200",
         rollout_checkpoint="qwen3-6-35b-a3b-release-nvfp4-miles",
-        train_args=_QWEN3_6_TRAIN
+        train_args=_QWEN3_6_NO_MTP_TRAIN
         + "--expert-model-parallel-size 4 --max-tokens-per-gpu 8192 "
         + _QWEN3_6_NVFP4_TRAIN
         + _CPU_ADAM,
@@ -337,7 +332,7 @@ _ONE_NODE_TOKENS = "--max-tokens-per-gpu 16384 "
 CONFIGS |= {
     "qwen3.6-35b-a3b-nvfp4-node": replace(
         CONFIGS["qwen3.6-35b-a3b-nvfp4"],
-        train_args=_QWEN3_6_TRAIN
+        train_args=_QWEN3_6_NO_MTP_TRAIN
         + "--expert-model-parallel-size 8 "
         + _ONE_NODE_TOKENS
         + _QWEN3_6_NVFP4_TRAIN,
@@ -372,7 +367,6 @@ CONFIGS |= {
     ),
     "qwen3.6-35b-a3b-fp8-node": replace(
         CONFIGS["qwen3.6-35b-a3b-fp8"],
-        # Adam on the H200s leaves no room to train the MTP layer; engines draft with its base.
         train_args=_QWEN3_6_NO_MTP_TRAIN
         + "--expert-model-parallel-size 8 "
         + _ONE_NODE_TOKENS,
