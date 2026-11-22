@@ -88,6 +88,8 @@ SETUPS = {
     "glm5.3-cut-fp8": Setup(engines=2, join_at=4, resume_at=2),
     "glm5.3-flash-cut-nvfp4": Setup(engines=2, join_at=4, resume_at=2),
     "glm5.3-flash-cut-nvfp4-pp2": Setup(engines=2, join_at=4, resume_at=2),
+    "glm5.3-flash-cut-nvfp4-bf16-sr": Setup(engines=2, join_at=4, resume_at=2),
+    "glm5.3-flash-cut-nvfp4-sr": Setup(engines=2, join_at=4, resume_at=2),
     # No resume: the streamed Adam state and two runs' saves outgrow the trainer's disk.
     "dsv4.1-cut-nvfp4": Setup(engines=2, join_at=4),
     "muse-spark-cut-bf16": Setup(engines=2, join_at=4, resume_at=2),

@@ -468,6 +468,24 @@ CONFIGS["glm5.3-flash-cut-nvfp4-pp2"] = replace(
         "--pipeline-model-parallel-size 2 --decoder-first-pipeline-num-layers 3 ",
     ).replace("--expert-model-parallel-size 4 ", "--expert-model-parallel-size 2 "),
 )
+# The algorithm runs' recipe: BF16 weights rounded stochastically from their FP32 masters, NVFP4 export in 4over6.
+CONFIGS["glm5.3-flash-cut-nvfp4-bf16-sr"] = replace(
+    CONFIGS["glm5.3-flash-cut-nvfp4"],
+    env=BF16_TRAINER_NVFP4_ENV | {"OPEN_TRAINING_BF16_STOCHASTIC_ROUNDING_FLAG": "1"},
+)
+# The NVFP4 export rounded stochastically as well; TE rounds 4over6 blocks to nearest only.
+CONFIGS["glm5.3-flash-cut-nvfp4-sr"] = replace(
+    CONFIGS["glm5.3-flash-cut-nvfp4"],
+    env={
+        k: v
+        for k, v in BF16_TRAINER_NVFP4_ENV.items()
+        if not k.startswith("NVTE_NVFP4_4OVER6")
+    }
+    | {
+        "OPEN_TRAINING_BF16_STOCHASTIC_ROUNDING_FLAG": "1",
+        "OPEN_TRAINING_NVFP4_STOCHASTIC_ROUNDING_FLAG": "1",
+    },
+)
 
 # The engine serves the trainer's LoRA adapter, synced by disk-lora, over the checkpoint's base.
 
