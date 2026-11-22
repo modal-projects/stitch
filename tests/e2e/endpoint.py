@@ -370,9 +370,17 @@ for pid in filter(str.isdigit, os.listdir("/proc")):
         argv = open(f"/proc/{pid}/cmdline", "rb").read().decode().split("\\0")
     except OSError:
         continue
-    if "sglang.launch_server" in argv and "--admin-api-key" in argv:
+    if "sglang.launch_server" in argv:
         break
-flag = lambda name: argv[argv.index(name) + 1]
+else:
+    argv = None
+def flag(name):
+    # A value starting with "-" is passed attached, as --name=value.
+    for index, word in enumerate(argv):
+        if word == name:
+            return argv[index + 1]
+        if word.startswith(name + "="):
+            return word.split("=", 1)[1]
 def post(path, body):
     request = urllib.request.Request(
         f"http://127.0.0.1:{flag('--port')}{path}",
@@ -384,6 +392,9 @@ def upload(reply):
     # Engines mount the Volume read-only: the reply goes up through the Volume's API.
     with modal.Volume.from_name(sys.argv[2]).batch_upload(force=True) as batch:
         batch.put_file(io.BytesIO(reply), sys.argv[1])
+if argv is None:
+    upload(json.dumps({"error": "no SGLang server runs in this container"}).encode())
+    sys.exit()
 """
 # Every checksum.
 _STATE_SCRIPT = (
@@ -423,7 +434,10 @@ def _in_engine(container_id: str, folder: Path, script: str, *args: str):
     command = [sys.executable, "-m", "modal", "container", "exec", "--no-pty"]
     command += [container_id, "--", "python3", "-c", script]
     subprocess.run([*command, path, harness.data.name, *args], check=True)
-    return json.loads(b"".join(harness.data.read_file(path)))
+    reply = json.loads(b"".join(harness.data.read_file(path)))
+    if isinstance(reply, dict) and "error" in reply:
+        raise RuntimeError(f"{container_id}: {reply['error']}")
+    return reply
 
 
 @app.local_entrypoint()
