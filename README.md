@@ -15,10 +15,10 @@ from stitch.sglang import SGLangConfig
 SGLANG = (
     "python3 -m pip install --no-deps nvidia-libnvcomp-cu13==6.0.0.12"
     " && git clone --filter=blob:none https://github.com/modal-projects/sglang /tmp/sglang"
-    " && git -C /tmp/sglang checkout 34f48d135a"
+    " && git -C /tmp/sglang checkout e2cf191a1b"
     " && cp -a /tmp/sglang/python/sglang/. /sgl-workspace/sglang/python/sglang/"
     " && git clone --filter=blob:none https://github.com/modal-projects/miles /tmp/miles"
-    " && git -C /tmp/miles checkout 65ca8e4355"
+    " && git -C /tmp/miles checkout 0f30c3e631"
     " && cp -a /tmp/miles/miles/. /root/miles/miles/"
 )
 
