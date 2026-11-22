@@ -18,7 +18,7 @@ SGLANG = (
     " && git -C /tmp/sglang checkout 34f48d135a"
     " && cp -a /tmp/sglang/python/sglang/. /sgl-workspace/sglang/python/sglang/"
     " && git clone --filter=blob:none https://github.com/modal-projects/miles /tmp/miles"
-    " && git -C /tmp/miles checkout 45f8bf6c45"
+    " && git -C /tmp/miles checkout b2ae264832"
     " && cp -a /tmp/miles/miles/. /root/miles/miles/"
 )
 
