@@ -49,7 +49,7 @@ SGLANG_SOURCE, MILES_SOURCE = (
 )
 # A Miles build for its Megatron, Megatron-Bridge and TransformerEngine;
 # its Miles and SGLang trees are replaced by ours.
-MILES_IMAGE = "radixark/miles:dev-202611191721"
+MILES_IMAGE = "radixark/miles:dev-202611220647"
 MILES, MILES_OVERLAY = "/root/miles", "/root/miles-overlay"
 MILES_DIRS = ("miles", "miles_plugins", "scripts", "tools")
 MEGATRON_PATH = "/root/Megatron-LM"
