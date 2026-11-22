@@ -72,6 +72,23 @@ CPUS = 64
 ENGINE_PORT = 30000
 RAY_PORT = 6379
 NUM_ROLLOUT = 10
+# The adapter weights SGLang's LoRA layers hold (set_lora_info in sglang/srt/lora/layers.py), which
+# lora_slot_check judges; the state check compares the rest.
+LORA_SLOTS = frozenset(
+    (
+        "A_buffer",
+        "B_buffer",
+        "A_buffer_qkv",
+        "B_buffer_qkv",
+        "lora_a",
+        "lora_b",
+        "embedding_A_buffer",
+        "embedding_B_buffer",
+        "new_embeddings_buffer",
+        "lm_head_A_buffer",
+        "lm_head_B_buffer",
+    )
+)
 # Miles' name for its single adapter (miles.utils.lora.utils.LORA_ADAPTER_NAME).
 LORA_ADAPTER = "miles_lora"
 LORA_PROMPTS = [
@@ -876,9 +893,10 @@ def tp_states(ranks: list[dict]) -> dict[str, dict[str, str]]:
 
 
 def compare(delta: dict, reference: dict) -> dict:
+    """Each GPU's tensors that differ or that one side lacks, LoRA slots aside."""
     differ, only_one = [], []
     for gpu in sorted(delta.keys() | reference.keys()):
-        a, b = delta.get(gpu, {}), reference.get(gpu, {})
+        a, b = _base(delta.get(gpu, {})), _base(reference.get(gpu, {}))
         only_one += [f"{gpu} {name}" for name in sorted(a.keys() ^ b.keys())]
         differ += [
             f"{gpu} {name}"
@@ -887,7 +905,17 @@ def compare(delta: dict, reference: dict) -> dict:
         ]
     return {
         "gpus": len(delta),
-        "tensors": sum(len(checksums) for checksums in delta.values()),
+        "tensors": sum(len(_base(checksums)) for checksums in delta.values()),
         "differ": differ,
         "only_one": only_one,
+    }
+
+
+def _base(checksums: dict) -> dict:
+    """Less a served-LoRA engine's adapter slots."""
+    return {
+        name: checksum
+        for name, checksum in checksums.items()
+        if name.rpartition(".")[2] not in LORA_SLOTS
+        and not name.endswith(("_lora_a_weights", "_lora_b_weights"))
     }

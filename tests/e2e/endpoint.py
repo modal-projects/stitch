@@ -522,7 +522,9 @@ def main(
     finally:
         run.stop()
 
-    print(json.dumps(result, indent=1)[:8000])
+    # The slot counts first: a long list of differing tensors would cut them off.
+    shown = {"lora_slots": result.get("lora_slots"), **result}
+    print(json.dumps(shown, indent=1)[:8000])
     failures = _failures(setup, result, check_state, num_rollout)
     if failures:
         raise SystemExit(f"endpoint e2e FAILED: {failures}")
