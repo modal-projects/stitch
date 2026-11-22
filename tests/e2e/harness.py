@@ -62,6 +62,7 @@ SGLANG_CACHE = "/root/.cache/sglang"
 REWARD_DIR = "/root/stitch-e2e"
 # lora_slot_check, which a sitecustomize there installs into a served-LoRA engine's processes.
 LORA_CHECK_DIR = "/root/lora-check"
+LORA_CHECK_SITE = "import lora_slot_check\nlora_slot_check.install()\n"
 CHECKPOINTS, DATA = "/checkpoints", "/data"
 SAVE = "/tmp/save"
 # The engine takes the GPUs after the trainer's, as many as its config asks for.
@@ -374,7 +375,9 @@ def _run(
         delta_state = engine.state()
         last = _last_version(fully_async, num_rollout)
         if config.served_lora:
-            (version_dir,) = (run_dir / "adapters").glob(f"{LORA_ADAPTER}_*_v{last}")
+            (version_dir,) = update_dir(config, run_dir).glob(
+                f"{LORA_ADAPTER}_*_v{last}"
+            )
             # Outputs are not compared: nondeterministic kernels move log-probs. Serving
             # them makes the adapter resident for the slot check.
             result["lora"] = {
@@ -495,9 +498,7 @@ class Engine:
         ]
         env = {**os.environ, **config.env, "CUDA_VISIBLE_DEVICES": gpus}
         if config.served_lora:
-            Path(LORA_CHECK_DIR, "sitecustomize.py").write_text(
-                "import lora_slot_check\nlora_slot_check.install()\n"
-            )
+            Path(LORA_CHECK_DIR, "sitecustomize.py").write_text(LORA_CHECK_SITE)
             env["PYTHONPATH"] = ":".join(
                 filter(None, [LORA_CHECK_DIR, env.get("PYTHONPATH")])
             )
@@ -700,6 +701,11 @@ POLICY_LOSS = (
 )
 
 
+def update_dir(config: Config, run_dir: Path) -> Path:
+    """Where Miles writes each version: whole adapters for served LoRA, deltas for full weights."""
+    return run_dir / ("adapters" if config.served_lora else "deltas")
+
+
 def recipe_args(
     config: Config,
     run_dir: Path,
@@ -721,7 +727,7 @@ def recipe_args(
         "--optimizer adam --lr 1e-6 --lr-decay-style constant --weight-decay 0.1 "
         "--adam-beta1 0.9 --adam-beta2 0.98 "
         f"--update-weight-transfer-mode {'disk-lora' if config.served_lora else 'gpu-delta'} "
-        f"--update-weight-disk-dir {run_dir}/{'adapters' if config.served_lora else 'deltas'} "
+        f"--update-weight-disk-dir {update_dir(config, run_dir)} "
         f"--actor-num-nodes 1 --actor-num-gpus-per-node {config.train_gpus} "
         f"--num-gpus-per-node {config.train_gpus} "
         f"{te_precision}{config.train_args}"

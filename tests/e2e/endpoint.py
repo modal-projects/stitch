@@ -10,6 +10,7 @@ modal run -d tests/e2e/endpoint.py \
 """
 
 import ast
+import io
 import json
 import os
 import re
@@ -86,6 +87,7 @@ SETUPS = {
     "glm5.3-cut-fp8": Setup(engines=2, join_at=4, resume_at=2),
     "muse-spark-cut-bf16": Setup(engines=2, join_at=4, resume_at=2),
     "muse-spark-cut-bf16-lora": Setup(engines=2, join_at=4),
+    "qwen3.6-35b-a3b-bf16-node-lora": Setup(engines=2, join_at=3),
     **{
         name: Setup(engines=4, join_at=3, rollout=DAPO_ROLLOUT)
         for name in (
@@ -217,8 +219,13 @@ def _train_against_run(
                 cpus=harness.CPUS,
             )
         if check_state:
+            # Served LoRA keeps the base, so the reference is the checkpoint.
             result["reference"] = _reference_state(
-                config, f"{saves}/{phases[-1]}/hf/step_{num_rollout - 1}", logs
+                config,
+                f"{harness.CHECKPOINTS}/{config.rollout_checkpoint}"
+                if config.served_lora
+                else f"{saves}/{phases[-1]}/hf/step_{num_rollout - 1}",
+                logs,
             )
             result["serving_after_s"] = _wait_serving(
                 stitch_run, setup.engines + 1, num_rollout
@@ -316,10 +323,10 @@ def _served(log: Path) -> dict[int, dict]:
     return {int(match[1]): ast.literal_eval(match[2]) for match in lines}
 
 
-# Run in an engine container: SGLang's key and port off its command line, then every checksum,
-# written to the run's Volume (argv: path, Volume) as exec's output can lose a large reply.
-_STATE_SCRIPT = """
-import io, json, os, sys, urllib.request
+# Run in an engine container: SGLang's key and port off its command line, and a reply written to the
+# run's Volume (argv: path, Volume, ...) as exec's output can lose a large one.
+_IN_ENGINE = """
+import glob, io, json, os, re, sys, urllib.request
 import modal
 for pid in filter(str.isdigit, os.listdir("/proc")):
     try:
@@ -329,27 +336,57 @@ for pid in filter(str.isdigit, os.listdir("/proc")):
     if "sglang.launch_server" in argv and "--admin-api-key" in argv:
         break
 flag = lambda name: argv[argv.index(name) + 1]
-request = urllib.request.Request(
-    f"http://127.0.0.1:{flag('--port')}/weights_checker",
-    data=json.dumps({"action": "state_checksum"}).encode(),
-    headers={"Content-Type": "application/json", "Authorization": "Bearer " + flag("--admin-api-key")},
-)
-reply = urllib.request.urlopen(request, timeout=1800).read()
-# Engines mount the Volume read-only: the reply goes up through the Volume's API.
-with modal.Volume.from_name(sys.argv[2]).batch_upload(force=True) as batch:
-    batch.put_file(io.BytesIO(reply), sys.argv[1])
+def post(path, body):
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{flag('--port')}{path}",
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json", "Authorization": "Bearer " + flag("--admin-api-key")},
+    )
+    return urllib.request.urlopen(request, timeout=1800).read()
+def upload(reply):
+    # Engines mount the Volume read-only: the reply goes up through the Volume's API.
+    with modal.Volume.from_name(sys.argv[2]).batch_upload(force=True) as batch:
+        batch.put_file(io.BytesIO(reply), sys.argv[1])
 """
+# Every checksum.
+_STATE_SCRIPT = (
+    _IN_ENGINE
+    + """
+upload(post("/weights_checker", {"action": "state_checksum"}))
+"""
+)
+# The served adapter, made resident by a request through it, against SGLang's install of the last
+# version, by lora_slot_check (argv[3]: that version's directory).
+_LORA_SLOT_SCRIPT = (
+    _IN_ENGINE
+    + """
+post("/generate", {"text": "The river", "lora_path": "miles_lora", "sampling_params": {"max_new_tokens": 1}})
+for stale in glob.glob("/tmp/lora_slot_check_rank*.json"):
+    os.unlink(stale)
+post("/load_lora_adapter", {"lora_name": "__check__miles_lora", "lora_path": sys.argv[3]})
+files = sorted(glob.glob("/tmp/lora_slot_check_rank*.json"), key=lambda f: int(re.search(r"rank(\\d+)", f)[1]))
+upload(json.dumps([json.load(open(f)) for f in files]).encode())
+"""
+)
 
 
 def _engine_state(container_id: str, run_dir: Path) -> dict:
-    path = run_dir / "states" / f"{container_id}.json"
-    command = [sys.executable, "-m", "modal", "container", "exec", "--no-pty"]
-    command += [container_id, "--", "python3", "-c", _STATE_SCRIPT]
-    subprocess.run(
-        [*command, str(path.relative_to(harness.DATA)), harness.data.name], check=True
+    reply = _in_engine(container_id, run_dir / "states", _STATE_SCRIPT)
+    return harness.tp_states(reply["ranks"])
+
+
+def _engine_lora_slot(container_id: str, run_dir: Path, version_dir: str) -> list:
+    return _in_engine(
+        container_id, run_dir / "lora-slots", _LORA_SLOT_SCRIPT, version_dir
     )
-    reply = b"".join(harness.data.read_file(str(path.relative_to(harness.DATA))))
-    return harness.tp_states(json.loads(reply)["ranks"])
+
+
+def _in_engine(container_id: str, folder: Path, script: str, *args: str):
+    path = str((folder / f"{container_id}.json").relative_to(harness.DATA))
+    command = [sys.executable, "-m", "modal", "container", "exec", "--no-pty"]
+    command += [container_id, "--", "python3", "-c", script]
+    subprocess.run([*command, path, harness.data.name, *args], check=True)
+    return json.loads(b"".join(harness.data.read_file(path)))
 
 
 @app.local_entrypoint()
@@ -368,6 +405,21 @@ def main(
     # Runs launched together may start in the same second; the suffix keeps their apps apart.
     stamp = f"{datetime.now().strftime('%m%d-%H%M%S')}-{secrets.token_hex(2)}"
     run_dir = Path(harness.DATA, "endpoint", config, stamp)
+    versions = harness.update_dir(e2e, run_dir)
+    env = e2e.env
+    if e2e.served_lora:
+        hook = run_dir / "lora-check"
+        with harness.data.batch_upload() as batch:
+            batch.put_file(
+                str(Path(__file__).with_name("lora_slot_check.py")),
+                str((hook / "lora_slot_check.py").relative_to(harness.DATA)),
+            )
+            batch.put_file(
+                io.BytesIO(harness.LORA_CHECK_SITE.encode()),
+                str((hook / "sitecustomize.py").relative_to(harness.DATA)),
+            )
+        # Ahead of the entries Modal sets, whose sitecustomize this one stands in for in SGLang.
+        env = env | {"PYTHONPATH": f"{hook}:/pkg/:/root/"}
     run_config = RunConfig(
         run_id=f"endpoint-e2e-{stamp}",
         image=harness.MILES_IMAGE,
@@ -377,10 +429,8 @@ def main(
             harness.DATA: harness.data.name,
         },
         checkpoint=f"{harness.CHECKPOINTS}/{e2e.rollout_checkpoint}",
-        versions=str(run_dir / "deltas"),
-        engine=SGLangConfig(
-            server_args=harness.server_args(e2e.engine_args), env=e2e.env
-        ),
+        versions=str(versions),
+        engine=SGLangConfig(server_args=harness.server_args(e2e.engine_args), env=env),
         pool=PoolConfig(
             gpu=f"{e2e.gpu}:{e2e.engine_gpus}",
             cpu=max(16, 8 * e2e.engine_gpus),
@@ -414,6 +464,20 @@ def main(
                 container: harness.compare(_engine_state(container, run_dir), reference)
                 for container in result["engines_at_end"]
             }
+            if e2e.served_lora:
+                (version_dir,) = [
+                    entry.path
+                    for entry in harness.data.listdir(
+                        str(versions.relative_to(harness.DATA))
+                    )
+                    if entry.path.endswith(f"_v{num_rollout}")
+                ]
+                result["lora_slots"] = {
+                    container: _engine_lora_slot(
+                        container, run_dir, f"{harness.DATA}/{version_dir}"
+                    )
+                    for container in result["engines_at_end"]
+                }
     finally:
         run.stop()
 
@@ -464,4 +528,13 @@ def _failures(
             failures.append(
                 f"engine {container} is not the trainer's save: {json.dumps(check)[:2000]}"
             )
+    for container, ranks in result.get("lora_slots", {}).items():
+        failures += [
+            f"engine {container} rank {rank} serves another adapter: {counts}"
+            for rank, counts in enumerate(ranks)
+            if not counts["written"]
+            or counts["mismatch"]
+            or counts["unwritten_nonzero"]
+            or counts["written_outside_regions"]
+        ]
     return failures
