@@ -251,12 +251,19 @@ def _train_against_run(
                 cpus=harness.CPUS,
             )
         if check_state:
-            # Served LoRA keeps the base, so the reference is the checkpoint.
+            # Served LoRA keeps the base, so the reference is the checkpoint; full weights: the
+            # trainer's last save as it publishes it.
+            checkpoint = Path(harness.CHECKPOINTS, config.rollout_checkpoint)
             result["reference"] = _reference_state(
                 config,
-                f"{harness.CHECKPOINTS}/{config.rollout_checkpoint}"
+                str(checkpoint)
                 if config.served_lora
-                else f"{saves}/{phases[-1]}/hf/step_{num_rollout - 1}",
+                else str(
+                    harness.in_checkpoint_dtypes(
+                        Path(f"{saves}/{phases[-1]}/hf/step_{num_rollout - 1}"),
+                        checkpoint,
+                    )
+                ),
                 logs,
             )
             result["serving_after_s"] = _wait_serving(
