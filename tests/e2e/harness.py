@@ -60,6 +60,8 @@ SGLANG_BUILD_PRODUCTS = (
 )
 SGLANG_CACHE = "/root/.cache/sglang"
 REWARD_DIR = "/root/stitch-e2e"
+# lora_slot_check, which a sitecustomize there installs into a served-LoRA engine's processes.
+LORA_CHECK_DIR = "/root/lora-check"
 CHECKPOINTS, DATA = "/checkpoints", "/data"
 SAVE = "/tmp/save"
 # The engine takes the GPUs after the trainer's, as many as its config asks for.
@@ -166,9 +168,16 @@ image = (
 # A clone is a build step, which Modal allows only before the local trees it mounts at start-up.
 for tree in sorted(TREES, key=lambda tree: tree[0] is not None):
     image = _with_tree(image, *tree)
-image = image.add_local_file(
-    Path(__file__).with_name("seeded_reward.py"), f"{REWARD_DIR}/seeded_reward.py"
-).add_local_python_source("configs")
+image = (
+    image.add_local_file(
+        Path(__file__).with_name("seeded_reward.py"), f"{REWARD_DIR}/seeded_reward.py"
+    )
+    .add_local_file(
+        Path(__file__).with_name("lora_slot_check.py"),
+        f"{LORA_CHECK_DIR}/lora_slot_check.py",
+    )
+    .add_local_python_source("configs")
+)
 # What a run's engines build onto MILES_IMAGE: our SGLang copied over the image's, so the files the image
 # built for its SGLang stay, and our Miles, whose GPU-delta receiver SGLang imports.
 ENGINE_COMMANDS = [
@@ -365,15 +374,18 @@ def _run(
         delta_state = engine.state()
         last = _last_version(fully_async, num_rollout)
         if config.served_lora:
-            # The same engine also loads the last version by SGLang's own path: the numbers
-            # depend on an engine's history.
             (version_dir,) = (run_dir / "adapters").glob(f"{LORA_ADAPTER}_*_v{last}")
-            engine.load_lora_adapter("reference", str(version_dir))
+            # Outputs are not compared: nondeterministic kernels move log-probs. Serving
+            # them makes the adapter resident for the slot check.
             result["lora"] = {
                 "served_version": engine.weight_version(),
                 "served": engine.greedy(LORA_ADAPTER),
-                "reference": engine.greedy("reference"),
             }
+            result["lora"]["slot"] = engine.check_lora_slot(
+                LORA_ADAPTER, str(version_dir)
+            )
+            engine.load_lora_adapter("reference", str(version_dir))
+            result["lora"]["reference"] = engine.greedy("reference")
         engine.stop()
         # Served LoRA keeps the base, so the reference is the checkpoint; full weights:
         # the trainer's save of the last version.
@@ -403,11 +415,12 @@ def _run(
                     f"served weight version {lora['served_version']}, not {last}"
                 )
             result["check"]["differ"] += [
-                f"greedy output {index} through {LORA_ADAPTER}"
-                for index, (a, b) in enumerate(
-                    zip(lora["served"], lora["reference"], strict=True)
-                )
-                if a != b
+                f"{LORA_ADAPTER} slot on rank {rank}: {counts}"
+                for rank, counts in enumerate(lora["slot"])
+                if not counts["written"]
+                or counts["mismatch"]
+                or counts["unwritten_nonzero"]
+                or counts["written_outside_regions"]
             ]
     except Exception as error:
         result["error"] = repr(error)
@@ -481,6 +494,13 @@ class Engine:
             *shlex.split(config.engine_args),
         ]
         env = {**os.environ, **config.env, "CUDA_VISIBLE_DEVICES": gpus}
+        if config.served_lora:
+            Path(LORA_CHECK_DIR, "sitecustomize.py").write_text(
+                "import lora_slot_check\nlora_slot_check.install()\n"
+            )
+            env["PYTHONPATH"] = ":".join(
+                filter(None, [LORA_CHECK_DIR, env.get("PYTHONPATH")])
+            )
         with log.open("w") as out:
             self.process = subprocess.Popen(
                 command,
@@ -525,6 +545,18 @@ class Engine:
     def load_lora_adapter(self, name: str, path: str) -> None:
         """SGLang's own load of an adapter directory."""
         self._post("/load_lora_adapter", {"lora_name": name, "lora_path": path})
+
+    def check_lora_slot(self, name: str, path: str) -> list[dict]:
+        """Each rank's served slot of `name` against SGLang's install of `path` (lora_slot_check)."""
+        for stale in glob("/tmp/lora_slot_check_rank*.json"):
+            os.unlink(stale)
+        self.load_lora_adapter(f"__check__{name}", path)
+        files = sorted(
+            glob("/tmp/lora_slot_check_rank*.json"),
+            key=lambda file: int(re.search(r"rank(\d+)", file)[1]),
+        )
+        assert files, "lora_slot_check is not installed in the engine"
+        return [json.loads(Path(file).read_text()) for file in files]
 
     def weight_version(self) -> str:
         with urllib.request.urlopen(f"{self.url}/model_info", timeout=60) as reply:
