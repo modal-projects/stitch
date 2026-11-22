@@ -67,6 +67,14 @@ ENGINE_GPU_START = 4
 CPUS = 64
 ENGINE_PORT = 30000
 NUM_ROLLOUT = 10
+# Miles' name for its single adapter (miles.utils.lora.utils.LORA_ADAPTER_NAME).
+LORA_ADAPTER = "miles_lora"
+LORA_PROMPTS = [
+    "The river",
+    "Compute 17 * 23 and explain each step.",
+    "Write a haiku about pipelines.",
+    "List three prime numbers greater than 100.",
+]
 # A full MoE's CPU-offload Adam takes most of an hour to build on these nodes.
 TRAIN_TIMEOUT = 3 * 3600
 
@@ -295,7 +303,10 @@ def _run(
     dump_details: bool,
     resume_at: int,
 ) -> dict:
-    run_dir = Path(DATA, "e2e", name, datetime.now().strftime("%m%d-%H%M%S"))
+    # Runs launched in the same second get apart.
+    run_dir = Path(
+        DATA, "e2e", name, f"{datetime.now():%m%d-%H%M%S}-{os.urandom(2).hex()}"
+    )
     logs = run_dir / "logs"
     logs.mkdir(parents=True)
     result = {
@@ -341,14 +352,36 @@ def _run(
             result["first_syncs"] = syncs(logs / "first.log")
             engine.stop()
             engine = start_engine("engine-resumed.log")
-            args += f"--load {first}/torch_dist --ckpt-step {resume_at} --no-load-optim --no-load-rng "
+            # LoRA resumes from the adapter checkpoint, whose schedule ran fewer rollouts.
+            if config.served_lora:
+                args += (
+                    f"--lora-adapter-path {first}/torch_dist/iter_{resume_at:07d}/adapter "
+                    "--no-load-optim --override-opt-param-scheduler "
+                )
+            else:
+                args += f"--load {first}/torch_dist --ckpt-step {resume_at} --no-load-optim --no-load-rng "
         train(config, logs / "train.log", args, fully_async)
         result["syncs"] = syncs(logs / "train.log")
         delta_state = engine.state()
+        last = _last_version(fully_async, num_rollout)
+        if config.served_lora:
+            # The same engine also loads the last version by SGLang's own path: the numbers
+            # depend on an engine's history.
+            (version_dir,) = (run_dir / "adapters").glob(f"{LORA_ADAPTER}_*_v{last}")
+            engine.load_lora_adapter("reference", str(version_dir))
+            result["lora"] = {
+                "served_version": engine.weight_version(),
+                "served": engine.greedy(LORA_ADAPTER),
+                "reference": engine.greedy("reference"),
+            }
         engine.stop()
+        # Served LoRA keeps the base, so the reference is the checkpoint; full weights:
+        # the trainer's save of the last version.
         reference = Engine(
-            in_checkpoint_dtypes(
-                Path(f"{SAVE}/hf/step_{_last_version(fully_async, num_rollout) - 1}"),
+            f"{CHECKPOINTS}/{config.rollout_checkpoint}"
+            if config.served_lora
+            else in_checkpoint_dtypes(
+                Path(f"{SAVE}/hf/step_{last - 1}"),
                 Path(CHECKPOINTS, config.rollout_checkpoint),
             ),
             config,
@@ -363,6 +396,19 @@ def _run(
             json.dumps({"delta": delta_state, "reference": reference_state}, indent=1)
         )
         result["check"] = compare(delta_state, reference_state)
+        if config.served_lora:
+            lora = result["lora"]
+            if lora["served_version"] != str(last):
+                result["check"]["differ"].append(
+                    f"served weight version {lora['served_version']}, not {last}"
+                )
+            result["check"]["differ"] += [
+                f"greedy output {index} through {LORA_ADAPTER}"
+                for index, (a, b) in enumerate(
+                    zip(lora["served"], lora["reference"], strict=True)
+                )
+                if a != b
+            ]
     except Exception as error:
         result["error"] = repr(error)
         result.setdefault("syncs", syncs(logs / "train.log"))
@@ -475,6 +521,47 @@ class Engine:
         )
         with urllib.request.urlopen(request, timeout=1800) as reply:
             reply.read()
+
+    def load_lora_adapter(self, name: str, path: str) -> None:
+        """SGLang's own load of an adapter directory."""
+        self._post("/load_lora_adapter", {"lora_name": name, "lora_path": path})
+
+    def weight_version(self) -> str:
+        with urllib.request.urlopen(f"{self.url}/model_info", timeout=60) as reply:
+            return json.loads(reply.read())["weight_version"]
+
+    def greedy(self, lora_name: str) -> list[dict]:
+        """Greedy outputs of LORA_PROMPTS through `lora_name`, one request at a time."""
+        replies = [
+            self._post(
+                "/generate",
+                {
+                    "text": prompt,
+                    "lora_path": lora_name,
+                    "return_logprob": True,
+                    "sampling_params": {"temperature": 0, "max_new_tokens": 32},
+                },
+            )
+            for prompt in LORA_PROMPTS
+        ]
+        return [
+            {
+                "text": reply["text"],
+                "logprobs": [
+                    token[0] for token in reply["meta_info"]["output_token_logprobs"]
+                ],
+            }
+            for reply in replies
+        ]
+
+    def _post(self, path: str, body: dict):
+        request = urllib.request.Request(
+            f"{self.url}{path}",
+            data=json.dumps(body).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(request, timeout=1800) as reply:
+            return json.loads(reply.read())
 
     def state(self) -> dict[str, dict[str, str]]:
         """Every tensor's checksum on each GPU (draft tensors prefixed by their role), by
@@ -601,8 +688,8 @@ def recipe_args(
         f"{rollout}{loss}"
         "--optimizer adam --lr 1e-6 --lr-decay-style constant --weight-decay 0.1 "
         "--adam-beta1 0.9 --adam-beta2 0.98 "
-        "--update-weight-transfer-mode gpu-delta "
-        f"--update-weight-disk-dir {run_dir}/deltas "
+        f"--update-weight-transfer-mode {'disk-lora' if config.served_lora else 'gpu-delta'} "
+        f"--update-weight-disk-dir {run_dir}/{'adapters' if config.served_lora else 'deltas'} "
         f"--actor-num-nodes 1 --actor-num-gpus-per-node {config.train_gpus} "
         f"--num-gpus-per-node {config.train_gpus} "
         f"{te_precision}{config.train_args}"

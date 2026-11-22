@@ -20,6 +20,8 @@ class Config:
     te_precision_config: str | None = None
     train_gpus: int = 4
     engine_gpus: int = 4
+    # LoRA adapter served and synced by disk-lora; else full weights by gpu-delta.
+    served_lora: bool = False
 
 
 GLM5_ENV = {
@@ -464,4 +466,21 @@ CONFIGS["glm5.3-flash-cut-nvfp4-pp2"] = replace(
         "--pipeline-model-parallel-size 1 ",
         "--pipeline-model-parallel-size 2 --decoder-first-pipeline-num-layers 3 ",
     ).replace("--expert-model-parallel-size 4 ", "--expert-model-parallel-size 2 "),
+)
+
+# The engine serves the trainer's LoRA adapter, synced by disk-lora.
+CONFIGS["qwen3.6-35b-a3b-bf16-node-lora"] = replace(
+    CONFIGS["qwen3.6-35b-a3b-bf16"],
+    train_args=_QWEN3_6_NO_MTP_TRAIN
+    + "--expert-model-parallel-size 8 "
+    + _ONE_NODE_TOKENS
+    + "--lora-rank 32 --lora-alpha 32 --lr 1e-5 --no-gradient-accumulation-fusion "
+    "--target-modules all-linear --experts-shared-outer-loras "
+    # Miles saves a LoRA adapter under the precision-aware optimizer only with CPU Adam.
+     + _CPU_ADAM,
+    engine_args="--tp-size 1 " + _QWEN3_5_SERVE + "--moe-runner-backend triton "
+    "--enable-lora --max-lora-rank 32 --max-loras-per-batch 1 --lora-target-modules all "
+    "--experts-shared-outer-loras --lora-use-virtual-experts --lora-backend triton ",
+    served_lora=True,
+    **_ONE_NODE,
 )
