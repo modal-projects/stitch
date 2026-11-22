@@ -408,22 +408,24 @@ CONFIGS |= {
     f"qwen3.6-35b-a3b-fp8-node-{name}": CONFIGS["qwen3.6-35b-a3b-fp8-node-replay"]
     for name in ("top-p", "top-p-score-centering")
 }
-# LoRA merged into the weights at every sync: the engines and the sync are full fine-tuning's.
-_MERGED_LORA = (
+_LORA = (
     "--lora-rank 32 --lora-alpha 32 --lr 1e-5 --no-gradient-accumulation-fusion "
-    "--target-modules all-linear --experts-shared-outer-loras --lora-merge-for-rollout "
+    "--target-modules all-linear "
 )
-CONFIGS["qwen3.6-35b-a3b-fp8-node-lora"] = replace(
+_EXPERT_LORA = _LORA + "--experts-shared-outer-loras "
+# LoRA merged into the weights at every sync: the engines and the sync are full fine-tuning's.
+_MERGED_LORA = _EXPERT_LORA + "--lora-merge-for-rollout "
+CONFIGS["qwen3.6-35b-a3b-fp8-node-merged-lora"] = replace(
     CONFIGS["qwen3.6-35b-a3b-fp8-node"],
     train_args=CONFIGS["qwen3.6-35b-a3b-fp8-node"].train_args + _MERGED_LORA,
 )
 # Miles streams no LoRA optimizer to disk; the adapters' Adam state fits on the GPUs.
-CONFIGS["dsv4.1-cut-nvfp4-lora"] = replace(
+CONFIGS["dsv4.1-cut-nvfp4-merged-lora"] = replace(
     CONFIGS["dsv4.1-cut-nvfp4"],
     train_args=_DSV41_TRAIN + _MERGED_LORA,
 )
 # The absorbed DSA never runs kv_b_proj as a linear, so it takes no adapter.
-CONFIGS["glm5.3-flash-cut-nvfp4-lora"] = replace(
+CONFIGS["glm5.3-flash-cut-nvfp4-merged-lora"] = replace(
     CONFIGS["glm5.3-flash-cut-nvfp4"],
     train_args=CONFIGS["glm5.3-flash-cut-nvfp4"].train_args
     + _MERGED_LORA
@@ -456,7 +458,7 @@ CONFIGS["muse-spark-cut-bf16"] = Config(
 )
 # Muse Spark's adapters as Miles' Muse Spark LoRA trains them: q/gate/k/v/o and the routed experts; the
 # latent MoE's projections stay at base. The adapters' Adam state fits on the GPUs.
-CONFIGS["muse-spark-cut-bf16-lora"] = replace(
+CONFIGS["muse-spark-cut-bf16-merged-lora"] = replace(
     CONFIGS["muse-spark-cut-bf16"],
     train_args=_MUSE_SPARK_TRAIN + _MERGED_LORA,
 )
@@ -468,19 +470,123 @@ CONFIGS["glm5.3-flash-cut-nvfp4-pp2"] = replace(
     ).replace("--expert-model-parallel-size 4 ", "--expert-model-parallel-size 2 "),
 )
 
-# The engine serves the trainer's LoRA adapter, synced by disk-lora.
-CONFIGS["qwen3.6-35b-a3b-bf16-node-lora"] = replace(
-    CONFIGS["qwen3.6-35b-a3b-bf16"],
-    train_args=_QWEN3_6_NO_MTP_TRAIN
+# The engine serves the trainer's LoRA adapter, synced by disk-lora, over the checkpoint's base.
+
+
+def _lora_engine(slots: int, experts: bool = True, targets: str = "all") -> str:
+    """SGLang serving LoRA, `slots` adapters per batch.
+
+    DP attention pins the adapter, so it takes two: the adapter's and the base model's.
+    """
+    flags = (
+        f"--enable-lora --max-lora-rank 32 --max-loras-per-batch {slots} "
+        f"--lora-target-modules {targets} --lora-backend triton "
+    )
+    return flags + (
+        "--experts-shared-outer-loras --lora-use-virtual-experts " if experts else ""
+    )
+
+
+# Miles saves a LoRA adapter under the precision-aware optimizer only with CPU Adam.
+_QWEN3_6_LORA_TRAIN = (
+    _QWEN3_6_NO_MTP_TRAIN
     + "--expert-model-parallel-size 8 "
     + _ONE_NODE_TOKENS
-    + "--lora-rank 32 --lora-alpha 32 --lr 1e-5 --no-gradient-accumulation-fusion "
-    "--target-modules all-linear --experts-shared-outer-loras "
-    # Miles saves a LoRA adapter under the precision-aware optimizer only with CPU Adam.
-     + _CPU_ADAM,
-    engine_args="--tp-size 1 " + _QWEN3_5_SERVE + "--moe-runner-backend triton "
-    "--enable-lora --max-lora-rank 32 --max-loras-per-batch 1 --lora-target-modules all "
-    "--experts-shared-outer-loras --lora-use-virtual-experts --lora-backend triton ",
+    + _EXPERT_LORA
+    + _CPU_ADAM
+)
+CONFIGS["qwen3.6-35b-a3b-bf16-node-lora"] = replace(
+    CONFIGS["qwen3.6-35b-a3b-bf16"],
+    train_args=_QWEN3_6_LORA_TRAIN,
+    engine_args="--tp-size 1 "
+    + _QWEN3_5_SERVE
+    + "--moe-runner-backend triton "
+    + _lora_engine(1),
     served_lora=True,
     **_ONE_NODE,
+)
+# One engine over a node: DP attention, EP8, the adapter pinned.
+CONFIGS["qwen3.6-35b-a3b-bf16-node-lora-dp8"] = replace(
+    CONFIGS["qwen3.6-35b-a3b-bf16-node-lora"],
+    engine_args=dp_attention(8)
+    + "--enable-dp-lm-head "
+    + _QWEN3_5_SERVE
+    + "--moe-runner-backend triton "
+    + _lora_engine(2),
+    engine_gpus=8,
+)
+CONFIGS["qwen3.6-35b-a3b-fp8-node-lora"] = replace(
+    CONFIGS["qwen3.6-35b-a3b-fp8-node"],
+    train_args=_QWEN3_6_LORA_TRAIN,
+    engine_args="--tp-size 1 "
+    + _QWEN3_5_SERVE
+    + "--moe-runner-backend triton "
+    + _lora_engine(1),
+    served_lora=True,
+)
+# NVFP4 expert LoRA runs on the Marlin MoE runner.
+CONFIGS["qwen3.6-35b-a3b-nvfp4-node-lora"] = replace(
+    CONFIGS["qwen3.6-35b-a3b-nvfp4-node"],
+    train_args=_QWEN3_6_LORA_TRAIN,
+    engine_args="--tp-size 1 "
+    + _QWEN3_5_SERVE
+    + "--moe-runner-backend marlin "
+    + _lora_engine(1),
+    env={},
+    served_lora=True,
+)
+CONFIGS["qwen3.8-27b-bf16-node-lora"] = replace(
+    CONFIGS["qwen3.8-27b-bf16-node"],
+    train_args=_QWEN3_8_TRAIN + _ONE_NODE_TOKENS + _LORA + _CPU_ADAM,
+    engine_args="--tp-size 1 " + _QWEN3_5_SERVE + _lora_engine(1, experts=False),
+    served_lora=True,
+)
+# Expert LoRA on GLM-5.3-Flash and DeepSeek-V4.1 is served over BF16 experts on the Triton runner, as
+# Miles' recipes serve it: Marlin, which quantized experts take with LoRA, drops their SwiGLU limit.
+# The modules Miles trains with kv_b_proj excluded: SGLang serves no kv_b_proj adapter under DSA.
+_GLM53_FLASH_LORA_TARGETS = (
+    "q_proj k_proj v_proj o_proj b_proj f_a_proj f_b_proj g_a_proj g_b_proj q_a_proj q_b_proj "
+    "kv_a_proj_with_mqa gate_proj up_proj gate_up_proj down_proj"
+)
+CONFIGS["glm5.3-flash-cut-bf16-lora"] = replace(
+    CONFIGS["glm5.3-flash-cut-nvfp4"],
+    rollout_checkpoint="glm5-3-flash-cut5-bf16",
+    train_args=_GLM53_FLASH_TRAIN
+    + _EXPERT_LORA
+    + "--exclude-modules '*.self_attn.kv_b_proj' ",
+    engine_args=dp_attention(4) + "--enable-dp-lm-head --moe-runner-backend triton "
+    "--dsa-prefill-backend tilelang --dsa-decode-backend tilelang --kv-cache-dtype bfloat16 "
+    "--chunked-prefill-size 8192 --disable-radix-cache --mem-fraction-static 0.7 "
+    + _lora_engine(2, targets=_GLM53_FLASH_LORA_TARGETS),
+    env={},
+    served_lora=True,
+)
+CONFIGS["glm5.3-flash-cut-bf16-lora-pp2"] = replace(
+    CONFIGS["glm5.3-flash-cut-bf16-lora"],
+    train_args=CONFIGS["glm5.3-flash-cut-nvfp4-pp2"].train_args
+    + _EXPERT_LORA
+    + "--exclude-modules '*.self_attn.kv_b_proj' ",
+)
+# The modules Miles trains on V4.1: the attention projections and the routed and shared experts. SGLang
+# reads an expert projection by its experts parent, and a bare wq_b as the DSA indexer's.
+_DSV41_LORA_TARGETS = (
+    "attn.wq_a attn.wq_b attn.wkv attn.wo_a attn.wo_b experts.w1 experts.w2 experts.w3"
+)
+# TP and EP over the engine's GPUs, as Miles' V4.1 LoRA recipe serves it (scripts/run_deepseek_v4_1.py).
+CONFIGS["dsv4.1-cut-bf16-lora"] = replace(
+    CONFIGS["dsv4.1-cut-nvfp4"],
+    rollout_checkpoint="deepseek-v4-1-flash-cut7-bf16",
+    train_args=_DSV41_TRAIN + _EXPERT_LORA,
+    engine_args="--tp-size 4 --ep-size 4 --moe-a2a-backend none --attention-backend dsv4 "
+    "--moe-runner-backend triton --mem-fraction-static 0.7 "
+    + _lora_engine(1, targets=_DSV41_LORA_TARGETS),
+    env=DSV41_ENV | {"SGLANG_DSV4_FP4_EXPERTS": "0"},
+    served_lora=True,
+)
+# As the V4.1 full-weight configs serve it: DP attention, EP, the adapter pinned.
+CONFIGS["dsv4.1-cut-bf16-lora-dp4"] = replace(
+    CONFIGS["dsv4.1-cut-bf16-lora"],
+    engine_args=dp_attention(4)
+    + "--enable-dp-lm-head --dsv4-attn-backend flashmla --moe-runner-backend triton "
+    "--mem-fraction-static 0.7 " + _lora_engine(2, targets=_DSV41_LORA_TARGETS),
 )

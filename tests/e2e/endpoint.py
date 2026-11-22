@@ -86,14 +86,29 @@ SETUPS = {
     "glm5.3-cut-nvfp4": Setup(engines=2, join_at=4, resume_at=2),
     "glm5.3-cut-fp8": Setup(engines=2, join_at=4, resume_at=2),
     "muse-spark-cut-bf16": Setup(engines=2, join_at=4, resume_at=2),
-    "muse-spark-cut-bf16-lora": Setup(engines=2, join_at=4),
-    "qwen3.6-35b-a3b-bf16-node-lora": Setup(engines=2, join_at=3),
+    "muse-spark-cut-bf16-merged-lora": Setup(engines=2, join_at=4),
+    **{
+        name: Setup(engines=2, join_at=3)
+        for name in (
+            "qwen3.6-35b-a3b-bf16-node-lora",
+            "qwen3.6-35b-a3b-fp8-node-lora",
+            "qwen3.6-35b-a3b-nvfp4-node-lora",
+            "qwen3.8-27b-bf16-node-lora",
+        )
+    },
+    "qwen3.6-35b-a3b-bf16-node-lora-dp8": Setup(engines=1, join_at=3),
+    "glm5.3-flash-cut-bf16-lora": Setup(engines=2, join_at=4),
+    "glm5.3-flash-cut-bf16-lora-pp2": Setup(engines=1, join_at=3),
+    "dsv4.1-cut-bf16-lora": Setup(engines=2, join_at=4),
+    "dsv4.1-cut-bf16-lora-dp4": Setup(engines=2, join_at=4),
+    # Resumes, then an engine joins after the versions it would have caught up from were pruned.
+    "lora-resume": Setup(engines=2, join_at=4, resume_at=2),
     **{
         name: Setup(engines=4, join_at=3, rollout=DAPO_ROLLOUT)
         for name in (
             "qwen3.6-35b-a3b-nvfp4-node",
             "qwen3.6-35b-a3b-fp8-node",
-            "qwen3.6-35b-a3b-fp8-node-lora",
+            "qwen3.6-35b-a3b-fp8-node-merged-lora",
             "qwen3.6-35b-a3b-nvfp4-node-dflash2",
             "qwen3.8-27b-bf16-node",
             "qwen3.8-27b-fp8-node",
@@ -201,8 +216,12 @@ def _train_against_run(
             args = f"{base_args}--save {save}/torch_dist --save-hf {save}/hf/step_{{rollout_id}} "
             if phase == "resume":
                 result["engines"] = _engines(pool)
+                # LoRA resumes from the adapter checkpoint, whose schedule ran fewer rollouts.
                 args += (
-                    f"--load {saves}/train/torch_dist --ckpt-step {setup.resume_at} "
+                    f"--lora-adapter-path {saves}/train/torch_dist/iter_{setup.resume_at:07d}/adapter "
+                    "--no-load-optim --override-opt-param-scheduler "
+                    if config.served_lora
+                    else f"--load {saves}/train/torch_dist --ckpt-step {setup.resume_at} "
                     "--no-load-optim --no-load-rng "
                 )
             last = phase == phases[-1]
