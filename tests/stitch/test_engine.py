@@ -232,15 +232,18 @@ def test_an_open_engine_follows_each_version_and_reports_its_stats(service, vers
 
 
 class FakeLoRAEngine:
-    """Serves whichever adapter version it applied last; it holds no committed weights."""
+    """Serves whichever adapter version it applied last; it holds no committed weights. `fail_at`:
+    applying that version fails."""
 
-    def __init__(self):
-        self.version, self.applied = -1, []
+    def __init__(self, fail_at=None):
+        self.version, self.applied, self.fail_at = -1, [], fail_at
 
     def committed(self, plan_digest):
         raise AssertionError("a LoRA version builds on no committed weights")
 
     def apply(self, publication, version):
+        if version == self.fail_at:
+            raise RuntimeError(f"version {version} failed")
         self.applied.append((publication["lora_path"], version))
         self.version = version
         return {}
@@ -266,6 +269,19 @@ def test_an_engine_takes_only_the_newest_lora_version_then_each_one_after(
         (str(versions / "a_run_v4"), 4),
     ]
     assert service.status()["serving"] == {4: 1}
+
+
+def test_a_lora_apply_that_fails_names_the_version_folder(service, versions):
+    start = _start(service, 3, _lora(3))
+    container = _container(service, FakeLoRAEngine(fail_at=4), versions)
+    container.open()
+    ended = _run(container.listen, container.follow)
+
+    with pytest.raises(Failed, match="every open engine failed to apply version 4"):
+        service.publish(4, 3, *start, _lora(4))
+
+    time.sleep(0.3)
+    assert "version 4 from a_run_v4: version 4 failed" in ended
 
 
 def test_an_engine_stays_heard_while_a_version_applies_longer_than_the_lease(

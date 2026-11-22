@@ -235,9 +235,12 @@ class EngineContainer:
             if not self.exiting:
                 with contextlib.suppress(Exception):
                     self.control.fail(head)
-            raise RuntimeError(
-                f"version {head} from {publication['manifest']}: {error}"
-            ) from error
+            source = (
+                publication["path"]
+                if publication.get("kind") == "lora"
+                else publication["manifest"]
+            )
+            raise RuntimeError(f"version {head} from {source}: {error}") from error
         self.applied = (head, start_id)
         logger.info("version %d: %d publications, %s", head, len(chain), stats)
         return head, stats
