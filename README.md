@@ -28,7 +28,8 @@ run = create_run(RunConfig(
     image_commands=[SGLANG],
     volumes={"/models": "my-models", "/runs": "my-runs"},
     checkpoint="/models/my-model",  # every publication chain starts from it
-    # On another Volume than the checkpoint: an engine's first reload drops what it read through that Volume.
+    # On another Volume than the checkpoint: an engine's first reload drops what it read through that Volume. A v2
+    # Volume (`modal volume create --version 2`): the trainer seals each version with a hard link, which v1 refuses.
     versions="/runs/my-run/versions",
     engine=SGLangConfig(server_args={"--tp-size": "8", "--expert-parallel-size": "8"}),
     pool=PoolConfig(gpu="B200:8", min_containers=2, max_containers=8),
