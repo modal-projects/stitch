@@ -1,7 +1,11 @@
 """One run's app on Modal, built from the run config in STITCH_RUN: control service and engines."""
 
+import dataclasses
+import logging
 import math
 import os
+import re
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -14,6 +18,7 @@ from stitch.run import RunConfig
 from stitch.sglang import SGLang
 
 PORT = 8000
+logger = logging.getLogger(__name__)
 
 config = RunConfig.from_json(os.environ["STITCH_RUN"])
 ENV = {"STITCH_RUN": os.environ["STITCH_RUN"]}
@@ -23,6 +28,17 @@ volumes = {
     for mount, name in config.volumes.items()
 }
 versions_volume = volumes[config.mount_of(config.versions)]
+COMPILE_CACHE_MOUNT = "/compile-cache"
+compile_cache_volume = (
+    modal.Volume.from_name(config.compile_cache, create_if_missing=True, version=2)
+    if config.compile_cache
+    else None
+)
+engine_volumes = (
+    {**volumes, COMPILE_CACHE_MOUNT: compile_cache_volume}
+    if compile_cache_volume
+    else volumes
+)
 image = (
     modal.Image.from_registry(config.image)
     .run_commands(
@@ -135,6 +151,74 @@ class Control:
             time.sleep(60)
 
 
+# Each cache's environment variable and its folder; XDG_CACHE_HOME covers FlashInfer's and CuTe DSL's.
+CACHE_FOLDERS = {
+    "SGLANG_CACHE_DIR": "sglang",
+    "TRITON_CACHE_DIR": "triton",
+    "TORCHINDUCTOR_CACHE_DIR": "inductor",
+    "CUDA_CACHE_PATH": "nv",
+    "XDG_CACHE_HOME": "xdg",
+    "TILELANG_CACHE_DIR": "tilelang",
+    "DG_JIT_CACHE_DIR": "deep_gemm",
+}
+LOCAL_COMPILE_CACHE = Path("/root/compile-cache")
+
+
+class CompileCache:
+    """This image, GPU and model's compiled kernels and tuned tactics, kept as one archive in the compile cache:
+    reading thousands of small files through a Volume costs more than compiling them."""
+
+    def __init__(self, volume: modal.Volume):
+        gpu = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.splitlines()[0]
+        parts = (config.image, gpu, Path(config.checkpoint).name)
+        name = "__".join(re.sub(r"[^A-Za-z0-9._-]", "_", part) for part in parts)
+        self.volume, self.archive = volume, Path(COMPILE_CACHE_MOUNT, f"{name}.tar")
+        self.restored = 0
+
+    def restore(self) -> dict[str, str]:
+        """Unpacks the archive onto local disk; the env that points every cache there."""
+        LOCAL_COMPILE_CACHE.mkdir(parents=True, exist_ok=True)
+        if self.archive.is_file():
+            try:
+                subprocess.run(
+                    ["tar", "-xf", str(self.archive), "-C", str(LOCAL_COMPILE_CACHE)],
+                    check=True,
+                )
+            except subprocess.CalledProcessError:
+                logger.warning("the compile cache was not restored", exc_info=True)
+        self.restored = _file_count(LOCAL_COMPILE_CACHE)
+        return {
+            variable: str(LOCAL_COMPILE_CACHE / folder)
+            for variable, folder in CACHE_FOLDERS.items()
+        }
+
+    def save(self) -> None:
+        """Packs the caches into the archive when this engine added to them; an engine that cannot still serves."""
+        try:
+            if _file_count(LOCAL_COMPILE_CACHE) == self.restored:
+                return
+            partial = self.archive.with_name(
+                f"{self.archive.name}.{os.environ['MODAL_TASK_ID']}"
+            )
+            subprocess.run(
+                ["tar", "-cf", str(partial), "-C", str(LOCAL_COMPILE_CACHE), "."],
+                check=True,
+            )
+            partial.rename(self.archive)
+            self.volume.commit()
+        except Exception:
+            logger.warning("the compile cache was not saved", exc_info=True)
+
+
+def _file_count(folder: Path) -> int:
+    return sum(len(files) for _, _, files in os.walk(folder))
+
+
 def _node(cls):
     """An engine on every GPU of its machine runs as a one-node cluster, so the machine is its alone
     (Modal: up to 4 A10s or 8 of any other type in a container; a cluster takes one GPU type)."""
@@ -156,7 +240,7 @@ def _node(cls):
     exit_grace_period=config.pool.exit_grace_period,
     cpu=config.pool.cpu,
     memory=config.pool.memory,
-    volumes=volumes,
+    volumes=engine_volumes,
     env=ENV,
     experimental_options=config.server_options,
 )
@@ -164,11 +248,15 @@ def _node(cls):
 class EnginePool:
     @modal.enter()
     def enter(self):
+        cache = CompileCache(compile_cache_volume) if compile_cache_volume else None
         engine = SGLang(
             config.checkpoint,
             version=-1,
             port=PORT,
-            config=config.engine,
+            config=dataclasses.replace(
+                config.engine,
+                env={**(cache.restore() if cache else {}), **config.engine.env},
+            ),
             startup_timeout=config.pool.startup_timeout,
             engine_id=os.environ["MODAL_TASK_ID"],
         )
@@ -177,6 +265,8 @@ class EnginePool:
             engine, control, Path(config.versions), versions_volume.reload
         )
         self.container.enter()
+        if cache:
+            threading.Thread(target=cache.save, daemon=True).start()
 
     @modal.exit()
     def exit(self):

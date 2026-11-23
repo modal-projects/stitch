@@ -37,7 +37,9 @@ class PoolConfig:
 class RunConfig:
     """`image`: the engines' Docker image, with an SGLang that serves weight deltas, built on with `image_commands`.
     `checkpoint` (where every publication chain starts) and `versions` are paths under `volumes`
-    (mount path -> Volume)."""
+    (mount path -> Volume). `compile_cache`: the Volume where engines keep the kernels they compile and the
+    tactics they tune, one archive per image, GPU and model, shared by every run that names it; None compiles
+    in every engine."""
 
     run_id: str
     image: str
@@ -47,6 +49,7 @@ class RunConfig:
     engine: SGLangConfig
     pool: PoolConfig
     image_commands: list[str] = field(default_factory=list)
+    compile_cache: str | None = "stitch-compile-cache"
     clocks: Clocks = Clocks()
 
     @property
