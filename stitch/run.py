@@ -50,7 +50,8 @@ class RunConfig:
     `checkpoint` (where every publication chain starts) and `versions` are paths under `volumes`
     (mount path -> Volume). `compile_cache`: the Volume where engines keep the kernels they compile and the
     tactics they tune, one archive per image, GPU and model, shared by every run that names it; None compiles
-    in every engine."""
+    in every engine. `adapters`: where a trainer publishes adapters that requests name and engines load on
+    demand, on a mount of its own: engines see each one as a local copy at the same path."""
 
     run_id: str
     image: str
@@ -61,7 +62,17 @@ class RunConfig:
     pool: PoolConfig
     image_commands: list[str] = field(default_factory=list)
     compile_cache: str | None = "stitch-compile-cache"
+    adapters: str | None = None
     clocks: Clocks = Clocks()
+
+    def __post_init__(self):
+        if self.adapters and self.mount_of(self.adapters) in (
+            self.mount_of(self.versions),
+            self.mount_of(self.checkpoint),
+        ):
+            raise ValueError(
+                f"adapters {self.adapters} need a mount of their own: engines read them only as local copies"
+            )
 
     @property
     def app_name(self) -> str:
@@ -71,6 +82,11 @@ class RunConfig:
     def versions_volume(self) -> str:
         """The Volume the trainer commits each version to and the engines reload: STITCH_VERSIONS_VOLUME."""
         return self.volumes[self.mount_of(self.versions)]
+
+    @property
+    def adapters_volume(self) -> str | None:
+        """The Volume the trainer commits each adapter to: STITCH_ADAPTERS_VOLUME."""
+        return self.volumes[self.mount_of(self.adapters)] if self.adapters else None
 
     @property
     def server_options(self) -> dict[str, str | bool | int]:

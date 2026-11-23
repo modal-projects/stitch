@@ -48,6 +48,19 @@ def test_auto_mode_keeps_an_engine_to_measure():
         PoolConfig(gpu="H200:4", autoscale=True, min_containers=0)
 
 
+def test_adapters_need_a_mount_of_their_own():
+    with pytest.raises(ValueError, match="a mount of their own"):
+        dataclasses.replace(CONFIG, adapters="/data/r1/adapters")
+
+    on_their_own = dataclasses.replace(
+        CONFIG,
+        volumes={**CONFIG.volumes, "/adapters": "adapters"},
+        adapters="/adapters/r1",
+    )
+    assert RunConfig.from_json(on_their_own.to_json()) == on_their_own
+    assert on_their_own.adapters_volume == "adapters" and CONFIG.adapters_volume is None
+
+
 def test_a_run_id_already_deployed_with_another_config_is_refused(monkeypatch):
     deployed = dataclasses.replace(CONFIG, clocks=Clocks()).to_json()
     control = SimpleNamespace(run_config=SimpleNamespace(remote=lambda: deployed))

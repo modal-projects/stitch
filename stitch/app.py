@@ -14,7 +14,7 @@ import modal
 
 from stitch.autoscale import Autoscaler
 from stitch.control import ControlService, Failed, Refused
-from stitch.engine import ControlClient, EngineContainer
+from stitch.engine import AdapterStage, ControlClient, EngineContainer
 from stitch.run import RunConfig
 from stitch.sglang import SGLang
 
@@ -43,11 +43,15 @@ compile_cache_volume = (
     if config.compile_cache
     else None
 )
-engine_volumes = (
-    {**volumes, COMPILE_CACHE_MOUNT: compile_cache_volume}
-    if compile_cache_volume
-    else volumes
-)
+# Engines see published adapters only as local copies at the paths requests name, made from a private mount.
+ADAPTER_SOURCE_MOUNT = "/adapter-source"
+adapters_mount = config.mount_of(config.adapters) if config.adapters else None
+engine_volumes = {
+    ADAPTER_SOURCE_MOUNT if mount == adapters_mount else mount: volume
+    for mount, volume in volumes.items()
+}
+if compile_cache_volume:
+    engine_volumes[COMPILE_CACHE_MOUNT] = compile_cache_volume
 image = (
     modal.Image.from_registry(config.image)
     .run_commands(
@@ -93,13 +97,24 @@ class Control:
 
     @modal.method()
     def next(
-        self, engine_id: str, version: int, seen: int, start_id: str | None
+        self,
+        engine_id: str,
+        version: int,
+        seen: int,
+        start_id: str | None,
+        seen_adapters: int,
     ) -> dict:
-        return self.service.next(engine_id, version, seen, start_id)
+        return self.service.next(engine_id, version, seen, start_id, seen_adapters)
 
     @modal.method()
     def served(self, engine_id: str, version: int, stats: dict, start_id: str) -> dict:
         return self.service.served(engine_id, version, stats, start_id)
+
+    @modal.method()
+    def staged(
+        self, engine_id: str, version: int, adapters: int, start_id: str | None
+    ) -> dict:
+        return self.service.staged(engine_id, version, adapters, start_id)
 
     @modal.method()
     def fail(self, engine_id: str, version: int) -> None:
@@ -141,6 +156,25 @@ class Control:
                 raise HTTPException(409, str(error)) from None
             except Failed as error:
                 raise HTTPException(422, str(error)) from None
+
+        @web.post("/adapters")
+        def adapters(body: dict) -> dict:
+            if not config.adapters or not Path(body["path"]).is_relative_to(
+                config.adapters
+            ):
+                raise HTTPException(
+                    422,
+                    f"{body['path']} is outside the run's adapters {config.adapters}",
+                )
+            try:
+                return service.publish_adapter(
+                    body["path"],
+                    bool(body.get("withdrawn", False)),
+                    int(body["start"]),
+                    body["start_id"],
+                )
+            except Refused as error:
+                raise HTTPException(409, str(error)) from None
 
         @web.post("/steps")
         def steps(body: dict) -> dict:
@@ -306,8 +340,19 @@ class EnginePool:
             engine_id=os.environ["MODAL_TASK_ID"],
         )
         control = ControlClient(Control(), os.environ["MODAL_TASK_ID"], config.clocks)
+        adapter_stage = None
+        if adapters_mount:
+            adapter_stage = AdapterStage(
+                Path(ADAPTER_SOURCE_MOUNT),
+                Path(adapters_mount),
+                volumes[adapters_mount].reload,
+            )
         self.container = EngineContainer(
-            engine, control, Path(config.versions), versions_volume.reload
+            engine,
+            control,
+            Path(config.versions),
+            versions_volume.reload,
+            adapter_stage,
         )
         self.container.enter()
         if cache:

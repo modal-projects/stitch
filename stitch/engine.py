@@ -4,9 +4,12 @@ import contextlib
 import hashlib
 import json
 import logging
+import shutil
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from pathlib import Path
 from typing import Protocol
 
@@ -65,11 +68,16 @@ class ControlClient:
     def open(self, version: int, start_id: str | None) -> dict:
         return self._call(self.service.open, version, start_id)
 
-    def next(self, version: int, seen: int, start_id: str | None) -> dict:
-        return self._call(self.service.next, version, seen, start_id)
+    def next(
+        self, version: int, seen: int, start_id: str | None, seen_adapters: int
+    ) -> dict:
+        return self._call(self.service.next, version, seen, start_id, seen_adapters)
 
     def served(self, version: int, stats: dict, start_id: str) -> dict:
         return self._call(self.service.served, version, stats, start_id)
+
+    def staged(self, version: int, adapters: int, start_id: str | None) -> dict:
+        return self._call(self.service.staged, version, adapters, start_id)
 
     def fail(self, version: int) -> None:
         self._call(self.service.fail, version)
@@ -132,6 +140,26 @@ def publication_chain(
     return chain[::-1]
 
 
+class AdapterStage:
+    """Published adapters at the paths requests name, copied there from a private mount of their Volume."""
+
+    def __init__(self, source: Path, target: Path, reload: Callable[[], None]):
+        self.source, self.target, self.reload = source, target, reload
+
+    def apply(self, changes: list[dict]) -> None:
+        self.reload()
+        withdrawn = {change["path"] for change in changes if change["withdrawn"]}
+        published = {change["path"] for change in changes} - withdrawn
+        # Each copy mostly waits on the Volume's reads, and a burst of saves stages together.
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            list(pool.map(partial(shutil.rmtree, ignore_errors=True), withdrawn))
+            list(pool.map(self._copy, published))
+
+    def _copy(self, path: str) -> None:
+        source = self.source / Path(path).relative_to(self.target)
+        shutil.copytree(source, path, dirs_exist_ok=True)
+
+
 class EngineContainer:
     """One engine's Modal container: applies the run's publications in order, up to the head's."""
 
@@ -141,9 +169,10 @@ class EngineContainer:
         control: ControlClient,
         versions: Path,
         reload: Callable[[], None],
+        adapter_stage: AdapterStage | None = None,
     ):
         self.engine, self.control, self.versions = engine, control, versions
-        self.reload = reload
+        self.reload, self.adapter_stage = reload, adapter_stage
         self.head = engine.version
         # The head's publication, as the control service last named it.
         self.publication: dict | None = None
@@ -152,6 +181,8 @@ class EngineContainer:
         self.start_id: str | None = None
         self.applied: tuple[int, str | None] = (engine.version, None)
         self.view_head: int | None = None
+        self.adapters: list[dict] = []
+        self.staged = 0
         self.newer = threading.Condition()
         self.exiting = False
 
@@ -178,7 +209,9 @@ class EngineContainer:
             reply = _raise_on_exit(self.control.open(*self.applied))
             self.start_id = reply["start_id"] or self.start_id
             self.head, self.publication = reply["head"], reply["publication"]
+            self.adapters = reply["adapters"]
             if reply["open"]:
+                self._stage_adapters()
                 return
             if self.head > self.engine.version:
                 self._catch_up()
@@ -187,19 +220,30 @@ class EngineContainer:
         """Keeps one call to the control service open, also while applying; wakes `follow`."""
         while True:
             version, start_id = self.applied
-            reply = _raise_on_exit(self.control.next(version, self.head, start_id))
+            reply = _raise_on_exit(
+                self.control.next(version, self.head, start_id, len(self.adapters))
+            )
             with self.newer:
                 self.head, self.publication = reply["head"], reply["publication"]
                 self.start_id = reply["start_id"] or self.start_id
+                self.adapters += reply["adapters"]
                 self.newer.notify_all()
 
     def follow(self) -> None:
-        """Applies the publications up to the newest version, in order, and reports it served."""
+        """Applies the publications up to the newest version and reports it served; stages new adapters."""
         while True:
             with self.newer:
-                self.newer.wait_for(lambda: self.head > self.engine.version)
-            version, stats = self._catch_up()
-            _raise_on_exit(self.control.served(version, stats, self.applied[1]))
+                self.newer.wait_for(
+                    lambda: (
+                        self.head > self.engine.version
+                        or len(self.adapters) > self.staged
+                    )
+                )
+            if self.head > self.engine.version:
+                version, stats = self._catch_up()
+                _raise_on_exit(self.control.served(version, stats, self.applied[1]))
+            if len(self.adapters) > self.staged:
+                self._stage_adapters()
 
     def _run_or_exit(self, loop: Callable[[], None]) -> None:
         try:
@@ -211,6 +255,16 @@ class EngineContainer:
             with contextlib.suppress(Exception):
                 self.engine.abort_all()
             terminate_container()
+
+    def _stage_adapters(self) -> None:
+        changes = self.adapters[self.staged :]
+        if not changes:
+            return
+        self.adapter_stage.apply(changes)
+        self.staged += len(changes)
+        _raise_on_exit(
+            self.control.staged(self.applied[0], self.staged, self.applied[1])
+        )
 
     def _catch_up(self) -> tuple[int, dict]:
         start_id, head, publication = self.start_id, self.head, self.publication

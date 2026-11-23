@@ -4,6 +4,7 @@ import secrets
 import threading
 import time
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass
 
 
@@ -45,6 +46,7 @@ class _Engine:
     open: bool = False
     behind_since: float | None = None
     stats: dict | None = None
+    staged: int = 0
 
 
 class ControlService:
@@ -56,6 +58,7 @@ class ControlService:
         self.publication: dict | None = None
         self.start_version: int | None = None
         self.start_id: str | None = None
+        self.adapters: list[dict] = []
         self.engines: dict[str, _Engine] = {}
         self.ending: dict[str, str] = {}
         self.failed: dict[str, int] = {}
@@ -76,6 +79,7 @@ class ControlService:
                     "head": version,
                     "start_id": self.start_id,
                     "publication": None,
+                    "adapters": list(self.adapters),
                 }
             engine.open = version == self.head
             self.condition.notify_all()
@@ -84,13 +88,19 @@ class ControlService:
                 "head": self.head,
                 "start_id": self.start_id,
                 "publication": self.publication,
+                "adapters": list(self.adapters),
             }
 
     def next(
-        self, engine_id: str, version: int, seen: int, start_id: str | None
+        self,
+        engine_id: str,
+        version: int,
+        seen: int,
+        start_id: str | None,
+        seen_adapters: int,
     ) -> dict:
-        """The engine serves `version`: {"head": N, "start_id": the run's start} once N is not
-        `seen` or the wait ends, or {"exit": why}"""
+        """The engine serves `version`: {"head": N, "start_id": the run's start, "adapters": the adapter
+        changes after its `seen_adapters`} once N is not `seen` or a change came, or the wait ends; or {"exit": why}"""
         with self.condition:
             if reason := self._exit_reason(engine_id, version, start_id):
                 return self._end(engine_id, reason)
@@ -101,6 +111,7 @@ class ControlService:
                 lambda: (
                     engine_id in self.ending
                     or (self.head is not None and self.head != seen)
+                    or len(self.adapters) != seen_adapters
                 ),
                 self.clocks.wait,
             )
@@ -110,6 +121,7 @@ class ControlService:
                 "head": seen if self.head is None else self.head,
                 "start_id": self.start_id,
                 "publication": self.publication,
+                "adapters": self.adapters[seen_adapters:],
             }
 
     def served(self, engine_id: str, version: int, stats: dict, start_id: str) -> dict:
@@ -119,6 +131,18 @@ class ControlService:
                 return self._end(engine_id, reason)
             engine = self._heard(engine_id, version)
             engine.open, engine.stats = True, stats
+            self.condition.notify_all()
+            return {}
+
+    def staged(
+        self, engine_id: str, version: int, adapters: int, start_id: str | None
+    ) -> dict:
+        """The engine staged the first `adapters` adapter changes: {} or {"exit": why}"""
+        with self.condition:
+            if reason := self._exit_reason(engine_id, version, start_id):
+                return self._end(engine_id, reason)
+            engine = self._heard(engine_id, version)
+            engine.staged = max(engine.staged, adapters)
             self.condition.notify_all()
             return {}
 
@@ -174,6 +198,19 @@ class ControlService:
                 self._set_head(version)
         return self._barrier(version, start_id)
 
+    def publish_adapter(
+        self, path: str, withdrawn: bool, start_version: int, start_id: str
+    ) -> dict:
+        """Waits until every engine taking traffic staged the adapter at `path`, or removed it if `withdrawn`."""
+        with self.condition:
+            self.trainer_heard = time.monotonic()
+            self._check_trainer(start_version, start_id, None)
+            self.adapters.append({"path": path, "withdrawn": withdrawn})
+            adapters = len(self.adapters)
+            self.condition.notify_all()
+        self._until_serving(start_id, lambda e: e.staged >= adapters)
+        return {}
+
     def status(
         self,
         start_version: int | None = None,
@@ -207,20 +244,11 @@ class ControlService:
     def _barrier(self, version: int, start_id: str) -> dict:
         started = time.monotonic()
         with self.condition:
-            # Every open engine calls once a lease: only a service up that long knows all of them.
-            while (left := self.started + self.clocks.lease - time.monotonic()) > 0:
-                self.condition.wait(left)
+            self._wait_to_know_engines()
             # An open engine that failed at `version` before this call counts too.
             expected = set(self._serving())
             expected |= {i for i, failed in self.failed.items() if failed == version}
-            while True:
-                if self.start_id != start_id:
-                    raise Refused("the call is from another start than the run's")
-                self._sweep()
-                if all(e.version >= version for e in self._serving().values()):
-                    break
-                self.condition.wait(1.0)
-            serving = self._serving()
+            serving = self._until_serving(start_id, lambda e: e.version >= version)
             if (
                 expected
                 and not serving
@@ -235,6 +263,24 @@ class ControlService:
                     for i, e in serving.items()
                 },
             }
+
+    def _wait_to_know_engines(self) -> None:
+        # Every open engine calls once a lease: only a service up that long knows all of them.
+        while (left := self.started + self.clocks.lease - time.monotonic()) > 0:
+            self.condition.wait(left)
+
+    def _until_serving(
+        self, start_id: str, reached: Callable[[_Engine], bool]
+    ) -> dict[str, _Engine]:
+        with self.condition:
+            self._wait_to_know_engines()
+            while True:
+                if self.start_id != start_id:
+                    raise Refused("the call is from another start than the run's")
+                self._sweep()
+                if all(reached(e) for e in self._serving().values()):
+                    return self._serving()
+                self.condition.wait(1.0)
 
     def _serving(self) -> dict[str, _Engine]:
         """Open engines heard from within the lease, as of now; any other is gone."""

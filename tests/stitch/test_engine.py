@@ -15,6 +15,7 @@ import stitch.engine
 from stitch.control import Clocks, ControlService, Failed, Refused
 from stitch.engine import (
     PUBLICATION_FIELDS,
+    AdapterStage,
     ControlClient,
     EngineContainer,
     publication_chain,
@@ -151,12 +152,13 @@ def _modal_class(**methods) -> SimpleNamespace:
     )
 
 
-def _container(service, engine, versions, reload=lambda: None):
+def _container(service, engine, versions, reload=lambda: None, adapter_stage=None):
     methods = {
-        name: getattr(service, name) for name in ("open", "next", "served", "fail")
+        name: getattr(service, name)
+        for name in ("open", "next", "served", "staged", "fail")
     }
     control = ControlClient(_modal_class(**methods), "e0", CLOCKS)
-    return EngineContainer(engine, control, versions, reload)
+    return EngineContainer(engine, control, versions, reload, adapter_stage)
 
 
 def _run(*loops) -> list[str]:
@@ -608,3 +610,100 @@ def test_a_control_service_unreachable_past_the_patience_raises(no_sleep):
     clocks = Clocks(patience=0, lease=0.3)
     with pytest.raises(modal.exception.ConnectionError):
         ControlClient(service, "e0", clocks).open(3, None)
+
+
+def _adapters(tmp_path):
+    published, mount, local = (
+        tmp_path / "published",
+        tmp_path / "mount",
+        tmp_path / "local",
+    )
+    published.mkdir()
+    mount.mkdir()
+
+    def reload():
+        shutil.copytree(published, mount, dirs_exist_ok=True)
+
+    return published, AdapterStage(mount, local, reload), local
+
+
+def _publish_adapter(published: Path, name: str) -> None:
+    (published / name).mkdir()
+    (published / name / "adapter_model.safetensors").write_bytes(name.encode())
+
+
+def test_staging_copies_each_published_adapter_and_removes_a_withdrawn_one(tmp_path):
+    published, stage, local = _adapters(tmp_path)
+    for name in ("a", "b"):
+        _publish_adapter(published, name)
+    stage.apply(
+        [{"path": str(local / name), "withdrawn": False} for name in ("a", "b")]
+    )
+    assert (local / "b" / "adapter_model.safetensors").read_bytes() == b"b"
+
+    stage.apply([{"path": str(local / "a"), "withdrawn": True}])
+
+    assert not (local / "a").exists() and (local / "b").exists()
+
+
+def test_an_adapter_withdrawn_in_the_same_changes_is_never_copied(tmp_path):
+    published, stage, local = _adapters(tmp_path)
+    _publish_adapter(published, "a")
+
+    stage.apply(
+        [
+            {"path": str(local / "a"), "withdrawn": False},
+            {"path": str(local / "a"), "withdrawn": True},
+        ]
+    )
+
+    assert not (local / "a").exists()
+
+
+def test_a_burst_of_published_adapters_is_copied_at_once(tmp_path, monkeypatch):
+    published, stage, local = _adapters(tmp_path)
+    names = ("a", "b", "c")
+    for name in names:
+        _publish_adapter(published, name)
+    together = threading.Barrier(len(names), timeout=5)
+    copytree = shutil.copytree
+
+    def copy_once_all_started(source, target, *args, **kwargs):
+        if Path(target).parent == local:
+            together.wait()
+        return copytree(source, target, *args, **kwargs)
+
+    monkeypatch.setattr(stitch.engine.shutil, "copytree", copy_once_all_started)
+
+    stage.apply([{"path": str(local / name), "withdrawn": False} for name in names])
+
+    assert all((local / name).exists() for name in names)
+
+
+def test_an_engine_stages_every_adapter_published_before_it_opens(
+    service, versions, tmp_path
+):
+    published, stage, local = _adapters(tmp_path)
+    _publish_adapter(published, "a")
+    _, start_id = _start(service, -1, None)
+    service.publish_adapter(str(local / "a"), False, -1, start_id)
+    container = _container(service, FakeEngine(), versions, adapter_stage=stage)
+
+    container.open()
+
+    assert (local / "a").exists() and container.staged == 1
+
+
+def test_a_serving_engine_stages_an_adapter_before_its_publication_returns(
+    service, versions, tmp_path
+):
+    published, stage, local = _adapters(tmp_path)
+    _, start_id = _start(service, -1, None)
+    container = _container(service, FakeEngine(), versions, adapter_stage=stage)
+    container.open()
+    _run(container.listen, container.follow)
+    _publish_adapter(published, "a")
+
+    service.publish_adapter(str(local / "a"), False, -1, start_id)
+
+    assert (local / "a").exists() and container.staged == 1

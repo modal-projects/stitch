@@ -27,7 +27,8 @@ class Engine:
     """An open engine: one thread keeps a next call open, another applies each newer version at
     once unless `stuck`, and reports it served; `fail_at` reports that version failed and leaves,
     `die` stops both. An engine that opened before the service restarted (`opened`) just keeps
-    following; `start_id` is the start it knew when it applied `version`."""
+    following; `start_id` is the start it knew when it applied `version`. It stages each
+    adapter change unless `blind`."""
 
     def __init__(
         self,
@@ -38,8 +39,10 @@ class Engine:
         fail_at=None,
         opened=False,
         start_id=None,
+        blind=False,
     ):
         self.service, self.id, self.head = service, engine_id, version
+        self.adapters, self.staged, self.blind = [], 0, blind
         self.applied, self.start_id = (version, start_id), start_id
         self.stuck, self.fail_at, self.exit, self.alive = stuck, fail_at, None, True
         self.newer = threading.Condition()
@@ -60,7 +63,9 @@ class Engine:
     def _listen(self):
         while self.alive:
             version, start_id = self.applied
-            reply = self.service.next(self.id, version, self.head, start_id)
+            reply = self.service.next(
+                self.id, version, self.head, start_id, len(self.adapters)
+            )
             if not self.alive:
                 return
             if "exit" in reply:
@@ -71,11 +76,17 @@ class Engine:
                     reply["head"],
                     reply["start_id"] or self.start_id,
                 )
+                self.adapters += reply["adapters"]
                 self.newer.notify_all()
 
     def _follow(self):
         while self.alive:
             with self.newer:
+                if not self.blind and len(self.adapters) > self.staged:
+                    self.staged = len(self.adapters)
+                    self.service.staged(
+                        self.id, self.version, self.staged, self.start_id
+                    )
                 if self.stuck or not self.newer.wait_for(
                     lambda: self.head > self.version, timeout=0.05
                 ):
@@ -102,6 +113,7 @@ def test_an_engine_waits_for_the_run_to_start():
         "head": 0,
         "start_id": None,
         "publication": None,
+        "adapters": [],
     }
 
     start_id = service.start(3, {"target_version": 3})["start_id"]
@@ -110,6 +122,7 @@ def test_an_engine_waits_for_the_run_to_start():
         "head": 3,
         "start_id": start_id,
         "publication": {"target_version": 3},
+        "adapters": [],
     }
 
 
@@ -124,7 +137,7 @@ def test_engines_learn_the_heads_publication_from_the_start_and_each_version():
         args=(4, 3, 3, start, {"target_version": 2}),
         daemon=True,
     ).start()
-    reply = service.next("e1", 3, 3, start)
+    reply = service.next("e1", 3, 3, start, 0)
 
     assert (reply["head"], reply["publication"]) == (4, {"target_version": 2})
 
@@ -310,7 +323,7 @@ def test_an_older_report_arriving_late_does_not_move_an_engine_back():
     service = _service()
     _, start_id = _start(service, 5)
     service.served("e0", 5, {}, start_id)
-    service.next("e0", 4, 5, start_id)
+    service.next("e0", 4, 5, start_id, 0)
 
     assert service.status()["serving"] == {5: 1}
 
@@ -364,6 +377,7 @@ def test_a_restarted_service_moves_no_engine_until_the_trainer_names_its_start()
         "head": 2,
         "start_id": None,
         "publication": None,
+        "adapters": [],
     }
     assert service.status()["head"] is None
 
@@ -414,6 +428,7 @@ def test_a_service_restarted_before_any_version_takes_the_run_from_the_trainers_
         "head": 2,
         "start_id": "t1",
         "publication": None,
+        "adapters": [],
     }
     with pytest.raises(Refused, match="from another start"):
         service.status(2, "t0", 2)
@@ -432,10 +447,62 @@ def test_the_serving_engines_are_the_open_ones_heard_within_the_lease():
     service = _service()
     start = _start(service, 3)[1]
     # A head the engine has not seen answers at once.
-    service.next("e0", 3, 2, start)
-    service.next("e1", 3, 2, start)
+    service.next("e0", 3, 2, start, 0)
+    service.next("e1", 3, 2, start, 0)
     assert service.serving() == 2
 
     time.sleep(CLOCKS.lease + 0.05)
 
     assert service.serving() == 0
+
+
+def test_an_adapter_publication_waits_until_every_engine_taking_traffic_sees_it():
+    service = _service()
+    _, start_id = _start(service, -1)
+    engines = [Engine(service, f"e{i}", -1) for i in range(2)]
+
+    service.publish_adapter("/adapters/a", False, -1, start_id)
+
+    assert [engine.adapters for engine in engines] == [
+        [{"path": "/adapters/a", "withdrawn": False}]
+    ] * 2
+    assert [engine.staged for engine in engines] == [1, 1]
+
+
+def test_an_engine_that_cannot_see_an_adapter_holds_its_publication_until_it_goes():
+    service = _service()
+    _, start_id = _start(service, -1)
+    Engine(service, "e0", -1)
+    blind = Engine(service, "e1", -1, blind=True)
+    publishing = threading.Thread(
+        target=service.publish_adapter,
+        args=("/adapters/a", False, -1, start_id),
+        daemon=True,
+    )
+    publishing.start()
+    publishing.join(0.2)
+    assert publishing.is_alive()
+
+    blind.die()
+
+    publishing.join(CLOCKS.lease + 1.5)
+    assert not publishing.is_alive()
+
+
+def test_an_adapter_from_another_start_is_refused():
+    service = _service()
+    _start(service, -1)
+
+    with pytest.raises(Refused):
+        service.publish_adapter("/adapters/a", False, -1, "another")
+
+
+def test_an_engine_hears_only_the_adapter_changes_it_has_not_seen():
+    service = _service()
+    _, start_id = _start(service, -1)
+    for path in ("/adapters/a", "/adapters/b"):
+        service.publish_adapter(path, False, -1, start_id)
+
+    reply = service.next("e0", -1, -1, start_id, 1)
+
+    assert [change["path"] for change in reply["adapters"]] == ["/adapters/b"]
