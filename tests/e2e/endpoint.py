@@ -3,6 +3,8 @@
 modal run tests/e2e/endpoint.py --config glm5.3-cut-nvfp4
 With --no-check-state, no engine joins and only each version's apply checksums are checked.
 
+With --autoscale-max N the run starts at the setup's engines in auto mode, which may grow it to N.
+
 A training run: a setup other than the config's own, more rollouts, and W&B:
 modal run -d tests/e2e/endpoint.py \
     --config qwen3.6-35b-a3b-nvfp4-node --setup dapo-training --no-check-state \
@@ -137,6 +139,8 @@ SETUPS = {
     "dapo-training": Setup(
         engines=8, join_at=3, rollout=DAPO_TRAINING_ROLLOUT, save_interval=10
     ),
+    # Auto mode grows the pool from one engine; no engine joins on its own.
+    "dapo-autoscale": Setup(engines=1, join_at=0, rollout=DAPO_ROLLOUT),
 }
 
 app = modal.App(
@@ -460,12 +464,17 @@ def main(
     setup: str = "",
     num_rollout: int = NUM_ROLLOUT,
     wandb_group: str = "",
+    autoscale_max: int = 0,
 ):
     from stitch.run import PoolConfig, RunConfig, create_run
     from stitch.sglang import SGLangConfig
 
     setup_name = setup or config
     e2e, setup = CONFIGS[config], SETUPS[setup_name]
+    if autoscale_max and check_state:
+        raise ValueError(
+            "in auto mode the pool sizes itself: run it with --no-check-state"
+        )
     # Runs launched together may start in the same second; the suffix keeps their apps apart.
     stamp = f"{datetime.now().strftime('%m%d-%H%M%S')}-{secrets.token_hex(2)}"
     run_dir = Path(harness.DATA, "endpoint", config, stamp)
@@ -500,7 +509,8 @@ def main(
             cpu=max(16, 8 * e2e.engine_gpus),
             memory=max(131072, 65536 * e2e.engine_gpus),
             min_containers=setup.engines,
-            max_containers=setup.engines,
+            max_containers=autoscale_max or setup.engines,
+            autoscale=bool(autoscale_max),
             # Off reserved capacity; Modal takes this only on a whole-node cluster, as Stitch runs
             # an 8-GPU engine.
             experimental_options=(
