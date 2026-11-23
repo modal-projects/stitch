@@ -62,6 +62,42 @@ trainer that polls `GET /status` passes `start`, `start_id` and its newest versi
 Modal's load balancer drops a connection that stays silent for 350 s: a client whose generations run longer
 streams them or sets TCP keepalive on its sockets, as Miles' branch does.
 
+## Adapters on demand
+
+A trainer that saves every adapter version under a new name and lets each request name the version it samples
+(Tinker-style multi-LoRA) publishes the adapters instead of weight versions. Give them a Volume mount of their own,
+on a v2 Volume, and start the engines with SGLang's LoRA flags:
+
+```python
+RunConfig(
+    ...,
+    volumes={"/models": "my-models", "/runs": "my-runs", "/adapters": "my-adapters"},
+    adapters="/adapters/my-run",
+    engine=SGLangConfig(server_args={
+        "--enable-lora": "", "--max-lora-rank": "8", "--lora-target-modules": "all",
+        "--max-loras-per-batch": "8", "--max-loaded-loras": "32",
+    }),
+)
+```
+
+Engines keep a local copy of each adapter at the path a request names. Miles' Tinker gateway publishes each sampler
+save with:
+
+```
+--rollout-external-url <run.generate_url> --rollout-external-control-url <run.url>
+--custom-update-weight-post-write-path stitch.trainer.commit_adapters --worker-comm-backend rpc
+--tinker-checkpoint-root /adapters/my-run
+```
+
+with `STITCH_ADAPTERS_VOLUME` set to `config.adapters_volume` (`my-adapters`) and `MILES_ROLLOUT_EXTERNAL_API_KEY` as
+above. A save returns once every serving engine holds the adapter. It holds the trainer only for the export: the
+Volume commit runs beside training (`--worker-comm-backend rpc`) and one commit covers every export made before it.
+A commit crosses to the Volume's region, so a trainer far from it waits longer for each save.
+
+Another trainer calls `POST /start {"version": -1}` once (the checkpoint's weights), then writes each adapter
+directory under `adapters`, commits the Volume and calls `POST /adapters {"path", "start", "start_id"}`, with
+`"withdrawn": true` once the directory is deleted.
+
 ## Scaling
 
 Modal's autoscaler sizes the pool: with `target_concurrency` set, it keeps about that many requests in flight per
