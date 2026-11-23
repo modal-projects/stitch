@@ -426,3 +426,16 @@ def test_trainer_calls_reset_the_idle_clock():
 
     service.status()
     assert service.idle_seconds() < 0.05
+
+
+def test_the_serving_engines_are_the_open_ones_heard_within_the_lease():
+    service = _service()
+    start = _start(service, 3)[1]
+    # A head the engine has not seen answers at once.
+    service.next("e0", 3, 2, start)
+    service.next("e1", 3, 2, start)
+    assert service.serving() == 2
+
+    time.sleep(CLOCKS.lease + 0.05)
+
+    assert service.serving() == 0

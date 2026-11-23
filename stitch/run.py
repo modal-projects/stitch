@@ -17,7 +17,7 @@ from stitch.sglang import SGLangConfig
 
 @dataclass(frozen=True)
 class PoolConfig:
-    """The engines' Modal Server: hardware, and Modal's own autoscaling."""
+    """The engines' Modal Server: hardware, and Modal's autoscaling, or with `autoscale` the control service's."""
 
     gpu: str
     cpu: float | None = None
@@ -29,8 +29,19 @@ class PoolConfig:
     scaledown_window: int | None = None
     # An engine's start: loading the checkpoint, then catching up through every version.
     startup_timeout: int = 3600
-    exit_grace_period: int = 0
+    exit_grace_period: int = 3600
     experimental_options: dict[str, str | bool | int] = field(default_factory=dict)
+    autoscale: bool = False
+
+    def __post_init__(self):
+        if self.autoscale and self.target_concurrency is not None:
+            raise ValueError(
+                "autoscale sets the engine count; Modal's target_concurrency would set it too"
+            )
+        if self.autoscale and self.min_containers < 1:
+            raise ValueError(
+                "autoscale measures what the engines produce, so it keeps at least one"
+            )
 
 
 @dataclass(frozen=True)

@@ -12,6 +12,7 @@ from pathlib import Path
 
 import modal
 
+from stitch.autoscale import Autoscaler
 from stitch.control import ControlService, Failed, Refused
 from stitch.engine import ControlClient, EngineContainer
 from stitch.run import RunConfig
@@ -19,6 +20,14 @@ from stitch.sglang import SGLang
 
 PORT = 8000
 logger = logging.getLogger(__name__)
+# Stitch's own records from INFO up, such as the autoscaler's decisions; other libraries keep their levels.
+_handler = logging.StreamHandler()
+_handler.setFormatter(
+    logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s")
+)
+logging.getLogger("stitch").addHandler(_handler)
+logging.getLogger("stitch").setLevel(logging.INFO)
+logging.getLogger("stitch").propagate = False
 
 config = RunConfig.from_json(os.environ["STITCH_RUN"])
 ENV = {"STITCH_RUN": os.environ["STITCH_RUN"]}
@@ -68,7 +77,15 @@ class Control:
     @modal.enter()
     def enter(self):
         self.service = ControlService(config.clocks)
-        threading.Thread(target=self._apply_idle_window, daemon=True).start()
+        self.pool = modal.Server.from_name(config.app_name, "EnginePool")
+        self.autoscaler = None
+        if config.pool.autoscale:
+            # A restarted service continues from the count it last set.
+            count = self.pool.autoscaler.settings().max_containers
+            self.autoscaler = Autoscaler(
+                config.pool.min_containers, config.pool.max_containers, count
+            )
+        threading.Thread(target=self._size_pool, daemon=True).start()
 
     @modal.method()
     def open(self, engine_id: str, version: int, start_id: str | None) -> dict:
@@ -125,6 +142,19 @@ class Control:
             except Failed as error:
                 raise HTTPException(422, str(error)) from None
 
+        @web.post("/steps")
+        def steps(body: dict) -> dict:
+            if self.autoscaler is not None:
+                self.autoscaler.observe_step(
+                    time.monotonic(),
+                    float(body["seconds"]),
+                    float(body["waited"]),
+                    float(body["held"]),
+                    int(body["consumed"]),
+                    int(body["produced"]),
+                )
+            return {}
+
         @web.get("/status")
         def status(
             start: int | None = None,
@@ -138,17 +168,29 @@ class Control:
 
         return web
 
-    def _apply_idle_window(self) -> None:
-        """While the trainer is away, the engines' minimum is 0; any trainer call restores it."""
-        server = modal.Server.from_name(config.app_name, "EnginePool")
-        idle = None
+    def _size_pool(self) -> None:
+        """Keeps the run's engine count, or auto mode's, with a minimum of 0 while the trainer is away."""
+        asked: dict[str, int] = {}
         while True:
-            now_idle = self.service.idle_seconds() > config.clocks.idle
-            if now_idle != idle:
-                minimum = 0 if now_idle else config.pool.min_containers
-                server.autoscaler.update(min_containers=minimum)
-                idle = now_idle
-            time.sleep(60)
+            away = self.service.idle_seconds() > config.clocks.idle
+            if self.autoscaler is None:
+                settings = {"min_containers": 0 if away else config.pool.min_containers}
+            else:
+                self.autoscaler.observe_serving(
+                    time.monotonic(), self.service.serving()
+                )
+                count = self.autoscaler.count
+                settings = {
+                    "min_containers": 0 if away else count,
+                    "max_containers": count,
+                }
+            changed = {
+                key: value for key, value in settings.items() if asked.get(key) != value
+            }
+            if changed:
+                self.pool.autoscaler.update(**changed)
+                asked |= changed
+            time.sleep(config.clocks.wait)
 
 
 # Each cache's environment variable and its folder; XDG_CACHE_HOME covers FlashInfer's and CuTe DSL's.
@@ -233,7 +275,10 @@ def _node(cls):
     port=PORT,
     startup_timeout=config.pool.startup_timeout,
     min_containers=config.pool.min_containers,
-    max_containers=config.pool.max_containers,
+    # Auto mode starts at its minimum, and the control service sets the count from there.
+    max_containers=config.pool.min_containers
+    if config.pool.autoscale
+    else config.pool.max_containers,
     buffer_containers=config.pool.buffer_containers,
     target_concurrency=config.pool.target_concurrency,
     scaledown_window=config.pool.scaledown_window,

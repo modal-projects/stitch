@@ -29,6 +29,25 @@ def test_a_run_config_comes_back_whole_from_its_json():
     assert RunConfig.from_json(CONFIG.to_json()) == CONFIG
 
 
+def test_auto_mode_refuses_modals_target_concurrency():
+    with pytest.raises(ValueError, match="target_concurrency"):
+        PoolConfig(gpu="H200:4", autoscale=True, target_concurrency=8)
+
+
+def test_a_removed_engine_may_finish_its_requests_for_modals_longest_grace():
+    assert PoolConfig(gpu="H200:4").exit_grace_period == 3600
+
+
+def test_auto_mode_leaves_the_count_to_the_control_service():
+    with pytest.raises(ValueError, match="target_concurrency"):
+        PoolConfig(gpu="H200:4", autoscale=True, target_concurrency=8)
+
+
+def test_auto_mode_keeps_an_engine_to_measure():
+    with pytest.raises(ValueError, match="at least one"):
+        PoolConfig(gpu="H200:4", autoscale=True, min_containers=0)
+
+
 def test_a_run_id_already_deployed_with_another_config_is_refused(monkeypatch):
     deployed = dataclasses.replace(CONFIG, clocks=Clocks()).to_json()
     control = SimpleNamespace(run_config=SimpleNamespace(remote=lambda: deployed))

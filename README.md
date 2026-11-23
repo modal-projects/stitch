@@ -61,6 +61,52 @@ trainer that polls `GET /status` passes `start`, `start_id` and its newest versi
 Modal's load balancer drops a connection that stays silent for 350 s: a client whose generations run longer
 streams them or sets TCP keepalive on its sockets, as Miles' branch does.
 
+## Scaling
+
+Modal's autoscaler sizes the pool: with `target_concurrency` set, it keeps about that many requests in flight per
+engine between `min_containers` and `max_containers`. An engine it removes drains: it takes no new requests and has
+up to `exit_grace_period` seconds (3600 by default, Modal's limit) to finish those in flight, stopping once they
+end. Without a trainer call for `clocks.idle` seconds, the pool's minimum drops to 0 until the trainer is back.
+
+### Auto mode
+
+`PoolConfig(autoscale=True)` runs the engines that keep the trainer fed; the control service sets the count and
+Modal runs it. After each training step the rollout posts it, `POST /steps {"seconds", "waited", "held",
+"consumed", "produced"}`: the step's length, how long the trainer waited for groups (0 when its batch was ready),
+how long the producer was held back by a full buffer or by admission, the groups the trainer took and the usable
+groups produced meanwhile. A step's need is the serving engines times the trainer's rate over the rollout's,
+`consumed * (seconds - held) / ((seconds - waited) * produced)`.
+
+- The count rises when the trainer waited in each of three steps in a row, and falls when each of them would still
+  be fed by one engine fewer; either way it moves halfway to their need, since production does not grow in
+  proportion to engines.
+- A rise promises production in proportion to the engines it adds, up to the need. One that raised production by
+  less than a quarter of that is undone, and the count does not rise again while production stays there: the
+  rollout, not the engines, is then the limit. A fall after which the trainer waited is not tried again from that
+  count while production stays there.
+- A step counts only if the serving engines and the count held through it, so a preempted engine or one still
+  starting delays decisions rather than skewing them. A change takes three steps plus an engine's start.
+- It assumes a group lives at most about two steps, so the steps after a change see what it did, and one policy
+  per pool.
+
+To use it:
+
+- Stitch: `PoolConfig(autoscale=True, min_containers=..., max_containers=...)`. The run starts at `min_containers`
+  (at least 1) and never goes below it; `max_containers` caps the cost. Leave `target_concurrency` unset, and keep
+  `exit_grace_period` long enough for the longest request, so a removed engine finishes what it runs.
+- Miles, fully async in endpoint mode (`--fully-async --rollout-external-url ... --rollout-external-control-url
+  ...`): the rollout posts its steps itself.
+  - `--async-max-concurrent-samples` is the work in flight that more engines can spread; about the staleness
+    window times the batch.
+  - `--sglang-server-concurrency` caps the requests in flight in endpoint mode: set it at least as high as
+    `--async-max-concurrent-samples`.
+  - `--max-weight-staleness N --async-submit-within-staleness` keep what is generated within what the trainer will
+    use, if wanted.
+- Any other rollout posts `/steps` after each training step.
+
+The control service logs each change (`engines 2 -> 3, 2 serving: needs [...]`), each undone rise, and a trainer
+that waits with the engines at `max_containers`.
+
 ## Tests
 
 See [`tests/README.md`](tests/README.md).

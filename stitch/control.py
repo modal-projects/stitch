@@ -200,6 +200,10 @@ class ControlService:
     def idle_seconds(self) -> float:
         return time.monotonic() - self.trainer_heard
 
+    def serving(self) -> int:
+        with self.condition:
+            return len(self._serving())
+
     def _barrier(self, version: int, start_id: str) -> dict:
         started = time.monotonic()
         with self.condition:
