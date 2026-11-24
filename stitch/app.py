@@ -1,6 +1,7 @@
 """One run's app on Modal, built from the run config in STITCH_RUN: control service and engines."""
 
 import dataclasses
+import json
 import logging
 import math
 import os
@@ -199,9 +200,15 @@ class Control:
             start: int | None = None,
             start_id: str | None = None,
             head: int | None = None,
+            publication: str | None = None,
         ) -> dict:
             try:
-                return service.status(start, start_id, head)
+                return service.status(
+                    start,
+                    start_id,
+                    head,
+                    None if publication is None else json.loads(publication),
+                )
             except Refused as error:
                 raise HTTPException(409, str(error)) from None
 

@@ -229,22 +229,28 @@ class ControlService:
         start_version: int | None = None,
         start_id: str | None = None,
         head: int | None = None,
+        publication: dict | None = None,
     ) -> dict:
         with self.condition:
             self.trainer_heard = time.monotonic()
             if start_id is not None:
-                self._check_trainer(start_version, start_id, head)
+                self._check_trainer(start_version, start_id, head, publication)
             return self._status()
 
     def _check_trainer(
-        self, start_version: int | None, start_id: str, head: int | None
+        self,
+        start_version: int | None,
+        start_id: str,
+        head: int | None,
+        publication: dict | None = None,
     ) -> None:
-        """A trainer call names the run's start and head: a restarted service takes them from it."""
+        """A trainer call names the run's start and head, a status poll also its publication: a restart takes them."""
         if self.start_id is None:
             self.start_version, self.start_id = start_version, start_id
         elif (start_version, start_id) != (self.start_version, self.start_id):
             raise Refused("the call is from another start than the run's")
         if self.head is None and head is not None:
+            self.publication = publication
             self._set_head(head)
 
     def idle_seconds(self) -> float:

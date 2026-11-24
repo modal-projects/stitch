@@ -449,6 +449,16 @@ def test_a_service_restarted_before_any_version_takes_the_run_from_the_trainers_
         service.status(2, "t0", 2)
 
 
+def test_a_service_restarted_before_any_version_learns_the_heads_publication_from_the_status_poll():
+    service = _service(restarted=True)
+    lora = {"kind": "lora", "lora_name": "miles_lora", "path": "miles_lora_eval_v40"}
+
+    service.status(40, "t1", 40, lora)
+
+    reply = service.open("e0", -1, None)
+    assert (reply["open"], reply["head"], reply["publication"]) == (False, 40, lora)
+
+
 def test_trainer_calls_reset_the_idle_clock():
     service = _service()
     time.sleep(0.1)
