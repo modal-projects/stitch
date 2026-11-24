@@ -53,7 +53,7 @@ class RunConfig:
     in every engine. `adapters`: where a trainer publishes adapters that requests name and engines load on
     demand, on a mount of its own: engines see each one as a local copy at the same path. Each adapter is a directory
     a trainer's link points to; with `adapters_in_place` each link is one adapter, named by its path under `adapters`,
-    whose new directories replace it in place."""
+    whose new directories replace it in place. Adapters rotate through SGLang's LoRA slots, so not with attention DP."""
 
     run_id: str
     image: str
@@ -72,6 +72,11 @@ class RunConfig:
         if self.adapters_in_place and not self.adapters:
             raise ValueError(
                 "adapters_in_place updates the adapters under `adapters`, which is unset"
+            )
+        if self.adapters and self.engine.attention_dp:
+            raise ValueError(
+                "adapters rotate through SGLang's LoRA slots, but attention DP serves only "
+                "pinned adapters: serve `adapters` without attention DP"
             )
         if self.adapters and self.mount_of(self.adapters) in (
             self.mount_of(self.versions),

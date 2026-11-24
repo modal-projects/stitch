@@ -61,6 +61,16 @@ def test_adapters_need_a_mount_of_their_own():
     assert on_their_own.adapters_volume == "adapters" and CONFIG.adapters_volume is None
 
 
+def test_adapters_refuse_attention_dp():
+    with pytest.raises(ValueError, match="without attention DP"):
+        dataclasses.replace(
+            CONFIG,
+            volumes={**CONFIG.volumes, "/adapters": "adapters"},
+            adapters="/adapters/r1",
+            engine=SGLangConfig(server_args={"--tp-size": "4", "--attn-dp-size": "4"}),
+        )
+
+
 def test_a_run_id_already_deployed_with_another_config_is_refused(monkeypatch):
     deployed = dataclasses.replace(CONFIG, clocks=Clocks()).to_json()
     control = SimpleNamespace(run_config=SimpleNamespace(remote=lambda: deployed))

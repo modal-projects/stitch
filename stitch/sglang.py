@@ -164,7 +164,6 @@ class SGLang:
                 "lora_path": path,
                 "weight_version": str(version),
                 "pause_mode": "in_place",
-                "pinned": self.config.attention_dp,
             },
         )
 

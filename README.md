@@ -66,7 +66,8 @@ streams them or sets TCP keepalive on its sockets, as Miles' branch does.
 
 A trainer that saves every adapter version under a new name and lets each request name the version it samples
 (Tinker-style multi-LoRA) publishes the adapters instead of weight versions. Give them a Volume mount of their own,
-on a v2 Volume, and start the engines with SGLang's LoRA flags:
+on a v2 Volume, and start the engines with SGLang's LoRA flags, without attention DP: adapters rotate through
+SGLang's LoRA slots, and attention DP serves only pinned ones.
 
 ```python
 RunConfig(
