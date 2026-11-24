@@ -30,7 +30,8 @@ class _Commits:
 
     def cover(self, written: Path) -> None:
         with self.lock:
-            paths = (written, *written.rglob("*"))
+            # A link switched in the parent, after the files are written, changes only the parent.
+            paths = (written.parent, written, *written.rglob("*"))
             if max(path.stat().st_mtime_ns for path in paths) < self.covered_ns:
                 return
             started = time.time_ns()
