@@ -51,7 +51,9 @@ class RunConfig:
     (mount path -> Volume). `compile_cache`: the Volume where engines keep the kernels they compile and the
     tactics they tune, one archive per image, GPU and model, shared by every run that names it; None compiles
     in every engine. `adapters`: where a trainer publishes adapters that requests name and engines load on
-    demand, on a mount of its own: engines see each one as a local copy at the same path."""
+    demand, on a mount of its own: engines see each one as a local copy at the same path. Each adapter is a directory
+    a trainer's link points to; with `adapters_in_place` each link is one adapter, named by its path under `adapters`,
+    whose new directories replace it in place."""
 
     run_id: str
     image: str
@@ -63,9 +65,14 @@ class RunConfig:
     image_commands: list[str] = field(default_factory=list)
     compile_cache: str | None = "stitch-compile-cache"
     adapters: str | None = None
+    adapters_in_place: bool = False
     clocks: Clocks = Clocks()
 
     def __post_init__(self):
+        if self.adapters_in_place and not self.adapters:
+            raise ValueError(
+                "adapters_in_place updates the adapters under `adapters`, which is unset"
+            )
         if self.adapters and self.mount_of(self.adapters) in (
             self.mount_of(self.versions),
             self.mount_of(self.checkpoint),

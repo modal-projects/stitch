@@ -102,19 +102,27 @@ class Control:
         version: int,
         seen: int,
         start_id: str | None,
-        seen_adapters: int,
+        service_id: str | None,
+        seen_changes: int,
     ) -> dict:
-        return self.service.next(engine_id, version, seen, start_id, seen_adapters)
+        return self.service.next(
+            engine_id, version, seen, start_id, service_id, seen_changes
+        )
 
     @modal.method()
     def served(self, engine_id: str, version: int, stats: dict, start_id: str) -> dict:
         return self.service.served(engine_id, version, stats, start_id)
 
     @modal.method()
-    def staged(
-        self, engine_id: str, version: int, adapters: int, start_id: str | None
+    def synced(
+        self,
+        engine_id: str,
+        version: int,
+        changes: int,
+        start_id: str | None,
+        service_id: str,
     ) -> dict:
-        return self.service.staged(engine_id, version, adapters, start_id)
+        return self.service.synced(engine_id, version, changes, start_id, service_id)
 
     @modal.method()
     def fail(self, engine_id: str, version: int) -> None:
@@ -168,10 +176,7 @@ class Control:
                 )
             try:
                 return service.publish_adapter(
-                    body["path"],
-                    bool(body.get("withdrawn", False)),
-                    int(body["start"]),
-                    body["start_id"],
+                    body["path"], int(body["start"]), body["start_id"]
                 )
             except Refused as error:
                 raise HTTPException(409, str(error)) from None
@@ -345,6 +350,7 @@ class EnginePool:
             adapter_stage = AdapterStage(
                 Path(ADAPTER_SOURCE_MOUNT),
                 Path(adapters_mount),
+                Path(config.adapters),
                 volumes[adapters_mount].reload,
             )
         self.container = EngineContainer(
@@ -353,6 +359,7 @@ class EnginePool:
             Path(config.versions),
             versions_volume.reload,
             adapter_stage,
+            config.adapters_in_place,
         )
         self.container.enter()
         if cache:

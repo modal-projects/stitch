@@ -156,6 +156,21 @@ class SGLang:
             self.version = version
         return reply["timings"]
 
+    def update_adapter(self, name: str, path: str, version: int) -> None:
+        self._post(
+            "/update_lora_adapter",
+            {
+                "lora_name": name,
+                "lora_path": path,
+                "weight_version": str(version),
+                "pause_mode": "in_place",
+                "pinned": self.config.attention_dp,
+            },
+        )
+
+    def remove_adapter(self, name: str) -> None:
+        self._post("/unload_lora_adapter", {"lora_name": name})
+
     def abort_all(self) -> None:
         """Ends every request in flight with finish_reason abort."""
         self._post("/abort_request", {"abort_all": True}, timeout=60)

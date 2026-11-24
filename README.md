@@ -86,7 +86,7 @@ save with:
 ```
 --rollout-external-url <run.generate_url> --rollout-external-control-url <run.url>
 --custom-update-weight-post-write-path stitch.trainer.commit_adapters --worker-comm-backend rpc
---tinker-checkpoint-root /adapters/my-run
+--tinker-sampler-root /adapters/my-run --tinker-checkpoint-root <training checkpoints, not under adapters>
 ```
 
 with `STITCH_ADAPTERS_VOLUME` set to `config.adapters_volume` (`my-adapters`) and `MILES_ROLLOUT_EXTERNAL_API_KEY` as
@@ -94,9 +94,20 @@ above. A save returns once every serving engine holds the adapter. It holds the 
 Volume commit runs beside training (`--worker-comm-backend rpc`) and one commit covers every export made before it.
 A commit crosses to the Volume's region, so a trainer far from it waits longer for each save.
 
-Another trainer calls `POST /start {"version": -1}` once (the checkpoint's weights), then writes each adapter
-directory under `adapters`, commits the Volume and calls `POST /adapters {"path", "start", "start_id"}`, with
-`"withdrawn": true` once the directory is deleted.
+Another trainer calls `POST /start {"version": -1}` once (the checkpoint's weights). Each save is a new directory
+under `adapters` that a symlink points to, as Miles writes `.<name>.<commit>/` and switches `<name>` to it; a linked
+directory never changes. After committing the Volume the trainer calls `POST /adapters {"path", "start", "start_id"}`
+with the directory, and again once it is deleted. Engines read what the Volume holds: a joining engine, or one that
+finds the control service restarted, copies every linked directory.
+
+### In place
+
+With `adapters_in_place=True` (Miles' `--tinker-sampler-backend in_place`; set the two together), each link is one
+adapter that requests name by its path under `adapters`, and each save replaces it on every engine: SGLang swaps it
+at a step boundary if it is loaded, and otherwise only learns where the new version is. The trainer writes
+`version.json` (`{"version": n}`, counting that adapter's saves) into each directory and calls `POST /adapters` with
+the link; the call returns once every serving engine serves the save, and responses report each token's adapter
+version. Deleting the link removes the adapter from every engine.
 
 ## Scaling
 

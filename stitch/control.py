@@ -46,7 +46,7 @@ class _Engine:
     open: bool = False
     behind_since: float | None = None
     stats: dict | None = None
-    staged: int = 0
+    synced: int = 0
 
 
 class ControlService:
@@ -58,7 +58,10 @@ class ControlService:
         self.publication: dict | None = None
         self.start_version: int | None = None
         self.start_id: str | None = None
-        self.adapters: list[dict] = []
+        # Where adapters changed since this service started: hints of where to look; the Volume holds the state.
+        self.changed_adapter_paths: list[str] = []
+        # Engines count adapter changes per service: a restarted service starts its count again.
+        self.service_id = secrets.token_hex(8)
         self.engines: dict[str, _Engine] = {}
         self.ending: dict[str, str] = {}
         self.failed: dict[str, int] = {}
@@ -79,7 +82,7 @@ class ControlService:
                     "head": version,
                     "start_id": self.start_id,
                     "publication": None,
-                    "adapters": list(self.adapters),
+                    **self._adapter_state(),
                 }
             engine.open = version == self.head
             self.condition.notify_all()
@@ -88,7 +91,7 @@ class ControlService:
                 "head": self.head,
                 "start_id": self.start_id,
                 "publication": self.publication,
-                "adapters": list(self.adapters),
+                **self._adapter_state(),
             }
 
     def next(
@@ -97,10 +100,10 @@ class ControlService:
         version: int,
         seen: int,
         start_id: str | None,
-        seen_adapters: int,
+        service_id: str | None,
+        seen_changes: int,
     ) -> dict:
-        """The engine serves `version`: {"head": N, "start_id": the run's start, "adapters": the adapter
-        changes after its `seen_adapters`} once N is not `seen` or a change came, or the wait ends; or {"exit": why}"""
+        """The run's state once it changes past what the engine saw, or the wait ends; or {"exit": why}"""
         with self.condition:
             if reason := self._exit_reason(engine_id, version, start_id):
                 return self._end(engine_id, reason)
@@ -111,7 +114,8 @@ class ControlService:
                 lambda: (
                     engine_id in self.ending
                     or (self.head is not None and self.head != seen)
-                    or len(self.adapters) != seen_adapters
+                    or service_id != self.service_id
+                    or len(self.changed_adapter_paths) > seen_changes
                 ),
                 self.clocks.wait,
             )
@@ -121,7 +125,12 @@ class ControlService:
                 "head": seen if self.head is None else self.head,
                 "start_id": self.start_id,
                 "publication": self.publication,
-                "adapters": self.adapters[seen_adapters:],
+                **self._adapter_state(),
+                "changed_adapter_paths": (
+                    self.changed_adapter_paths[seen_changes:]
+                    if service_id == self.service_id
+                    else None
+                ),
             }
 
     def served(self, engine_id: str, version: int, stats: dict, start_id: str) -> dict:
@@ -134,15 +143,21 @@ class ControlService:
             self.condition.notify_all()
             return {}
 
-    def staged(
-        self, engine_id: str, version: int, adapters: int, start_id: str | None
+    def synced(
+        self,
+        engine_id: str,
+        version: int,
+        changes: int,
+        start_id: str | None,
+        service_id: str,
     ) -> dict:
-        """The engine staged the first `adapters` adapter changes: {} or {"exit": why}"""
+        """The engine's adapters match the Volume after `service_id`'s first `changes`: {} or {"exit": why}"""
         with self.condition:
             if reason := self._exit_reason(engine_id, version, start_id):
                 return self._end(engine_id, reason)
             engine = self._heard(engine_id, version)
-            engine.staged = max(engine.staged, adapters)
+            if service_id == self.service_id:
+                engine.synced = max(engine.synced, changes)
             self.condition.notify_all()
             return {}
 
@@ -198,17 +213,15 @@ class ControlService:
                 self._set_head(version)
         return self._barrier(version, start_id)
 
-    def publish_adapter(
-        self, path: str, withdrawn: bool, start_version: int, start_id: str
-    ) -> dict:
-        """Waits until every engine taking traffic staged the adapter at `path`, or removed it if `withdrawn`."""
+    def publish_adapter(self, path: str, start_version: int, start_id: str) -> dict:
+        """Waits until every engine taking traffic matches the Volume at `path`, which changed."""
         with self.condition:
             self.trainer_heard = time.monotonic()
             self._check_trainer(start_version, start_id, None)
-            self.adapters.append({"path": path, "withdrawn": withdrawn})
-            adapters = len(self.adapters)
+            self.changed_adapter_paths.append(path)
+            changes = len(self.changed_adapter_paths)
             self.condition.notify_all()
-        self._until_serving(start_id, lambda e: e.staged >= adapters)
+        self._until_serving(start_id, lambda e: e.synced >= changes)
         return {}
 
     def status(
@@ -323,6 +336,12 @@ class ControlService:
         ):
             return f"at {version} from before the run's start at {self.start_version}"
         return None
+
+    def _adapter_state(self) -> dict:
+        return {
+            "service_id": self.service_id,
+            "adapter_changes": len(self.changed_adapter_paths),
+        }
 
     def _end(self, engine_id: str, reason: str) -> dict:
         self.engines.pop(engine_id, None)

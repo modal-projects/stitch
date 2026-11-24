@@ -4,10 +4,11 @@ import contextlib
 import hashlib
 import json
 import logging
+import os
 import shutil
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from pathlib import Path
@@ -30,6 +31,8 @@ PUBLICATION_FIELDS = (
     "plan_digest",
     "payload_checksum_format",
 )
+# Beside an in-place adapter's files: {"version": its count}, written by the trainer.
+ADAPTER_VERSION_FILE = "version.json"
 
 
 class Engine(Protocol):
@@ -53,6 +56,11 @@ class Engine(Protocol):
         (None until the last of a catch-up). A failure leaves the weights partly updated. It leaves none of the
         publication's files open: Modal reloads a Volume only with none of its files open."""
 
+    def update_adapter(self, name: str, path: str, version: int) -> None:
+        """Serves adapter `name` from `path` at `version` from its next step; a name not loaded only learns `path`."""
+
+    def remove_adapter(self, name: str) -> None: ...
+
     def abort_all(self) -> None:
         """Ends every request in flight."""
 
@@ -69,15 +77,24 @@ class ControlClient:
         return self._call(self.service.open, version, start_id)
 
     def next(
-        self, version: int, seen: int, start_id: str | None, seen_adapters: int
+        self,
+        version: int,
+        seen: int,
+        start_id: str | None,
+        service_id: str | None,
+        seen_changes: int,
     ) -> dict:
-        return self._call(self.service.next, version, seen, start_id, seen_adapters)
+        return self._call(
+            self.service.next, version, seen, start_id, service_id, seen_changes
+        )
 
     def served(self, version: int, stats: dict, start_id: str) -> dict:
         return self._call(self.service.served, version, stats, start_id)
 
-    def staged(self, version: int, adapters: int, start_id: str | None) -> dict:
-        return self._call(self.service.staged, version, adapters, start_id)
+    def synced(
+        self, version: int, changes: int, start_id: str | None, service_id: str
+    ) -> dict:
+        return self._call(self.service.synced, version, changes, start_id, service_id)
 
     def fail(self, version: int) -> None:
         self._call(self.service.fail, version)
@@ -141,23 +158,80 @@ def publication_chain(
 
 
 class AdapterStage:
-    """Published adapters at the paths requests name, copied there from a private mount of their Volume."""
+    """Local copies, at the paths requests name, of the directories the trainer links under the run's `root`."""
 
-    def __init__(self, source: Path, target: Path, reload: Callable[[], None]):
-        self.source, self.target, self.reload = source, target, reload
+    def __init__(
+        self, source: Path, target: Path, root: Path, reload: Callable[[], None]
+    ):
+        self.source, self.target, self.root, self.reload = source, target, root, reload
 
-    def apply(self, changes: list[dict]) -> None:
+    def current(self, paths: list[str] | None, links: bool) -> dict[str, str | None]:
+        """Each of `paths` (every link with None) mapped to its directory on the Volume now, None if gone."""
         self.reload()
-        withdrawn = {change["path"] for change in changes if change["withdrawn"]}
-        published = {change["path"] for change in changes} - withdrawn
+        if paths is None:
+            linked = self._linked()
+            return linked if links else {target: target for target in linked.values()}
+        if links:
+            return {path: self._target(path) for path in paths}
+        return {path: path if self._source(path).is_dir() else None for path in paths}
+
+    def copy(self, paths: Iterable[str]) -> set[str]:
+        """The `paths` held locally afterwards: a directory gone from the Volume meanwhile is not."""
         # Each copy mostly waits on the Volume's reads, and a burst of saves stages together.
         with ThreadPoolExecutor(max_workers=16) as pool:
-            list(pool.map(partial(shutil.rmtree, ignore_errors=True), withdrawn))
-            list(pool.map(self._copy, published))
+            paths = list(paths)
+            return {
+                path
+                for path, held in zip(paths, pool.map(self._copy, paths), strict=True)
+                if held
+            }
 
-    def _copy(self, path: str) -> None:
-        source = self.source / Path(path).relative_to(self.target)
-        shutil.copytree(source, path, dirs_exist_ok=True)
+    def remove(self, paths: Iterable[str]) -> None:
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            list(pool.map(partial(shutil.rmtree, ignore_errors=True), paths))
+
+    def version(self, path: str) -> int:
+        return json.loads((Path(path) / ADAPTER_VERSION_FILE).read_text())["version"]
+
+    def name(self, link: str) -> str:
+        return str(Path(link).relative_to(self.root))
+
+    def _linked(self) -> dict[str, str]:
+        linked, folders = {}, [self._source(str(self.root))]
+        while folders:
+            for entry in os.scandir(folders.pop()):
+                # A dot entry is a link's directory or the trainer's own bookkeeping, never a name.
+                if entry.name.startswith("."):
+                    continue
+                if entry.is_symlink():
+                    if (target := self._target(self._local(entry.path))) is not None:
+                        linked[self._local(entry.path)] = target
+                elif entry.is_dir():
+                    folders.append(Path(entry.path))
+        return linked
+
+    def _target(self, link: str) -> str | None:
+        source = self._source(link)
+        if not source.is_symlink():
+            return None
+        target = source.parent / os.readlink(source)
+        return self._local(os.path.normpath(target)) if target.is_dir() else None
+
+    def _copy(self, path: str) -> bool:
+        if Path(path).exists():
+            return True
+        try:
+            shutil.copytree(self._source(path), path)
+        except FileNotFoundError:
+            shutil.rmtree(path, ignore_errors=True)
+            return False
+        return True
+
+    def _source(self, path: str) -> Path:
+        return self.source / Path(path).relative_to(self.target)
+
+    def _local(self, source: str) -> str:
+        return str(self.target / Path(source).relative_to(self.source))
 
 
 class EngineContainer:
@@ -170,9 +244,11 @@ class EngineContainer:
         versions: Path,
         reload: Callable[[], None],
         adapter_stage: AdapterStage | None = None,
+        adapters_in_place: bool = False,
     ):
         self.engine, self.control, self.versions = engine, control, versions
         self.reload, self.adapter_stage = reload, adapter_stage
+        self.adapters_in_place = adapters_in_place
         self.head = engine.version
         # The head's publication, as the control service last named it.
         self.publication: dict | None = None
@@ -181,8 +257,12 @@ class EngineContainer:
         self.start_id: str | None = None
         self.applied: tuple[int, str | None] = (engine.version, None)
         self.view_head: int | None = None
-        self.adapters: list[dict] = []
-        self.staged = 0
+        # Each adapter held, by its link in place or its directory otherwise, and the local directory it serves.
+        self.adapters: dict[str, str] = {}
+        self.service_id: str | None = None
+        self.adapter_changes = 0
+        # Where adapters changed since the last sync; None: anywhere.
+        self.changed_adapter_paths: list[str] | None = []
         self.newer = threading.Condition()
         self.exiting = False
 
@@ -204,16 +284,20 @@ class EngineContainer:
         self.engine.stop()
 
     def open(self) -> None:
-        """Catches up to the head per call to the control service until it lets this engine open."""
+        """Catches up to the head and syncs the adapters until the control service opens this engine on them."""
+        synced = None
         while True:
             reply = _raise_on_exit(self.control.open(*self.applied))
             self.start_id = reply["start_id"] or self.start_id
             self.head, self.publication = reply["head"], reply["publication"]
-            self.adapters = reply["adapters"]
+            self.service_id = reply["service_id"]
+            self.adapter_changes = reply["adapter_changes"]
             if reply["open"]:
-                self._stage_adapters()
-                return
-            if self.head > self.engine.version:
+                if synced == (self.service_id, self.adapter_changes):
+                    return
+                self._sync_adapters(None, self.adapter_changes, self.service_id)
+                synced = (self.service_id, self.adapter_changes)
+            elif self.head > self.engine.version:
                 self._catch_up()
 
     def listen(self) -> None:
@@ -221,29 +305,39 @@ class EngineContainer:
         while True:
             version, start_id = self.applied
             reply = _raise_on_exit(
-                self.control.next(version, self.head, start_id, len(self.adapters))
+                self.control.next(
+                    version, self.head, start_id, self.service_id, self.adapter_changes
+                )
             )
             with self.newer:
                 self.head, self.publication = reply["head"], reply["publication"]
                 self.start_id = reply["start_id"] or self.start_id
-                self.adapters += reply["adapters"]
+                changed = reply["changed_adapter_paths"]
+                if changed is None or self.changed_adapter_paths is None:
+                    self.changed_adapter_paths = None
+                else:
+                    self.changed_adapter_paths += changed
+                self.service_id = reply["service_id"]
+                self.adapter_changes = reply["adapter_changes"]
                 self.newer.notify_all()
 
     def follow(self) -> None:
-        """Applies the publications up to the newest version and reports it served; stages new adapters."""
+        """Applies the publications up to the newest version and reports it served; syncs changed adapters."""
         while True:
             with self.newer:
                 self.newer.wait_for(
                     lambda: (
                         self.head > self.engine.version
-                        or len(self.adapters) > self.staged
+                        or self.changed_adapter_paths != []
                     )
                 )
+                changed, self.changed_adapter_paths = self.changed_adapter_paths, []
+                through, service_id = self.adapter_changes, self.service_id
             if self.head > self.engine.version:
                 version, stats = self._catch_up()
                 _raise_on_exit(self.control.served(version, stats, self.applied[1]))
-            if len(self.adapters) > self.staged:
-                self._stage_adapters()
+            if changed != []:
+                self._sync_adapters(changed, through, service_id)
 
     def _run_or_exit(self, loop: Callable[[], None]) -> None:
         try:
@@ -256,15 +350,46 @@ class EngineContainer:
                 self.engine.abort_all()
             terminate_container()
 
-    def _stage_adapters(self) -> None:
-        changes = self.adapters[self.staged :]
-        if not changes:
-            return
-        self.adapter_stage.apply(changes)
-        self.staged += len(changes)
+    def _sync_adapters(
+        self, changed: list[str] | None, through: int, service_id: str
+    ) -> None:
+        """Brings the adapters at `changed`, or every one with None, to the Volume's; reports `through` synced."""
+        if self.adapter_stage is not None:
+            current = self.adapter_stage.current(changed, links=self.adapters_in_place)
+            if changed is None:
+                current |= {key: None for key in self.adapters.keys() - current.keys()}
+            moved = {
+                key: path
+                for key, path in current.items()
+                if self.adapters.get(key) != path
+            }
+            held = self.adapter_stage.copy(path for path in moved.values() if path)
+            moved = {
+                key: path for key, path in moved.items() if path in held or path is None
+            }
+            if self.adapters_in_place:
+                with ThreadPoolExecutor(max_workers=16) as pool:
+                    list(pool.map(self._switch_adapter, moved.items()))
+            # After the switch: until then the engine may still read the replaced directory.
+            self.adapter_stage.remove(
+                self.adapters[key] for key in moved if key in self.adapters
+            )
+            for key, path in moved.items():
+                if path is None:
+                    self.adapters.pop(key, None)
+                else:
+                    self.adapters[key] = path
         _raise_on_exit(
-            self.control.staged(self.applied[0], self.staged, self.applied[1])
+            self.control.synced(self.applied[0], through, self.applied[1], service_id)
         )
+
+    def _switch_adapter(self, change: tuple[str, str | None]) -> None:
+        link, path = change
+        name = self.adapter_stage.name(link)
+        if path is None:
+            self.engine.remove_adapter(name)
+        else:
+            self.engine.update_adapter(name, path, self.adapter_stage.version(path))
 
     def _catch_up(self) -> tuple[int, dict]:
         start_id, head, publication = self.start_id, self.head, self.publication

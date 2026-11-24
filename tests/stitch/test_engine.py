@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 import shutil
 import threading
 import time
@@ -14,6 +15,7 @@ import pytest
 import stitch.engine
 from stitch.control import Clocks, ControlService, Failed, Refused
 from stitch.engine import (
+    ADAPTER_VERSION_FILE,
     PUBLICATION_FIELDS,
     AdapterStage,
     ControlClient,
@@ -152,13 +154,22 @@ def _modal_class(**methods) -> SimpleNamespace:
     )
 
 
-def _container(service, engine, versions, reload=lambda: None, adapter_stage=None):
-    methods = {
-        name: getattr(service, name)
-        for name in ("open", "next", "served", "staged", "fail")
-    }
+CONTROL_METHODS = ("open", "next", "served", "synced", "fail")
+
+
+def _container(
+    service,
+    engine,
+    versions,
+    reload=lambda: None,
+    adapter_stage=None,
+    adapters_in_place=False,
+):
+    methods = {name: getattr(service, name) for name in CONTROL_METHODS}
     control = ControlClient(_modal_class(**methods), "e0", CLOCKS)
-    return EngineContainer(engine, control, versions, reload, adapter_stage)
+    return EngineContainer(
+        engine, control, versions, reload, adapter_stage, adapters_in_place
+    )
 
 
 def _run(*loops) -> list[str]:
@@ -613,58 +624,98 @@ def test_a_control_service_unreachable_past_the_patience_raises(no_sleep):
 
 
 def _adapters(tmp_path):
-    published, mount, local = (
-        tmp_path / "published",
-        tmp_path / "mount",
-        tmp_path / "local",
-    )
-    published.mkdir()
-    mount.mkdir()
+    """The run's adapters on a Volume another run also uses, staged from a mount each reload copies."""
+    volume, mount, local = tmp_path / "volume", tmp_path / "mount", tmp_path / "local"
+    published = volume / "run"
+    published.mkdir(parents=True)
+    _save(volume / "other-run", "z", "1")
 
     def reload():
-        shutil.copytree(published, mount, dirs_exist_ok=True)
+        shutil.rmtree(mount, ignore_errors=True)
+        shutil.copytree(volume, mount, symlinks=True)
 
-    return published, AdapterStage(mount, local, reload), local
-
-
-def _publish_adapter(published: Path, name: str) -> None:
-    (published / name).mkdir()
-    (published / name / "adapter_model.safetensors").write_bytes(name.encode())
+    reload()
+    return published, AdapterStage(mount, local, local / "run", reload), local / "run"
 
 
-def test_staging_copies_each_published_adapter_and_removes_a_withdrawn_one(tmp_path):
+def _save(published: Path, name: str, commit: str, version: int | None = None) -> str:
+    """Miles' commit: a new directory .<name>.<commit>, then <name> switched to it and the old one deleted."""
+    directory = published / f".{name}.{commit}"
+    directory.mkdir(parents=True)
+    (directory / "adapter_model.safetensors").write_bytes(f"{name}@{commit}".encode())
+    if version is not None:
+        (directory / ADAPTER_VERSION_FILE).write_text(json.dumps({"version": version}))
+    link = published / name
+    previous = os.readlink(link) if link.is_symlink() else None
+    staging = published / f"{directory.name}.link"
+    staging.symlink_to(directory.name)
+    os.replace(staging, link)
+    if previous is not None:
+        shutil.rmtree(published / previous)
+    return directory.name
+
+
+def _delete(published: Path, name: str) -> None:
+    directory = published / os.readlink(published / name)
+    (published / name).unlink()
+    shutil.rmtree(directory)
+
+
+class FakeAdapterEngine(FakeEngine):
+    """Records each adapter call, with whether the directory it named last for that adapter was still there."""
+
+    def __init__(self):
+        super().__init__()
+        self.adapter_calls, self.paths = [], {}
+
+    def update_adapter(self, name, path, version):
+        previous = self.paths.get(name)
+        kept = previous is None or Path(previous).exists()
+        self.adapter_calls.append(("update", name, Path(path).name, version, kept))
+        self.paths[name] = path
+
+    def remove_adapter(self, name):
+        self.adapter_calls.append(("remove", name))
+        self.paths.pop(name)
+
+
+def test_the_volume_holds_the_directories_links_point_to_and_nothing_else(tmp_path):
     published, stage, local = _adapters(tmp_path)
-    for name in ("a", "b"):
-        _publish_adapter(published, name)
-    stage.apply(
-        [{"path": str(local / name), "withdrawn": False} for name in ("a", "b")]
-    )
-    assert (local / "b" / "adapter_model.safetensors").read_bytes() == b"b"
+    _save(published, "a", "1")
+    _save(published, "a", "2")
+    _save(published, "b", "1")
+    # Still being written: no link points to it yet.
+    (published / ".c.1").mkdir()
+    a, b = str(local / ".a.2"), str(local / ".b.1")
 
-    stage.apply([{"path": str(local / "a"), "withdrawn": True}])
+    assert stage.current(None, links=True) == {
+        str(local / "a"): a,
+        str(local / "b"): b,
+    }
+    assert stage.current(None, links=False) == {a: a, b: b}
+    assert stage.current([str(local / "b"), str(local / "c")], links=True) == {
+        str(local / "b"): b,
+        str(local / "c"): None,
+    }
+    assert stage.current([a, str(local / ".a.1")], links=False) == {
+        a: a,
+        str(local / ".a.1"): None,
+    }
 
-    assert not (local / "a").exists() and (local / "b").exists()
 
-
-def test_an_adapter_withdrawn_in_the_same_changes_is_never_copied(tmp_path):
+def test_a_directory_gone_from_the_volume_before_its_copy_is_not_held(tmp_path):
     published, stage, local = _adapters(tmp_path)
-    _publish_adapter(published, "a")
+    kept = str(local / _save(published, "a", "1"))
+    stage.reload()
 
-    stage.apply(
-        [
-            {"path": str(local / "a"), "withdrawn": False},
-            {"path": str(local / "a"), "withdrawn": True},
-        ]
-    )
-
-    assert not (local / "a").exists()
+    assert stage.copy([kept, str(local / ".b.1")]) == {kept}
+    assert not (local / ".b.1").exists()
 
 
-def test_a_burst_of_published_adapters_is_copied_at_once(tmp_path, monkeypatch):
+def test_a_burst_of_adapters_is_copied_at_once(tmp_path, monkeypatch):
     published, stage, local = _adapters(tmp_path)
-    names = ("a", "b", "c")
-    for name in names:
-        _publish_adapter(published, name)
+    names = [_save(published, name, "1") for name in ("a", "b", "c")]
+    stage.reload()
     together = threading.Barrier(len(names), timeout=5)
     copytree = shutil.copytree
 
@@ -675,26 +726,26 @@ def test_a_burst_of_published_adapters_is_copied_at_once(tmp_path, monkeypatch):
 
     monkeypatch.setattr(stitch.engine.shutil, "copytree", copy_once_all_started)
 
-    stage.apply([{"path": str(local / name), "withdrawn": False} for name in names])
+    stage.copy(str(local / name) for name in names)
 
     assert all((local / name).exists() for name in names)
 
 
-def test_an_engine_stages_every_adapter_published_before_it_opens(
+def test_an_engine_copies_every_adapter_on_the_volume_before_it_opens(
     service, versions, tmp_path
 ):
     published, stage, local = _adapters(tmp_path)
-    _publish_adapter(published, "a")
-    _, start_id = _start(service, -1, None)
-    service.publish_adapter(str(local / "a"), False, -1, start_id)
+    saved = [_save(published, name, "1") for name in ("a", "b")]
+    _start(service, -1, None)
     container = _container(service, FakeEngine(), versions, adapter_stage=stage)
 
     container.open()
 
-    assert (local / "a").exists() and container.staged == 1
+    assert sorted(container.adapters) == sorted(str(local / name) for name in saved)
+    assert all((local / name).exists() for name in saved)
 
 
-def test_a_serving_engine_stages_an_adapter_before_its_publication_returns(
+def test_a_serving_engine_copies_a_saved_adapter_and_drops_a_deleted_one_before_each_publication_returns(
     service, versions, tmp_path
 ):
     published, stage, local = _adapters(tmp_path)
@@ -702,8 +753,120 @@ def test_a_serving_engine_stages_an_adapter_before_its_publication_returns(
     container = _container(service, FakeEngine(), versions, adapter_stage=stage)
     container.open()
     _run(container.listen, container.follow)
-    _publish_adapter(published, "a")
+    a = str(local / _save(published, "a", "1"))
 
-    service.publish_adapter(str(local / "a"), False, -1, start_id)
+    service.publish_adapter(a, -1, start_id)
+    assert Path(a).exists()
 
-    assert (local / "a").exists() and container.staged == 1
+    _delete(published, "a")
+    service.publish_adapter(a, -1, start_id)
+    assert not Path(a).exists() and container.adapters == {}
+
+
+def test_in_place_an_adapter_switches_to_each_save_then_drops_its_old_directory(
+    service, versions, tmp_path
+):
+    published, stage, local = _adapters(tmp_path)
+    _, start_id = _start(service, -1, None)
+    engine = FakeAdapterEngine()
+    container = _container(
+        service, engine, versions, adapter_stage=stage, adapters_in_place=True
+    )
+    container.open()
+    _run(container.listen, container.follow)
+    x = str(local / "x")
+
+    for commit, version in (("c1", 1), ("c2", 2)):
+        _save(published, "x", commit, version)
+        service.publish_adapter(x, -1, start_id)
+    _delete(published, "x")
+    service.publish_adapter(x, -1, start_id)
+
+    assert engine.adapter_calls == [
+        ("update", "x", ".x.c1", 1, True),
+        ("update", "x", ".x.c2", 2, True),
+        ("remove", "x"),
+    ]
+    assert not (local / ".x.c1").exists() and not (local / ".x.c2").exists()
+
+
+def test_in_place_a_joining_engine_defines_every_adapter_before_it_opens(
+    service, versions, tmp_path
+):
+    published, stage, local = _adapters(tmp_path)
+    _save(published, "x", "c1", 3)
+    _start(service, -1, None)
+    engine = FakeAdapterEngine()
+    container = _container(
+        service, engine, versions, adapter_stage=stage, adapters_in_place=True
+    )
+
+    container.open()
+
+    assert engine.adapter_calls == [("update", "x", ".x.c1", 3, True)]
+
+
+def test_after_a_control_restart_an_engine_syncs_every_adapter_then_waits(
+    versions, tmp_path
+):
+    published, stage, local = _adapters(tmp_path)
+    services, calls = [ControlService(CLOCKS)], []
+    services[0].started -= CLOCKS.lease
+    _, start_id = _start(services[0], -1, None)
+
+    def calling(name):
+        def method(*args):
+            calls.append(name)
+            return getattr(services[-1], name)(*args)
+
+        return method
+
+    methods = {name: calling(name) for name in CONTROL_METHODS}
+    control = ControlClient(_modal_class(**methods), "e0", CLOCKS)
+    container = EngineContainer(FakeEngine(), control, versions, lambda: None, stage)
+    container.open()
+    _run(container.listen, container.follow)
+    # Saved while the service restarts: no service hears of it.
+    a = str(local / _save(published, "a", "1"))
+    restarted = ControlService(CLOCKS)
+    restarted.started -= CLOCKS.lease
+    restarted.status(-1, start_id, -1)
+    services.append(restarted)
+
+    time.sleep(3 * CLOCKS.wait)
+    calls.clear()
+    time.sleep(5 * CLOCKS.wait)
+
+    assert Path(a).exists()
+    assert calls.count("next") <= 7
+    b = str(local / _save(published, "b", "1"))
+    restarted.publish_adapter(b, -1, start_id)
+    assert Path(b).exists()
+
+
+def test_an_engine_opens_only_after_syncing_adapters_saved_during_its_sync(
+    service, versions, tmp_path, monkeypatch
+):
+    published, stage, local = _adapters(tmp_path)
+    a = str(local / _save(published, "a", "1"))
+    _, start_id = _start(service, -1, None)
+    copy, saved = stage.copy, []
+
+    def copy_then_save_b(paths):
+        held = copy(paths)
+        if not saved:
+            saved.append(str(local / _save(published, "b", "1")))
+            threading.Thread(
+                target=service.publish_adapter,
+                args=(saved[0], -1, start_id),
+                daemon=True,
+            ).start()
+            time.sleep(0.1)
+        return held
+
+    monkeypatch.setattr(stage, "copy", copy_then_save_b)
+    container = _container(service, FakeEngine(), versions, adapter_stage=stage)
+
+    container.open()
+
+    assert Path(a).exists() and Path(saved[0]).exists()
