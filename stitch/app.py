@@ -130,6 +130,10 @@ class Control:
         self.service.fail(engine_id, version)
 
     @modal.method()
+    def report_load(self, engine_id: str, load: dict) -> None:
+        self.service.report_load(engine_id, load)
+
+    @modal.method()
     def leave(self, engine_id: str) -> None:
         self.service.leave(engine_id)
 

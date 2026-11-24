@@ -459,6 +459,24 @@ def test_a_service_restarted_before_any_version_learns_the_heads_publication_fro
     assert (reply["open"], reply["head"], reply["publication"]) == (False, 40, lora)
 
 
+def test_an_engines_load_reports_are_kept_for_half_an_hour_and_an_unknown_engines_dropped():
+    service = _service()
+    service.start(2)
+    service.open("e0", 2, None)
+
+    for running in range(70):
+        service.report_load("e0", {"running": running})
+    service.report_load("e9", {"running": 1})
+
+    loads = service.engines["e0"].loads
+    assert (len(loads), loads[0][1], loads[-1][1]) == (
+        60,
+        {"running": 10},
+        {"running": 69},
+    )
+    assert "e9" not in service.engines
+
+
 def test_trainer_calls_reset_the_idle_clock():
     service = _service()
     time.sleep(0.1)

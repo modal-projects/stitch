@@ -3,9 +3,9 @@
 import secrets
 import threading
 import time
-from collections import Counter
+from collections import Counter, deque
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
@@ -47,6 +47,7 @@ class _Engine:
     behind_since: float | None = None
     stats: dict | None = None
     synced: int = 0
+    loads: deque[tuple[float, dict]] = field(default_factory=lambda: deque(maxlen=60))
 
 
 class ControlService:
@@ -169,6 +170,11 @@ class ControlService:
                 self.failed[engine_id] = version
             self.ending[engine_id] = f"failed to apply version {version}"
             self.condition.notify_all()
+
+    def report_load(self, engine_id: str, load: dict) -> None:
+        with self.condition:
+            if (engine := self.engines.get(engine_id)) is not None:
+                engine.loads.append((time.monotonic(), load))
 
     def leave(self, engine_id: str) -> None:
         """The engine is shutting down: no barrier waits for it, and its call in flight ends it."""

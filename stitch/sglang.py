@@ -33,6 +33,11 @@ class SGLangConfig:
         return self._replicas * self._attention_groups
 
     @property
+    def running_slots(self) -> int | None:
+        slots = self.server_args.get("--max-running-requests")
+        return None if slots is None else int(slots)
+
+    @property
     def attention_dp(self) -> bool:
         """Whether SGLang runs attention DP, as Miles decides it; it then serves only pinned LoRA adapters."""
         return self._attention_groups > 1 or (
@@ -87,6 +92,7 @@ class SGLang:
                 **config.server_args,
                 "--weight-version": str(version),
                 "--admin-api-key": self.admin_key,
+                "--enable-metrics": "",
             },
             health_timeout=startup_timeout,
             log_requests_level=-1,
@@ -178,6 +184,38 @@ class SGLang:
         """Lets the requests in flight finish, then stops SGLang."""
         self.endpoint.stop()
 
+    def load(self) -> dict:
+        values = _metric_values(self._get("/metrics"))
+
+        def total(*names: str) -> float:
+            return sum(sum(values.get(name, ())) for name in names)
+
+        def mean(name: str) -> float | None:
+            return sum(values[name]) / len(values[name]) if values.get(name) else None
+
+        return {
+            "running": total("sglang:num_running_reqs"),
+            "queued": total("sglang:num_queue_reqs"),
+            "queue_seconds": total("sglang:queue_time_seconds_sum"),
+            "dequeued": total("sglang:queue_time_seconds_count"),
+            "prompt_tokens": total("sglang:prompt_tokens_total"),
+            "cached_tokens": total("sglang:cached_tokens_total"),
+            "evicted_tokens": total("sglang:evicted_tokens_total"),
+            "retracted_tokens": total(
+                "sglang:num_retracted_input_tokens_total",
+                "sglang:num_retracted_output_tokens_total",
+            ),
+            "utilization": mean("sglang:utilization"),
+            "token_usage": mean("sglang:token_usage"),
+            "running_slots": self.config.running_slots,
+        }
+
+    def _get(self, path: str) -> str:
+        with urllib.request.urlopen(
+            f"{self.endpoint.base_url}{path}", timeout=30
+        ) as reply:
+            return reply.read().decode()
+
     def _post(self, path: str, body: dict, timeout: float | None = None) -> dict:
         request = urllib.request.Request(
             f"{self.endpoint.base_url}{path}",
@@ -198,3 +236,13 @@ class SGLang:
         if isinstance(result, dict) and result.get("success") is False:
             raise RuntimeError(f"SGLang {path}: {result.get('message')}")
         return result
+
+
+def _metric_values(text: str) -> dict[str, list[float]]:
+    values: dict[str, list[float]] = {}
+    for line in text.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        series, _, value = line.rpartition(" ")
+        values.setdefault(series.partition("{")[0], []).append(float(value))
+    return values

@@ -61,6 +61,9 @@ class Engine(Protocol):
 
     def remove_adapter(self, name: str) -> None: ...
 
+    def load(self) -> dict:
+        """The engine's load now: request and token counts as the control service's solver reads them."""
+
     def abort_all(self) -> None:
         """Ends every request in flight."""
 
@@ -98,6 +101,10 @@ class ControlClient:
 
     def fail(self, version: int) -> None:
         self._call(self.service.fail, version)
+
+    def report_load(self, load: dict) -> None:
+        # Not awaited: a lost report only thins the solver's window.
+        self.service.report_load.spawn(self.engine_id, load)
 
     def leave(self) -> None:
         # Not waited on: a container shutting down does not wait for the control service.
@@ -276,6 +283,15 @@ class EngineContainer:
             threading.Thread(
                 target=self._run_or_exit, args=(loop,), daemon=True
             ).start()
+        threading.Thread(target=self.report, daemon=True).start()
+
+    def report(self) -> None:
+        while not self.exiting:
+            time.sleep(30)
+            try:
+                self.control.report_load(self.engine.load())
+            except Exception:
+                logger.warning("could not report this engine's load", exc_info=True)
 
     def exit(self) -> None:
         self.exiting = True

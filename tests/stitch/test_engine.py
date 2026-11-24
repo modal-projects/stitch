@@ -439,6 +439,28 @@ def test_a_leaving_container_ends_its_loops_without_calling_again_or_alarming(
     assert "cannot follow" not in caplog.text and "did not answer" not in caplog.text
 
 
+def test_an_engine_reports_its_load_and_skips_a_failed_read(versions, no_sleep, caplog):
+    reports, reads = [], iter([RuntimeError("metrics down"), {"running": 3}])
+
+    def load():
+        read = next(reads)
+        if isinstance(read, Exception):
+            raise read
+        container.exiting = True
+        return read
+
+    engine = FakeEngine()
+    engine.load = load
+    spawn = SimpleNamespace(spawn=lambda *args: reports.append(args))
+    control = ControlClient(SimpleNamespace(report_load=spawn), "e0", CLOCKS)
+    container = EngineContainer(engine, control, versions, lambda: None)
+
+    container.report()
+
+    assert reports == [("e0", {"running": 3})]
+    assert "could not report this engine's load" in caplog.text
+
+
 def test_a_leaving_container_tells_the_control_service_without_waiting(versions):
     left, waited = [], []
 
