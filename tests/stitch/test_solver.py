@@ -28,9 +28,9 @@ def _rollout(solver, ages, *, kept=1.0, waiting=0.0):
         solver.observe_rollout_load(
             NOW - 60 * age,
             {
-                "finished_groups": 1,
-                "turn_seconds": 2400.0,
-                "session_seconds": 4800.0,
+                "finished_groups": 3,
+                "turn_seconds": 7200.0,
+                "session_seconds": 14400.0,
                 "prefix_tokens": 10_000,
                 "uncached_prefix_tokens": round(10_000 * (1 - kept)),
                 "waiting": waiting,
@@ -55,7 +55,34 @@ def test_a_starved_trainer_with_stressed_engines_adds_the_engines_it_uses_at_the
     decision = solver.decide(NOW, {"e": _engine(16)}, count=4, serving=4)
 
     assert decision == Decision(
-        6, "trainer starving, engines stressed", "prefix kept 0.60", 128, 256
+        7, "trainer starving, engines stressed", "prefix kept 0.60", 128, 256, 6
+    )
+
+
+def test_engines_below_their_slots_are_solved_from_what_one_engine_produced():
+    solver = Solver(1, 16)
+    for _ in range(3):
+        solver.observe_step(100.0, 0.0, 15)
+    for age in range(10, -1, -1):
+        solver.observe_rollout_load(
+            NOW - 60 * age,
+            {
+                "finished_groups": 6,
+                "turn_seconds": 6000.0,
+                "session_seconds": 6000.0,
+                "waiting": 5.0,
+            },
+        )
+
+    decision = solver.decide(NOW, {"e": _engine(100, slots=256)}, count=1, serving=1)
+
+    assert decision == Decision(
+        2,
+        "trainer starving, engines in band",
+        "short of what the trainer uses",
+        256,
+        256,
+        1,
     )
 
 
@@ -95,7 +122,7 @@ def test_idle_engines_under_a_fed_trainer_shrink_to_what_the_trainer_uses():
         NOW, {"e": _engine(4), "f": _engine(4)}, count=8, serving=8
     )
 
-    assert decision[:3] == (6, "trainer fed, engines idle", "idle")
+    assert decision[:3] == (7, "trainer fed, engines idle", "idle")
 
 
 def test_idle_engines_without_a_trainer_shrink_no_lower_than_their_peak_load():
@@ -162,4 +189,4 @@ def test_a_decision_is_logged_only_when_its_count_or_cell_changes(caplog):
         for _ in range(3):
             solver.decide(NOW, {"e": _engine(16)}, count=4, serving=4)
 
-    assert caplog.text.count("shadow: engines 4 -> 6") == 1
+    assert caplog.text.count("shadow: engines 4 -> 7") == 1

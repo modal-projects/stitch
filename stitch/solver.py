@@ -21,6 +21,7 @@ class Step(NamedTuple):
 
 
 class InBand(NamedTuple):
+    groups_per_engine_second: float
     slot_seconds_per_group: float
     generating_share: float
 
@@ -31,6 +32,7 @@ class Decision(NamedTuple):
     reason: str
     capacity: int | None
     sessions: int | None
+    slot_engines: int | None
 
 
 class Solver:
@@ -63,22 +65,42 @@ class Solver:
             rollout_reports = _window(self.rollout_loads, now, STRESSED_SECONDS)
             stressed = _stressed(now, engine_loads, rollout_reports)
             idle = _idle(now, engine_loads, slots)
+            recent = [
+                (at, load)
+                for at, load in self.rollout_loads
+                if at >= now - STRESSED_SECONDS
+            ]
             if (
                 rollout_reports
                 and not stressed
-                and (groups := _sum(rollout_reports, "finished_groups"))
+                and not idle
+                and serving
+                and len(recent) > 1
             ):
-                turn_seconds = _sum(rollout_reports, "turn_seconds")
-                self.in_band = InBand(
-                    turn_seconds / groups,
-                    turn_seconds / _sum(rollout_reports, "session_seconds"),
-                )
+                # Each report counts what finished since the one before, so the first opens the span.
+                span = recent[-1][0] - recent[0][0]
+                finished = [load for _, load in recent[1:]]
+                if groups := _sum(finished, "finished_groups"):
+                    turn_seconds = _sum(finished, "turn_seconds")
+                    self.in_band = InBand(
+                        groups / span / serving,
+                        turn_seconds / groups,
+                        turn_seconds / _sum(finished, "session_seconds"),
+                    )
             starving = self._starving(now)
+            consumption = self._consumption()
+            needed = slot_engines = None
+            if consumption is not None and self.in_band is not None:
+                needed = math.ceil(consumption / self.in_band.groups_per_engine_second)
+                if slots is not None:
+                    slot_engines = math.ceil(
+                        consumption * self.in_band.slot_seconds_per_group / slots
+                    )
             target, reason = _target(
                 starving,
                 stressed,
                 idle,
-                needed=self._needed(slots),
+                needed=needed,
                 load_engines=_engines_for(engine_loads, slots, now, STRESSED_SECONDS),
                 peak_engines=_engines_for(engine_loads, slots, now, IDLE_SECONDS),
                 count=count,
@@ -97,7 +119,7 @@ class Solver:
             sessions = None
             if capacity is not None and self.in_band is not None:
                 sessions = math.floor(capacity / self.in_band.generating_share)
-            decision = Decision(target, cell, reason, capacity, sessions)
+            decision = Decision(target, cell, reason, capacity, sessions, slot_engines)
             previous, self.decision = self.decision, decision
             if previous is None or previous[:2] != decision[:2]:
                 logger.info(
@@ -113,14 +135,12 @@ class Solver:
         waiting = now - at <= 120 and bool(load.get("waiting"))
         return waiting or bool(self.steps and self.steps[-1].waited)
 
-    def _needed(self, slots: int | None) -> int | None:
-        if slots is None or self.in_band is None or not self.steps:
-            return None
+    def _consumption(self) -> float | None:
+        """Groups the trainer consumes per second it trains."""
         training = sum(step.seconds - step.waited for step in self.steps)
         if training <= 0:
             return None
-        appetite = sum(step.consumed for step in self.steps) / training
-        return math.ceil(appetite * self.in_band.slot_seconds_per_group / slots)
+        return sum(step.consumed for step in self.steps) / training
 
 
 def _target(
