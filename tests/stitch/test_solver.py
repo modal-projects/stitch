@@ -369,3 +369,25 @@ def test_a_trainer_waiting_in_every_step_starves_though_most_minutes_catch_it_be
         "trainer starving, engines in band",
         "short of what the trainer uses",
     )
+
+
+def test_an_engine_lost_while_a_move_is_checked_restarts_the_check():
+    solver = _starved_at_one_engine()
+    solver.decide(600.0, _engines_at(600.0, 1), 1)
+    solver.decide(720.0, _engines_at(720.0, 2), 2)
+    _minutes(solver, 11, 25, groups=6, waiting=0.0)
+    assert (
+        solver.decide(840.0, _engines_at(840.0, 1), 1).reason == "1 of 2 engines serve"
+    )
+    assert (
+        solver.decide(900.0, _engines_at(900.0, 2), 2).reason
+        == "checking the move from 1"
+    )
+
+    assert (
+        solver.decide(1080.0, _engines_at(1080.0, 2), 2).reason
+        == "checking the move from 1"
+    )
+    assert solver.decide(1200.0, _engines_at(1200.0, 2), 2).reason.startswith(
+        "production rose"
+    )

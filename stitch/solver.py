@@ -135,6 +135,8 @@ class Solver:
                     )
             if self.count is not None and serving != count:
                 target, reason = count, f"{serving} of {count} engines serve"
+                if self.move is not None:
+                    self.move = self.move._replace(served_at=None)
             elif self.count is not None and self.move is not None:
                 reason = self._follow_move(now, stressed or starving, production)
                 target = self.count
