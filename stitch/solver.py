@@ -1,4 +1,4 @@
-"""Auto mode's next rule in shadow: the engine count that the trainer and the engines' load call for, logged."""
+"""Auto mode: the engine count that the trainer and the engines' load call for, each move checked before the next."""
 
 import logging
 import math
@@ -9,21 +9,33 @@ from typing import NamedTuple
 
 logger = logging.getLogger(__name__)
 
-# Defaults, to become run settings once the solver sets the count.
+# Defaults, to become run settings.
 STRESSED_SECONDS, IDLE_SECONDS = 300, 900
 PREFIX_KEPT, RETRACTED_SHARE, QUEUED_SHARE, IDLE_RUNNING_SHARE = 0.9, 0.05, 0.5, 0.25
+# Production changes count from this share up: of what a move promised, or of the production a refused move saw.
+SIGNIFICANT = 0.25
 
 
 class Step(NamedTuple):
     seconds: float
     waited: float
+    held: float
     consumed: int
+    produced: int
 
 
 class InBand(NamedTuple):
     groups_per_engine_second: float
-    slot_seconds_per_group: float
-    generating_share: float
+    slot_seconds_per_group: float | None
+    generating_share: float | None
+
+
+class Move(NamedTuple):
+    kind: str
+    before: int
+    production: float
+    promised: float
+    served_at: float | None = None
 
 
 class Decision(NamedTuple):
@@ -36,13 +48,18 @@ class Decision(NamedTuple):
 
 
 class Solver:
-    def __init__(self, minimum: int, maximum: int | None):
-        self.minimum, self.maximum = minimum, maximum
+    def __init__(self, minimum: int, maximum: int | None, count: int | None):
+        """`count`: the engines it sets from, None to only log what it would set."""
+        self.minimum, self.maximum, self.count = minimum, maximum, count
         self.rollout_loads: deque[tuple[float, dict]] = deque(maxlen=30)
         self.steps: deque[Step] = deque(maxlen=3)
         self.in_band: InBand | None = None
         self.serving: int | None = None
         self.serving_since = -math.inf
+        self.move: Move | None = None
+        self.rollout_limited: tuple[int, float] | None = None
+        self.stress_stuck: int | None = None
+        self.refused_shrink: tuple[int, float] | None = None
         self.decision: Decision | None = None
         self.lock = threading.Lock()
 
@@ -50,23 +67,26 @@ class Solver:
         with self.lock:
             self.rollout_loads.append((now, load))
 
-    def observe_step(self, seconds: float, waited: float, consumed: int) -> None:
+    def observe_step(
+        self, seconds: float, waited: float, held: float, consumed: int, produced: int
+    ) -> None:
         with self.lock:
-            self.steps.append(Step(seconds, waited, consumed))
+            self.steps.append(Step(seconds, waited, held, consumed, produced))
 
     def decide(
         self,
         now: float,
         engine_loads: dict[str, list[tuple[float, dict]]],
-        count: int,
         serving: int,
     ) -> Decision:
-        """`count` is the engine count set now, of which `serving` serve."""
         with self.lock:
+            count = serving if self.count is None else self.count
             slots = _slots(engine_loads)
             rollout_reports = _window(self.rollout_loads, now, STRESSED_SECONDS)
             stressed = _stressed(now, engine_loads, rollout_reports)
             idle = _idle(now, engine_loads, slots)
+            if not stressed:
+                self.stress_stuck = None
             if serving != self.serving:
                 self.serving, self.serving_since = serving, now
             recent = [
@@ -74,14 +94,14 @@ class Solver:
                 for at, load in self.rollout_loads
                 if at >= now - STRESSED_SECONDS
             ]
-            if (
-                rollout_reports
-                and self.serving_since <= now - STRESSED_SECONDS
+            steady = (
+                self.serving_since <= now - STRESSED_SECONDS
                 and not stressed
                 and not idle
                 and serving
-                and len(recent) > 1
-            ):
+            )
+            producing = sum(step.seconds - step.held for step in self.steps)
+            if steady and rollout_reports and len(recent) > 1:
                 # Each report counts what finished since the one before, so the first opens the span.
                 span = recent[-1][0] - recent[0][0]
                 finished = [load for _, load in recent[1:]]
@@ -92,27 +112,51 @@ class Solver:
                         turn_seconds / groups,
                         turn_seconds / _sum(finished, "session_seconds"),
                     )
+            elif (
+                steady
+                and not self.rollout_loads
+                and producing > 0
+                and self.serving_since <= now - sum(step.seconds for step in self.steps)
+            ):
+                produced = sum(step.produced for step in self.steps)
+                self.in_band = InBand(produced / producing / serving, None, None)
             starving = self._starving(now)
+            production = self._production(recent)
             consumption = self._consumption()
             needed = slot_engines = None
             if consumption is not None and self.in_band is not None:
                 needed = math.ceil(consumption / self.in_band.groups_per_engine_second)
-                if slots is not None:
+                if (
+                    slots is not None
+                    and self.in_band.slot_seconds_per_group is not None
+                ):
                     slot_engines = math.ceil(
                         consumption * self.in_band.slot_seconds_per_group / slots
                     )
-            target, reason = _target(
-                starving,
-                stressed,
-                idle,
-                needed=needed,
-                load_engines=_engines_for(engine_loads, slots, now, STRESSED_SECONDS),
-                peak_engines=_engines_for(engine_loads, slots, now, IDLE_SECONDS),
-                count=count,
-            )
-            if self.maximum is not None:
-                target = min(self.maximum, target)
-            target = max(self.minimum, target)
+            if self.count is not None and serving != count:
+                target, reason = count, f"{serving} of {count} engines serve"
+            elif self.count is not None and self.move is not None:
+                reason = self._follow_move(now, stressed or starving, production)
+                target = self.count
+            else:
+                target, reason = _target(
+                    starving,
+                    stressed,
+                    idle,
+                    needed=needed,
+                    load_engines=_engines_for(
+                        engine_loads, slots, now, STRESSED_SECONDS
+                    ),
+                    peak_engines=_engines_for(engine_loads, slots, now, IDLE_SECONDS),
+                    count=count,
+                )
+                if self.maximum is not None and target > self.maximum:
+                    target, reason = self.maximum, f"{reason}; at the maximum"
+                target = max(self.minimum, target)
+                if self.count is not None and target != count:
+                    target, reason = self._start_move(
+                        count, target, reason, "stress" if stressed else "", production
+                    )
             trainer_state = {
                 None: "no trainer",
                 True: "trainer starving",
@@ -122,23 +166,104 @@ class Solver:
             cell = f"{trainer_state[starving]}, engines {engines_state}"
             capacity = None if slots is None else serving * slots
             sessions = None
-            if capacity is not None and self.in_band is not None:
+            if capacity is not None and self.in_band and self.in_band.generating_share:
                 sessions = math.floor(capacity / self.in_band.generating_share)
             decision = Decision(target, cell, reason, capacity, sessions, slot_engines)
             previous, self.decision = self.decision, decision
-            if previous is None or previous[:2] != decision[:2]:
+            if previous is None or previous[:3] != decision[:3]:
                 logger.info(
-                    "shadow: engines %d -> %d (%s): %s", count, target, cell, reason
+                    "%sengines %d -> %d (%s): %s",
+                    "shadow: " if self.count is None else "",
+                    count,
+                    target,
+                    cell,
+                    reason,
                 )
             return decision
 
+    def _start_move(
+        self, count: int, target: int, reason: str, stress: str, production: float
+    ) -> tuple[int, str]:
+        if target < count:
+            kind = "shrink"
+            refused = self.refused_shrink
+            if refused and target <= refused[0] and _close(production, refused[1]):
+                return (
+                    count,
+                    f"{reason}; shrinking to {refused[0]} stressed or starved it before",
+                )
+        elif stress:
+            kind = "stress"
+            if self.stress_stuck == count:
+                return count, f"{reason}; adds for stress stopped at {count}"
+        else:
+            kind = "add"
+            limited = self.rollout_limited
+            if limited and limited[0] == count and _close(production, limited[1]):
+                return count, f"{reason}; rollout-limited at {count}"
+        per_engine = self.in_band.groups_per_engine_second if self.in_band else 0.0
+        self.count, self.move = (
+            target,
+            Move(kind, count, production, (target - count) * per_engine),
+        )
+        return target, reason
+
+    def _follow_move(self, now: float, worse: str | bool, production: float) -> str:
+        move = self.move
+        if move.served_at is None:
+            self.move = move = move._replace(served_at=now)
+        if move.kind == "undo":
+            self.move = None
+            return f"back at {self.count}"
+        if now - move.served_at < STRESSED_SECONDS:
+            return f"checking the move from {move.before}"
+        self.move = None
+        if move.kind == "shrink":
+            if worse:
+                self.refused_shrink = (self.count, move.production)
+                return self._undo(
+                    move, "the shrink stressed the engines or starved the trainer"
+                )
+            return "the shrink held"
+        gain = production - move.production
+        if gain >= SIGNIFICANT * move.promised:
+            return (
+                f"production rose {gain:.3g}/s against {move.promised:.3g}/s promised"
+            )
+        if move.kind == "stress":
+            self.stress_stuck = self.count
+            return f"production rose {gain:.3g}/s against {move.promised:.3g}/s: adds for stress stop here"
+        self.rollout_limited = (move.before, move.production)
+        return self._undo(
+            move,
+            f"production rose {gain:.3g}/s against {move.promised:.3g}/s: rollout-limited",
+        )
+
+    def _undo(self, move: Move, reason: str) -> str:
+        self.count, self.move = move.before, Move("undo", self.count, 0.0, 0.0)
+        return f"undone: {reason}"
+
     def _starving(self, now: float) -> bool | None:
-        """Whether the trainer is starving; None without a trainer."""
+        """Whether the trainer waited in at least half the last window; None without a trainer."""
         if not self.rollout_loads and not self.steps:
             return None
-        at, load = self.rollout_loads[-1] if self.rollout_loads else (now, {})
-        waiting = now - at <= 120 and bool(load.get("waiting"))
-        return waiting or bool(self.steps and self.steps[-1].waited)
+        if reports := _window(self.rollout_loads, now, STRESSED_SECONDS):
+            return sum(bool(load.get("waiting")) for load in reports) * 2 >= len(
+                reports
+            )
+        return bool(self.steps and self.steps[-1].waited)
+
+    def _production(self, recent: list[tuple[float, dict]]) -> float:
+        if len(recent) > 1:
+            return _sum([load for _, load in recent[1:]], "finished_groups") / (
+                recent[-1][0] - recent[0][0]
+            )
+        producing = sum(step.seconds - step.held for step in self.steps)
+        return (
+            sum(step.produced for step in self.steps) / producing
+            if producing > 0
+            else 0.0
+        )
 
     def _consumption(self) -> float | None:
         """Groups the trainer consumes per second it trains."""
@@ -146,6 +271,10 @@ class Solver:
         if training <= 0:
             return None
         return sum(step.consumed for step in self.steps) / training
+
+
+def _close(production: float, seen: float) -> bool:
+    return abs(production - seen) < SIGNIFICANT * seen
 
 
 def _target(

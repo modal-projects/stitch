@@ -13,7 +13,6 @@ from pathlib import Path
 
 import modal
 
-from stitch.autoscale import Autoscaler
 from stitch.control import ControlService, Failed, Refused
 from stitch.engine import AdapterStage, ControlClient, EngineContainer
 from stitch.run import RunConfig
@@ -22,7 +21,7 @@ from stitch.solver import Solver
 
 PORT = 8000
 logger = logging.getLogger(__name__)
-# Stitch's own records from INFO up, such as the autoscaler's decisions; other libraries keep their levels.
+# Stitch's own records from INFO up, such as the solver's decisions; other libraries keep their levels.
 _handler = logging.StreamHandler()
 _handler.setFormatter(
     logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -84,14 +83,13 @@ class Control:
     def enter(self):
         self.service = ControlService(config.clocks)
         self.pool = modal.Server.from_name(config.app_name, "EnginePool")
-        self.autoscaler = None
+        count = None
         if config.pool.autoscale:
             # A restarted service continues from the count it last set.
             count = self.pool.autoscaler.settings().max_containers
-            self.autoscaler = Autoscaler(
-                config.pool.min_containers, config.pool.max_containers, count
-            )
-        self.solver = Solver(config.pool.min_containers, config.pool.max_containers)
+        self.solver = Solver(
+            config.pool.min_containers, config.pool.max_containers, count
+        )
         threading.Thread(target=self._size_pool, daemon=True).start()
 
     @modal.method()
@@ -190,17 +188,12 @@ class Control:
 
         @web.post("/steps")
         def steps(body: dict) -> dict:
-            if self.autoscaler is not None:
-                self.autoscaler.observe_step(
-                    time.monotonic(),
-                    float(body["seconds"]),
-                    float(body["waited"]),
-                    float(body["held"]),
-                    int(body["consumed"]),
-                    int(body["produced"]),
-                )
             self.solver.observe_step(
-                float(body["seconds"]), float(body["waited"]), int(body["consumed"])
+                float(body["seconds"]),
+                float(body["waited"]),
+                float(body["held"]),
+                int(body["consumed"]),
+                int(body["produced"]),
             )
             return {}
 
@@ -227,7 +220,7 @@ class Control:
             except Refused as error:
                 raise HTTPException(409, str(error)) from None
             if self.solver.decision is not None:
-                reply["shadow"] = self.solver.decision._asdict()
+                reply["solver"] = self.solver.decision._asdict()
             return reply
 
         return web
@@ -238,20 +231,17 @@ class Control:
         solved = -math.inf
         while True:
             away = self.service.idle_seconds() > config.clocks.idle
-            now, serving = time.monotonic(), self.service.serving()
-            if self.autoscaler is None:
-                count = serving
+            now = time.monotonic()
+            if now - solved >= 60:
+                self.solver.decide(now, self.service.loads(), self.service.serving())
+                solved = now
+            if (count := self.solver.count) is None:
                 settings = {"min_containers": 0 if away else config.pool.min_containers}
             else:
-                self.autoscaler.observe_serving(now, serving)
-                count = self.autoscaler.count
                 settings = {
                     "min_containers": 0 if away else count,
                     "max_containers": count,
                 }
-            if now - solved >= 60:
-                self.solver.decide(now, self.service.loads(), count, serving)
-                solved = now
             changed = {
                 key: value for key, value in settings.items() if asked.get(key) != value
             }

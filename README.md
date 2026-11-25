@@ -119,34 +119,45 @@ end. Without a trainer call for `clocks.idle` seconds, the pool's minimum drops 
 
 ### Auto mode
 
-`PoolConfig(autoscale=True)` runs the engines that keep the trainer fed; the control service sets the count and
-Modal runs it. After each training step the rollout posts it, `POST /steps {"seconds", "waited", "held",
-"consumed", "produced"}`: the step's length, how long the trainer waited for groups (0 when its batch was ready),
-how long the producer was held back by a full buffer or by admission, the groups the trainer took and the usable
-groups produced meanwhile. A step's need is the serving engines times the trainer's rate over the rollout's,
-`consumed * (seconds - held) / ((seconds - waited) * produced)`.
+`PoolConfig(autoscale=True)` runs the engines that keep the trainer fed, each at a load it runs well; the control
+service sets the count and Modal runs it. It reads:
 
-- The count rises when the trainer waited in each of three steps in a row, and falls when each of them would still
-  be fed by one engine fewer; either way it moves halfway to their need, since production does not grow in
-  proportion to engines.
-- A rise promises production in proportion to the engines it adds, up to the need. One that raised production by
-  less than a quarter of that is undone, and the count does not rise again while production stays there: the
-  rollout, not the engines, is then the limit. A fall after which the trainer waited is not tried again from that
-  count while production stays there.
-- A step counts only if the serving engines and the count held through it, so a preempted engine or one still
-  starting delays decisions rather than skewing them. A change takes three steps plus an engine's start.
-- It assumes a group lives at most about two steps, so the steps after a change see what it did, and one policy
-  per pool.
+- after each training step, the step: `POST /steps {"seconds", "waited", "held", "consumed", "produced"}`, the step's
+  length, how long the trainer waited for groups, how long the producer was held back by a full buffer or by
+  admission, the groups the trainer took and the usable groups produced meanwhile;
+- every minute, the rollout's load: `POST /load {"finished_sessions", "finished_groups", "session_seconds",
+  "turn_seconds", "prefix_tokens", "uncached_prefix_tokens", "sessions_in_flight", "waiting"}`, the sessions and
+  groups finished since its last report, their seconds in all and in requests, the tokens their turns shared with the
+  turns they continued and of those the ones the engine did not find cached, the sessions in flight, and how long the
+  trainer has waited so far. The reply carries `capacity`, the requests the serving engines run at once, which Miles'
+  admission follows;
+- every 30 s, each engine's SGLang load: requests running and queued, prompt, cached and retracted tokens, and the
+  requests it runs at once (`/v1/loads`).
 
-Each engine reports SGLang's `/metrics` every 30 s, and every minute the rollout posts its load, `POST /load
-{"finished_sessions", "finished_groups", "session_seconds", "turn_seconds", "prefix_tokens", "uncached_prefix_tokens",
-"sessions_in_flight", "waiting"}`: the sessions and groups finished since its last report, their seconds in all and
-in requests, the tokens their turns shared with the turns they continued and of those the ones the engine did not
-find cached, the sessions in flight, and how long the trainer has waited so far. The reply carries `capacity`, the
-requests the serving engines run at once, which Miles' admission follows. From both, in every run, auto mode
-or not, the control service solves each minute the count that auto mode's next rule would set and logs it (`shadow:
-engines 4 -> 6 (trainer starving, engines stressed): prefix kept 0.62`); `/status` shows it under `shadow`. It does
-not set the count yet.
+Each minute it judges the last five:
+
+- The trainer is starving when it waited in at least half of them (without the rollout's load, in its last step).
+- The engines are stressed when sessions kept under 90% of the prefix they shared with their earlier turns, when a
+  queue showed on most of the median engine's reports, or, without a prefix signal, when retraction recomputed over
+  5% of prefill; idle when every engine ran under a quarter of its requests at once with no queue for 15 minutes.
+- The engines the trainer needs are the groups it consumes per second it trains over the groups one engine produced
+  per second in the last window neither stressed nor idle, through which the serving engines held.
+
+Starving with stressed engines adds toward that need, or before there is one toward the engines that hold the load;
+starving in band adds toward the need; fed with stressed engines holds (over-admitted); starving with idle engines
+holds (demand-limited); fed with idle engines shrinks, never below the need or the engines that held the last 15
+minutes' peak. Without a trainer only the engines decide. Each move is checked before the next:
+
+- Nothing is decided while the engines serving differ from the count: a change or a replacement is still starting.
+- Five minutes after the new count serves, an add must have raised production by a quarter of what its engines
+  promised, or it is undone and the count does not rise from there again while production stays (the rollout, not
+  the engines, limits it). An add for stress that did not raise production stops adds for stress until the stress
+  clears. A shrink after which the engines are stressed or the trainer starves is undone and not tried again while
+  production stays.
+
+In every run, auto mode or not, the control service logs each decision when it changes (`engines 1 -> 2 (trainer
+starving, engines in band): short of what the trainer uses`, prefixed `shadow:` where the pool's count is fixed), and
+`/status` shows the latest under `solver`.
 
 To use it:
 
@@ -161,11 +172,8 @@ To use it:
     `--async-max-concurrent-samples`.
   - `--max-weight-staleness N --async-submit-within-staleness` keep what is generated within what the trainer will
     use, if wanted.
-- Any other rollout posts `/steps` after each training step, and may post `/load`; without it the shadow judges by
-  the engines alone.
-
-The control service logs each change (`engines 2 -> 3, 2 serving: needs [...]`), each undone rise, and a trainer
-that waits with the engines at `max_containers`.
+- Any other rollout posts `/steps` after each training step and may post `/load`; without it the count follows the
+  steps' production and the engines' load.
 
 ## Tests
 
