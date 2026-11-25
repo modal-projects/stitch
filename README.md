@@ -142,10 +142,10 @@ Each engine reports SGLang's `/metrics` every 30 s, and every minute the rollout
 {"finished_sessions", "finished_groups", "session_seconds", "turn_seconds", "prefix_tokens", "uncached_prefix_tokens",
 "sessions_in_flight", "waiting"}`: the sessions and groups finished since its last report, their seconds in all and
 in requests, the tokens their turns shared with the turns they continued and of those the ones the engine did not
-find cached, the sessions in flight, and how long the trainer has waited so far. From both, the control service
-solves each minute the count that auto mode's next rule would set and logs it beside this rule's (`shadow: engines 4
--> 6 (trainer starving, engines stressed): prefix kept 0.62`); `/status` shows it under `shadow`. It does not set the
-count yet.
+find cached, the sessions in flight, and how long the trainer has waited so far. From both, in every run, auto mode
+or not, the control service solves each minute the count that auto mode's next rule would set and logs it (`shadow:
+engines 4 -> 6 (trainer starving, engines stressed): prefix kept 0.62`); `/status` shows it under `shadow`. It does
+not set the count yet.
 
 To use it:
 

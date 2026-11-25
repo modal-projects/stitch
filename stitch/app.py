@@ -84,14 +84,14 @@ class Control:
     def enter(self):
         self.service = ControlService(config.clocks)
         self.pool = modal.Server.from_name(config.app_name, "EnginePool")
-        self.autoscaler = self.solver = None
+        self.autoscaler = None
         if config.pool.autoscale:
             # A restarted service continues from the count it last set.
             count = self.pool.autoscaler.settings().max_containers
             self.autoscaler = Autoscaler(
                 config.pool.min_containers, config.pool.max_containers, count
             )
-            self.solver = Solver(config.pool.min_containers, config.pool.max_containers)
+        self.solver = Solver(config.pool.min_containers, config.pool.max_containers)
         threading.Thread(target=self._size_pool, daemon=True).start()
 
     @modal.method()
@@ -199,15 +199,14 @@ class Control:
                     int(body["consumed"]),
                     int(body["produced"]),
                 )
-                self.solver.observe_step(
-                    float(body["seconds"]), float(body["waited"]), int(body["consumed"])
-                )
+            self.solver.observe_step(
+                float(body["seconds"]), float(body["waited"]), int(body["consumed"])
+            )
             return {}
 
         @web.post("/load")
         def load(body: dict) -> dict:
-            if self.solver is not None:
-                self.solver.observe_rollout_load(time.monotonic(), body)
+            self.solver.observe_rollout_load(time.monotonic(), body)
             return {}
 
         @web.get("/status")
@@ -226,7 +225,7 @@ class Control:
                 )
             except Refused as error:
                 raise HTTPException(409, str(error)) from None
-            if self.solver is not None and self.solver.decision is not None:
+            if self.solver.decision is not None:
                 reply["shadow"] = self.solver.decision._asdict()
             return reply
 
@@ -238,19 +237,20 @@ class Control:
         solved = -math.inf
         while True:
             away = self.service.idle_seconds() > config.clocks.idle
+            now, serving = time.monotonic(), self.service.serving()
             if self.autoscaler is None:
+                count = serving
                 settings = {"min_containers": 0 if away else config.pool.min_containers}
             else:
-                now, serving = time.monotonic(), self.service.serving()
                 self.autoscaler.observe_serving(now, serving)
                 count = self.autoscaler.count
-                if now - solved >= 60:
-                    self.solver.decide(now, self.service.loads(), count, serving)
-                    solved = now
                 settings = {
                     "min_containers": 0 if away else count,
                     "max_containers": count,
                 }
+            if now - solved >= 60:
+                self.solver.decide(now, self.service.loads(), count, serving)
+                solved = now
             changed = {
                 key: value for key, value in settings.items() if asked.get(key) != value
             }
