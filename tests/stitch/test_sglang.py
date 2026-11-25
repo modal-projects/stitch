@@ -25,6 +25,7 @@ class FakeSGLang:
         self.calls: list[tuple[str, dict, str]] = []
         self.refuse: str | None = None
         self.metrics = ""
+        self.loads: list[dict] | None = None
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -39,7 +40,14 @@ class FakeSGLang:
                 self.wfile.write(data)
 
             def do_GET(self):
-                data = fake.metrics.encode()
+                if self.path.startswith("/v1/loads") and fake.loads is None:
+                    self.send_error(404)
+                    return
+                data = (
+                    json.dumps({"loads": fake.loads})
+                    if self.path.startswith("/v1/loads")
+                    else fake.metrics
+                ).encode()
                 self.send_response(200)
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
@@ -204,7 +212,8 @@ sglang:utilization{dp_rank="1",model_name="the model"} 0.7
 
 def test_the_load_sums_sglangs_metrics_over_its_ranks_and_averages_the_ratios(fake):
     fake.metrics = METRICS
-    sglang = _sglang(fake, server_args={"--max-running-requests": "32"})
+    fake.loads = [{"max_running_requests": 48}, {"max_running_requests": 48}]
+    sglang = _sglang(fake, server_args={"--max-running-requests": "256"})
 
     assert "--enable-metrics" in sglang.endpoint.extra_server_args
     assert sglang.load() == {
@@ -216,10 +225,15 @@ def test_the_load_sums_sglangs_metrics_over_its_ranks_and_averages_the_ratios(fa
         "cached_tokens": 700.0,
         "evicted_tokens": 50.0,
         "retracted_tokens": 37.0,
-        "utilization": pytest.approx(0.6),
         "token_usage": None,
-        "running_slots": 32,
+        "running_slots": 96,
     }
+
+
+def test_an_sglang_without_the_loads_endpoint_reports_no_slots(fake):
+    fake.metrics = METRICS
+
+    assert _sglang(fake).load()["running_slots"] is None
 
 
 def test_a_publication_before_the_last_of_a_catch_up_carries_no_label(fake):

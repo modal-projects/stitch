@@ -182,18 +182,16 @@ def test_reports_short_of_a_window_judge_nothing():
     )
 
 
-def test_an_engine_holds_what_it_runs_while_requests_queue_whatever_the_slots_set():
+def test_without_reported_slots_an_engine_holds_what_it_ran_while_requests_queued():
     solver = Solver(1, 16)
 
-    decision = solver.decide(NOW, {"e": _engine(96, 28, slots=256)}, count=1, serving=1)
+    decision = solver.decide(
+        NOW, {"e": _engine(96, 28, slots=None)}, count=1, serving=1
+    )
 
     assert (decision.engines, decision.capacity) == (2, 96)
-    assert (
-        solver.decide(
-            NOW, {"e": _engine(24, 8, slots=None)}, count=1, serving=1
-        ).capacity
-        == 24
-    )
+    reported = solver.decide(NOW, {"e": _engine(96, 28, slots=96)}, count=1, serving=1)
+    assert reported.capacity == 96
 
 
 def test_the_count_stays_within_the_pools_bounds():

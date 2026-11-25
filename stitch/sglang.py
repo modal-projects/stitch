@@ -33,11 +33,6 @@ class SGLangConfig:
         return self._replicas * self._attention_groups
 
     @property
-    def running_slots(self) -> int | None:
-        slots = self.server_args.get("--max-running-requests")
-        return None if slots is None else int(slots)
-
-    @property
     def attention_dp(self) -> bool:
         """Whether SGLang runs attention DP, as Miles decides it; it then serves only pinned LoRA adapters."""
         return self._attention_groups > 1 or (
@@ -205,10 +200,17 @@ class SGLang:
                 "sglang:num_retracted_input_tokens_total",
                 "sglang:num_retracted_output_tokens_total",
             ),
-            "utilization": mean("sglang:utilization"),
             "token_usage": mean("sglang:token_usage"),
-            "running_slots": self.config.running_slots,
+            "running_slots": self._running_slots(),
         }
+
+    def _running_slots(self) -> int | None:
+        """What SGLang runs at once over its ranks: below --max-running-requests when memory caps it."""
+        try:
+            loads = json.loads(self._get("/v1/loads?include=core"))["loads"]
+        except urllib.error.HTTPError:
+            return None
+        return sum(load["max_running_requests"] for load in loads)
 
     def _get(self, path: str) -> str:
         with urllib.request.urlopen(
