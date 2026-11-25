@@ -213,14 +213,14 @@ def _idle(now: float, engine_loads, slots: int | None) -> bool:
 
 
 def _slots(engine_loads) -> int | None:
-    """Running slots per engine as the run sets them, else measured: what an engine runs while requests queue."""
+    """What an engine ran while requests queued (SGLang may cap it below the run's slots); before a queue, those."""
     loads = [load for reports in engine_loads.values() for _, load in reports]
-    if slots := next(
-        (load["running_slots"] for load in loads if load.get("running_slots")), None
-    ):
-        return slots
-    return max(
+    if ran := max(
         (round(load["running"]) for load in loads if load["queued"]), default=None
+    ):
+        return ran
+    return next(
+        (load["running_slots"] for load in loads if load.get("running_slots")), None
     )
 
 
