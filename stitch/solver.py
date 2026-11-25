@@ -41,6 +41,8 @@ class Solver:
         self.rollout_loads: deque[tuple[float, dict]] = deque(maxlen=30)
         self.steps: deque[Step] = deque(maxlen=3)
         self.in_band: InBand | None = None
+        self.serving: int | None = None
+        self.serving_since = -math.inf
         self.decision: Decision | None = None
         self.lock = threading.Lock()
 
@@ -65,6 +67,8 @@ class Solver:
             rollout_reports = _window(self.rollout_loads, now, STRESSED_SECONDS)
             stressed = _stressed(now, engine_loads, rollout_reports)
             idle = _idle(now, engine_loads, slots)
+            if serving != self.serving:
+                self.serving, self.serving_since = serving, now
             recent = [
                 (at, load)
                 for at, load in self.rollout_loads
@@ -72,6 +76,7 @@ class Solver:
             ]
             if (
                 rollout_reports
+                and self.serving_since <= now - STRESSED_SECONDS
                 and not stressed
                 and not idle
                 and serving

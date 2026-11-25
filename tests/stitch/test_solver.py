@@ -44,7 +44,8 @@ def _solver(*, waited=0.0, maximum=16) -> Solver:
     for _ in range(3):
         solver.observe_step(100.0 + waited, waited, 8)
     _rollout(solver, range(15, 9, -1))
-    solver.decide(NOW - 600, {"e": _engine(16)}, count=4, serving=4)
+    for age in (900, 600):
+        solver.decide(NOW - age, {"e": _engine(16)}, count=4, serving=4)
     return solver
 
 
@@ -74,6 +75,7 @@ def test_engines_below_their_slots_are_solved_from_what_one_engine_produced():
             },
         )
 
+    solver.decide(NOW - 300, {"e": _engine(100, slots=256)}, count=1, serving=1)
     decision = solver.decide(NOW, {"e": _engine(100, slots=256)}, count=1, serving=1)
 
     assert decision == Decision(
@@ -83,6 +85,19 @@ def test_engines_below_their_slots_are_solved_from_what_one_engine_produced():
         256,
         256,
         1,
+    )
+
+
+def test_a_window_across_a_change_in_serving_engines_teaches_nothing():
+    solver = _solver()
+    _rollout(solver, range(9, -1, -1), waiting=5.0)
+
+    decision = solver.decide(NOW, {"e": _engine(16)}, count=8, serving=8)
+
+    assert decision[:3] == (
+        8,
+        "trainer starving, engines in band",
+        "short of what the trainer uses",
     )
 
 
