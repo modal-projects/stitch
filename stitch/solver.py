@@ -244,14 +244,16 @@ class Solver:
         return f"undone: {reason}"
 
     def _starving(self, now: float) -> bool | None:
-        """Whether the trainer waited in at least half the last window; None without a trainer."""
+        """Whether each of the trainer's last steps waited or it waited in half the window; None without one."""
         if not self.rollout_loads and not self.steps:
             return None
+        steps_waited = len(self.steps) == self.steps.maxlen and all(
+            step.waited for step in self.steps
+        )
         if reports := _window(self.rollout_loads, now, STRESSED_SECONDS):
-            return sum(bool(load.get("waiting")) for load in reports) * 2 >= len(
-                reports
-            )
-        return bool(self.steps and self.steps[-1].waited)
+            waiting = sum(bool(load.get("waiting")) for load in reports)
+            return steps_waited or waiting * 2 >= len(reports)
+        return steps_waited
 
     def _production(self, recent: list[tuple[float, dict]]) -> float:
         if len(recent) > 1:

@@ -352,3 +352,20 @@ def test_without_the_rollouts_load_the_steps_tell_what_one_engine_produced():
         "trainer starving, engines in band",
         "short of what the trainer uses",
     )
+
+
+def test_a_trainer_waiting_in_every_step_starves_though_most_minutes_catch_it_between_waits():
+    solver = Solver(1, 16, 1)
+    for _ in range(3):
+        solver.observe_step(100.0, 20.0, 0.0, 8, 8)
+    _minutes(solver, 0, 9, groups=3, waiting=0.0)
+    _minutes(solver, 10, 10, groups=3, waiting=5.0)
+    solver.decide(300.0, _engines_at(300.0, 1), 1)
+
+    decision = solver.decide(600.0, _engines_at(600.0, 1), 1)
+
+    assert decision[:3] == (
+        2,
+        "trainer starving, engines in band",
+        "short of what the trainer uses",
+    )

@@ -136,7 +136,8 @@ service sets the count and Modal runs it. It reads:
 
 Each minute it judges the last five:
 
-- The trainer is starving when it waited in at least half of them (without the rollout's load, in its last step).
+- The trainer is starving when each of its last three steps waited, or when it was waiting in at least half of the
+  rollout's reports.
 - The engines are stressed when sessions kept under 90% of the prefix they shared with their earlier turns, when a
   queue showed on most of the median engine's reports, or, without a prefix signal, when retraction recomputed over
   5% of prefill; idle when every engine ran under a quarter of its requests at once with no queue for 15 minutes.
