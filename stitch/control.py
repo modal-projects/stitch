@@ -266,6 +266,10 @@ class ControlService:
         with self.condition:
             return len(self._serving())
 
+    def loads(self) -> dict[str, list[tuple[float, dict]]]:
+        with self.condition:
+            return {i: list(e.loads) for i, e in self._serving().items()}
+
     def _barrier(self, version: int, start_id: str) -> dict:
         started = time.monotonic()
         with self.condition:

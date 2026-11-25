@@ -138,20 +138,30 @@ groups produced meanwhile. A step's need is the serving engines times the traine
 - It assumes a group lives at most about two steps, so the steps after a change see what it did, and one policy
   per pool.
 
+Each engine reports SGLang's `/metrics` every 30 s, and every minute the rollout posts its load, `POST /load
+{"finished_sessions", "finished_groups", "session_seconds", "turn_seconds", "prefix_tokens", "uncached_prefix_tokens",
+"sessions_in_flight", "waiting"}`: the sessions and groups finished since its last report, their seconds in all and
+in requests, the tokens their turns shared with the turns they continued and of those the ones the engine did not
+find cached, the sessions in flight, and how long the trainer has waited so far. From both, the control service
+solves each minute the count that auto mode's next rule would set and logs it beside this rule's (`shadow: engines 4
+-> 6 (trainer starving, engines stressed): prefix kept 0.62`); `/status` shows it under `shadow`. It does not set the
+count yet.
+
 To use it:
 
 - Stitch: `PoolConfig(autoscale=True, min_containers=..., max_containers=...)`. The run starts at `min_containers`
   (at least 1) and never goes below it; `max_containers` caps the cost. Leave `target_concurrency` unset, and keep
   `exit_grace_period` long enough for the longest request, so a removed engine finishes what it runs.
 - Miles, fully async in endpoint mode (`--fully-async --rollout-external-url ... --rollout-external-control-url
-  ...`): the rollout posts its steps itself.
+  ...`): the rollout posts its steps and its load itself.
   - `--async-max-concurrent-samples` is the work in flight that more engines can spread; about the staleness
     window times the batch.
   - `--sglang-server-concurrency` caps the requests in flight in endpoint mode: set it at least as high as
     `--async-max-concurrent-samples`.
   - `--max-weight-staleness N --async-submit-within-staleness` keep what is generated within what the trainer will
     use, if wanted.
-- Any other rollout posts `/steps` after each training step.
+- Any other rollout posts `/steps` after each training step, and may post `/load`; without it the shadow judges by
+  the engines alone.
 
 The control service logs each change (`engines 2 -> 3, 2 serving: needs [...]`), each undone rise, and a trainer
 that waits with the engines at `max_containers`.
