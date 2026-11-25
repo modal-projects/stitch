@@ -207,7 +207,8 @@ class Control:
         @web.post("/load")
         def load(body: dict) -> dict:
             self.solver.observe_rollout_load(time.monotonic(), body)
-            return {}
+            decision = self.solver.decision
+            return {"capacity": None if decision is None else decision.capacity}
 
         @web.get("/status")
         def status(
