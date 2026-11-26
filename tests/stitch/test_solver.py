@@ -55,7 +55,8 @@ def test_a_trainer_taking_more_than_the_engines_put_out_adds_once_they_served_fi
     assert run.minutes(5, serving=1).engines == 1
     assert run.minutes(1, serving=1) == Decision(
         2,
-        "the trainer takes 0.26 groups/s, a fully used engine puts out 0.2/s: 1.43 needed",
+        "the trainer takes 0.26 groups/s, a fully used engine puts out 0.2/s, the engines run 100% of their "
+        "slots: 1.43 needed",
         32,
     )
 
@@ -96,7 +97,8 @@ def test_engines_the_trainer_does_not_need_shrink_after_fifteen_minutes():
     assert run.minutes(15, serving=4).engines == 4
     assert run.minutes(1, serving=4) == Decision(
         1,
-        "the trainer takes 0.1 groups/s, a fully used engine puts out 0.2/s: 0.55 needed",
+        "the trainer takes 0.1 groups/s, a fully used engine puts out 0.2/s, the engines run 12% of their "
+        "slots: 0.55 needed",
         128,
     )
 
@@ -145,9 +147,32 @@ def test_short_of_engines_it_asked_for_it_lowers_the_count_to_what_serves_once_t
     run.minutes(6, serving=1)
     run.steps(0.1)
 
-    run.minutes(10, serving=1)
+    assert run.minutes(14, serving=1).engines == 2
+    run.minutes(1, serving=1)
 
     assert (run.solver.count, run.solver.move.kind) == (1, "shrink")
+
+
+def test_a_reading_that_dips_after_an_add_does_not_lower_the_count_before_the_add_is_checked():
+    run = _Run(Solver(1, 16, 8), demand=1.6, per_engine=0.2)
+    run.minutes(6, serving=8)
+    assert run.solver.count == 9
+    # The ninth engine is still starting when the trainer comes to take less.
+    run.steps(1.3)
+
+    decision = run.minutes(10, serving=8)
+
+    assert decision.engines == 9
+    assert decision.reason.endswith("7.15 needed; 8 of 9 engines serve")
+
+
+def test_at_the_minimum_it_holds_and_says_so():
+    run = _Run(Solver(8, 16, 8), demand=0.26, per_engine=0.2)
+
+    decision = run.minutes(16, serving=8)
+
+    assert decision.engines == 8
+    assert decision.reason.endswith("1.43 needed; at the minimum")
 
 
 def test_an_engine_lost_while_an_add_is_checked_restarts_the_check():
@@ -179,7 +204,8 @@ def test_at_the_maximum_it_holds_and_says_so():
 
     assert run.minutes(6, serving=2) == Decision(
         2,
-        "the trainer takes 0.8 groups/s, a fully used engine puts out 0.2/s: 4.40 needed; at the maximum",
+        "the trainer takes 0.8 groups/s, a fully used engine puts out 0.2/s, the engines run 100% of their "
+        "slots: 4.40 needed; at the maximum",
         64,
     )
 

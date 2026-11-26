@@ -46,7 +46,7 @@ class Solver:
         self.outputs: deque[tuple[float, int]] = deque(maxlen=SHRINK_SECONDS // 60 + 1)
         self.uses: deque[tuple[float, float]] = deque(maxlen=SHRINK_SECONDS // 60 + 1)
         self.serving: int | None = None
-        self.serving_since = -math.inf
+        self.serving_since = self.count_since = -math.inf
         self.move: Move | None = None
         self.undone: dict[tuple[str, int], float] = {}
         self.decision: Decision | None = None
@@ -100,11 +100,14 @@ class Solver:
         if per_engine is None:
             return count, "no output measured on the serving engines yet"
         needed = demand * (1 + HEADROOM) / per_engine
-        target = max(self.minimum, math.ceil(needed))
+        target = math.ceil(needed)
         reason = (
             f"the trainer takes {demand:.3g} groups/s, a fully used engine puts out "
-            f"{per_engine:.3g}/s: {needed:.2f} needed"
+            f"{per_engine:.3g}/s, the engines run {self._use(now):.0%} of their slots: "
+            f"{needed:.2f} needed"
         )
+        if target < self.minimum:
+            target, reason = self.minimum, f"{reason}; at the minimum"
         if self.maximum is not None and target > self.maximum:
             target, reason = self.maximum, f"{reason}; at the maximum"
         if target < count and load and load["slots"]:
@@ -117,7 +120,7 @@ class Solver:
                 reason = f"{reason}; the requests on the engines fill {occupied}"
         if serving != count:
             reason = f"{reason}; {serving} of {count} engines serve"
-        steady = now - self.serving_since
+        steady = now - max(self.serving_since, self.count_since)
         if target > count and serving == count and steady >= ADD_SECONDS:
             kind = "add"
         elif target < count and target <= serving and steady >= SHRINK_SECONDS:
@@ -138,6 +141,7 @@ class Solver:
             else 0.0
         )
         self.count, self.move = target, Move(kind, count, output, promised, needed)
+        self.count_since = now
         return target, reason
 
     def _follow_move(self, now: float, serving: int, move: Move) -> str:
@@ -156,16 +160,17 @@ class Solver:
             return (
                 outcome
                 if gain >= SIGNIFICANT * move.promised
-                else self._undo(move, outcome)
+                else self._undo(now, move, outcome)
             )
         needed = self._demand() * (1 + HEADROOM) / per_engine
         if math.ceil(needed) > self.count:
-            return self._undo(move, f"{needed:.2f} needed after it")
+            return self._undo(now, move, f"{needed:.2f} needed after it")
         return f"the shrink held: {needed:.2f} needed"
 
-    def _undo(self, move: Move, outcome: str) -> str:
+    def _undo(self, now: float, move: Move, outcome: str) -> str:
         self.undone[(move.kind, move.before)] = move.needed
         self.count, self.move = move.before, Move("undo", self.count, 0.0, 0.0, 0.0)
+        self.count_since = now
         return f"undone: {outcome}"
 
     def _demand(self) -> float | None:
