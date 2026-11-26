@@ -183,10 +183,14 @@ def test_a_lora_version_replaces_the_adapter_pinned_under_attention_dp(
     assert stats == {} and sglang.version == 4
 
 
-def test_the_slots_are_what_sglang_runs_at_once_over_its_ranks(fake):
-    fake.loads = [{"max_running_requests": 48}, {"max_running_requests": 48}]
+def test_the_load_sums_sglangs_ranks_and_its_slots_are_what_it_runs_at_once(fake):
+    fake.loads = [
+        {"num_running_reqs": 40, "num_waiting_reqs": 2, "max_running_requests": 48},
+        {"num_running_reqs": 45, "num_waiting_reqs": 0, "max_running_requests": 48},
+    ]
+    sglang = _sglang(fake, server_args={"--max-running-requests": "256"})
 
-    assert _sglang(fake, server_args={"--max-running-requests": "256"}).slots() == 96
+    assert sglang.load() == {"running": 85, "queued": 2, "slots": 96}
 
 
 def test_a_publication_before_the_last_of_a_catch_up_carries_no_label(fake):

@@ -120,30 +120,31 @@ end. Without a trainer call for `clocks.idle` seconds, the pool's minimum drops 
 ### Auto mode
 
 `PoolConfig(autoscale=True)` runs the engines whose output keeps up with what the trainer takes; the control service
-sets the count and Modal runs it. It reads, from the rollout:
+sets the count and Modal runs it. It reads:
 
 - after each training step: `POST /steps {"seconds", "waited", "consumed"}`, the step's length, how long the trainer
   waited for groups and the groups it took;
-- every minute: `POST /load {"produced", "held"}`, the groups put into the trainer's buffer and the seconds the
-  producer was held back by a full buffer or by admission, both counted from the rollout's start. The reply carries
-  `capacity`, the requests the serving engines run at once as each engine's SGLang reports them (`/v1/loads`), which
-  Miles' admission follows.
+- every minute: `POST /load {"produced"}`, the groups the rollout put into the trainer's buffer since its start. The
+  reply carries `capacity`, the requests the serving engines run at once, which Miles' admission follows;
+- every 30 s, each engine's requests running and queued and its slots, as SGLang reports them (`/v1/loads`).
 
-Each minute the trainer's demand is the groups it took per second it did not wait over its last three steps, and the
-engines' output the groups put per second the producer was not held since the serving engines last changed (up to 15
-minutes). The engines needed are the serving engines times demand over output, with 10% to spare, between
-`min_containers` and `max_containers`: fewer than serve once they have served 15 minutes, more once they have served
-5. Each move is checked before the next:
+Each minute the trainer's demand is the groups it took per second it did not wait over its last three steps, and a
+fully used engine's output the groups put per second over the serving engines' average use of their slots, since the
+serving engines last changed (up to 15 minutes). The engines needed are demand over that output, with 10% to spare,
+between `min_containers` and `max_containers`: more once the serving engines have served 5 minutes, fewer once they
+have served 15, never fewer than the requests on the engines fill (admitted requests stay where they are). Each move is
+checked before the next:
 
-- While engines it asked for are still starting, it adds no more; it may still lower the count.
-- Five minutes after the new count serves, an add must have raised the output by a quarter of what its engines
-  promised, and after a shrink the engines needed must still fit; otherwise the move is undone and not tried again
-  from that count while the engines needed stay within a quarter of what they were.
+- While engines it asked for are still starting, it adds no more, and lowers the count only below what serves.
+- Five minutes after the new count serves, an add must have raised the output by a quarter of what it promised (what
+  its engines put out, up to what the trainer still lacked), and after a shrink the engines needed must still fit;
+  otherwise the move is undone and not tried again from that count while the engines needed stay within a quarter of
+  what they were.
 
 In every run, auto mode or not, the control service logs each decision when it changes (`engines 1 -> 2: the trainer
-takes 0.254 groups/s, 1 engines put out 0.213/s: 1.31 needed`, prefixed `shadow:` where the pool's count is fixed),
-and `/status` shows the latest under `solver`, with the capacity. A rollout that reports nothing scales best with
-Modal's `target_concurrency` instead, at most the requests one engine runs at once.
+takes 0.26 groups/s, a fully used engine puts out 0.2/s: 1.43 needed`, prefixed `shadow:` where the pool's count is
+fixed), and `/status` shows the latest under `solver`, with the capacity. A rollout that reports nothing scales best
+with Modal's `target_concurrency` instead, at most the requests one engine runs at once.
 
 To use it:
 

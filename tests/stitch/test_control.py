@@ -459,19 +459,21 @@ def test_a_service_restarted_before_any_version_learns_the_heads_publication_fro
     assert (reply["open"], reply["head"], reply["publication"]) == (False, 40, lora)
 
 
-def test_the_serving_engines_slots_add_up_and_an_unknown_engines_are_dropped():
+def test_the_serving_engines_last_loads_add_up_and_an_unknown_engines_is_dropped():
     service = _service()
     service.start(2)
     service.open("e0", 2, None)
     service.open("e1", 2, None)
-    assert service.slots() is None
+    assert service.load() is None
 
-    service.report_slots("e0", 96)
-    service.report_slots("e9", 32)
+    service.report_load("e0", {"running": 90, "queued": 0, "slots": 96})
+    service.report_load("e9", {"running": 1, "queued": 0, "slots": 32})
 
-    assert service.slots() == 96 and "e9" not in service.engines
-    service.report_slots("e1", 96)
-    assert service.slots() == 192
+    assert service.load() == {"running": 90, "queued": 0, "slots": 96}
+    assert "e9" not in service.engines
+    service.report_load("e1", {"running": 40, "queued": 2, "slots": 96})
+    service.report_load("e0", {"running": 80, "queued": 0, "slots": 96})
+    assert service.load() == {"running": 120, "queued": 2, "slots": 192}
 
 
 def test_trainer_calls_reset_the_idle_clock():

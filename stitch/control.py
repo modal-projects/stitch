@@ -47,7 +47,7 @@ class _Engine:
     behind_since: float | None = None
     stats: dict | None = None
     synced: int = 0
-    slots: int | None = None
+    load: dict | None = None
 
 
 class ControlService:
@@ -171,10 +171,10 @@ class ControlService:
             self.ending[engine_id] = f"failed to apply version {version}"
             self.condition.notify_all()
 
-    def report_slots(self, engine_id: str, slots: int) -> None:
+    def report_load(self, engine_id: str, load: dict) -> None:
         with self.condition:
             if (engine := self.engines.get(engine_id)) is not None:
-                engine.slots = slots
+                engine.load = load
 
     def leave(self, engine_id: str) -> None:
         """The engine is shutting down: no barrier waits for it, and its call in flight ends it."""
@@ -266,10 +266,13 @@ class ControlService:
         with self.condition:
             return len(self._serving())
 
-    def slots(self) -> int | None:
+    def load(self) -> dict | None:
+        """The serving engines' last load reports, summed; None until one of them reports."""
         with self.condition:
-            slots = [e.slots for e in self._serving().values() if e.slots is not None]
-            return sum(slots) if slots else None
+            loads = [e.load for e in self._serving().values() if e.load is not None]
+            if not loads:
+                return None
+            return {key: sum(load[key] for load in loads) for key in loads[0]}
 
     def _barrier(self, version: int, start_id: str) -> dict:
         started = time.monotonic()

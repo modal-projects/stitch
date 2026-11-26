@@ -61,8 +61,8 @@ class Engine(Protocol):
 
     def remove_adapter(self, name: str) -> None: ...
 
-    def slots(self) -> int:
-        """Requests the engine runs at once."""
+    def load(self) -> dict:
+        """Requests the engine runs and queues now, and the slots: how many it runs at once."""
 
     def abort_all(self) -> None:
         """Ends every request in flight."""
@@ -102,9 +102,9 @@ class ControlClient:
     def fail(self, version: int) -> None:
         self._call(self.service.fail, version)
 
-    def report_slots(self, slots: int) -> None:
+    def report_load(self, load: dict) -> None:
         # Not awaited: the next report follows in 30 s.
-        self.service.report_slots.spawn(self.engine_id, slots)
+        self.service.report_load.spawn(self.engine_id, load)
 
     def leave(self) -> None:
         # Not waited on: a container shutting down does not wait for the control service.
@@ -286,12 +286,11 @@ class EngineContainer:
         threading.Thread(target=self.report, daemon=True).start()
 
     def report(self) -> None:
-        # Repeated so that a restarted control service learns them too.
         while not self.exiting:
             try:
-                self.control.report_slots(self.engine.slots())
+                self.control.report_load(self.engine.load())
             except Exception:
-                logger.warning("could not report this engine's slots", exc_info=True)
+                logger.warning("could not report this engine's load", exc_info=True)
             time.sleep(30)
 
     def exit(self) -> None:

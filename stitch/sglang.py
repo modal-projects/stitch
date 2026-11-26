@@ -178,10 +178,14 @@ class SGLang:
         """Lets the requests in flight finish, then stops SGLang."""
         self.endpoint.stop()
 
-    def slots(self) -> int:
-        """Requests SGLang runs at once over its ranks: below --max-running-requests when memory caps it."""
+    def load(self) -> dict:
+        """Requests running and queued over the ranks, and slots: below --max-running-requests when memory caps them."""
         loads = json.loads(self._get("/v1/loads?include=core"))["loads"]
-        return sum(load["max_running_requests"] for load in loads)
+        return {
+            "running": sum(load["num_running_reqs"] for load in loads),
+            "queued": sum(load["num_waiting_reqs"] for load in loads),
+            "slots": sum(load["max_running_requests"] for load in loads),
+        }
 
     def _get(self, path: str) -> str:
         with urllib.request.urlopen(

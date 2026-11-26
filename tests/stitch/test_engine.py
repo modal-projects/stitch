@@ -439,12 +439,11 @@ def test_a_leaving_container_ends_its_loops_without_calling_again_or_alarming(
     assert "cannot follow" not in caplog.text and "did not answer" not in caplog.text
 
 
-def test_an_engine_reports_its_slots_and_skips_a_failed_read(
-    versions, no_sleep, caplog
-):
-    reports, reads = [], iter([RuntimeError("loads down"), 96])
+def test_an_engine_reports_its_load_and_skips_a_failed_read(versions, no_sleep, caplog):
+    load = {"running": 3, "queued": 0, "slots": 96}
+    reports, reads = [], iter([RuntimeError("loads down"), load])
 
-    def slots():
+    def read_load():
         read = next(reads)
         if isinstance(read, Exception):
             raise read
@@ -452,15 +451,15 @@ def test_an_engine_reports_its_slots_and_skips_a_failed_read(
         return read
 
     engine = FakeEngine()
-    engine.slots = slots
+    engine.load = read_load
     spawn = SimpleNamespace(spawn=lambda *args: reports.append(args))
-    control = ControlClient(SimpleNamespace(report_slots=spawn), "e0", CLOCKS)
+    control = ControlClient(SimpleNamespace(report_load=spawn), "e0", CLOCKS)
     container = EngineContainer(engine, control, versions, lambda: None)
 
     container.report()
 
-    assert reports == [("e0", 96)]
-    assert "could not report this engine's slots" in caplog.text
+    assert reports == [("e0", load)]
+    assert "could not report this engine's load" in caplog.text
 
 
 def test_a_leaving_container_tells_the_control_service_without_waiting(versions):
