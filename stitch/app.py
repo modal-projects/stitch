@@ -130,8 +130,8 @@ class Control:
         self.service.fail(engine_id, version)
 
     @modal.method()
-    def report_load(self, engine_id: str, load: dict) -> None:
-        self.service.report_load(engine_id, load)
+    def report_slots(self, engine_id: str, slots: int) -> None:
+        self.service.report_slots(engine_id, slots)
 
     @modal.method()
     def leave(self, engine_id: str) -> None:
@@ -189,17 +189,15 @@ class Control:
         @web.post("/steps")
         def steps(body: dict) -> dict:
             self.solver.observe_step(
-                float(body["seconds"]),
-                float(body["waited"]),
-                float(body["held"]),
-                int(body["consumed"]),
-                int(body["produced"]),
+                float(body["seconds"]), float(body["waited"]), int(body["consumed"])
             )
             return {}
 
         @web.post("/load")
         def load(body: dict) -> dict:
-            self.solver.observe_rollout_load(time.monotonic(), body)
+            # An older Miles reports its sessions' load instead.
+            if "produced" in body:
+                self.solver.observe_output(time.monotonic(), body)
             decision = self.solver.decision
             return {"capacity": None if decision is None else decision.capacity}
 
@@ -233,7 +231,7 @@ class Control:
             away = self.service.idle_seconds() > config.clocks.idle
             now = time.monotonic()
             if now - solved >= 60:
-                self.solver.decide(now, self.service.loads(), self.service.serving())
+                self.solver.decide(now, self.service.serving(), self.service.slots())
                 solved = now
             if (count := self.solver.count) is None:
                 settings = {"min_containers": 0 if away else config.pool.min_containers}

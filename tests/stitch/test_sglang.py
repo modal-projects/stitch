@@ -24,7 +24,6 @@ class FakeSGLang:
     def __init__(self):
         self.calls: list[tuple[str, dict, str]] = []
         self.refuse: str | None = None
-        self.metrics = ""
         self.loads: list[dict] | None = None
         fake = self
 
@@ -40,14 +39,10 @@ class FakeSGLang:
                 self.wfile.write(data)
 
             def do_GET(self):
-                if self.path.startswith("/v1/loads") and fake.loads is None:
+                if not self.path.startswith("/v1/loads") or fake.loads is None:
                     self.send_error(404)
                     return
-                data = (
-                    json.dumps({"loads": fake.loads})
-                    if self.path.startswith("/v1/loads")
-                    else fake.metrics
-                ).encode()
+                data = json.dumps({"loads": fake.loads}).encode()
                 self.send_response(200)
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
@@ -188,52 +183,10 @@ def test_a_lora_version_replaces_the_adapter_pinned_under_attention_dp(
     assert stats == {} and sglang.version == 4
 
 
-METRICS = """\
-# HELP sglang:num_running_reqs The number of running requests.
-# TYPE sglang:num_running_reqs gauge
-sglang:num_running_reqs{dp_rank="0",model_name="the model"} 3.0
-sglang:num_running_reqs{dp_rank="1",model_name="the model"} 5.0
-sglang:num_queue_reqs{dp_rank="0",model_name="the model"} 2.0
-sglang:num_queue_reqs{dp_rank="1",model_name="the model"} 0.0
-sglang:queue_time_seconds_bucket{le="0.1",model_name="the model"} 4.0
-sglang:queue_time_seconds_sum{model_name="the model"} 12.5
-sglang:queue_time_seconds_count{model_name="the model"} 10.0
-sglang:prompt_tokens_total{is_streaming="false",model_name="the model"} 1000.0
-sglang:prompt_tokens_created{is_streaming="false",model_name="the model"} 1.7e+09
-sglang:cached_tokens_total{cache_source="device",model_name="the model"} 600.0
-sglang:cached_tokens_total{cache_source="host",model_name="the model"} 100.0
-sglang:evicted_tokens_total{model_name="the model"} 50.0
-sglang:num_retracted_input_tokens_total{model_name="the model"} 30.0
-sglang:num_retracted_output_tokens_total{model_name="the model"} 7.0
-sglang:utilization{dp_rank="0",model_name="the model"} 0.5
-sglang:utilization{dp_rank="1",model_name="the model"} 0.7
-"""
-
-
-def test_the_load_sums_sglangs_metrics_over_its_ranks_and_averages_the_ratios(fake):
-    fake.metrics = METRICS
+def test_the_slots_are_what_sglang_runs_at_once_over_its_ranks(fake):
     fake.loads = [{"max_running_requests": 48}, {"max_running_requests": 48}]
-    sglang = _sglang(fake, server_args={"--max-running-requests": "256"})
 
-    assert "--enable-metrics" in sglang.endpoint.extra_server_args
-    assert sglang.load() == {
-        "running": 8.0,
-        "queued": 2.0,
-        "queue_seconds": 12.5,
-        "dequeued": 10.0,
-        "prompt_tokens": 1000.0,
-        "cached_tokens": 700.0,
-        "evicted_tokens": 50.0,
-        "retracted_tokens": 37.0,
-        "token_usage": None,
-        "running_slots": 96,
-    }
-
-
-def test_an_sglang_without_the_loads_endpoint_reports_no_slots(fake):
-    fake.metrics = METRICS
-
-    assert _sglang(fake).load()["running_slots"] is None
+    assert _sglang(fake, server_args={"--max-running-requests": "256"}).slots() == 96
 
 
 def test_a_publication_before_the_last_of_a_catch_up_carries_no_label(fake):

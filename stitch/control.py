@@ -3,9 +3,9 @@
 import secrets
 import threading
 import time
-from collections import Counter, deque
+from collections import Counter
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
@@ -47,7 +47,7 @@ class _Engine:
     behind_since: float | None = None
     stats: dict | None = None
     synced: int = 0
-    loads: deque[tuple[float, dict]] = field(default_factory=lambda: deque(maxlen=60))
+    slots: int | None = None
 
 
 class ControlService:
@@ -171,10 +171,10 @@ class ControlService:
             self.ending[engine_id] = f"failed to apply version {version}"
             self.condition.notify_all()
 
-    def report_load(self, engine_id: str, load: dict) -> None:
+    def report_slots(self, engine_id: str, slots: int) -> None:
         with self.condition:
             if (engine := self.engines.get(engine_id)) is not None:
-                engine.loads.append((time.monotonic(), load))
+                engine.slots = slots
 
     def leave(self, engine_id: str) -> None:
         """The engine is shutting down: no barrier waits for it, and its call in flight ends it."""
@@ -266,9 +266,10 @@ class ControlService:
         with self.condition:
             return len(self._serving())
 
-    def loads(self) -> dict[str, list[tuple[float, dict]]]:
+    def slots(self) -> int | None:
         with self.condition:
-            return {i: list(e.loads) for i, e in self._serving().items()}
+            slots = [e.slots for e in self._serving().values() if e.slots is not None]
+            return sum(slots) if slots else None
 
     def _barrier(self, version: int, start_id: str) -> dict:
         started = time.monotonic()

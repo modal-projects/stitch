@@ -1,393 +1,180 @@
-"""Auto mode's engine count, from the engines' and the rollout's load reports, each move checked before the next."""
+"""Auto mode's engine count, from the trainer's steps and the rollout's output, each move checked before the next."""
 
 import logging
 
 from stitch.solver import Decision, Solver
 
-NOW = 3600.0
+SLOTS = 32
 
 
-def _engine(running, queued=0, *, slots: int | None = 32, prompt=1000, retracted=0):
-    return [
-        (
-            NOW - 30 * age,
-            {
-                "running": running,
-                "queued": queued,
-                "prompt_tokens": prompt * (40 - age),
-                "retracted_tokens": retracted * (40 - age),
-                "running_slots": slots,
-            },
-        )
-        for age in range(40, -1, -1)
-    ]
+class _Run:
+    """A trainer taking `demand` groups a second; each serving engine puts out `per_engine` a second while the
+    producer is not held, which it is for `held` of each minute. One report and one decision a minute."""
 
+    def __init__(self, solver: Solver, *, demand: float, per_engine: float, held=0.0):
+        self.solver, self.per_engine, self.held = solver, per_engine, held
+        self.now, self.output = 0.0, {"produced": 0.0, "held": 0.0}
+        self.steps(demand)
 
-def _rollout(solver, ages, *, kept=1.0, waiting=0.0):
-    for age in ages:
-        solver.observe_rollout_load(
-            NOW - 60 * age,
-            {
-                "finished_groups": 3,
-                "turn_seconds": 7200.0,
-                "session_seconds": 14400.0,
-                "prefix_tokens": 10_000,
-                "uncached_prefix_tokens": round(10_000 * (1 - kept)),
-                "waiting": waiting,
-            },
-        )
-
-
-def _solver(*, waited=0.0, maximum=16) -> Solver:
-    """A trainer that uses 8 groups a 100 s step, and a window in band from 15 to 10 minutes ago."""
-    solver = Solver(1, maximum, None)
-    for _ in range(3):
-        solver.observe_step(100.0 + waited, waited, 0.0, 8, 8)
-    _rollout(solver, range(15, 9, -1))
-    for age in (900, 600):
-        solver.decide(NOW - age, {"e": _engine(16)}, 4)
-    return solver
-
-
-def test_a_starved_trainer_with_stressed_engines_adds_the_engines_it_uses_at_the_window_in_band():
-    solver = _solver()
-    _rollout(solver, range(9, -1, -1), kept=0.6, waiting=5.0)
-
-    decision = solver.decide(NOW, {"e": _engine(16)}, 4)
-
-    assert decision == Decision(
-        7, "trainer starving, engines stressed", "prefix kept 0.60", 128, 256, 6
-    )
-
-
-def test_engines_below_their_slots_are_solved_from_what_one_engine_produced():
-    solver = Solver(1, 16, None)
-    for _ in range(3):
-        solver.observe_step(100.0, 0.0, 0.0, 15, 15)
-    for age in range(10, -1, -1):
-        solver.observe_rollout_load(
-            NOW - 60 * age,
-            {
-                "finished_groups": 6,
-                "turn_seconds": 6000.0,
-                "session_seconds": 6000.0,
-                "waiting": 5.0,
-            },
-        )
-
-    solver.decide(NOW - 300, {"e": _engine(100, slots=256)}, 1)
-    decision = solver.decide(NOW, {"e": _engine(100, slots=256)}, 1)
-
-    assert decision == Decision(
-        2,
-        "trainer starving, engines in band",
-        "short of what the trainer uses",
-        256,
-        256,
-        1,
-    )
-
-
-def test_a_window_across_a_change_in_serving_engines_teaches_nothing():
-    solver = _solver()
-    _rollout(solver, range(9, -1, -1), waiting=5.0)
-
-    decision = solver.decide(NOW, {"e": _engine(16)}, 8)
-
-    assert decision[:3] == (
-        8,
-        "trainer starving, engines in band",
-        "short of what the trainer uses",
-    )
-
-
-def test_a_fed_trainer_with_stressed_engines_holds_and_reports_over_admission():
-    solver = _solver()
-    _rollout(solver, range(9, -1, -1), kept=0.6)
-
-    decision = solver.decide(NOW, {"e": _engine(16)}, 4)
-
-    assert decision[:3] == (
-        4,
-        "trainer fed, engines stressed",
-        "over-admitted: prefix kept 0.60",
-    )
-
-
-def test_a_starved_trainer_with_idle_engines_holds_as_demand_limited():
-    solver = _solver()
-    _rollout(solver, range(9, -1, -1), waiting=5.0)
-
-    decision = solver.decide(NOW, {"e": _engine(4), "f": _engine(4)}, 2)
-
-    assert decision[:3] == (
-        2,
-        "trainer starving, engines idle",
-        "demand-limited: more engines would not feed the trainer",
-    )
-
-
-def test_idle_engines_under_a_fed_trainer_shrink_to_what_the_trainer_uses():
-    solver = _solver()
-    _rollout(solver, range(9, -1, -1))
-
-    decision = solver.decide(NOW, {"e": _engine(4), "f": _engine(4)}, 8)
-
-    assert decision[:3] == (7, "trainer fed, engines idle", "idle")
-
-
-def test_idle_engines_without_a_trainer_shrink_no_lower_than_their_peak_load():
-    solver = Solver(1, 16, None)
-    engines = {name: _engine(7) for name in "abcdefghij"}
-
-    decision = solver.decide(NOW, engines, 10)
-
-    assert decision[:3] == (3, "no trainer, engines idle", "idle")
-
-
-def test_without_a_trainer_queued_engines_add_toward_the_load_they_hold():
-    solver = Solver(1, 16, None)
-
-    decision = solver.decide(NOW, {"e": _engine(32, 16), "f": _engine(32, 16)}, 2)
-
-    assert decision[:3] == (
-        3,
-        "no trainer, engines stressed",
-        "a queue on 100% of the median engine's reports",
-    )
-
-
-def test_without_a_prefix_signal_retraction_marks_the_engines_stressed():
-    solver = Solver(1, 16, None)
-
-    decision = solver.decide(NOW, {"e": _engine(16, retracted=60)}, 1)
-
-    assert decision.reason == "retraction recomputes 6% of prefill"
-
-
-def test_reports_short_of_a_window_judge_nothing():
-    solver = Solver(1, 16, None)
-    young = {"e": _engine(32, 16)[-5:]}
-
-    assert solver.decide(NOW, young, 2)[:3] == (
-        2,
-        "no trainer, engines in band",
-        "",
-    )
-
-
-def test_without_reported_slots_an_engine_holds_what_it_ran_while_requests_queued():
-    solver = Solver(1, 16, None)
-
-    decision = solver.decide(NOW, {"e": _engine(96, 28, slots=None)}, 1)
-
-    assert (decision.engines, decision.capacity) == (2, 96)
-    reported = solver.decide(NOW, {"e": _engine(96, 28, slots=96)}, 1)
-    assert reported.capacity == 96
-
-
-def test_the_count_stays_within_the_pools_bounds():
-    solver = _solver(maximum=5)
-    _rollout(solver, range(9, -1, -1), kept=0.6, waiting=5.0)
-
-    decision = solver.decide(NOW, {"e": _engine(16)}, 4)
-
-    assert (decision.engines, decision.reason) == (
-        5,
-        "prefix kept 0.60; at the maximum",
-    )
-
-
-def test_a_decision_is_logged_only_when_its_count_or_cell_changes(caplog):
-    solver = _solver()
-    _rollout(solver, range(9, -1, -1), kept=0.6, waiting=5.0)
-
-    with caplog.at_level(logging.INFO, logger="stitch.solver"):
+    def steps(self, demand: float) -> None:
         for _ in range(3):
-            solver.decide(NOW, {"e": _engine(16)}, 4)
+            self.solver.observe_step(100.0, 0.0, round(demand * 100))
 
-    assert caplog.text.count("shadow: engines 4 -> 7") == 1
-
-
-def _engines_at(t: float, count: int, running: int = 16) -> dict:
-    reports = [
-        (
-            t - 30 * age,
-            {
-                "running": running,
-                "queued": 0,
-                "prompt_tokens": 0,
-                "retracted_tokens": 0,
-                "running_slots": 32,
-            },
-        )
-        for age in range(40, -1, -1)
-    ]
-    return {f"e{index}": reports for index in range(count)}
+    def minutes(self, count: int, *, serving: int) -> Decision:
+        for _ in range(count):
+            self.now += 60
+            unheld = 60 * (1 - self.held)
+            self.output = {
+                "produced": self.output["produced"]
+                + self.per_engine * serving * unheld,
+                "held": self.output["held"] + 60 - unheld,
+            }
+            self.solver.observe_output(self.now, self.output)
+            decision = self.solver.decide(self.now, serving, SLOTS * serving)
+        return decision
 
 
-def _minutes(solver, first: int, last: int, *, groups: int, waiting: float) -> None:
-    for minute in range(first, last + 1):
-        solver.observe_rollout_load(
-            60.0 * minute,
-            {
-                "finished_groups": groups,
-                "turn_seconds": 600.0,
-                "session_seconds": 1200.0,
-                "waiting": waiting,
-            },
-        )
+def test_without_a_training_step_it_holds():
+    assert Solver(1, 8, 1).decide(60.0, 1, SLOTS) == Decision(
+        1, "no training step yet", SLOTS
+    )
 
 
-def _starved_at_one_engine() -> Solver:
-    """One engine finishing 3 groups a minute while the trainer, waiting, consumes 0.08 a second: 2 engines needed."""
-    solver = Solver(1, 16, 1)
-    for _ in range(3):
-        solver.observe_step(100.0, 0.0, 0.0, 8, 8)
-    _minutes(solver, 0, 10, groups=3, waiting=5.0)
-    solver.decide(300.0, _engines_at(300.0, 1), 1)
-    return solver
+def test_without_output_from_the_serving_engines_it_holds():
+    solver = Solver(1, 8, 1)
+    solver.observe_step(100.0, 0.0, 26)
+
+    reason = solver.decide(60.0, 1, SLOTS).reason
+
+    assert reason == "no output measured on the serving engines yet"
 
 
-def test_a_move_waits_for_its_engines_then_keeps_the_count_its_production_backs():
-    solver = _starved_at_one_engine()
+def test_a_trainer_taking_more_than_the_engines_put_out_adds_once_they_served_five_minutes():
+    run = _Run(Solver(1, 8, 1), demand=0.26, per_engine=0.2)
 
-    assert solver.decide(600.0, _engines_at(600.0, 1), 1)[:3] == (
+    assert run.minutes(5, serving=1).engines == 1
+    assert run.minutes(1, serving=1) == Decision(
+        2, "the trainer takes 0.26 groups/s, 1 engines put out 0.2/s: 1.43 needed", 32
+    )
+
+
+def test_an_add_that_raised_the_output_is_kept():
+    run = _Run(Solver(1, 8, 1), demand=0.26, per_engine=0.2)
+    run.minutes(6, serving=1)
+
+    assert run.minutes(5, serving=2).reason == "checking the add from 1"
+    assert run.minutes(1, serving=2).reason == "output rose 0.2/s of 0.2/s promised"
+    assert (run.solver.count, run.solver.move) == (2, None)
+
+
+def test_an_add_that_did_not_raise_the_output_is_undone_and_not_tried_again_while_the_need_stays():
+    run = _Run(Solver(1, 8, 1), demand=0.26, per_engine=0.2)
+    run.minutes(6, serving=1)
+    # Two engines put out what one did: something other than the engines limits the rollout.
+    run.per_engine = 0.1
+
+    assert run.minutes(6, serving=2) == Decision(
+        1, "undone: output rose 0/s of 0.2/s promised", 64
+    )
+    run.per_engine = 0.2
+    assert run.minutes(1, serving=1).reason == "back at 1"
+    decision = run.minutes(6, serving=1)
+    assert decision.engines == 1
+    assert decision.reason.endswith("1.43 needed; the add from 1 was undone")
+
+    run.steps(0.52)
+    assert run.minutes(1, serving=1).engines == 3
+
+
+def test_engines_held_by_a_full_buffer_shrink_to_what_the_trainer_takes_after_fifteen_minutes():
+    run = _Run(Solver(1, 8, 4), demand=0.1, per_engine=0.2, held=0.875)
+
+    assert run.minutes(15, serving=4).engines == 4
+    assert run.minutes(1, serving=4) == Decision(
+        1, "the trainer takes 0.1 groups/s, 4 engines put out 0.8/s: 0.55 needed", 128
+    )
+
+
+def test_engines_whose_extra_groups_go_stale_shrink_too():
+    run = _Run(Solver(1, 8, 4), demand=0.1, per_engine=0.2)
+
+    assert run.minutes(16, serving=4).engines == 1
+
+
+def test_a_shrink_that_leaves_too_few_engines_is_undone_and_not_tried_again_while_the_need_stays():
+    run = _Run(Solver(1, 8, 4), demand=0.1, per_engine=0.2, held=0.875)
+    run.minutes(16, serving=4)
+    # One engine alone puts out less than a quarter of what four did.
+    run.per_engine, run.held = 0.08, 0.0
+
+    assert run.minutes(5, serving=1).reason == "checking the shrink from 4"
+    assert run.minutes(1, serving=1) == Decision(4, "undone: 1.38 needed after it", 32)
+    run.per_engine, run.held = 0.2, 0.875
+    assert run.minutes(1, serving=4).reason == "back at 4"
+    decision = run.minutes(16, serving=4)
+    assert decision.engines == 4
+    assert decision.reason.endswith("0.55 needed; the shrink from 4 was undone")
+
+
+def test_while_engines_it_asked_for_start_it_adds_no_more():
+    run = _Run(Solver(1, 8, 1), demand=0.26, per_engine=0.2)
+    run.minutes(6, serving=1)
+    run.steps(0.8)
+
+    decision = run.minutes(10, serving=1)
+
+    assert decision.engines == 2
+    assert decision.reason.endswith("4.40 needed; 1 of 2 engines serve")
+
+
+def test_short_of_engines_it_asked_for_it_may_still_lower_the_count():
+    """A GPU shortage: the second engine never starts, and the trainer comes to take less."""
+    run = _Run(Solver(1, 8, 1), demand=0.26, per_engine=0.2)
+    run.minutes(6, serving=1)
+    run.steps(0.1)
+
+    run.minutes(10, serving=1)
+
+    assert (run.solver.count, run.solver.move.kind) == (1, "shrink")
+
+
+def test_an_engine_lost_while_an_add_is_checked_restarts_the_check():
+    run = _Run(Solver(1, 8, 1), demand=0.26, per_engine=0.2)
+    run.minutes(6, serving=1)
+    run.minutes(3, serving=2)
+    run.minutes(1, serving=1)
+
+    assert run.minutes(5, serving=2).reason == "checking the add from 1"
+    assert run.minutes(1, serving=2).reason == "output rose 0.2/s of 0.2/s promised"
+
+
+def test_a_restarted_rollout_measures_its_output_again():
+    solver = Solver(1, 8, 1)
+    solver.observe_step(100.0, 0.0, 26)
+    solver.decide(0.0, 1, SLOTS)
+    solver.observe_output(60.0, {"produced": 500, "held": 0.0})
+    solver.observe_output(120.0, {"produced": 3, "held": 0.0})
+
+    reason = solver.decide(120.0, 1, SLOTS).reason
+
+    assert reason == "no output measured on the serving engines yet"
+
+
+def test_at_the_maximum_it_holds_and_says_so():
+    run = _Run(Solver(1, 2, 2), demand=0.8, per_engine=0.2)
+
+    assert run.minutes(6, serving=2) == Decision(
         2,
-        "trainer starving, engines in band",
-        "short of what the trainer uses",
-    )
-    assert (
-        solver.decide(660.0, _engines_at(660.0, 1), 1).reason == "1 of 2 engines serve"
-    )
-    assert (
-        solver.decide(720.0, _engines_at(720.0, 2), 2).reason
-        == "checking the move from 1"
-    )
-    _minutes(solver, 11, 18, groups=6, waiting=0.0)
-
-    kept = solver.decide(1080.0, _engines_at(1080.0, 2), 2)
-
-    assert (kept.engines, kept.reason) == (
-        2,
-        "production rose 0.05/s against 0.05/s promised",
-    )
-    assert solver.count == 2
-
-
-def test_an_add_production_does_not_back_is_undone_and_not_retried_while_production_stays():
-    solver = _starved_at_one_engine()
-    solver.decide(600.0, _engines_at(600.0, 1), 1)
-    solver.decide(720.0, _engines_at(720.0, 2), 2)
-    _minutes(solver, 11, 18, groups=3, waiting=5.0)
-
-    undone = solver.decide(1080.0, _engines_at(1080.0, 2), 2)
-    assert (undone.engines, undone.reason) == (
-        1,
-        "undone: production rose 0/s against 0.05/s: rollout-limited",
-    )
-    assert solver.decide(1140.0, _engines_at(1140.0, 1), 1).reason == "back at 1"
-    _minutes(solver, 19, 25, groups=3, waiting=5.0)
-
-    held = solver.decide(1500.0, _engines_at(1500.0, 1), 1)
-
-    assert (held.engines, held.reason) == (
-        1,
-        "short of what the trainer uses; rollout-limited at 1",
+        "the trainer takes 0.8 groups/s, 2 engines put out 0.4/s: 4.40 needed; at the maximum",
+        64,
     )
 
 
-def test_a_shrink_that_starves_the_trainer_is_undone_and_not_tried_again():
-    solver = Solver(1, 16, 4)
-    for _ in range(3):
-        solver.observe_step(100.0, 0.0, 0.0, 1, 1)
-    _minutes(solver, 0, 20, groups=3, waiting=0.0)
-    solver.decide(600.0, _engines_at(600.0, 4), 4)
-    solver.decide(1200.0, _engines_at(1200.0, 4, running=16), 4)
+def test_a_fixed_pool_logs_what_auto_mode_would_set_and_moves_nothing(caplog):
+    caplog.set_level(logging.INFO, logger="stitch.solver")
+    run = _Run(Solver(1, 8, None), demand=0.26, per_engine=0.2)
 
-    shrink = solver.decide(1260.0, _engines_at(1260.0, 4, running=4), 4)
-    assert (shrink.engines, shrink.reason) == (1, "idle")
-    solver.decide(1320.0, _engines_at(1320.0, 1, running=4), 1)
-    _minutes(solver, 21, 27, groups=3, waiting=5.0)
+    decision = run.minutes(6, serving=1)
 
-    undone = solver.decide(1680.0, _engines_at(1680.0, 1, running=4), 1)
-    assert (undone.engines, undone.reason) == (
-        4,
-        "undone: the shrink stressed the engines or starved the trainer",
-    )
-    solver.decide(1740.0, _engines_at(1740.0, 4, running=4), 4)
-    _minutes(solver, 28, 45, groups=3, waiting=0.0)
-
-    refused = solver.decide(2700.0, _engines_at(2700.0, 4, running=4), 4)
-
-    assert (refused.engines, refused.reason) == (
-        4,
-        "idle; shrinking to 1 stressed or starved it before",
-    )
-
-
-def test_one_minute_of_waiting_does_not_move_the_count():
-    solver = Solver(1, 16, 1)
-    for _ in range(3):
-        solver.observe_step(100.0, 0.0, 0.0, 8, 8)
-    _minutes(solver, 0, 9, groups=3, waiting=0.0)
-    _minutes(solver, 10, 10, groups=3, waiting=5.0)
-    solver.decide(300.0, _engines_at(300.0, 1), 1)
-
-    decision = solver.decide(600.0, _engines_at(600.0, 1), 1)
-
-    assert (decision.engines, decision.cell) == (1, "trainer fed, engines in band")
-
-
-def test_without_the_rollouts_load_the_steps_tell_what_one_engine_produced():
-    solver = Solver(1, 16, 1)
-    for _ in range(3):
-        solver.observe_step(100.0, 50.0, 0.0, 8, 4)
-    solver.decide(300.0, _engines_at(300.0, 1), 1)
-
-    decision = solver.decide(600.0, _engines_at(600.0, 1), 1)
-
-    assert decision[:3] == (
-        4,
-        "trainer starving, engines in band",
-        "short of what the trainer uses",
-    )
-
-
-def test_a_trainer_waiting_in_every_step_starves_though_most_minutes_catch_it_between_waits():
-    solver = Solver(1, 16, 1)
-    for _ in range(3):
-        solver.observe_step(100.0, 20.0, 0.0, 8, 8)
-    _minutes(solver, 0, 9, groups=3, waiting=0.0)
-    _minutes(solver, 10, 10, groups=3, waiting=5.0)
-    solver.decide(300.0, _engines_at(300.0, 1), 1)
-
-    decision = solver.decide(600.0, _engines_at(600.0, 1), 1)
-
-    assert decision[:3] == (
-        2,
-        "trainer starving, engines in band",
-        "short of what the trainer uses",
-    )
-
-
-def test_an_engine_lost_while_a_move_is_checked_restarts_the_check():
-    solver = _starved_at_one_engine()
-    solver.decide(600.0, _engines_at(600.0, 1), 1)
-    solver.decide(720.0, _engines_at(720.0, 2), 2)
-    _minutes(solver, 11, 25, groups=6, waiting=0.0)
-    assert (
-        solver.decide(840.0, _engines_at(840.0, 1), 1).reason == "1 of 2 engines serve"
-    )
-    assert (
-        solver.decide(900.0, _engines_at(900.0, 2), 2).reason
-        == "checking the move from 1"
-    )
-
-    assert (
-        solver.decide(1080.0, _engines_at(1080.0, 2), 2).reason
-        == "checking the move from 1"
-    )
-    assert solver.decide(1200.0, _engines_at(1200.0, 2), 2).reason.startswith(
-        "production rose"
-    )
+    assert (decision.engines, run.solver.count, run.solver.move) == (2, None, None)
+    assert "shadow: engines 1 -> 2: the trainer takes 0.26 groups/s" in caplog.text
