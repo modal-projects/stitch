@@ -126,7 +126,7 @@ sets the count and Modal runs it. It reads:
   waited for groups and the groups it took;
 - every minute: `POST /load {"produced"}`, the groups the rollout put into the trainer's buffer since its start. The
   reply carries `capacity`, `running` and `queued`, the requests the serving engines run at once, run now and hold
-  waiting, from which Miles' admission keeps the engines' slots in use without a queue;
+  waiting; Miles' admission follows the capacity;
 - every 30 s, each engine's requests running and queued and its slots, as SGLang reports them (`/v1/loads`).
 
 Each minute the trainer's demand is the groups it took per second it did not wait over its last three steps, and a
