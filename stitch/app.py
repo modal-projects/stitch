@@ -343,6 +343,8 @@ def _node(cls):
     target_concurrency=config.pool.target_concurrency,
     scaledown_window=config.pool.scaledown_window,
     exit_grace_period=config.pool.exit_grace_period,
+    routing_region=config.pool.routing_region,
+    compute_region=config.pool.compute_region,
     cpu=config.pool.cpu,
     memory=config.pool.memory,
     volumes=engine_volumes,

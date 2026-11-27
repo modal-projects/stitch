@@ -38,6 +38,12 @@ def test_a_removed_engine_may_finish_its_requests_for_modals_longest_grace():
     assert PoolConfig(gpu="H200:4").exit_grace_period == 3600
 
 
+def test_requests_route_and_engines_run_where_modal_puts_them_unless_pinned():
+    pool = PoolConfig(gpu="H200:4")
+
+    assert (pool.routing_region, pool.compute_region) == ("us-east", None)
+
+
 def test_auto_mode_leaves_the_count_to_the_control_service():
     with pytest.raises(ValueError, match="target_concurrency"):
         PoolConfig(gpu="H200:4", autoscale=True, target_concurrency=8)

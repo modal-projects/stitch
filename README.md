@@ -117,6 +117,10 @@ engine between `min_containers` and `max_containers`. An engine it removes drain
 up to `exit_grace_period` seconds (3600 by default, Modal's limit) to finish those in flight, stopping once they
 end. Without a trainer call for `clocks.idle` seconds, the pool's minimum drops to 0 until the trainer is back.
 
+Requests reach the engines through Modal's proxy in `PoolConfig.routing_region` (us-east by default), and the engines
+run wherever GPUs are free unless `compute_region` pins them. Keep the rollout's client, the proxy and the engines in
+one region: a client and engines far from the proxy spend most of each request on the way.
+
 ### Auto mode
 
 `PoolConfig(autoscale=True)` runs the engines whose output keeps up with what the trainer takes; the control service

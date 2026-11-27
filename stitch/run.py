@@ -30,6 +30,10 @@ class PoolConfig:
     # An engine's start: loading the checkpoint, then catching up through every version.
     startup_timeout: int = 3600
     exit_grace_period: int = 3600
+    # Where Modal's proxy routes requests and where engines may run (Modal's defaults: us-east, anywhere): a request
+    # goes from the rollout's client through the proxy to an engine, so keep the three in one region.
+    routing_region: str = "us-east"
+    compute_region: str | list[str] | None = None
     experimental_options: dict[str, str | bool | int] = field(default_factory=dict)
     autoscale: bool = False
 
