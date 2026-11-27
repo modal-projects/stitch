@@ -129,31 +129,46 @@ sets the count and Modal runs it. It reads:
   waiting; Miles' admission follows the capacity;
 - every 30 s, each engine's requests running and queued and its slots, as SGLang reports them (`/v1/loads`).
 
-Each minute the trainer's demand is the groups it took per second it did not wait over its last three steps, and a
-fully used engine's output the groups put per second over the last 15 minutes, divided by the engines in use (their
-running requests over their slots). The engines needed are demand over that output, with 10% to spare, between
-`min_containers` and `max_containers`: more once the serving engines and the count have held 5 minutes, fewer once
-they have held 15, never fewer than the requests on the engines fill (admitted requests stay where they are). Each move
-is checked before the next:
+A change in the serving engines shows in the output and in the trainer's waiting only once groups started on them
+finish: a group's lifetime, 15 minutes by default. So each minute, from 15 minutes after the serving engines last
+changed:
+
+- the trainer's demand is the groups it took per second it did not wait over its last three steps, and an engine's
+  output the groups put per second over the last 15 minutes (at least 5), divided by the engines serving;
+- the engines needed are demand over that output, with 10% to spare, between `min_containers` and `max_containers`;
+- the trainer is short when it waited at least 5% of its last steps begun since then. Short, it adds up to the
+  engines needed; fed, it shrinks to them, but never below what the requests on the engines fill (running and queued
+  over each engine's slots, averaged over 15 minutes, with 10% to spare): fewer would queue them until they end.
+
+Each move is checked before the next:
 
 - While engines it asked for are still starting, it adds no more, and lowers the count only to what serves or below.
-- Five minutes after the new count serves, an add must have raised the output by a quarter of what it promised (what
-  its engines put out, up to what the trainer still lacked), and after a shrink the engines needed must still fit;
-  otherwise the move is undone and not tried again from that count while the engines needed stay within a quarter of
-  what they were.
+- Five minutes after an add serves, the requests on the engines must have grown by at least a quarter as much as the
+  engines did, or the rollout cannot use them; after a shrink, the trainer's next step must find it fed. Otherwise the
+  move is undone, and not tried again from that count while the trainer's demand stays within a quarter of what it
+  was.
 
 In every run, auto mode or not, the control service logs each decision when it changes (`engines 1 -> 2: the trainer
-takes 0.26 groups/s, a fully used engine puts out 0.2/s: 1.43 needed`, prefixed `shadow:` where the pool's count is
-fixed), and `/status` shows the latest under `solver`, with the capacity. A rollout that reports nothing scales best
-with Modal's `target_concurrency` instead, at most the requests one engine runs at once.
+waited 23% of its last steps and takes 0.26 groups/s, an engine puts out 0.2/s: 1.43 needed`, prefixed `shadow:` where
+the pool's count is fixed), and `/status` shows the latest under `solver`, with the capacity. A rollout that reports
+nothing scales best with Modal's `target_concurrency` instead, at most the requests one engine runs at once.
 
 To use it:
 
 - Stitch: `PoolConfig(autoscale=True, min_containers=..., max_containers=...)`. The run starts at `min_containers`
   (at least 1) and never goes below it; `max_containers` caps the cost. Leave `target_concurrency` unset, and keep
   `exit_grace_period` long enough for the longest request, so a removed engine finishes what it runs.
+- SGLang: `--max-running-requests` is the capacity the engines report. Admission keeps a share of it in use, so set
+  it from the efficient point, where an engine's output stops rising with more requests (read from its logs; it
+  depends on the model and hardware), as the rollout below says.
 - Miles, fully async in endpoint mode (`--fully-async --rollout-external-url ... --rollout-external-control-url
-  ...`): the rollout posts its steps and its load itself.
+  ...`): the rollout posts its steps and its load itself, and admits samples up to the capacity over the share of
+  a session's life spent in model calls. Its admission log says what share of each call SGLang took ("turns spent
+  X% of their time in engines"): set `--max-running-requests` to about the efficient point over that share (32 for
+  an efficient point of 16 at 50%), and set it again when the task changes.
+  - Each request carries its rollout's admission order as its priority; with `--sglang-enable-priority-scheduling
+    --sglang-schedule-low-priority-values-first --sglang-retraction-policy priority
+    --sglang-disable-priority-preemption` the engines run the oldest rollouts' requests first.
   - `--async-max-concurrent-samples` is the work in flight that more engines can spread; about the staleness
     window times the batch.
   - `--sglang-server-concurrency` caps the requests in flight in endpoint mode: set it at least as high as

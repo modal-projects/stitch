@@ -188,9 +188,8 @@ class Control:
 
         @web.post("/steps")
         def steps(body: dict) -> dict:
-            self.solver.observe_step(
-                float(body["seconds"]), float(body["waited"]), int(body["consumed"])
-            )
+            seconds, waited, consumed = float(body["seconds"]), float(body["waited"]), int(body["consumed"])
+            self.solver.observe_step(time.monotonic(), seconds, waited, consumed)
             return {}
 
         @web.post("/load")
