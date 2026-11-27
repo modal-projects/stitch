@@ -199,8 +199,12 @@ class Control:
             if "produced" in body:
                 self.solver.observe_output(time.monotonic(), int(body["produced"]))
             if (load := self.service.load()) is None:
-                return {"capacity": None, "running": None}
-            return {"capacity": load["slots"], "running": load["running"]}
+                return {"capacity": None, "running": None, "queued": None}
+            return {
+                "capacity": load["slots"],
+                "running": load["running"],
+                "queued": load["queued"],
+            }
 
         @web.get("/status")
         def status(
