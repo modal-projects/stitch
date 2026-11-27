@@ -44,7 +44,9 @@ class Solver:
         self.minimum, self.maximum, self.count = minimum, maximum, count
         self.steps: deque[Step] = deque(maxlen=3)
         self.outputs: deque[tuple[float, int]] = deque(maxlen=SHRINK_SECONDS // 60 + 1)
-        self.uses: deque[tuple[float, float]] = deque(maxlen=SHRINK_SECONDS // 60 + 1)
+        self.uses: deque[tuple[float, int, float]] = deque(
+            maxlen=SHRINK_SECONDS // 60 + 1
+        )
         self.serving: int | None = None
         self.serving_since = self.count_since = -math.inf
         self.move: Move | None = None
@@ -65,14 +67,14 @@ class Solver:
             self.outputs.append((now, produced))
 
     def decide(self, now: float, serving: int, load: dict | None) -> Decision:
-        """`load`: the serving engines' requests running and queued, and their slots, summed."""
+        """`load`: the serving engines' requests running and queued and their slots, summed, and their average use."""
         with self.lock:
             if serving != self.serving:
                 self.serving, self.serving_since = serving, now
                 if self.move is not None:
                     self.move = self.move._replace(served_at=None)
-            if load and load["slots"]:
-                self.uses.append((now, load["running"] / load["slots"]))
+            if load:
+                self.uses.append((now, serving, load["use"]))
             count = serving if self.count is None else self.count
             if self.count is not None and self.move is not None and serving == count:
                 reason = self._follow_move(now, serving, self.move)
@@ -94,7 +96,7 @@ class Solver:
     def _solve(
         self, now: float, serving: int, count: int, load: dict | None
     ) -> tuple[int, str]:
-        demand, per_engine = self._demand(), self._per_engine(now, serving)
+        demand, per_engine = self._demand(), self._per_engine(now)
         if demand is None:
             return count, "no training step yet"
         if per_engine is None:
@@ -103,7 +105,7 @@ class Solver:
         target = math.ceil(needed)
         reason = (
             f"the trainer takes {demand:.3g} groups/s, a fully used engine puts out "
-            f"{per_engine:.3g}/s, the engines run {self._use(now):.0%} of their slots: "
+            f"{per_engine:.3g}/s, the engines are {self.uses[-1][2]:.0%} used: "
             f"{needed:.2f} needed"
         )
         if target < self.minimum:
@@ -133,7 +135,7 @@ class Solver:
             needed, undone
         ):
             return count, f"{reason}; the {kind} from {count} was undone"
-        output = self._output(now)
+        output = self._output(now, self.serving_since)
         # An add promises what its engines put out, up to what the trainer still lacks.
         promised = (
             min((target - count) * per_engine, demand * (1 + HEADROOM) - output)
@@ -150,12 +152,12 @@ class Solver:
         if move.kind == "undo":
             self.move = None
             return f"back at {self.count}"
-        per_engine = self._per_engine(now, serving)
+        per_engine = self._per_engine(now)
         if now - (move.served_at or now) < ADD_SECONDS or per_engine is None:
             return f"checking the {move.kind} from {move.before}"
         self.move = None
         if move.kind == "add":
-            gain = self._output(now) - move.output
+            gain = self._output(now, self.serving_since) - move.output
             outcome = f"output rose {gain:.3g}/s of {move.promised:.3g}/s promised"
             return (
                 outcome
@@ -182,31 +184,29 @@ class Solver:
             else None
         )
 
-    def _per_engine(self, now: float, serving: int) -> float | None:
-        """Groups a fully used engine puts out per second, since the serving engines last changed."""
-        output, use = self._output(now), self._use(now)
-        return output / (serving * use) if output and use else None
+    def _per_engine(self, now: float) -> float | None:
+        """Groups a fully used engine puts out per second over the last SHRINK_SECONDS, across serving changes."""
+        output = self._output(now, now - SHRINK_SECONDS)
+        in_use = [
+            engines * use
+            for at, engines, use in self.uses
+            if at >= now - SHRINK_SECONDS
+        ]
+        if not output or not sum(in_use):
+            return None
+        return output / (sum(in_use) / len(in_use))
 
-    def _output(self, now: float) -> float | None:
-        """Groups put per second since the serving engines last changed, at most SHRINK_SECONDS back."""
-        reports = _since(self.outputs, self.serving_since, now)
+    def _output(self, now: float, since: float) -> float | None:
+        """Groups put per second from `since`, at most SHRINK_SECONDS back."""
+        reports = [
+            (at, produced)
+            for at, produced in self.outputs
+            if at >= max(since, now - SHRINK_SECONDS)
+        ]
         if len(reports) < 2:
             return None
         (first_at, first), (last_at, last) = reports[0], reports[-1]
         return (last - first) / (last_at - first_at)
-
-    def _use(self, now: float) -> float | None:
-        """The serving engines' running requests over their slots since they last changed, on average."""
-        uses = [use for _, use in _since(self.uses, self.serving_since, now)]
-        return sum(uses) / len(uses) if uses else None
-
-
-def _since(samples, serving_since: float, now: float) -> list:
-    return [
-        (at, value)
-        for at, value in samples
-        if at >= max(serving_since, now - SHRINK_SECONDS)
-    ]
 
 
 def _close(value: float, seen: float) -> bool:

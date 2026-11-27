@@ -9,7 +9,8 @@ SLOTS = 32
 
 class _Run:
     """A trainer taking `demand` groups a second, and serving engines that run `use` of their slots with `queued`
-    requests waiting, each fully used engine putting out `per_engine` groups a second. One minute per decision."""
+    requests waiting, each fully used engine putting out `per_engine` groups a second; an engine with requests waiting
+    runs all it can. One minute per decision."""
 
     def __init__(self, solver: Solver, *, demand: float, per_engine: float, use=1.0):
         self.solver, self.per_engine, self.use, self.queued = solver, per_engine, use, 0
@@ -23,12 +24,14 @@ class _Run:
     def minutes(self, count: int, *, serving: int) -> Decision:
         for _ in range(count):
             self.now += 60
-            self.produced += self.per_engine * serving * self.use * 60
+            use = 1.0 if self.queued else self.use
+            self.produced += self.per_engine * serving * use * 60
             self.solver.observe_output(self.now, round(self.produced))
             load = {
                 "running": round(self.use * SLOTS * serving),
                 "queued": self.queued,
                 "slots": SLOTS * serving,
+                "use": use,
             }
             decision = self.solver.decide(self.now, serving, load)
         return decision
@@ -44,7 +47,9 @@ def test_without_output_from_the_serving_engines_it_holds():
     solver = Solver(1, 8, 1)
     solver.observe_step(100.0, 0.0, 26)
 
-    reason = solver.decide(60.0, 1, {"running": 32, "queued": 0, "slots": 32}).reason
+    reason = solver.decide(
+        60.0, 1, {"running": 32, "queued": 0, "slots": 32, "use": 1.0}
+    ).reason
 
     assert reason == "no output measured on the serving engines yet"
 
@@ -55,8 +60,8 @@ def test_a_trainer_taking_more_than_the_engines_put_out_adds_once_they_served_fi
     assert run.minutes(5, serving=1).engines == 1
     assert run.minutes(1, serving=1) == Decision(
         2,
-        "the trainer takes 0.26 groups/s, a fully used engine puts out 0.2/s, the engines run 100% of their "
-        "slots: 1.43 needed",
+        "the trainer takes 0.26 groups/s, a fully used engine puts out 0.2/s, the engines are 100% "
+        "used: 1.43 needed",
         32,
     )
 
@@ -97,8 +102,8 @@ def test_engines_the_trainer_does_not_need_shrink_after_fifteen_minutes():
     assert run.minutes(15, serving=4).engines == 4
     assert run.minutes(1, serving=4) == Decision(
         1,
-        "the trainer takes 0.1 groups/s, a fully used engine puts out 0.2/s, the engines run 12% of their "
-        "slots: 0.55 needed",
+        "the trainer takes 0.1 groups/s, a fully used engine puts out 0.2/s, the engines are 12% "
+        "used: 0.55 needed",
         128,
     )
 
@@ -113,19 +118,42 @@ def test_a_shrink_leaves_the_engines_the_requests_on_them_fill():
     assert decision.reason.endswith("0.55 needed; the requests on the engines fill 3")
 
 
-def test_a_shrink_that_leaves_too_few_engines_is_undone_and_not_tried_again_while_the_need_stays():
+def test_a_shrink_the_trainer_outgrows_is_undone_and_not_tried_again_while_the_need_stays():
     run = _Run(Solver(1, 8, 4), demand=0.1, per_engine=0.2, use=0.125)
     run.minutes(16, serving=4)
-    # One engine alone puts out less than a quarter of what four did, fully used.
-    run.per_engine, run.use = 0.08, 1.0
+    run.steps(0.3)
+    run.use = 0.5
 
     assert run.minutes(5, serving=1).reason == "checking the shrink from 4"
-    assert run.minutes(1, serving=1) == Decision(4, "undone: 1.38 needed after it", 32)
-    run.per_engine, run.use = 0.2, 0.125
+    assert run.minutes(1, serving=1) == Decision(4, "undone: 1.65 needed after it", 32)
+    run.steps(0.1)
+    run.use = 0.125
     assert run.minutes(1, serving=4).reason == "back at 4"
     decision = run.minutes(16, serving=4)
     assert decision.engines == 4
     assert decision.reason.endswith("0.55 needed; the shrink from 4 was undone")
+
+
+def test_engines_with_requests_waiting_count_as_fully_used():
+    """Long contexts fill an engine's cache before its slots: half its slots run and the rest of its requests wait."""
+    run = _Run(Solver(1, 16, 5), demand=0.15, per_engine=0.02, use=0.5)
+    run.queued = 20
+
+    decision = run.minutes(6, serving=5)
+
+    assert decision.engines == 9
+    assert decision.reason.endswith("the engines are 100% used: 8.25 needed")
+
+
+def test_the_output_measure_holds_across_a_change_in_serving_engines():
+    run = _Run(Solver(1, 8, None), demand=0.26, per_engine=0.2)
+    run.minutes(6, serving=1)
+
+    reason = run.minutes(1, serving=2).reason
+
+    assert reason.startswith(
+        "the trainer takes 0.26 groups/s, a fully used engine puts out 0.2"
+    )
 
 
 def test_while_engines_it_asked_for_start_it_neither_adds_nor_lowers_toward_them():
@@ -189,7 +217,7 @@ def test_an_engine_lost_while_an_add_is_checked_restarts_the_check():
 def test_a_restarted_rollout_measures_its_output_again():
     solver = Solver(1, 8, 1)
     solver.observe_step(100.0, 0.0, 26)
-    load = {"running": 32, "queued": 0, "slots": 32}
+    load = {"running": 32, "queued": 0, "slots": 32, "use": 1.0}
     solver.decide(0.0, 1, load)
     solver.observe_output(60.0, 500)
     solver.observe_output(120.0, 3)
@@ -204,8 +232,8 @@ def test_at_the_maximum_it_holds_and_says_so():
 
     assert run.minutes(6, serving=2) == Decision(
         2,
-        "the trainer takes 0.8 groups/s, a fully used engine puts out 0.2/s, the engines run 100% of their "
-        "slots: 4.40 needed; at the maximum",
+        "the trainer takes 0.8 groups/s, a fully used engine puts out 0.2/s, the engines are 100% "
+        "used: 4.40 needed; at the maximum",
         64,
     )
 

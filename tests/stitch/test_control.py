@@ -469,11 +469,12 @@ def test_the_serving_engines_last_loads_add_up_and_an_unknown_engines_is_dropped
     service.report_load("e0", {"running": 90, "queued": 0, "slots": 96})
     service.report_load("e9", {"running": 1, "queued": 0, "slots": 32})
 
-    assert service.load() == {"running": 90, "queued": 0, "slots": 96}
+    assert service.load() == {"running": 90, "queued": 0, "slots": 96, "use": 0.9375}
     assert "e9" not in service.engines
+    # e1 runs 40 of its 96 slots with requests waiting: its cache ran out first, so it is fully used.
     service.report_load("e1", {"running": 40, "queued": 2, "slots": 96})
-    service.report_load("e0", {"running": 80, "queued": 0, "slots": 96})
-    assert service.load() == {"running": 120, "queued": 2, "slots": 192}
+    service.report_load("e0", {"running": 48, "queued": 0, "slots": 96})
+    assert service.load() == {"running": 88, "queued": 2, "slots": 192, "use": 0.75}
 
 
 def test_trainer_calls_reset_the_idle_clock():
