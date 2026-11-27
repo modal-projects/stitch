@@ -267,21 +267,12 @@ class ControlService:
             return len(self._serving())
 
     def load(self) -> dict | None:
-        """The serving engines' last load reports, summed, and their average use; None until one of them reports."""
+        """The serving engines' last load reports, summed; None until one of them reports."""
         with self.condition:
             loads = [e.load for e in self._serving().values() if e.load is not None]
             if not loads:
                 return None
-            total = {
-                key: sum(load[key] for load in loads)
-                for key in ("running", "queued", "slots")
-            }
-            # An engine with requests waiting runs all it can, whether its slots or its cache run out first.
-            uses = [
-                1.0 if load["queued"] else load["running"] / load["slots"]
-                for load in loads
-            ]
-            return total | {"use": sum(uses) / len(uses)}
+            return {key: sum(load[key] for load in loads) for key in loads[0]}
 
     def _barrier(self, version: int, start_id: str) -> dict:
         started = time.monotonic()

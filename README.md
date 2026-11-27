@@ -125,16 +125,16 @@ sets the count and Modal runs it. It reads:
 - after each training step: `POST /steps {"seconds", "waited", "consumed"}`, the step's length, how long the trainer
   waited for groups and the groups it took;
 - every minute: `POST /load {"produced"}`, the groups the rollout put into the trainer's buffer since its start. The
-  reply carries `capacity`, the requests the serving engines run at once, which Miles' admission follows;
+  reply carries `capacity` and `running`, the requests the serving engines run at once and run now, from which
+  Miles' admission keeps the engines' slots in use;
 - every 30 s, each engine's requests running and queued and its slots, as SGLang reports them (`/v1/loads`).
 
 Each minute the trainer's demand is the groups it took per second it did not wait over its last three steps, and a
-fully used engine's output the groups put per second over the last 15 minutes, divided by the engines in use: an
-engine counts as fully used once requests wait on it (its slots or its cache ran out), and otherwise by its running
-requests over its slots. The engines needed are demand over that output, with 10% to spare, between `min_containers`
-and `max_containers`: more once the serving engines and the count have held 5 minutes, fewer once they have held 15,
-never fewer than the requests on the engines fill (admitted requests stay where they are). Each move is checked before
-the next:
+fully used engine's output the groups put per second over the last 15 minutes, divided by the engines in use (their
+running requests over their slots). The engines needed are demand over that output, with 10% to spare, between
+`min_containers` and `max_containers`: more once the serving engines and the count have held 5 minutes, fewer once
+they have held 15, never fewer than the requests on the engines fill (admitted requests stay where they are). Each move
+is checked before the next:
 
 - While engines it asked for are still starting, it adds no more, and lowers the count only to what serves or below.
 - Five minutes after the new count serves, an add must have raised the output by a quarter of what it promised (what

@@ -198,8 +198,9 @@ class Control:
             # An older Miles reports its sessions' load instead.
             if "produced" in body:
                 self.solver.observe_output(time.monotonic(), int(body["produced"]))
-            load = self.service.load()
-            return {"capacity": None if load is None else load["slots"]}
+            if (load := self.service.load()) is None:
+                return {"capacity": None, "running": None}
+            return {"capacity": load["slots"], "running": load["running"]}
 
         @web.get("/status")
         def status(

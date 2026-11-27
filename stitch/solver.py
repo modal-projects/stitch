@@ -67,14 +67,14 @@ class Solver:
             self.outputs.append((now, produced))
 
     def decide(self, now: float, serving: int, load: dict | None) -> Decision:
-        """`load`: the serving engines' requests running and queued and their slots, summed, and their average use."""
+        """`load`: the serving engines' requests running and queued, and their slots, summed."""
         with self.lock:
             if serving != self.serving:
                 self.serving, self.serving_since = serving, now
                 if self.move is not None:
                     self.move = self.move._replace(served_at=None)
-            if load:
-                self.uses.append((now, serving, load["use"]))
+            if load and load["slots"]:
+                self.uses.append((now, serving, load["running"] / load["slots"]))
             count = serving if self.count is None else self.count
             if self.count is not None and self.move is not None and serving == count:
                 reason = self._follow_move(now, serving, self.move)
@@ -105,7 +105,7 @@ class Solver:
         target = math.ceil(needed)
         reason = (
             f"the trainer takes {demand:.3g} groups/s, a fully used engine puts out "
-            f"{per_engine:.3g}/s, the engines are {self.uses[-1][2]:.0%} used: "
+            f"{per_engine:.3g}/s, the engines run {self.uses[-1][2]:.0%} of their slots: "
             f"{needed:.2f} needed"
         )
         if target < self.minimum:
