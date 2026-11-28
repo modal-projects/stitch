@@ -128,29 +128,32 @@ sets the count and Modal runs it. It reads:
 
 - after each training step: `POST /steps {"seconds", "waited", "consumed"}`, the step's length, how long the trainer
   waited for groups and the groups it took;
-- every minute: `POST /load {"produced"}`, the groups the rollout put into the trainer's buffer since its start. The
-  reply carries `capacity`, `running` and `queued`, the requests the serving engines run at once, run now and hold
-  waiting; Miles' admission follows the capacity;
+- every minute: `POST /load {"produced", "held", "lifetime"}`, the groups the rollout put into the trainer's buffer
+  since its start, the seconds since its last report it held off admitting for a reason other than the engines (a
+  full buffer, a staleness bound, its own limit), and how long its groups take from admission to finished (the 90th
+  percentile of the last 10 minutes). The reply carries `capacity`, `running` and `queued`, the requests the serving
+  engines run at once, run now and hold waiting; Miles' admission follows the capacity;
 - every 30 s, each engine's requests running and queued and its slots, as SGLang reports them (`/v1/loads`).
 
-A change in the serving engines shows in the output and in the trainer's waiting only once groups started on them
-finish: a group's lifetime, 15 minutes by default. So each minute, from 15 minutes after the serving engines last
-changed:
+A change shows in the output only once groups started after it finish: a group's lifetime, as the rollout reports
+it (15 minutes until it has). Nothing is judged before: no output is measured, and no step counted, within a
+lifetime of the serving engines changing or the rollout holding off. From there, each minute:
 
-- the trainer's demand is the groups it took per second it did not wait over its last three steps, and an engine's
-  output the groups put per second over the last 15 minutes (at least 5), divided by the engines serving;
+- an engine's output is the groups put per second over the last 15 minutes (at least 10) divided by the engines
+  serving, measured only then and kept until measured again; the trainer's demand is the groups it took per second
+  it did not wait over its last three steps;
 - the engines needed are demand over that output, with 10% to spare, between `min_containers` and `max_containers`;
-- the trainer is short when it waited at least 5% of its last steps begun since then. Short, it adds up to the
-  engines needed; fed, it shrinks to them, but never below what the requests on the engines fill (running and queued
-  over each engine's slots, averaged over 15 minutes, with 10% to spare): fewer would queue them until they end.
+- the trainer is short when it waited at least 5% of its steps begun since: then it adds up to the engines needed,
+  unless the rollout also held off (more engines would not be used). Not short, with the rollout holding off ahead of
+  it, it shrinks to the engines needed once they are at least one fewer, but never below what the requests on the
+  engines fill (running and queued over each engine's slots, averaged over 15 minutes, with 10% to spare).
 
-Each move is checked before the next:
+Each move is judged a lifetime plus 10 minutes after its engines serve:
 
 - While engines it asked for are still starting, it adds no more, and lowers the count only to what serves or below.
-- Five minutes after an add serves, the requests on the engines must have grown by at least a quarter as much as the
-  engines did, or the rollout cannot use them; after a shrink, the trainer's next step must find it fed. Otherwise the
-  move is undone, and not tried again from that count while the trainer's demand stays within a quarter of what it
-  was.
+- An add holds if output rose by a quarter of what its engines promised, or the rollout got ahead and held off;
+  a shrink holds if the rollout still holds off or output covers the trainer's demand. Otherwise the move is undone,
+  and not tried again from that count while the trainer's demand stays within a quarter of what it was.
 
 In every run, auto mode or not, the control service logs each decision when it changes (`engines 1 -> 2: the trainer
 waited 23% of its last steps and takes 0.26 groups/s, an engine puts out 0.2/s: 1.43 needed`, prefixed `shadow:` where

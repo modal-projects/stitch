@@ -196,7 +196,8 @@ class Control:
         def load(body: dict) -> dict:
             # An older Miles reports its sessions' load instead.
             if "produced" in body:
-                self.solver.observe_output(time.monotonic(), int(body["produced"]))
+                held, lifetime = float(body.get("held") or 0.0), body.get("lifetime")
+                self.solver.observe_load(time.monotonic(), int(body["produced"]), held, lifetime)
             if (load := self.service.load()) is None:
                 return {"capacity": None, "running": None, "queued": None}
             return {
