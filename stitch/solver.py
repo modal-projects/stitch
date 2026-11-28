@@ -15,6 +15,9 @@ HEADROOM = 0.1
 LAG, WINDOW, MEASURED = 900, 900, 600
 # The trainer is short when it waited at least this share of its last steps.
 SHORT = 0.05
+# A load report counts as a hold from this many seconds of holding off: less is the rollout's own scheduling between
+# its waits, which no engine's output shows.
+HELD = 1.0
 # An add counts from this share of the output it promised; an undone move is not retried while the trainer's demand
 # stays within this share of what it was.
 SIGNIFICANT = 0.25
@@ -199,10 +202,10 @@ class Solver:
         return sum(step.waited for step in steps) / seconds if seconds else None
 
     def _held(self, since: float) -> bool:
-        return any(minute.held > 0 for minute in self.minutes if minute.at >= since)
+        return any(minute.held >= HELD for minute in self.minutes if minute.at >= since)
 
     def _last_held(self) -> float:
-        return max((minute.at for minute in self.minutes if minute.held > 0), default=-math.inf)
+        return max((minute.at for minute in self.minutes if minute.held >= HELD), default=-math.inf)
 
     def _filled(self, since: float) -> float | None:
         """The engines the requests on them fill, averaged from `since`."""

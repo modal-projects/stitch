@@ -14,6 +14,8 @@ class _Run:
         """`paced`: the rollout holds off whatever the engines put out; `requests`: on the engines, however busy."""
         self.solver, self.demand, self.per_engine, self.limit = solver, demand, per_engine, limit
         self.lifetime, self.paced, self.requests = lifetime, paced, requests
+        # Miles times every wait, so even one that returns at once adds to what it reports.
+        self.scheduling = 1e-5
         self.now, self.produced = 0.0, 0.0
 
     def minutes(self, count: int, *, serving: int) -> Decision:
@@ -22,7 +24,7 @@ class _Run:
             can = min(self.per_engine * serving, self.limit)
             output = min(can, self.demand)
             waited = 60 * (1 - output / self.demand)
-            held = 30.0 if self.paced else 60 * (1 - output / can) if can else 0.0
+            held = self.scheduling + (30.0 if self.paced else 60 * (1 - output / can) if can else 0.0)
             self.solver.observe_step(self.now, 60.0, waited, round(self.demand * (60 - waited)))
             self.produced += output * 60
             self.solver.observe_load(self.now, round(self.produced), held, self.lifetime)
